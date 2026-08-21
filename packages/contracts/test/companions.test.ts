@@ -1064,6 +1064,7 @@ describe("Companion trigger contracts", () => {
       name: "CI failed on main",
       prompt: "Investigate the failing workflow.",
       provider: "github",
+      target: { repo: "acme/demo", events: ["push"] },
     });
     expect(proposal.provider).toBe("github");
     expect(companionTriggerProposalMessageSchema.parse({
@@ -1099,6 +1100,7 @@ describe("Companion trigger contracts", () => {
       name: "CI failed on main",
       prompt: "Investigate the failing workflow.",
       provider: "github",
+      target: { repo: "acme/demo", events: ["push"] },
     });
     const decision = {
       request_id: "ui-trigger-1",

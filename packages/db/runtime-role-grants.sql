@@ -638,6 +638,20 @@ BEGIN
         'public.companion_api_trigger_json(uuid,uuid,uuid,boolean)'::regprocedure
       ];
     END IF;
+    -- 0115-0117 add plugin-gated, target-aware trigger overloads plus the on-demand registration
+    -- and plugin trigger-key surfaces. Same API-role placement as the base trigger surface.
+    IF pg_catalog.to_regprocedure(
+      'public.companion_api_create_trigger(uuid,uuid,uuid,text,text,text,jsonb,text,boolean)'
+    ) IS NOT NULL THEN
+      companion_api_functions := companion_api_functions || ARRAY[
+        'public.companion_api_create_trigger(uuid,uuid,uuid,text,text,text,jsonb,text,boolean)'::regprocedure,
+        'public.companion_api_update_trigger(uuid,uuid,uuid,text,text,text,jsonb,boolean)'::regprocedure,
+        'public.companion_api_set_trigger_registration(uuid,uuid,uuid,uuid,text,text,text)'::regprocedure,
+        'public.companion_api_get_trigger_for_registration(uuid,uuid,uuid,text)'::regprocedure,
+        'public.companion_api_set_plugin_trigger_key(uuid,uuid,text,uuid,text,text,text,text,text,text,text)'::regprocedure,
+        'public.companion_api_get_plugin_trigger_key(uuid,uuid,text)'::regprocedure
+      ];
+    END IF;
     IF pg_catalog.to_regprocedure(
       'public.companion_api_answer_trigger_decision(uuid,uuid,text,text,uuid,text)'
     ) IS NOT NULL THEN

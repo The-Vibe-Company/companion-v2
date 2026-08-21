@@ -810,8 +810,29 @@
     {
       "idx": 115,
       "version": "7",
-      "when": 1789837600001,
-      "tag": "0115_companion_icons",
+      "when": 1789924000000,
+      "tag": "0115_companion_trigger_plugin_gate",
+      "breakpoints": true
+    },
+    {
+      "idx": 116,
+      "version": "7",
+      "when": 1789924000001,
+      "tag": "0116_companion_trigger_target",
+      "breakpoints": true
+    },
+    {
+      "idx": 117,
+      "version": "7",
+      "when": 1790010400000,
+      "tag": "0117_companion_plugin_trigger_keys",
+      "breakpoints": true
+    },
+    {
+      "idx": 118,
+      "version": "7",
+      "when": 1790010400001,
+      "tag": "0118_companion_icons",
       "breakpoints": true
     }
   ]

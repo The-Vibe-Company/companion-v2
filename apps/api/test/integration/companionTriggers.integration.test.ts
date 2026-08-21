@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, sql as drizzleSql } from "drizzle-orm";
+import { z } from "zod";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   CompanionTriggerNotFoundError,
@@ -14,10 +15,14 @@ import {
   listCompanionTriggersV2,
   listCompanionsV2,
   readCompanionThreadV2,
+  registerCompanionTriggerWebhookV2,
   rotateCompanionTriggerSecretV2,
+  saveCompanionPlugin,
+  saveCompanionPluginTriggerKey,
   saveCompanionProvider,
   setCompanionWorkspaceShareV2,
   triggerFireMessageId,
+  unregisterCompanionTriggerWebhookV2,
   updateCompanionTriggerV2,
 } from "@companion/core";
 import { COMPANION_TRIGGER_MAX_PER_COMPANION } from "@companion/contracts";
@@ -43,19 +48,27 @@ function webhookSecretOf(trigger: { id: string; webhook_url: string | null }): s
   return secret;
 }
 
+const databaseErrorNodeSchema = z.object({
+  code: z.string().optional(),
+  cause: z.unknown(),
+}).passthrough();
+
 /** Drizzle nests the postgres.js SQLSTATE on `cause`; read the first code in the chain. */
-function sqlState(error: unknown): string | null {
+function sqlState(cause: unknown): string | null {
   const seen = new Set<unknown>();
-  let current: unknown = error;
-  while (current && typeof current === "object" && !seen.has(current)) {
+  let current: unknown = cause;
+  while (current !== null && !seen.has(current)) {
+    const node = databaseErrorNodeSchema.safeParse(current);
+    if (!node.success) break;
     seen.add(current);
-    if ("code" in current && typeof (current as { code?: unknown }).code === "string") {
-      return (current as { code: string }).code;
-    }
-    current = "cause" in current ? (current as { cause?: unknown }).cause : null;
+    if (node.data.code !== undefined) return node.data.code;
+    current = "cause" in node.data ? node.data.cause : null;
   }
   return null;
 }
+
+// SAFETY: the fake fetch helpers below only return Response objects, the sole part of `fetch` the trigger services use.
+const asFetch = (fn: (...args: Parameters<typeof fetch>) => Promise<Response>): typeof fetch => fn;
 
 async function expectSqlState(work: Promise<unknown>, code: string): Promise<void> {
   let observed: string | null = null;
@@ -90,6 +103,7 @@ describe("Companion triggers over the real database", () => {
       name,
       prompt: `Investigate the ${name} event.`,
       provider: "github" as const,
+      target: { repo: "acme/demo", events: ["push"] },
     };
   }
 
@@ -138,6 +152,37 @@ describe("Companion triggers over the real database", () => {
       database,
     }));
     companionId = companion.id;
+    // Plugin-backed trigger providers (linear, github) require the matching plugin attached; the
+    // default fixture attaches a github account so the ordinary CRUD tests keep using `github`.
+    const plugin = await saveCompanionPlugin({
+      actor: fixture.owner,
+      orgId: fixture.orgA,
+      plugin: {
+        provider: "github",
+        label: "GitHub",
+        transport: "http",
+        url: "https://mcp.example.com/github",
+        args: [],
+      },
+      oauthCredential: {
+        kind: "oauth",
+        version: 1,
+        serverName: "io.github.github/github-mcp-server",
+        accessToken: "gho_registration_test_token",
+        refreshToken: null,
+        accessExpiresAt: null,
+        scope: "repo admin:repo_hook",
+        tokenType: "Bearer",
+        tokenEndpoint: "https://github.com/login/oauth/access_token",
+        resource: "https://api.githubcopilot.com/mcp/",
+        client: { clientId: "integration-client", clientSecret: null, tokenEndpointAuthMethod: "none" },
+      },
+      masterKey,
+      database: integrationDb,
+    });
+    await integrationDb.update(schema.companions)
+      .set({ selectedMcpAccountIds: [plugin.id] })
+      .where(eq(schema.companions.id, companionId));
   });
 
   afterEach(async () => {
@@ -248,6 +293,7 @@ describe("Companion triggers over the real database", () => {
           ${fixture.orgA}::uuid, ${companionId}::uuid
         ) as triggers
       `));
+      // SAFETY: the RPC above returns one row whose triggers column holds the trigger JSON list.
       const [row] = Array.from(result as Iterable<{ triggers: Array<{ secret: string | null }> }>);
       return row!.triggers;
     };
@@ -356,6 +402,60 @@ describe("Companion triggers over the real database", () => {
       await createTrigger(fixture.owner, `Trigger ${index}`);
     }
     await expectSqlState(createTrigger(fixture.owner, "One too many"), "P0001");
+  });
+
+  it("refuses plugin-backed providers without the matching plugin attached, in create and update", async () => {
+    // Detach the fixture's github account: the provider is connected at the org level through the
+    // account row, but this Companion no longer has it attached.
+    const [account] = await integrationDb
+      .select({ id: schema.companionMcpAccounts.id })
+      .from(schema.companionMcpAccounts)
+      .where(eq(schema.companionMcpAccounts.orgId, fixture.orgA));
+    await integrationDb.update(schema.companions)
+      .set({ selectedMcpAccountIds: [] })
+      .where(eq(schema.companions.id, companionId));
+    expect(account).toBeDefined();
+
+    await expectSqlState(createTrigger(fixture.owner, "No github plugin"), "P0001");
+
+    // `custom` needs no plugin.
+    const custom = await asActor(fixture.owner, (database) => createCompanionTriggerV2({
+      orgId: fixture.orgA,
+      companionId,
+      name: "Custom hook",
+      prompt: "React to the custom event.",
+      provider: "custom",
+      database,
+      webhookBaseUrl: WEBHOOK_BASE_URL,
+    }));
+    expect(custom.provider).toBe("custom");
+
+    // An update cannot sneak a plugin-backed provider in either.
+    await expectSqlState(asActor(fixture.owner, (database) => updateCompanionTriggerV2({
+      orgId: fixture.orgA,
+      companionId,
+      triggerId: custom.id,
+      provider: "github",
+      target: { repo: "acme/demo", events: ["push"] },
+      database,
+      webhookBaseUrl: WEBHOOK_BASE_URL,
+    })), "P0001");
+
+    // Attaching the account unlocks the provider on both paths.
+    await integrationDb.update(schema.companions)
+      .set({ selectedMcpAccountIds: [account!.id] })
+      .where(eq(schema.companions.id, companionId));
+    const attached = await createTrigger(fixture.owner, "With github plugin");
+    expect(attached.provider).toBe("github");
+    await asActor(fixture.owner, (database) => updateCompanionTriggerV2({
+      orgId: fixture.orgA,
+      companionId,
+      triggerId: custom.id,
+      provider: "github",
+      target: { repo: "acme/demo", events: ["push"] },
+      database,
+      webhookBaseUrl: WEBHOOK_BASE_URL,
+    }));
   });
 
   it("fires once as the Owner, masks the prompt behind the trigger name, and collapses replays", async () => {
@@ -589,12 +689,238 @@ describe("Companion triggers over the real database", () => {
     });
   });
 
+  it("requires a github target, refuses targets elsewhere, and records on-demand registrations", async () => {
+    // A github trigger without a repo/events target is rejected before it reaches SQL.
+    await expect(asActor(fixture.owner, (database) => createCompanionTriggerV2({
+      orgId: fixture.orgA,
+      companionId,
+      name: "No target",
+      prompt: "p",
+      provider: "github",
+      database,
+      webhookBaseUrl: WEBHOOK_BASE_URL,
+    }))).rejects.toThrow(/requires a target repo/);
+    // No other provider accepts a target yet.
+    await expect(asActor(fixture.owner, (database) => createCompanionTriggerV2({
+      orgId: fixture.orgA,
+      companionId,
+      name: "Custom with target",
+      prompt: "p",
+      provider: "custom",
+      target: { repo: "acme/demo", events: ["push"] },
+      database,
+      webhookBaseUrl: WEBHOOK_BASE_URL,
+    }))).rejects.toThrow(/does not support a target/);
+
+    const trigger = await createTrigger(fixture.owner, "Wired trigger");
+
+    // Registration is on demand: approval and creation leave the row manual.
+    expect((await triggerRow(trigger.id)).registrationStatus).toBe("manual");
+    const [githubAccount] = await integrationDb
+      .select({ id: schema.companionMcpAccounts.id })
+      .from(schema.companionMcpAccounts)
+      .where(and(
+        eq(schema.companionMcpAccounts.orgId, fixture.orgA),
+        eq(schema.companionMcpAccounts.provider, "github"),
+      ));
+
+    // A rejected registration persists its failure instead of silently staying manual.
+    const failingFetch = asFetch(async () => new Response("{}", { status: 422 }));
+    await expect(asActor(fixture.owner, (database) => registerCompanionTriggerWebhookV2({
+      orgId: fixture.orgA,
+      companionId,
+      triggerId: trigger.id,
+      webhookBaseUrl: WEBHOOK_BASE_URL,
+      masterKey,
+      database,
+      fetch: failingFetch,
+    }))).resolves.toMatchObject({ status: "failed", error: /github rejected the webhook/ });
+    let row = await triggerRow(trigger.id);
+    expect(row.registrationStatus).toBe("failed");
+    expect(row.lastRegistrationError).toContain("github rejected the webhook");
+
+    // A successful registration stores the remote hook id and never touches the secret.
+    const requests: Array<{ url: string; init: RequestInit }> = [];
+    const okFetch = asFetch(async (url, init) => {
+      requests.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify({ id: 424242 }), { status: 201 });
+    });
+    await asActor(fixture.owner, (database) => registerCompanionTriggerWebhookV2({
+      orgId: fixture.orgA,
+      companionId,
+      triggerId: trigger.id,
+      webhookBaseUrl: WEBHOOK_BASE_URL,
+      masterKey,
+      database,
+      fetch: okFetch,
+    }));
+    row = await triggerRow(trigger.id);
+    expect(row).toMatchObject({
+      registrationStatus: "registered",
+      remoteHookId: "424242",
+      remoteHookAccountId: githubAccount!.id,
+      lastRegistrationError: null,
+    });
+    expect(requests[0]!.url).toBe("https://api.github.com/repos/acme/demo/hooks");
+    const body = JSON.parse(String(requests[0]!.init.body));
+    expect(body.events).toEqual(["push"]);
+    expect(body.config.url).toContain(`/v1/hooks/triggers/${trigger.id}/`);
+    // The URL secret doubles as the provider HMAC secret.
+    expect(body.config.secret).toBe((await getCompanionTriggerForWebhook({
+      triggerId: trigger.id,
+      database: integrationDb,
+    }))!.secret);
+
+    // Unregistering removes the remote hook and returns the row to manual.
+    const deleteRequests: string[] = [];
+    const deleteFetch = asFetch(async (url) => {
+      deleteRequests.push(String(url));
+      return new Response(null, { status: 204 });
+    });
+    await asActor(fixture.owner, (database) => unregisterCompanionTriggerWebhookV2({
+      orgId: fixture.orgA,
+      companionId,
+      triggerId: trigger.id,
+      webhookBaseUrl: WEBHOOK_BASE_URL,
+      masterKey,
+      database,
+      fetch: deleteFetch,
+    }));
+    row = await triggerRow(trigger.id);
+    expect(row.registrationStatus).toBe("manual");
+    expect(row.remoteHookId).toBeNull();
+    expect(deleteRequests[0]).toBe("https://api.github.com/repos/acme/demo/hooks/424242");
+
+    // Linear has no webhook wiring yet and says so plainly.
+    const linearAccount = await saveCompanionPlugin({
+      actor: fixture.owner,
+      orgId: fixture.orgA,
+      plugin: { provider: "linear", label: "Linear", transport: "http", url: "https://mcp.linear.app/mcp", args: [] },
+      masterKey,
+      database: integrationDb,
+    });
+    await integrationDb.update(schema.companions)
+      .set({ selectedMcpAccountIds: [linearAccount.id] })
+      .where(eq(schema.companions.id, companionId));
+    const linearTrigger = await asActor(fixture.owner, (database) => createCompanionTriggerV2({
+      orgId: fixture.orgA,
+      companionId,
+      name: "New ticket",
+      prompt: "Triage the ticket.",
+      provider: "linear",
+      database,
+      webhookBaseUrl: WEBHOOK_BASE_URL,
+    }));
+    await expect(asActor(fixture.owner, (database) => registerCompanionTriggerWebhookV2({
+      orgId: fixture.orgA,
+      companionId,
+      triggerId: linearTrigger.id,
+      webhookBaseUrl: WEBHOOK_BASE_URL,
+      masterKey,
+      database,
+    }))).rejects.toThrow(/Linear API key/);
+  });
+
+  it("registers a linear webhook once the plugin's trigger key is stored, and unwires it", async () => {
+    const linearAccount = await saveCompanionPlugin({
+      actor: fixture.owner,
+      orgId: fixture.orgA,
+      plugin: { provider: "linear", label: "Linear", transport: "http", url: "https://mcp.linear.app/mcp", args: [] },
+      masterKey,
+      database: integrationDb,
+    });
+    await integrationDb.update(schema.companions)
+      .set({ selectedMcpAccountIds: [linearAccount.id] })
+      .where(eq(schema.companions.id, companionId));
+    const trigger = await asActor(fixture.owner, (database) => createCompanionTriggerV2({
+      orgId: fixture.orgA,
+      companionId,
+      name: "New ticket",
+      prompt: "Triage the ticket.",
+      provider: "linear",
+      database,
+      webhookBaseUrl: WEBHOOK_BASE_URL,
+    }));
+
+    // Without a stored trigger key the registration says exactly what is missing.
+    await expect(asActor(fixture.owner, (database) => registerCompanionTriggerWebhookV2({
+      orgId: fixture.orgA,
+      companionId,
+      triggerId: trigger.id,
+      webhookBaseUrl: WEBHOOK_BASE_URL,
+      masterKey,
+      database,
+    }))).rejects.toThrow(/Linear API key/);
+
+    // Storing the key unlocks the GraphQL registration path.
+    await asActor(fixture.owner, (database) => saveCompanionPluginTriggerKey({
+      actor: fixture.owner,
+      orgId: fixture.orgA,
+      provider: "linear",
+      credential: "lin_api_integration_key",
+      masterKey,
+      database,
+    }));
+    const requests: Array<{ url: string; init: RequestInit }> = [];
+    const okFetch = asFetch(async (url, init) => {
+      requests.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify({
+        data: { webhookSubscriptionCreate: { success: true, webhookSubscription: { id: "linear-hook-1" } } },
+      }), { status: 200 });
+    });
+    const outcome = await asActor(fixture.owner, (database) => registerCompanionTriggerWebhookV2({
+      orgId: fixture.orgA,
+      companionId,
+      triggerId: trigger.id,
+      webhookBaseUrl: WEBHOOK_BASE_URL,
+      masterKey,
+      database,
+      fetch: okFetch,
+    }));
+    expect(outcome).toEqual({ status: "registered", remote_hook_id: "linear-hook-1" });
+    expect((await triggerRow(trigger.id)).registrationStatus).toBe("registered");
+    const body = JSON.parse(String(requests[0]!.init.body));
+    expect(requests[0]!.url).toBe("https://api.linear.app/graphql");
+    expect(body.variables.input.url).toContain(`/v1/hooks/triggers/${trigger.id}/`);
+    expect(body.variables.input.secret).toBe((await getCompanionTriggerForWebhook({
+      triggerId: trigger.id,
+      database: integrationDb,
+    }))!.secret);
+    // SAFETY: this request's headers were built by registerLinearTriggerWebhook as a plain string record.
+    expect((requests[0]!.init.headers as Record<string, string>).authorization)
+      .toBe("lin_api_integration_key");
+
+    // Unregistering removes the remote subscription and returns the row to manual.
+    const deleteRequests: Array<{ url: string; init: RequestInit }> = [];
+    const deleteFetch = asFetch(async (url, init) => {
+      deleteRequests.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify({
+        data: { webhookSubscriptionDelete: { success: true } },
+      }), { status: 200 });
+    });
+    await asActor(fixture.owner, (database) => unregisterCompanionTriggerWebhookV2({
+      orgId: fixture.orgA,
+      companionId,
+      triggerId: trigger.id,
+      webhookBaseUrl: WEBHOOK_BASE_URL,
+      masterKey,
+      database,
+      fetch: deleteFetch,
+    }));
+    const row = await triggerRow(trigger.id);
+    expect(row.registrationStatus).toBe("manual");
+    expect(row.remoteHookId).toBeNull();
+    const deleteBody = JSON.parse(String(deleteRequests[0]!.init.body));
+    expect(deleteBody.variables.id).toBe("linear-hook-1");
+  });
+
   it("applies an approved trigger proposal under the approver and refuses every other path", async () => {
     const proposal = {
       kind: "trigger",
       name: "CI failed on main",
       prompt: "Investigate the failing workflow.",
       provider: "github",
+      target: { repo: "acme/demo", events: ["push", "pull_request"] },
     };
     const allowKey = `trigger-allow-${randomUUID()}`;
     const denyKey = `trigger-deny-${randomUUID()}`;
@@ -719,6 +1045,8 @@ describe("Companion triggers over the real database", () => {
       name: proposal.name,
       prompt: proposal.prompt,
       provider: proposal.provider,
+      target: proposal.target,
+      registration_status: "manual",
       enabled: true,
     });
     expect(triggers[0]!.webhook_url).not.toBeNull();

@@ -564,6 +564,11 @@ export const companionTriggers = pgTable(
     prompt: text("prompt").notNull(),
     provider: text("provider").notNull(),
     secret: text("secret").notNull(),
+    target: jsonb("target").$type<Record<string, unknown>>().notNull().default({}),
+    remoteHookId: text("remote_hook_id"),
+    remoteHookAccountId: uuid("remote_hook_account_id"),
+    registrationStatus: text("registration_status").notNull().default("manual"),
+    lastRegistrationError: text("last_registration_error"),
     enabled: boolean("enabled").notNull().default(true),
     lastFiredAt: timestamp("last_fired_at", { withTimezone: true }),
     lastErrorCode: text("last_error_code"),
@@ -585,6 +590,11 @@ export const companionTriggers = pgTable(
     nameCheck: check("companion_triggers_name_check", sql`char_length(btrim(${t.name})) between 1 and 80 and ${t.name} !~ E'[\\n\\r]'`),
     promptCheck: check("companion_triggers_prompt_check", sql`char_length(btrim(${t.prompt})) between 1 and 16384`),
     providerCheck: check("companion_triggers_provider_check", sql`${t.provider} in ('linear', 'github', 'custom')`),
+    targetShapeCheck: check("companion_triggers_target_shape_check", sql`jsonb_typeof(${t.target}) = 'object'`),
+    registrationStatusCheck: check(
+      "companion_triggers_registration_status_check",
+      sql`${t.registrationStatus} in ('manual', 'registered', 'failed')`,
+    ),
     secretCheck: check("companion_triggers_secret_check", sql`${t.secret} ~ '^[0-9a-f]{32,128}$'`),
     errorCheck: check("companion_triggers_error_check", sql`((${t.lastErrorCode} is null) = (${t.lastErrorMessage} is null)) and ((${t.lastErrorCode} is null) = (${t.lastErrorAt} is null)) and (${t.lastErrorCode} is null or ${t.lastErrorCode} ~ '^[a-z][a-z0-9_]{0,63}$') and (${t.lastErrorMessage} is null or (char_length(${t.lastErrorMessage}) <= 500 and ${t.lastErrorMessage} !~ E'[\\n\\r]')) and ${t.consecutiveFailures} >= 0`),
   }),
@@ -1694,6 +1704,35 @@ export const companionMcpAccounts = pgTable(
     transportShape: check(
       "companion_mcp_accounts_transport_check",
       sql`${t.transport} in ('http', 'stdio')`,
+    ),
+  }),
+);
+
+export const companionPluginTriggerKeys = pgTable(
+  "companion_plugin_trigger_keys",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => companionMcpAccounts.id, { onDelete: "cascade" }),
+    provider: text("provider").notNull(),
+    credentialGeneration: uuid("credential_generation").notNull().defaultRandom(),
+    ciphertext: text("ciphertext").notNull(),
+    iv: text("iv").notNull(),
+    authTag: text("auth_tag").notNull(),
+    wrappedDek: text("wrapped_dek").notNull(),
+    wrapIv: text("wrap_iv").notNull(),
+    wrapAuthTag: text("wrap_auth_tag").notNull(),
+    keyId: text("key_id").notNull(),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    uniqueOrgProvider: unique("companion_plugin_trigger_keys_org_provider_uq").on(t.orgId, t.provider),
+    providerCheck: check(
+      "companion_plugin_trigger_keys_provider_check",
+      sql`${t.provider} in ('linear')`,
     ),
   }),
 );

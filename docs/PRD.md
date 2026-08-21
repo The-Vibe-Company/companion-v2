@@ -176,6 +176,6 @@ explicitly recoverable interruption even after the browser, API, or one runtime 
 - Unit, real PostgreSQL, simulator fault-injection, and browser suites in `docs/testing.md` pass.
 - The full API + worker + runtime + web + Box/Pi simulator topology passes cold send, image,
   decision, stop/wake, takeover, interruption, Retry/Cancel, and permanent deletion scenarios.
-- The daily real-provider canary is green for seven consecutive days, no P0/P1 runtime incident is
-  open, and the purge report contains no owned legacy resource before legacy orchestration removal.
+- No P0/P1 runtime incident is open, and the purge report contains no owned legacy resource before
+  legacy orchestration removal.
 - `pnpm verify:change` and every printed PostgreSQL, container, dependency, and browser gate pass.

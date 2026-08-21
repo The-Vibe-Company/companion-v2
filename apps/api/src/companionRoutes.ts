@@ -74,6 +74,8 @@ import {
   readCompanionThreadV2,
   retryCompanionTurnV2,
   rotateCompanionTriggerSecretV2,
+  registerCompanionTriggerWebhookV2,
+  unregisterCompanionTriggerWebhookV2,
   setCompanionWorkspaceShareV2,
   setCompanionProviderV2,
   triggerFireMessageId,
@@ -89,6 +91,7 @@ import {
   pollOpenAICodexProviderOAuth,
   saveCompanionProvider,
   saveCompanionPlugin,
+  saveCompanionPluginTriggerKey,
   saveCompanionOAuthPlugin,
   setDefaultCompanionProvider,
 } from "@companion/core";
@@ -225,7 +228,7 @@ function verifyCompanionPluginOAuthState(
   if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
     throw new Error("invalid OAuth state");
   }
-  // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- invariant checked by the surrounding validation
+  // SAFETY: the state cookie was produced by encodeCompanionPluginOAuthState below, so its JSON decodes to CompanionPluginOAuthState.
   const parsed = JSON.parse(
     Buffer.from(encoded, "base64url").toString("utf8"),
   ) as CompanionPluginOAuthState;
@@ -261,7 +264,7 @@ function decodeCompanionPluginOAuthFlow(input: {
   value: string;
   masterKey: Buffer;
 }): { label: string; flow: Awaited<ReturnType<typeof beginCompanionPluginOAuth>>["flow"] } {
-  // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- invariant checked by the surrounding validation
+  // SAFETY: the cookie value was produced by encodeCompanionPluginOAuthFlow, so its JSON decodes to OpaqueCiphertext.
   const encrypted = JSON.parse(
     Buffer.from(input.value, "base64url").toString("utf8"),
   ) as OpaqueCiphertext;
@@ -271,7 +274,7 @@ function decodeCompanionPluginOAuthFlow(input: {
     subjectId: input.nonce,
     ...encrypted,
   }, input.masterKey);
-  // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- invariant checked by the surrounding validation
+  // SAFETY: the plaintext was encrypted by encodeCompanionPluginOAuthFlow, so it decodes to the label+flow shape.
   return JSON.parse(plaintext) as {
     label: string;
     flow: Awaited<ReturnType<typeof beginCompanionPluginOAuth>>["flow"];
@@ -303,17 +306,19 @@ function encodeCompanionProviderOAuthFlow(input: {
     .toString("base64url");
 }
 
-function decodeCompanionProviderOAuthFlow(input: {
-  value: string;
-  masterKey: Buffer;
-}): {
+interface DecodedCompanionProviderOAuthFlow {
   orgId: string;
   userId: string;
   flow:
     | ReturnType<typeof beginAnthropicProviderOAuth>["flow"]
     | Awaited<ReturnType<typeof beginOpenAICodexProviderOAuth>>["flow"];
-} {
-  // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- invariant checked by the surrounding validation
+}
+
+function decodeCompanionProviderOAuthFlow(input: {
+  value: string;
+  masterKey: Buffer;
+}): DecodedCompanionProviderOAuthFlow {
+  // SAFETY: the cookie was produced by encodeCompanionProviderOAuthFlow, so its JSON decodes to CompanionProviderOAuthCookie.
   const cookie = JSON.parse(
     Buffer.from(input.value, "base64url").toString("utf8"),
   ) as CompanionProviderOAuthCookie;
@@ -323,17 +328,11 @@ function decodeCompanionProviderOAuthFlow(input: {
     subjectId: cookie.nonce,
     ...cookie.encrypted,
   }, input.masterKey);
-  // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- invariant checked by the surrounding validation
-  const pending = JSON.parse(plaintext) as {
-    userId: string;
-    flow:
-      | ReturnType<typeof beginAnthropicProviderOAuth>["flow"]
-      | Awaited<ReturnType<typeof beginOpenAICodexProviderOAuth>>["flow"];
-  };
+  // SAFETY: the plaintext was encrypted by encodeCompanionProviderOAuthFlow, so it decodes to the userId+flow shape.
+  const pending = JSON.parse(plaintext) as Omit<DecodedCompanionProviderOAuthFlow, "orgId">;
   if (!pending.userId || !pending.flow || pending.flow.expiresAt < Date.now()) {
     throw new CompanionProviderOAuthError("oauth_expired", "Provider sign-in expired. Start again.");
   }
-  // oxlint-disable-next-line anti-slop/no-known-value-widening -- legacy pattern predating the incremental anti-slop gate
   return { orgId: cookie.orgId, ...pending };
 }
 
@@ -344,21 +343,36 @@ class CompanionAccessForbiddenError extends Error {
   }
 }
 
-// oxlint-disable-next-line anti-slop/no-unknown-parameters -- legacy pattern predating the incremental anti-slop gate
-function databaseErrorCode(error: unknown): string | null {
+const databaseErrorNodeSchema = z.object({
+  code: z.string().optional(),
+  cause: z.unknown(),
+}).passthrough();
+
+/** The AWS SDK stamps `$metadata` on every error it produces; nothing else in these routes does. */
+const storageFailureSchema = z.object({ "$metadata": z.unknown() }).passthrough()
+  .refine((value) => "$metadata" in value);
+
+interface CreatedCompanionAttachmentKey {
+  key: string;
+  etag?: string;
+}
+
+type DeleteStorageObjectInput = Parameters<typeof deleteStorageObject>[0];
+
+function databaseErrorCode(cause: unknown): string | null {
   const seen = new Set<unknown>();
-  let current = error;
-  // oxlint-disable-next-line anti-slop/no-runtime-typeof -- legacy pattern predating the incremental anti-slop gate
-  while (current && typeof current === "object" && !seen.has(current)) {
+  let current: unknown = cause;
+  while (current !== null && !seen.has(current)) {
+    const node = databaseErrorNodeSchema.safeParse(current);
+    if (!node.success) break;
     seen.add(current);
-    // oxlint-disable-next-line anti-slop/no-runtime-typeof -- legacy pattern predating the incremental anti-slop gate
-    if ("code" in current && typeof current.code === "string") return current.code;
-    current = "cause" in current ? current.cause : null;
+    if (node.data.code !== undefined) return node.data.code;
+    current = "cause" in node.data ? node.data.cause : null;
   }
   return null;
 }
-// oxlint-disable-next-line anti-slop/no-unknown-parameters -- legacy pattern predating the incremental anti-slop gate
-function errorStatus(error: unknown): number {
+function errorStatus(cause: unknown): number {
+  const error = cause;
   const databaseCode = databaseErrorCode(error);
   if (databaseCode === "42501") return 403;
   if (databaseCode === "P0002" || databaseCode === "02000") return 404;
@@ -400,18 +414,17 @@ function errorStatus(error: unknown): number {
   return 400;
 }
 
-// oxlint-disable-next-line anti-slop/no-unknown-parameters -- legacy pattern predating the incremental anti-slop gate
-function routeError(c: Context, error: unknown): Response {
-  if (error instanceof CompanionProviderError) {
+function routeError(c: Context, cause: unknown): Response {
+  if (cause instanceof CompanionProviderError) {
+    // SAFETY: errorStatus only returns literal HTTP status codes accepted by Hono's status type.
     return c.json({
       ok: false,
-      error: error.message,
-      code: error.code,
-      provider_id: error.providerId,
-    // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- invariant checked by the surrounding validation
-    }, errorStatus(error) as never);
+      error: cause.message,
+      code: cause.code,
+      provider_id: cause.providerId,
+    }, errorStatus(cause) as never);
   }
-  return jsonError(c, error, errorStatus(error));
+  return jsonError(c, cause, errorStatus(cause));
 }
 
 /**
@@ -425,17 +438,14 @@ const COMPANION_MESSAGE_UPLOAD_LIMIT_BYTES = 64 * 1024 * 1024;
  * The AWS SDK stamps `$metadata` on every error it produces, which is what distinguishes it from a
  * `ZodError`, a domain error, or a database error.
  */
-// oxlint-disable-next-line anti-slop/no-unknown-parameters -- legacy pattern predating the incremental anti-slop gate
-function isStorageFailure(error: unknown): boolean {
-  // oxlint-disable-next-line anti-slop/no-runtime-typeof -- legacy pattern predating the incremental anti-slop gate
-  return typeof error === "object" && error !== null && "$metadata" in error;
+function isStorageFailure(cause: unknown): boolean {
+  return storageFailureSchema.safeParse(cause).success;
 }
 
 /** One text field of a multipart send, or null when the part is absent or is a file. */
 function formField(form: FormData, name: string): string | undefined {
-  const value = form.get(name);
-  // oxlint-disable-next-line anti-slop/no-runtime-typeof -- legacy pattern predating the incremental anti-slop gate
-  return typeof value === "string" ? value : undefined;
+  const parsed = z.string().safeParse(form.get(name));
+  return parsed.success ? parsed.data : undefined;
 }
 
 export function registerCompanionRoutes(
@@ -691,6 +701,27 @@ export function registerCompanionRoutes(
     }
   });
 
+  app.post("/v1/companion-plugins/trigger-key", async (c) => {
+    try {
+      const body = z.object({
+        provider: z.literal("linear"),
+        credential: z.string().min(1).max(256),
+      }).parse(await c.req.json());
+      await tenant(c, ({ actor, orgId, database }) =>
+        saveCompanionPluginTriggerKey({
+          actor,
+          orgId,
+          provider: body.provider,
+          credential: body.credential,
+          masterKey: loadSecretsMasterKey(env.COMPANION_SECRETS_MASTER_KEY),
+          database,
+        }));
+      return c.json({ stored: true });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
   app.post("/v1/companion-plugins/oauth/start", async (c) => {
     try {
       const body = companionPluginOAuthStartInputSchema.parse(await c.req.json());
@@ -912,8 +943,8 @@ export function registerCompanionRoutes(
     try {
       const companionId = companionIdSchema.parse(c.req.param("id"));
       const body = updateCompanionInputSchema.parse(await c.req.json());
-      // oxlint-disable-next-line anti-slop/no-unsafe-dictionary-type -- legacy pattern predating the incremental anti-slop gate
-      const patch: Record<string, unknown> = {};
+      type CompanionUpdatePatch = Partial<z.infer<typeof updateCompanionInputSchema>>;
+      const patch: CompanionUpdatePatch = {};
       if (body.name !== undefined) patch.name = body.name;
       if (body.persona !== undefined) patch.persona = body.persona;
       if (body.provider_id !== undefined) patch.provider_id = body.provider_id;
@@ -1030,6 +1061,7 @@ export function registerCompanionRoutes(
           name: body.name,
           prompt: body.prompt,
           provider: body.provider,
+          target: body.target ?? null,
           enabled: body.enabled,
           database,
           webhookBaseUrl: companionWebhookBaseUrl(env),
@@ -1053,6 +1085,7 @@ export function registerCompanionRoutes(
           name: body.name,
           prompt: body.prompt,
           provider: body.provider,
+          target: body.target === undefined ? undefined : body.target ?? null,
           enabled: body.enabled,
           database,
           webhookBaseUrl: companionWebhookBaseUrl(env),
@@ -1088,6 +1121,46 @@ export function registerCompanionRoutes(
           webhookBaseUrl: companionWebhookBaseUrl(env),
         }));
       return c.json({ trigger });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.post("/v1/companions/:id/triggers/:triggerId/registration", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const triggerId = companionIdSchema.parse(c.req.param("triggerId"));
+      // On-demand provider-side wiring, decided by the Companion or an Owner/Editor — approval of
+      // the trigger itself never registers anything, and this never wakes Box or Pi.
+      await tenant(c, ({ orgId, database }) =>
+        registerCompanionTriggerWebhookV2({
+          orgId,
+          companionId,
+          triggerId,
+          webhookBaseUrl: companionWebhookBaseUrl(env),
+          masterKey: loadSecretsMasterKey(env.COMPANION_SECRETS_MASTER_KEY),
+          database,
+        }));
+      return c.json({ registered: true });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.delete("/v1/companions/:id/triggers/:triggerId/registration", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const triggerId = companionIdSchema.parse(c.req.param("triggerId"));
+      await tenant(c, ({ orgId, database }) =>
+        unregisterCompanionTriggerWebhookV2({
+          orgId,
+          companionId,
+          triggerId,
+          webhookBaseUrl: companionWebhookBaseUrl(env),
+          masterKey: loadSecretsMasterKey(env.COMPANION_SECRETS_MASTER_KEY),
+          database,
+        }));
+      return c.body(null, 204);
     } catch (error) {
       return routeError(c, error);
     }
@@ -1211,14 +1284,9 @@ export function registerCompanionRoutes(
           body = sendCompanionMessageInputSchema.parse({
             content: formField(form, "content") ?? "",
             client_message_id: formField(form, "client_message_id"),
-            // oxlint-disable-next-line anti-slop/no-conditional-empty-object-spread -- legacy pattern predating the incremental anti-slop gate
-            ...(formField(form, "client_surface")
-              ? { client_surface: formField(form, "client_surface") }
-              : {}),
+            client_surface: formField(form, "client_surface"),
           });
-          const files = form.getAll("file")
-            // oxlint-disable-next-line anti-slop/no-runtime-typeof -- legacy pattern predating the incremental anti-slop gate
-            .filter((part): part is Exclude<typeof part, string> => typeof part !== "string");
+          const files = form.getAll("file").filter((part) => part instanceof File);
           if (files.length > COMPANION_MESSAGE_ATTACHMENT_MAX_COUNT) {
             throw new Error(
               `a message carries at most ${COMPANION_MESSAGE_ATTACHMENT_MAX_COUNT} attachments`,
@@ -1261,8 +1329,9 @@ export function registerCompanionRoutes(
               // Remember the exact version this request wrote. If a concurrent request for the same
               // client_message_id adopts this key and commits a row for it, the delete below no
               // longer matches and is refused rather than stranding that row.
-              // oxlint-disable-next-line anti-slop/no-conditional-empty-object-spread -- legacy pattern predating the incremental anti-slop gate
-              createdKeys.push({ key, ...(etag ? { etag } : {}) });
+              const created: CreatedCompanionAttachmentKey = { key };
+              if (etag) created.etag = etag;
+              createdKeys.push(created);
             } catch (error) {
               // The object already exists. Because the key is the digest of these exact bytes, it
               // holds the same content -- almost always this request's own replay, whose turn is
@@ -1312,11 +1381,11 @@ export function registerCompanionRoutes(
         // header -- a replay conflict is never cleaned up at all: that error means a turn with this
         // client_message_id is already accepted, and these are its files.
         if (databaseErrorCode(error) !== "23505") {
-          await Promise.allSettled(createdKeys.map((created) => deleteStorageObject({
-            key: created.key,
-            // oxlint-disable-next-line anti-slop/no-conditional-empty-object-spread -- legacy pattern predating the incremental anti-slop gate
-            ...(created.etag ? { ifMatch: created.etag } : {}),
-          })));
+          await Promise.allSettled(createdKeys.map((created) => {
+            const options: DeleteStorageObjectInput = { key: created.key };
+            if (created.etag) options.ifMatch = created.etag;
+            return deleteStorageObject(options);
+          }));
         }
         // An object-storage failure names the bucket, and a connection failure names the internal
         // endpoint. Neither belongs in a reply to a member, so a storage fault answers with a fixed
