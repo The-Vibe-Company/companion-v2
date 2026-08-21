@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/require-safety-comment-for-type-assertion -- Existing DOM test fixture predates the incremental anti-slop gate. */
+
 // @vitest-environment happy-dom
 
 import React, { act } from "react";

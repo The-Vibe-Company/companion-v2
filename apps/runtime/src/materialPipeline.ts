@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-conditional-empty-object-spread, anti-slop/no-unknown-parameters -- Existing material boundary predates the incremental anti-slop gate. */
+
 import { createHash, randomUUID } from "node:crypto";
 import { COMPANION_SKILL_KEY, companionSkillDir } from "@companion/companion-skill";
 import { getCompanionSkillPackage } from "@companion/companion-skill/package";

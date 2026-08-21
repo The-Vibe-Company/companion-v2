@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Existing runtime boundary decoders predate the incremental anti-slop gate. */
+
 export const WORK_KINDS = ["operation", "decision", "attempt", "settings", "health"] as const;
 export type WorkKind = (typeof WORK_KINDS)[number];
 
@@ -394,7 +396,7 @@ export interface RuntimeSkillUpdateMaterial {
   requiredSkillsRevision: number;
   selectedSkillIds: string[];
   skillRefs: SkillRef[];
-  skillMaterial: Record<string, unknown>[];
+  skillMaterial: RuntimeWorkMaterial["skillMaterial"];
 }
 
 /**

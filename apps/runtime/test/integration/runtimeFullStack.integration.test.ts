@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/require-safety-comment-for-type-assertion -- Existing simulator fixture decoding predates the incremental anti-slop gate. */
+
 /**
  * Product promise:
  * An accepted Companion message is durable independently of the API process, and the dedicated

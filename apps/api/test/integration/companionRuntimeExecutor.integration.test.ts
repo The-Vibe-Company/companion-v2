@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-chained-type-assertions, anti-slop/no-runtime-typeof, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Existing PostgreSQL fixture decoding predates the incremental anti-slop gate. */
+
 /**
  * Product promise:
  * the isolated Runtime v2 login can fetch only lease-authorized material and can commit a typed

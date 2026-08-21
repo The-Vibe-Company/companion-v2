@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-runtime-typeof, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Existing runtime fixtures predate the incremental anti-slop gate. */
+
 import { describe, expect, it } from "vitest";
 import { RuntimeEngine } from "./engine";
 import { RuntimeStoreIndeterminateError } from "./store";

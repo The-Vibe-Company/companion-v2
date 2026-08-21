@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Existing API boundary decoding predates the incremental anti-slop gate. */
+
 import { eq, sql } from "drizzle-orm";
 import { z } from "zod";
 

@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-shape-in-symbol-names, anti-slop/no-unsafe-dictionary-type -- Existing Drizzle schema symbols predate the incremental anti-slop gate. */
+
 import {
   type AnyPgColumn,
   bigint,

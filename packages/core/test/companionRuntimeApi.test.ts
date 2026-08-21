@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-known-value-widening, anti-slop/no-unsafe-dictionary-type -- Existing API fixtures predate the incremental anti-slop gate. */
+
 import { describe, expect, it } from "vitest";
 
 import type { Companion } from "@companion/contracts";

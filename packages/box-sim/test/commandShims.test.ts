@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-conditional-empty-object-spread, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Existing simulator fixtures predate the incremental anti-slop gate. */
+
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 

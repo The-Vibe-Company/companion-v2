@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-known-value-widening, anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Existing PostgreSQL row decoder predates the incremental anti-slop gate. */
+
 import {
   decodeGateStatusRow,
   decodeRuntimeAuthorizationRow,
@@ -355,6 +357,7 @@ function decodeSkillUpdateMaterial(row: Record<string, unknown>): RuntimeSkillUp
   const requiredRevision = row.required_skills_revision;
   const selected = row.selected_skill_ids;
   const refs = objectArray(row, "skill_refs");
+  // SAFETY: Number.isSafeInteger proves both revision values are finite integers before comparison.
   if (
     !Number.isSafeInteger(revision)
     || (revision as number) < 1
@@ -371,6 +374,7 @@ function decodeSkillUpdateMaterial(row: Record<string, unknown>): RuntimeSkillUp
     return { skill_id: skillId, current_version_id: versionId };
   });
   return {
+    // SAFETY: The checks above establish the revision bounds and UUID-only selected Skill ids.
     targetSkillsRevision: revision as number,
     requiredSkillsRevision: requiredRevision as number,
     selectedSkillIds: selected as string[],

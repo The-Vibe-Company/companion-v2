@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-conditional-empty-object-spread, anti-slop/no-known-value-widening, anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unknown-returns, anti-slop/require-safety-comment-for-type-assertion -- Existing runtime fixture factory predates the incremental anti-slop gate. */
+
 import type { RuntimeClock } from "../clock";
 import type {
   RuntimeAttachmentStager,

@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Existing Box transport fixtures predate the incremental anti-slop gate. */
+
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -820,11 +822,13 @@ describe("default Pi packages on the Box disk", () => {
         return response({ box: box("ready") });
       }
       if (url.endsWith("/files") && method === "PUT") {
+        // SAFETY: This test controls the request body emitted by the Box runtime file transport.
         const body = JSON.parse(String(init?.body)) as { path: string };
         stagedPaths.push(body.path);
         return response({ ok: true });
       }
       if (url.endsWith("/commands") && method === "POST") {
+        // SAFETY: This test controls the request body emitted by the Box runtime command transport.
         const body = JSON.parse(String(init?.body)) as { command: string };
         commands.push(body.command);
         if (body.command.includes("pi-layout.version")) return response(commandResult(`${layoutMarker}\n`));
@@ -877,11 +881,13 @@ describe("default Pi packages on the Box disk", () => {
         return response({ box: box("ready") });
       }
       if (url.endsWith("/files") && method === "PUT") {
+        // SAFETY: This test controls the request body emitted by the Box runtime file transport.
         const body = JSON.parse(String(init?.body)) as { path: string };
         stagedPaths.push(body.path);
         return response({ ok: true });
       }
       if (url.endsWith("/commands") && method === "POST") {
+        // SAFETY: This test controls the request body emitted by the Box runtime command transport.
         const body = JSON.parse(String(init?.body)) as { command: string };
         commands.push(body.command);
         if (body.command.includes("companion-box-runnable")) {

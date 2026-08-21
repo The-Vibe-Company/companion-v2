@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-conditional-empty-object-spread, anti-slop/no-unknown-returns, anti-slop/no-unsafe-dictionary-type -- Existing runtime port contracts predate the incremental anti-slop gate. */
+
 import type { RuntimeClock } from "./clock";
 import type { RuntimeProcessLog } from "./logging";
 import type { PiBrokerCounters, RuntimePiProjection } from "./piEvents";

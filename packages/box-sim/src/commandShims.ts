@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-known-value-widening, anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Existing simulator command parsing predates the incremental anti-slop gate. */
+
 import { createHash } from "node:crypto";
 
 import type { BoxSimCommandResult, BoxSimPiController } from "./protocol";
