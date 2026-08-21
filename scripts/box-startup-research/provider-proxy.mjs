@@ -175,6 +175,22 @@ companion_attest_broker() {
   done
   [ "$companion_socket_owned" = true ]
 }
+companion_pi_child_ready=false
+for companion_pi_probe in $(/usr/bin/seq 1 40); do
+  companion_main_pid="$(/usr/bin/systemctl --user show companion-pi-daemon.service -p MainPID --value 2>/dev/null || true)"
+  case "$companion_main_pid" in ''|*[!0-9]*|0) ;; *)
+    companion_pi_bin="$( { /usr/bin/tr '\0' '\n' < "/proc/$companion_main_pid/environ" | /usr/bin/sed -n 's/^COMPANION_PI_BIN=//p'; } 2>/dev/null || true)"
+    for companion_child in $(/usr/bin/cat "/proc/$companion_main_pid/task/$companion_main_pid/children" 2>/dev/null || true); do
+      if /usr/bin/tr '\0' '\n' < "/proc/$companion_child/cmdline" 2>/dev/null | /usr/bin/grep -Fx -- "$companion_pi_bin" >/dev/null \
+        && [ "$(/usr/bin/readlink -f "/proc/$companion_child/exe" 2>/dev/null || true)" = '${runtimeHashes.nodePath}' ]; then
+        companion_pi_child_ready=true
+      fi
+    done
+  esac
+  if [ "$companion_pi_child_ready" = true ]; then break; fi
+  if [ "$companion_pi_probe" -lt 40 ]; then /usr/bin/sleep 0.1; fi
+done
+[ "$companion_pi_child_ready" = true ]
 companion_attest_broker
 companion_invocation="$(/usr/bin/systemctl --user show companion-pi-daemon.service -p InvocationID --value)"
 COMPANION_PI_BROKER_SOCKET="$broker_socket" \
@@ -485,7 +501,7 @@ export class BoxLeaseProxy {
             this.#brokerSha256,
             this.#runtimeHashes,
           ),
-          timeoutSeconds: 13,
+          timeoutSeconds: 18,
         };
       }
       return authorization;
