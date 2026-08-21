@@ -133,7 +133,7 @@ the configured provider or the deterministic simulator. Model-provider credentia
 Providers**, then select its live Pi model when creating the Companion.
 
 See the [Runtime v2 operations runbook](docs/runbooks/companions-runtime.md) for cutover, purge,
-kill-switch, incident, rollback, and canary procedures. Railway deployment details live in
+kill-switch, incident, and rollback procedures. Railway deployment details live in
 [deploy/railway/README.md](deploy/railway/README.md).
 
 ## Verification
