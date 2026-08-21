@@ -733,6 +733,89 @@ describe("runtime lifecycle operations", () => {
     expect(store.authorization.piInvocationId).toBe(PI_INVOCATION_ID);
   });
 
+  it("keeps the installed tree and completes Restart Pi when an auto-update fails", async () => {
+    const claim = operationClaim({ operationKind: "restart_pi", targetSkillsRevision: 2 });
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        boxId: BOX_ID,
+        boxState: "ready",
+        piState: "idle",
+        piInvocationId: "old-pi-invocation",
+        appliedSkillsRevision: 1,
+        skillsRevision: 1,
+      }),
+    });
+    store.getSkillUpdateMaterial = async () => ({
+      targetSkillsRevision: 2,
+      requiredSkillsRevision: 1,
+      selectedSkillIds: [],
+      skillRefs: [],
+      skillMaterial: [],
+    });
+    const effects: string[] = [];
+    store.recordSkillUpdateError = async (_fence, error) => {
+      effects.push(`error:${error.code}`);
+      return true;
+    };
+    const ports = fakePorts(store);
+    ports.pi.stopPiDaemon = async () => { effects.push("stop-pi"); };
+    ports.resourceStager.stageSkillTree = async () => {
+      effects.push("update-skills");
+      throw new Error("simulated archive failure");
+    };
+    const originalStage = ports.resourceStager.stageExistingBox;
+    ports.resourceStager.stageExistingBox = async (input) => {
+      effects.push("stage-preserving-skills");
+      expect(input.preserveInstalledSkills).toBe(true);
+      return await originalStage(input);
+    };
+    ports.pi.restartPiDaemon = async () => {
+      effects.push("restart-pi");
+      return { state: "idle", invocationId: PI_INVOCATION_ID };
+    };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(store.authorization.appliedSkillsRevision).toBe(1);
+    expect(effects).toEqual([
+      "stop-pi",
+      "update-skills",
+      "error:skill_auto_update_failed",
+      "stage-preserving-skills",
+      "restart-pi",
+    ]);
+  });
+
+  it("blocks Restart Pi when a required Skill selection cannot be installed", async () => {
+    const claim = operationClaim({ operationKind: "restart_pi", targetSkillsRevision: 2 });
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        boxId: BOX_ID,
+        boxState: "ready",
+        piState: "idle",
+        piInvocationId: "old-pi-invocation",
+        appliedSkillsRevision: 1,
+        skillsRevision: 2,
+      }),
+    });
+    const ports = fakePorts(store);
+    let restarts = 0;
+    ports.resourceStager.stageSkillTree = async () => {
+      throw new Error("simulated archive failure");
+    };
+    ports.pi.restartPiDaemon = async () => {
+      restarts += 1;
+      return { state: "idle", invocationId: PI_INVOCATION_ID };
+    };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("failed");
+    expect(restarts).toBe(0);
+    expect(store.authorization.appliedSkillsRevision).toBe(1);
+  });
+
   it("activates staged settings with a new idle Pi invocation before publishing revisions", async () => {
     const claim = operationClaim({
       operationKind: "apply_settings",

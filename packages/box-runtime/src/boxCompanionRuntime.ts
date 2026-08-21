@@ -733,6 +733,7 @@ export interface CompanionBoxRuntimeV2 {
     mcpAccounts: CompanionMcpAccount[];
     skills: CompanionRuntimeSkill[];
     reuseSkills?: boolean;
+    preserveSkills?: boolean;
     hubEnv?: Record<string, string>;
     configCatalog?: CompanionConfigCatalog | null;
     signal?: AbortSignal;
@@ -740,6 +741,19 @@ export interface CompanionBoxRuntimeV2 {
     boxId: string;
     diskLayoutVersion: typeof COMPANION_PI_DISK_LAYOUT_VERSION;
     stagingMode: "refresh" | "skills";
+    skillBytesTransferred: number;
+    skillsDigest: string;
+  }>;
+  /** Replace only the installed Skills tree; no provider, MCP, Hub or credential inputs exist. */
+  stageSkillTree(input: {
+    companionId: string;
+    runtimeGeneration: number;
+    boxId: string;
+    skills: CompanionRuntimeSkill[];
+    signal?: AbortSignal;
+  }): Promise<{
+    boxId: string;
+    skillsDigest: string;
     skillBytesTransferred: number;
   }>;
   /** Pi-only lifecycle controls. None may resume/archive/create the Box. */
@@ -2484,9 +2498,10 @@ fi`,
     mcpAccounts: CompanionMcpAccount[];
     skills: CompanionRuntimeSkill[];
     reuseSkills: boolean;
+    preserveSkills: boolean;
     hubEnv?: Record<string, string>;
     configCatalog?: CompanionConfigCatalog | null;
-  }): Promise<{ stagingMode: "refresh" | "skills"; skillBytesTransferred: number }> {
+  }): Promise<{ stagingMode: "refresh" | "skills"; skillBytesTransferred: number; skillsDigest: string }> {
     const injectedSkills = input.clientSurface === "native_mobile" ? [] : input.skills;
     const mcp = buildMcpAdapterInjection(input.mcpAccounts);
     const bundledSkill = injectedSkills.find((skill) => skill.slug === "companion");
@@ -2494,13 +2509,23 @@ fi`,
     const bakedBundledArchivePath = bundledSkill
       ? `.companion/runtime/image/companion-${bundledSkill.checksum}.tar.gz.b64`
       : null;
-    const skillsTreeRevision = createHash("sha256")
+    let skillsTreeRevision = createHash("sha256")
       .update(JSON.stringify(injectedSkills.map(({ slug, version, checksum }) => ({
         slug,
         version,
         checksum,
       }))))
       .digest("hex");
+    if (input.preserveSkills) {
+      const installed = await this.#command(
+        input.boxId,
+        `set -e; digest="$(cat "$HOME/${SKILLS_TREE_REVISION_PATH}" 2>/dev/null || true)"; printf '%s' "$digest" | grep -Eq '^[0-9a-f]{64}$'; printf '%s\\n' "$digest"`,
+      );
+      if (!installed.success) {
+        throw new BoxRuntimeProviderError("The installed Skills snapshot is missing or corrupt", 409);
+      }
+      skillsTreeRevision = installed.stdout.trim();
+    }
     const prepareSkillArchives =
       ` rm -rf "$root/state/skill-archives"; mkdir -p "$root/state/skill-archives";`
       + (bundledArchivePath && bakedBundledArchivePath
@@ -2509,7 +2534,9 @@ fi`,
     const cleared = await this.#command(
       input.boxId,
       `set -e; root="$HOME/.companion/runtime";`
-      + (input.reuseSkills
+      + (input.preserveSkills
+        ? ` rm -rf "$root/state/skill-archives"; printf '%s\\n' ${SKILLS_TREE_REUSED_MARKER};`
+        : input.reuseSkills
         ? ` if [ "$(cat "$HOME/${SKILLS_TREE_REVISION_PATH}" 2>/dev/null || true)" = ${shellQuote(skillsTreeRevision)} ]; then printf '%s\\n' ${SKILLS_TREE_REUSED_MARKER}; else${prepareSkillArchives} fi;`
         : prepareSkillArchives)
       + ` if [ -f "$HOME/.companion/pi/auth.json" ]; then printf '%s\\n' ${shellQuote(PROVIDER_AUTH_PRESENT_MARKER)}; fi`,
@@ -2520,7 +2547,8 @@ fi`,
         502,
       );
     }
-    const reuseSkills = input.reuseSkills && cleared.stdout.includes(SKILLS_TREE_REUSED_MARKER);
+    const reuseSkills = (input.preserveSkills || input.reuseSkills)
+      && cleared.stdout.includes(SKILLS_TREE_REUSED_MARKER);
     // Pi keeps refreshed subscription tokens in its own agent directory, so the auth file is
     // replaced only when the encrypted workspace connection generation changes. The disk itself is
     // the authority on whether the file exists: a Box the control plane recorded at the current
@@ -2545,15 +2573,17 @@ fi`,
         content: `${JSON.stringify({ accounts: mcp.accounts }, null, 2)}\n`,
         mode: 0o600,
       },
-      {
+    );
+    if (!input.preserveSkills) {
+      controlFiles.push({
         path: ".companion/runtime/state/skills.json",
         content: `${JSON.stringify({
           client_surface: input.clientSurface,
           skills: injectedSkills.map(({ slug, version, checksum }) => ({ slug, version, checksum })),
         }, null, 2)}\n`,
         mode: 0o600,
-      },
-    );
+      });
+    }
     if (input.clientSurface !== "native_mobile" && input.configCatalog) {
       controlFiles.push({
         path: ".companion/runtime/state/config-catalog.json",
@@ -2649,6 +2679,7 @@ fi`,
       return {
         stagingMode: reuseSkills ? "refresh" : "skills",
         skillBytesTransferred,
+        skillsDigest: skillsTreeRevision,
       };
     } catch (error) {
       // providers.env is transient staging material. A staging failure must prove it absent from
@@ -2656,6 +2687,64 @@ fi`,
       await this.#removeProviderFile(input.boxId);
       throw error;
     }
+  }
+
+  async #replaceSkillTree(
+    boxId: string,
+    skills: CompanionRuntimeSkill[],
+  ): Promise<{ skillsDigest: string; skillBytesTransferred: number }> {
+    const skillsDigest = createHash("sha256")
+      .update(JSON.stringify(skills.map(({ slug, version, checksum }) => ({ slug, version, checksum }))))
+      .digest("hex");
+    const skillsManifest = `${JSON.stringify({
+      client_surface: "web",
+      skills: skills.map(({ slug, version, checksum }) => ({ slug, version, checksum })),
+    }, null, 2)}\n`;
+    const current = await this.#command(
+      boxId,
+      `test "$(cat "$HOME/${SKILLS_TREE_REVISION_PATH}" 2>/dev/null || true)" = ${shellQuote(skillsDigest)}`,
+    );
+    if (current.success) {
+      await this.#writeFile(boxId, ".companion/runtime/state/skills.json", skillsManifest);
+      return { skillsDigest, skillBytesTransferred: 0 };
+    }
+    const bundledSkill = skills.find((skill) => skill.slug === "companion");
+    const bundledArchivePath = bundledSkill ? runtimeSkillArchivePath(bundledSkill) : null;
+    const bakedBundledArchivePath = bundledSkill
+      ? `.companion/runtime/image/companion-${bundledSkill.checksum}.tar.gz.b64`
+      : null;
+    const prepared = await this.#command(
+      boxId,
+      `set -e; root="$HOME/.companion/runtime"; rm -rf "$root/state/skill-archives"; mkdir -p "$root/state/skill-archives";`
+      + (bundledArchivePath && bakedBundledArchivePath
+        ? ` if [ -s "$HOME/${bakedBundledArchivePath}" ]; then cp "$HOME/${bakedBundledArchivePath}" "$HOME/${bundledArchivePath}"; printf '%s\\n' companion-bundled-skill-reused; fi;`
+        : ""),
+    );
+    if (!prepared.success) {
+      throw new BoxRuntimeProviderError(`Skill staging failed${commandFailureDetail(prepared)}`, 502);
+    }
+    const staged = new Map<string, string>();
+    let skillBytesTransferred = 0;
+    for (const skill of skills) {
+      const path = runtimeSkillArchivePath(skill);
+      const content = skill.archive.toString("base64");
+      staged.set(path, content);
+      if (!(skill === bundledSkill && prepared.stdout.includes("companion-bundled-skill-reused"))) {
+        await this.#writeFile(boxId, path, content);
+        skillBytesTransferred += skill.archive.byteLength;
+      }
+    }
+    await this.#repairShortStagedArchives(boxId, staged);
+    await this.#writeFile(boxId, ".companion/runtime/state/skills.json.next", skillsManifest);
+    const swapped = await this.#command(
+      boxId,
+      `set -euo pipefail; root="$HOME/.companion/runtime"; digest="$HOME/${SKILLS_TREE_REVISION_PATH}"; manifest="$root/state/skills.json"; rm -rf "$root/skills.next"; mkdir -p "$root/skills.next"; shopt -s nullglob; for archive in "$root/state/skill-archives"/*.tar.gz.b64; do slug="$(basename "$archive" .tar.gz.b64)"; mkdir -p "$root/skills.next/$slug"; base64 --decode "$archive" | tar --extract --gzip --file=- --directory="$root/skills.next/$slug" --no-same-owner --no-same-permissions; done; rm -rf "$root/skills.prev" "$digest.prev" "$manifest.prev"; if [ -d "$root/skills" ]; then mv "$root/skills" "$root/skills.prev"; fi; if [ -f "$digest" ]; then cp "$digest" "$digest.prev"; fi; if [ -f "$manifest" ]; then cp "$manifest" "$manifest.prev"; fi; if ! mv "$root/skills.next" "$root/skills"; then if [ -d "$root/skills.prev" ]; then mv "$root/skills.prev" "$root/skills"; fi; exit 1; fi; if ! { printf '%s\\n' ${shellQuote(skillsDigest)} > "$digest.next" && mv "$digest.next" "$digest" && mv "$manifest.next" "$manifest"; }; then rm -rf "$root/skills" "$digest.next"; if [ -d "$root/skills.prev" ]; then mv "$root/skills.prev" "$root/skills"; fi; if [ -f "$digest.prev" ]; then mv "$digest.prev" "$digest"; else rm -f "$digest"; fi; if [ -f "$manifest.prev" ]; then mv "$manifest.prev" "$manifest"; else rm -f "$manifest"; fi; exit 1; fi; rm -rf "$root/skills.prev" "$root/state/skill-archives" "$digest.prev" "$manifest.prev"`,
+      180,
+    );
+    if (!swapped.success) {
+      throw new BoxRuntimeProviderError(`Skill tree update failed${commandFailureDetail(swapped)}`, 502);
+    }
+    return { skillsDigest, skillBytesTransferred };
   }
 
   async #activatePiDaemon(input: {
@@ -2929,6 +3018,7 @@ exit 1`,
     mcpAccounts: CompanionMcpAccount[];
     skills: CompanionRuntimeSkill[];
     reuseSkills?: boolean;
+    preserveSkills?: boolean;
     hubEnv?: Record<string, string>;
     configCatalog?: CompanionConfigCatalog | null;
     signal?: AbortSignal;
@@ -2937,6 +3027,7 @@ exit 1`,
     diskLayoutVersion: typeof COMPANION_PI_DISK_LAYOUT_VERSION;
     stagingMode: "refresh" | "skills";
     skillBytesTransferred: number;
+    skillsDigest: string;
   }> {
     companionBoxName(input.companionId, input.runtimeGeneration);
     this.#stagingSignal = input.signal;
@@ -2962,6 +3053,7 @@ exit 1`,
         mcpAccounts: input.mcpAccounts,
         skills: input.skills,
         reuseSkills: input.reuseSkills === true,
+        preserveSkills: input.preserveSkills === true,
         hubEnv: input.hubEnv,
         configCatalog: input.configCatalog,
       });
@@ -2970,6 +3062,30 @@ exit 1`,
         diskLayoutVersion: COMPANION_PI_DISK_LAYOUT_VERSION,
         ...staged,
       };
+    } finally {
+      this.#stagingSignal = undefined;
+    }
+  }
+
+  async stageSkillTree(input: {
+    companionId: string;
+    runtimeGeneration: number;
+    boxId: string;
+    skills: CompanionRuntimeSkill[];
+    signal?: AbortSignal;
+  }): Promise<{ boxId: string; skillsDigest: string; skillBytesTransferred: number }> {
+    companionBoxName(input.companionId, input.runtimeGeneration);
+    this.#stagingSignal = input.signal;
+    try {
+      const box = await this.#get(input.boxId, input.signal);
+      if (!isCompanionOwnBox(box, input.companionId, input.runtimeGeneration)) {
+        throw new BoxRuntimeProviderError("The durable Box identity does not match this Companion", 409);
+      }
+      if (!READY_STATES.has(box.state)) {
+        throw new BoxRuntimeProviderError("Box must be running to update Skills", 409);
+      }
+      await this.#assertBoxRunnable(box);
+      return { boxId: box.id, ...await this.#replaceSkillTree(box.id, input.skills) };
     } finally {
       this.#stagingSignal = undefined;
     }

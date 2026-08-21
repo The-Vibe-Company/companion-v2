@@ -11,6 +11,7 @@ import type {
   PiObservedState,
   RuntimeAuthorization,
   RuntimeOutputAttachment,
+  RuntimeSkillUpdateMaterial,
   RuntimeWorkMaterial,
 } from "./types";
 
@@ -177,6 +178,8 @@ export interface RuntimeResourceStager {
     clientSurface: ClientSurface;
     targetSettingsRevision: bigint;
     targetSkillsRevision: number | null;
+    /** Keep the tree already proven on disk; Skills were handled by the shutdown-only stage. */
+    preserveInstalledSkills?: boolean;
     signal: AbortSignal;
   }): Promise<{
     diskLayoutVersion: 14;
@@ -184,9 +187,19 @@ export interface RuntimeResourceStager {
     appliedSkillsRevision: number | null;
     stagingMode?: "refresh" | "skills";
     skillBytesTransferred?: number;
+    skillsDigest?: string;
     /** Earliest expiry among the bounded credentials written into this snapshot. */
     materialExpiresAt: Date | null;
   }>;
+  /** Atomically replace only the Skills tree. This surface never receives runtime credentials. */
+  stageSkillTree(input: {
+    orgId: string;
+    companionId: string;
+    boxId: string;
+    authorization: RuntimeAuthorization;
+    material: RuntimeSkillUpdateMaterial;
+    signal: AbortSignal;
+  }): Promise<{ appliedSkillsRevision: number; skillsDigest: string; skillBytesTransferred: number }>;
   /**
    * Apply the current Pi layout to a Box that is already running. Overlay-only changes rewrite the
    * broker without reinstalling packages. The caller restarts Pi when `applied` is not `none`.

@@ -414,6 +414,7 @@ const disabledPiControl: RuntimePiControl = {
 
 const disabledResourceStager: RuntimeResourceStager = {
   stageExistingBox: async () => runtimeDisabled(),
+  stageSkillTree: async () => runtimeDisabled(),
   refreshLayout: async () => runtimeDisabled(),
   invalidateLayout: async () => runtimeDisabled(),
 };

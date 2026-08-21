@@ -31,6 +31,7 @@ import type {
   RuntimeSettlementInput,
   RuntimeConfigCatalog,
   RuntimeWorkMaterial,
+  RuntimeSkillUpdateMaterial,
 } from "../types";
 
 export const ORG_ID = "11111111-1111-4111-8111-111111111111";
@@ -282,6 +283,7 @@ export class MemoryRuntimeStore implements RuntimeStore {
   duplicateCleanups = new Map<string, DuplicateCleanup>();
   recordedMaterialSnapshots: Array<{ clientSurface: ClientSurface; materialExpiresAt: Date | null }> = [];
   publishedMaterialSnapshots: string[] = [];
+  skillUpdateErrors: Array<{ code: string; message: string }> = [];
 
   constructor(input: {
     authorization: RuntimeAuthorization;
@@ -450,6 +452,34 @@ export class MemoryRuntimeStore implements RuntimeStore {
 
   async getMaterial(): Promise<RuntimeWorkMaterial | null> {
     return { ...this.material };
+  }
+
+  async getSkillUpdateMaterial(): Promise<RuntimeSkillUpdateMaterial | null> {
+    return {
+      targetSkillsRevision: this.authorization.targetSkillsRevision
+        ?? this.authorization.skillsRevision
+        ?? 1,
+      requiredSkillsRevision: this.authorization.skillsRevision ?? 1,
+      selectedSkillIds: this.authorization.skillRefs.map((ref) => ref.skill_id),
+      skillRefs: [...this.authorization.skillRefs],
+      skillMaterial: [...this.material.skillMaterial],
+    };
+  }
+
+  async commitSkillUpdate(
+    _fence: LeaseFence,
+    input: RuntimeSkillUpdateMaterial & { skillsDigest: string },
+  ): Promise<true | null> {
+    this.authorization.appliedSkillsRevision = input.targetSkillsRevision;
+    return true;
+  }
+
+  async recordSkillUpdateError(
+    _fence: LeaseFence,
+    input: { code: string; message: string },
+  ): Promise<true | null> {
+    this.skillUpdateErrors.push(input);
+    return true;
   }
 
   async getConfigCatalog(): Promise<RuntimeConfigCatalog | null> {
@@ -714,10 +744,17 @@ export function fakePorts(store: MemoryRuntimeStore): FakePorts {
     stageExistingBox: async (input) => ({
       diskLayoutVersion: 14,
       appliedSettingsRevision: input.targetSettingsRevision,
-      appliedSkillsRevision: input.targetSkillsRevision,
+      appliedSkillsRevision: input.preserveInstalledSkills
+        ? input.authorization.appliedSkillsRevision
+        : input.targetSkillsRevision,
       materialExpiresAt: input.clientSurface === "native_mobile"
         ? null
         : new Date("2026-08-16T18:00:00.000Z"),
+    }),
+    stageSkillTree: async (input) => ({
+      appliedSkillsRevision: input.material.targetSkillsRevision,
+      skillsDigest: "a".repeat(64),
+      skillBytesTransferred: 0,
     }),
     refreshLayout: async () => ({ applied: "none" }),
     invalidateLayout: async () => undefined,

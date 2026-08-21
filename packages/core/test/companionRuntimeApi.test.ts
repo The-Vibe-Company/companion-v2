@@ -59,6 +59,8 @@ function runtime(
     desired_settings_revision: 1,
     applied_settings_revision: 0,
     applied_skills_revision: 0,
+    skills_available_revision: 3,
+    skills_update_error_message: null,
     retirement_state: "active",
     last_error_code: null,
     last_error_message: null,

@@ -778,6 +778,13 @@
       "when": 1789492000000,
       "tag": "0110_companion_material_snapshot_expiry",
       "breakpoints": true
+    },
+    {
+      "idx": 111,
+      "version": "7",
+      "when": 1789664800000,
+      "tag": "0111_defer_skill_updates_to_pi_stop",
+      "breakpoints": true
     }
   ]
 }

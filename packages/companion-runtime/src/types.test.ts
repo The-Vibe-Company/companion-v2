@@ -193,6 +193,7 @@ describe("runtime SQL row refinement", () => {
       operation_kind: "stop",
       operation_started_at: new Date("2026-08-16T12:00:00.000Z"),
       operation_attempt_count: 1,
+      target_skills_revision: 1,
     }));
     expect(claim.workKind).toBe("operation");
     if (claim.workKind === "operation") expect(claim.clientSurface).toBeNull();

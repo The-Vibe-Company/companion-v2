@@ -2,6 +2,7 @@ import { AmbiguousExternalEffectError, RuntimeInvariantError } from "./errors";
 import { mustAbandonRuntimeExecution } from "./executionControl";
 import { runtimeSucceeded, type RuntimeWorkDisposition } from "./handler";
 import type { LeaseSession } from "./leaseSession";
+import { describeThrownError } from "./logging";
 import type {
   BoxCreateResult,
   GenerationBox,
@@ -333,7 +334,10 @@ async function waitForReadyBox(context: OperationContext): Promise<void> {
   }
 }
 
-async function stageCapturedResources(context: OperationContext): Promise<StagedRuntimeSettings> {
+async function stageCapturedResources(
+  context: OperationContext,
+  options: { preserveInstalledSkills?: boolean } = {},
+): Promise<StagedRuntimeSettings> {
   const startedAt = context.deps.clock.now().getTime();
   const authorization = requiredAuthorization(context.session);
   if (
@@ -369,8 +373,21 @@ async function stageCapturedResources(context: OperationContext): Promise<Staged
       clientSurface,
       targetSettingsRevision,
       targetSkillsRevision,
+      preserveInstalledSkills: options.preserveInstalledSkills,
       signal,
     }));
+  if (!options.preserveInstalledSkills && staged.appliedSkillsRevision !== null && staged.skillsDigest) {
+    const committed = await context.session.fencedMutation(async () =>
+      await context.deps.store.commitSkillUpdate(context.session.fence, {
+        targetSkillsRevision: staged.appliedSkillsRevision!,
+        requiredSkillsRevision: staged.appliedSkillsRevision!,
+        selectedSkillIds: authorization.skillRefs.map((ref) => ref.skill_id),
+        skillRefs: authorization.skillRefs,
+        skillMaterial: material.skillMaterial,
+        skillsDigest: staged.skillsDigest!,
+      }));
+    if (!committed) throw new Error("Skill snapshot fence was lost");
+  }
   await context.session.fencedMutation(async () =>
     await context.deps.store.recordMaterialSnapshot(context.session.fence, {
       clientSurface,
@@ -381,6 +398,63 @@ async function stageCapturedResources(context: OperationContext): Promise<Staged
     skillBytesTransferred: staged.skillBytesTransferred ?? 0,
   });
   return staged;
+}
+
+async function applyCapturedSkillUpdate(context: OperationContext): Promise<void> {
+  const authorization = requiredAuthorization(context.session);
+  if (
+    authorization.clientSurface === "native_mobile"
+    ||
+    authorization.targetSkillsRevision === null
+    || (authorization.appliedSkillsRevision ?? 0) >= authorization.targetSkillsRevision
+  ) return;
+  const material = await context.session.fencedMutation(async () =>
+    await context.deps.store.getSkillUpdateMaterial(context.session.fence, 30));
+  const blocking = material !== null
+    && (authorization.appliedSkillsRevision ?? 0) < material.requiredSkillsRevision;
+  if (!material) {
+    await context.session.fencedMutation(async () =>
+      await context.deps.store.recordSkillUpdateError(context.session.fence, {
+        code: "skill_auto_update_unauthorized",
+        message: "The pending Skill update is no longer authorized and will be retried later.",
+      }));
+    return;
+  }
+  try {
+    const staged = await context.session.external(async (signal) =>
+      await context.deps.resourceStager.stageSkillTree({
+        orgId: context.claim.orgId,
+        companionId: context.claim.companionId,
+        boxId: requiredBoxId(context.session),
+        authorization,
+        material,
+        signal,
+      }));
+    const committed = await context.session.fencedMutation(async () =>
+      await context.deps.store.commitSkillUpdate(context.session.fence, {
+        ...material,
+        skillsDigest: staged.skillsDigest,
+      }));
+    if (!committed) throw new Error("Skill update fence was lost");
+  } catch (error) {
+    if (mustAbandonRuntimeExecution(error)) throw error;
+    context.deps.log?.warn({
+      ts: context.deps.clock.now().toISOString(),
+      event: "runtime.skills.auto_update_failed",
+      companionId: context.claim.companionId,
+      operationKind: context.claim.operationKind,
+      blocking,
+      error: describeThrownError(error),
+    });
+    await context.session.fencedMutation(async () =>
+      await context.deps.store.recordSkillUpdateError(context.session.fence, {
+        code: blocking ? "skill_update_failed" : "skill_auto_update_failed",
+        message: blocking
+          ? "The required Skill selection could not be installed."
+          : "The automatic Skill update failed and will be retried at the next Pi stop or restart.",
+      }));
+    if (blocking) throw error;
+  }
 }
 
 async function publishStagedResources(
@@ -586,6 +660,7 @@ async function handleStop(context: OperationContext): Promise<RuntimeWorkDisposi
         if (authorization.boxId) {
           await lifecycle(context, "stop_pi", async ({ signal }) =>
             await context.deps.pi.stopPiDaemon({ boxId: requiredBoxId(context.session), signal }));
+          await applyCapturedSkillUpdate(context);
         }
         await context.session.checkpoint({ nextCheckpoint: "provider_stop_requested" });
         break;
@@ -645,7 +720,10 @@ async function handleRestartPi(context: OperationContext): Promise<RuntimeWorkDi
     const authorization = await context.session.reauthorize();
     switch (authorization.workCheckpoint) {
       case "pending":
-        await stageCapturedResources(context);
+        await lifecycle(context, "stop_pi", async ({ signal }) =>
+          await context.deps.pi.stopPiDaemon({ boxId: requiredBoxId(context.session), signal }));
+        await applyCapturedSkillUpdate(context);
+        await stageCapturedResources(context, { preserveInstalledSkills: true });
         await context.session.checkpoint({ nextCheckpoint: "restarting_pi" });
         break;
       case "restarting_pi":
@@ -700,6 +778,12 @@ async function handleRestartBox(context: OperationContext): Promise<RuntimeWorkD
     const authorization = await context.session.reauthorize();
     switch (authorization.workCheckpoint) {
       case "pending":
+        await lifecycle(context, "stop_pi", async ({ signal }) =>
+          await context.deps.pi.stopPiDaemon({ boxId: requiredBoxId(context.session), signal }));
+        await applyCapturedSkillUpdate(context);
+        await context.session.checkpoint({ nextCheckpoint: "skills_updated" });
+        break;
+      case "skills_updated":
         await context.session.checkpoint({ nextCheckpoint: "restarting_box" });
         break;
       case "restarting_box":
@@ -733,7 +817,10 @@ async function handleRestartBox(context: OperationContext): Promise<RuntimeWorkD
         await context.session.checkpoint({ nextCheckpoint: "installing_layout" });
         break;
       case "installing_layout":
-        await observeStagedResources(context, await stageCapturedResources(context));
+        await observeStagedResources(
+          context,
+          await stageCapturedResources(context, { preserveInstalledSkills: true }),
+        );
         await context.session.checkpoint({ nextCheckpoint: "starting_pi" });
         break;
       case "starting_pi":
@@ -760,6 +847,9 @@ async function handleApplySettings(context: OperationContext): Promise<RuntimeWo
     const authorization = await context.session.reauthorize();
     switch (authorization.workCheckpoint) {
       case "pending":
+        await lifecycle(context, "stop_pi", async ({ signal }) =>
+          await context.deps.pi.stopPiDaemon({ boxId: requiredBoxId(context.session), signal }));
+        await applyCapturedSkillUpdate(context);
         await context.session.checkpoint({ nextCheckpoint: "applying_settings" });
         break;
       case "applying_settings": {
@@ -774,12 +864,12 @@ async function handleApplySettings(context: OperationContext): Promise<RuntimeWo
           expectedSettingsRevision: authorization.targetSettingsRevision,
           expectedSkillsRevision: authorization.clientSurface === "native_mobile"
             ? null
-            : authorization.targetSkillsRevision,
+            : authorization.appliedSkillsRevision,
           previousPiInvocationId: authorization.piInvocationId,
           deadlineAt: workDeadline(context),
           clock: context.deps.clock,
           signal: context.session.signal,
-          stage: async () => await stageCapturedResources(context),
+          stage: async () => await stageCapturedResources(context, { preserveInstalledSkills: true }),
           restartPi: async () => await lifecycle(context, "restart_pi", async ({ signal }) =>
             await context.deps.pi.restartPiDaemon({
               boxId: requiredBoxId(context.session),

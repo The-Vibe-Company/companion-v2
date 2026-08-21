@@ -1466,6 +1466,16 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         `,
       });
       expect(skillBump?.changed).toBe(1);
+      const [deferredPublication] = await sql<Array<{
+        requiredRevision: number;
+        availableRevision: number;
+      }>>`
+        select skills_revision as "requiredRevision",
+          skills_available_revision as "availableRevision"
+        from companions
+        where org_id = ${ids.orgA}::uuid and id = ${companionId}::uuid
+      `;
+      expect(deferredPublication).toEqual({ requiredRevision: 1, availableRevision: 2 });
       await expect(asApi({
         orgId: ids.orgA,
         actorId: ids.editorA,
@@ -3031,6 +3041,120 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     } finally {
       if (claimed) await release(claimed);
       await removeCompanion(fixture.companionId);
+    }
+  });
+
+  it("keeps lifecycle authority when a deferred personal Skill update is no longer accessible", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    let companionId = "";
+    let claimed: Claim | undefined;
+    try {
+      const [created] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ companionId: string }>>`
+          select companion_id::text as "companionId"
+          from public.companion_api_create_companion(
+            ${ids.orgA}::uuid, 'Deferred personal Skill fixture', null,
+            ${providerId}, 'fixture-model',
+            ${tx.json([ids.skill])}::jsonb, false, '[]'::jsonb
+          )
+        `,
+      });
+      companionId = created?.companionId ?? "";
+      await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          select * from public.companion_api_set_workspace_access(
+            ${ids.orgA}::uuid, ${companionId}::uuid, 'editor'
+          )
+        `,
+      });
+      await sql`
+        update companion_runtime_instances
+        set box_id = 'bx_3456789a', box_state = 'ready', pi_state = 'idle',
+          pi_invocation_id = 'pi-deferred-personal', disk_layout_version = 14,
+          applied_settings_revision = desired_settings_revision, applied_client_surface = 'web',
+          applied_skills_revision = 1,
+          applied_selected_skill_ids = ${sql.json([ids.skill])},
+          applied_skill_refs = ${sql.json([{
+            skill_id: ids.skill,
+            current_version_id: ids.skillVersion,
+          }])},
+          applied_skills_digest = ${"a".repeat(64)}
+        where companion_id = ${companionId}::uuid
+      `;
+      await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          select public.companion_api_bump_skill_revision(${ids.orgA}::uuid, ${ids.skill}::uuid)
+        `,
+      });
+      await sql`
+        update companion_runtime_instances set applied_skills_revision = 2
+        where companion_id = ${companionId}::uuid
+      `;
+      expect(await authorizeDesktop({
+        companionId,
+        actorId: ids.ownerA,
+      })).toMatchObject([{ authorized: true, denialCode: null }]);
+      await sql`
+        update companion_runtime_instances set applied_skills_revision = 1
+        where companion_id = ${companionId}::uuid
+      `;
+      const [requested] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.editorA,
+        action: (tx) => tx<Array<{ operation: { id: string } }>>`
+          select operation from public.companion_api_enqueue_operation(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${randomUUID()}::uuid,
+            'restart_pi', 'web'
+          )
+        `,
+      });
+      claimed = await claimWork();
+      expect(claimed).toMatchObject({
+        companionId,
+        workKind: "operation",
+        workId: requested?.operation.id,
+      });
+      const lease = claimed;
+      const [renewal] = await asRuntime((tx) => tx<Array<{
+        authorized: boolean;
+        denialCode: string | null;
+        skillRefs: unknown;
+      }>>`
+        select authorized, denial_code as "denialCode", skill_refs as "skillRefs"
+        from public.companion_runtime_renew_and_authorize(
+          ${lease.orgId}::uuid, ${lease.companionId}::uuid,
+          ${lease.claimToken}::uuid, ${lease.claimEpoch}::bigint,
+          ${lease.gateEpoch}::bigint, ${executorId}, 'operation', ${lease.workId}::uuid, 30
+        )
+      `);
+      expect(renewal).toEqual({ authorized: true, denialCode: null, skillRefs: [] });
+      const material = await asRuntime((tx) => tx`
+        select * from public.companion_runtime_get_skill_update_material(
+          ${lease.orgId}::uuid, ${lease.companionId}::uuid,
+          ${lease.claimToken}::uuid, ${lease.claimEpoch}::bigint,
+          ${lease.gateEpoch}::bigint, ${executorId}, 'operation', ${lease.workId}::uuid, 30
+        )
+      `);
+      expect(material).toEqual([]);
+      const [recorded] = await asRuntime((tx) => tx<Array<{ recorded: boolean }>>`
+        select public.companion_runtime_record_skill_update_error(
+          ${lease.orgId}::uuid, ${lease.companionId}::uuid,
+          ${lease.claimToken}::uuid, ${lease.claimEpoch}::bigint,
+          ${lease.gateEpoch}::bigint, ${executorId}, 'operation', ${lease.workId}::uuid, 30,
+          'skill_auto_update_unauthorized',
+          'The pending Skill update is no longer authorized and will be retried later.'
+        ) as recorded
+      `);
+      expect(recorded?.recorded).toBe(true);
+    } finally {
+      if (claimed) await release(claimed);
+      if (companionId) await removeCompanion(companionId);
     }
   });
 

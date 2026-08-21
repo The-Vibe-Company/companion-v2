@@ -154,7 +154,17 @@ export type OperationRuntimeClaim =
     workKind: "operation";
     actorId: string;
     clientSurface: null;
-    operationKind: "stop" | "delete";
+    operationKind: "stop";
+    operationStartedAt: Date;
+    operationAttemptCount: number;
+    targetSettingsRevision: null;
+    targetSkillsRevision: number;
+  })
+  | (RuntimeClaimBase & {
+    workKind: "operation";
+    actorId: string;
+    clientSurface: null;
+    operationKind: "delete";
     operationStartedAt: Date;
     operationAttemptCount: number;
     targetSettingsRevision: null;
@@ -371,6 +381,15 @@ export interface RuntimeWorkMaterial {
   attachments: RuntimeAttachment[];
   /** Credential-free snapshot of what this Companion could select, or null when it is not staged. */
   configCatalog: RuntimeConfigCatalog | null;
+}
+
+/** Credential-free immutable Skill snapshot captured by a user Pi-shutdown operation. */
+export interface RuntimeSkillUpdateMaterial {
+  targetSkillsRevision: number;
+  requiredSkillsRevision: number;
+  selectedSkillIds: string[];
+  skillRefs: SkillRef[];
+  skillMaterial: Record<string, unknown>[];
 }
 
 /**
@@ -619,14 +638,20 @@ export function decodeRuntimeClaimRow(value: unknown): RuntimeClaim {
       ) {
         throw new RuntimeRowDecodeError("operation", "operation claim has an impossible nullable shape");
       }
-      if (base.operationKind === "stop" || base.operationKind === "delete") {
+      if (base.operationKind === "stop") {
+        if (
+          base.clientSurface !== null
+          || base.targetSettingsRevision !== null
+          || base.targetSkillsRevision === null
+        ) {
+          throw new RuntimeRowDecodeError("operation", "control operation contains resource snapshot data");
+        }
+      } else if (base.operationKind === "delete") {
         if (
           base.clientSurface !== null
           || base.targetSettingsRevision !== null
           || base.targetSkillsRevision !== null
-        ) {
-          throw new RuntimeRowDecodeError("operation", "control operation contains resource snapshot data");
-        }
+        ) throw new RuntimeRowDecodeError("operation", "delete operation contains resource data");
       } else if (
         base.clientSurface === null
         || base.targetSettingsRevision === null
@@ -793,6 +818,12 @@ export function decodeRuntimeAuthorizationRow(
           ) {
             throw new RuntimeRowDecodeError("operation", "authorized operation lacks its captured snapshot");
           }
+        } else if (authorization.operationKind === "stop") {
+          if (
+            authorization.clientSurface !== null
+            || authorization.targetSettingsRevision !== null
+            || authorization.targetSkillsRevision === null
+          ) throw new RuntimeRowDecodeError("operation", "authorized stop lacks its Skill snapshot");
         } else if (
           authorization.clientSurface !== null
           || authorization.targetSettingsRevision !== null
