@@ -577,6 +577,20 @@ BEGIN
       ];
     END IF;
 
+    -- 0114 moves all productive claims behind the delete-resume protocol. The five-argument
+    -- signature remains executable but returns no rows, allowing old runtimes to drain quietly.
+    IF pg_catalog.to_regprocedure(
+      'public.companion_runtime_defer_delete(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)'
+    ) IS NOT NULL THEN
+      companion_runtime_functions := companion_runtime_functions || ARRAY[
+        'public.companion_runtime_claim_work(text,integer,integer,bigint,integer,integer)'::regprocedure,
+        'public.companion_runtime_defer_delete(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)'::regprocedure
+      ];
+      internal_runtime_functions := internal_runtime_functions || ARRAY[
+        'public.companion_runtime_claim_work_without_delete_resume_guard(text,integer,integer,bigint,integer)'::regprocedure
+      ];
+    END IF;
+
     -- 0105/0106 add Companion routines. Resolved on sentinels so a database stopped before those
     -- migrations still grants a complete, self-consistent surface.
     IF pg_catalog.to_regprocedure(

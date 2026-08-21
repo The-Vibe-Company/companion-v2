@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-unknown-parameters -- The engine is the existing exception boundary: caught provider/store values are expurgated before persistence and described only for structured process logs. */
+
 import { handleAttempt } from "./attempt";
 import { handleDecision } from "./decision";
 import {
@@ -86,7 +88,7 @@ export class RuntimeEngine {
   }
 
   async drain(): Promise<void> {
-    await Promise.allSettled([...this.#executions]);
+    await Promise.allSettled(this.#executions);
   }
 
   async #execute(claim: RuntimeClaim): Promise<RuntimeExecutionResult> {
@@ -110,6 +112,10 @@ export class RuntimeEngine {
       if (disposition.kind === "release") {
         const released = await session.release();
         return this.#result(claim, released ? "released" : "fence_lost");
+      }
+      if (disposition.kind === "defer_delete") {
+        const deferred = await session.deferDelete();
+        return this.#result(claim, deferred ? "released" : "fence_lost");
       }
       return await this.#finishSettlement(claim, session, disposition.settlement);
     } catch (error) {
@@ -305,16 +311,17 @@ export class RuntimeEngine {
   }): void {
     const log = this.#deps.log;
     if (!log) return;
-    const record = workFailureLogRecord({
+    const logInput: Parameters<typeof workFailureLogRecord>[0] = {
       ts: this.#deps.clock.now(),
       event: input.event,
       claim: input.claim,
       authorization: input.session.authorization,
       outcome: input.outcome,
-      ...(input.reason ? { reason: input.reason } : {}),
-      ...(input.thrown !== undefined ? { thrown: input.thrown } : {}),
-      ...(input.persisted ? { persisted: input.persisted } : {}),
-    });
+    };
+    if (input.reason) logInput.reason = input.reason;
+    if (input.thrown !== undefined) logInput.thrown = input.thrown;
+    if (input.persisted) logInput.persisted = input.persisted;
+    const record = workFailureLogRecord(logInput);
     log[input.level ?? "error"](record);
   }
 
