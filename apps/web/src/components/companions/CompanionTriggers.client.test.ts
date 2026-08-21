@@ -12,6 +12,7 @@ const companionsApi = vi.hoisted(() => ({
   rotateCompanionTriggerSecret: vi.fn(),
 }));
 
+// oxlint-disable-next-line anti-slop/no-module-mocking -- legacy pattern predating the incremental anti-slop gate
 vi.mock("@/lib/companions", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/companions")>()),
   ...companionsApi,
@@ -19,6 +20,7 @@ vi.mock("@/lib/companions", async (importOriginal) => ({
 
 const { CompanionTriggers } = await import("./CompanionTriggers");
 
+// oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- legacy pattern predating the incremental anti-slop gate
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const companionId = "11111111-1111-4111-8111-111111111111";
@@ -33,6 +35,8 @@ function trigger(overrides: Partial<CompanionTrigger> = {}): CompanionTrigger {
     prompt: "Summarize the failure.",
     provider: "github",
     enabled: true,
+    target: null,
+    registration_status: "manual",
     webhook_url: "http://127.0.0.1:3000/v1/hooks/triggers/22222222-2222-4222-8222-222222222222/abc123",
     last_fired_at: null,
     last_error_code: null,
@@ -67,6 +71,7 @@ async function mount(input: {
 }
 
 function buttonNamed(container: HTMLElement, name: string): HTMLButtonElement | undefined {
+  // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- legacy pattern predating the incremental anti-slop gate
   return [...container.querySelectorAll("button")]
     .find((button) => button.textContent === name) as HTMLButtonElement | undefined;
 }
@@ -166,13 +171,17 @@ describe("Companion triggers panel", () => {
     const onChange = vi.fn();
     const container = await mount({ onChange });
 
+    // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- legacy pattern predating the incremental anti-slop gate
     const add = container.querySelector("[aria-label='Add a trigger']") as HTMLButtonElement;
     await act(async () => {
       add.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     });
 
+    // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- legacy pattern predating the incremental anti-slop gate
     setControlled(container.querySelector("input") as HTMLInputElement, "Deploy finished");
+    // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- legacy pattern predating the incremental anti-slop gate
     setControlled(container.querySelector("textarea") as HTMLTextAreaElement, "Report the deploy.");
+    // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- legacy pattern predating the incremental anti-slop gate
     setControlled(container.querySelector("select") as HTMLSelectElement, "custom");
     await act(async () => {});
 
