@@ -32,8 +32,8 @@
         "version": "1.82.0",
         "date": "2026-08-21",
         "changes": [
-          "Documents that a github trigger proposal may carry a repo and events target, and that provider webhook registration is a separate on-demand capability rather than part of approval.",
-          "Documents the per-plugin skills (plugin-github, plugin-linear) staged onto a Companion box while the matching plugin is attached.",
+          "Documents that propose_trigger may carry a github repo-and-events target, that the matching plugin must be attached, and that webhook registration is a separate on-demand capability rather than part of approval.",
+          "Keeps the propose_trigger webhook-URL handoff documented alongside the new on-demand registration, and stages per-plugin skills (plugin-github, plugin-linear) onto a Companion box while the matching plugin is attached.",
           "No change to Companion skill commands, permissions, or installation behavior."
         ]
       },

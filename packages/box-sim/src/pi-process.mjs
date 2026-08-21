@@ -305,6 +305,7 @@ function run() {
       name: "ci-failed",
       prompt: "Summarize the failed workflow run and post the likely cause.",
       provider: "github",
+      target: { repo: "acme/ci", events: ["push"] },
     };
     beginRun();
     writeJson({

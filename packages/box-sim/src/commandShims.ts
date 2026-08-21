@@ -26,6 +26,7 @@ export type BoxSimCommandKind =
   | "apply-control-bundle"
   | "mkdir-extensions"
   | "clear-skill-archives"
+  | "remove-plugin-skills"
   | "measure-skill-archives"
   | "read-skills-revision"
   | "match-skills-revision"
@@ -369,6 +370,9 @@ export function classifyBoxCommand(command: string): BoxSimCommandKind {
     && command.includes("companion-provider-auth-present")
   ) {
     return "clear-skill-archives";
+  }
+  if (/rm -rf "\$HOME\/\.companion\/runtime\/skills\/plugin-[a-z]+"/.test(command)) {
+    return "remove-plugin-skills";
   }
   if (command.includes("companion-outbox-manifest-begin")) return "list-outbox";
   if (command.includes("companion-outbox-chunk-begin")) return "read-outbox-chunk";
@@ -977,6 +981,16 @@ export async function executeBoxCommand(
         && (!expectedRevision || expectedRevision === installedRevision)
       ) output.push("companion-skills-tree-reused");
       return ok(output.length ? `${output.join("\n")}\n` : "");
+    }
+    case "remove-plugin-skills": {
+      // Mirrors the runtime's detached-plugin cleanup: drop the staged per-plugin skill dirs.
+      for (const match of command.matchAll(/skills\/(plugin-[a-z]+)/g)) {
+        const prefix = `.companion/runtime/skills/${match[1]}/`;
+        for (const path of machine.persistentFiles.keys()) {
+          if (path.startsWith(prefix)) machine.persistentFiles.delete(path);
+        }
+      }
+      return ok();
     }
     case "measure-skill-archives":
       return measuredArchives(machine);

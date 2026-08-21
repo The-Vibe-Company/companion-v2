@@ -813,6 +813,7 @@ describe("Pi journal validation and projection", () => {
       name: "ci-failed",
       prompt: "Investigate the failing build.",
       provider: "github" as const,
+      target: { repo: "acme/ci", events: ["push"] },
     };
     const summary = "Fire ci-failed on github webhook events";
     const now = new Date("2026-08-19T12:00:00.000Z");

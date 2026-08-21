@@ -1,7 +1,7 @@
 {
   "files": {
-    "SKILL.md": "sha256:ef931e52734c1bb750f73a4680c9c61586bfcbe73d1484a90878b0a050445464",
-    "companion.json": "sha256:f0027961beba31ad91e8f6f39e3e3351e20744e8793b9228b05d7c9804f91b86",
+    "SKILL.md": "sha256:594cafe343a5d78bb0c8baa326ec1b5af8bda817574e077fb486764f60843830",
+    "companion.json": "sha256:c4b705c5aa46a62a401029701d5a6cc1ca7d85f282b36a59ed377d72d8bc49d2",
     "evals/evals.json": "sha256:e798e4ee34de8b0bcc4ca4509d3ffab2c05c0ae84d169d201831aeda2d161f33",
     "scripts/bootstrap.py": "sha256:fcc58a22a3d8d270d3d2faef448bafefc3215556462aa5e66c37da82567711a0",
     "scripts/bootstrap_integrity.py": "sha256:697301a13d7fae907966209507e2636692b276c401e334ee97e4596e7b7b2ebe",
