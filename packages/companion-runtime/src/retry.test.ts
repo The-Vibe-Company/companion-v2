@@ -1,8 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { retryIdempotentLifecycle } from "./retry";
+import { isRetryableProviderError, retryIdempotentLifecycle } from "./retry";
 import { TestClock } from "./test/fixtures";
 
 describe("retryIdempotentLifecycle", () => {
+  it.each([
+    [{ retryable: true }, true],
+    [{ status: 408 }, true],
+    [{ status: 425 }, true],
+    [{ status: 429 }, true],
+    [{ status: 503 }, true],
+    [{ retryable: false, status: 400 }, false],
+    [new Error("opaque"), false],
+  ] as const)("classifies provider retryability from %o", (error, expected) => {
+    expect(isRetryableProviderError(Object(error))).toBe(expected);
+  });
+
   it("uses the complete 1/2/5/10/30 second schedule for a retryable lifecycle call", async () => {
     const clock = new TestClock();
     let calls = 0;

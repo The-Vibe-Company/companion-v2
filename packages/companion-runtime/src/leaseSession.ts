@@ -255,6 +255,17 @@ export class LeaseSession {
     });
   }
 
+  async deferDelete(): Promise<boolean> {
+    return await this.#enqueue(async () => {
+      if (this.#handoffRequested) throw new RuntimeHandoffError();
+      if (this.#lost) return false;
+      const deferred = await this.#store.deferDelete(this.fence);
+      if (!deferred) this.#lost = true;
+      this.stop();
+      return deferred;
+    });
+  }
+
   /** Stop local I/O and renewal without mutating the durable lease or work outcome. */
   requestHandoff(): void {
     if (this.#shutdownRequested) return;
@@ -294,7 +305,7 @@ export class LeaseSession {
     throw new LeaseFenceLostError();
   }
 
-  #abort(reason: unknown): void {
+  #abort(reason: Error): void {
     if (!this.#abortController.signal.aborted) this.#abortController.abort(reason);
   }
 
