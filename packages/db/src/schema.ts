@@ -21,6 +21,9 @@ import {
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
+/** JSON object payloads retain their existing open contract at the database boundary. */
+interface SchemaJsonObject {}
+
 export const orgRoleEnum = pgEnum("org_role", ["owner", "admin", "developer"]);
 export const validationStateEnum = pgEnum("validation_state", ["valid", "validating", "invalid"]);
 // A skill's library scope. 'org' = the flat org-wide library (default; visible to every member).
@@ -361,7 +364,7 @@ export const organizations = pgTable(
     updatedAt: updatedAt(),
   },
   (t) => ({
-    defaultCompanionProviderIdShape: check(
+    defaultCompanionProviderIdCheck: check(
       "organizations_default_companion_provider_id_check",
       sql`${t.defaultCompanionProviderId} is null or ${t.defaultCompanionProviderId} ~ '^[a-z][a-z0-9-]{0,62}$'`,
     ),
@@ -611,7 +614,7 @@ export const companionLegacyPurgeRuns = pgTable(
     id: text("id").primaryKey().notNull().default("legacy-companion-purge"),
     phase: text("phase").$type<CompanionLegacyPurgePhase>().notNull().default("deleting_external"),
     inventoryHash: text("inventory_hash").notNull(),
-    inventory: jsonb("inventory").$type<Record<string, unknown>>().notNull().default({}),
+    inventory: jsonb("inventory").$type<SchemaJsonObject>().notNull().default({}),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: updatedAt(),
     completedAt: timestamp("completed_at", { withTimezone: true }),
@@ -625,7 +628,7 @@ export const companionLegacyPurgeRuns = pgTable(
       "companion_legacy_purge_runs_phase_check",
       sql`${t.phase} in ('deleting_external', 'external_complete', 'database_complete')`,
     ),
-    inventoryHashShape: check(
+    inventoryHashCheck: check(
       "companion_legacy_purge_runs_inventory_hash_check",
       sql`${t.inventoryHash} ~ '^[0-9a-f]{64}$'`,
     ),
@@ -660,7 +663,7 @@ export const companionLegacyPurgeTargets = pgTable(
     operationIdUnique: uniqueIndex("companion_legacy_purge_targets_operation_id_uq")
       .on(t.operationId)
       .where(sql`${t.operationId} is not null`),
-    boxIdShape: check(
+    boxIdCheck: check(
       "companion_legacy_purge_targets_box_id_check",
       sql`${t.boxId} ~ '^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$'`,
     ),
@@ -672,7 +675,7 @@ export const companionLegacyPurgeTargets = pgTable(
       "companion_legacy_purge_targets_state_check",
       sql`${t.state} in ('discovered', 'requesting', 'pending', 'processing', 'blocked', 'completed', 'absent')`,
     ),
-    operationIdShape: check(
+    operationIdCheck: check(
       "companion_legacy_purge_targets_operation_id_check",
       sql`${t.operationId} is null or ${t.operationId} ~ '^bdop_[0-9a-f]{32}$'`,
     ),
@@ -690,7 +693,7 @@ export const companionLegacyPurgeTargets = pgTable(
       "companion_legacy_purge_targets_attempt_count_check",
       sql`${t.attemptCount} >= 0`,
     ),
-    lastErrorShape: check(
+    lastErrorCheck: check(
       "companion_legacy_purge_targets_last_error_check",
       sql`${t.lastError} is null or (char_length(${t.lastError}) <= 500 and ${t.lastError} !~ E'[\\n\\r]')`,
     ),
@@ -806,11 +809,18 @@ export const companionRuntimeInstances = pgTable(
      * rows stay in api_tokens until expiry.
      */
     hubTokenId: uuid("hub_token_id").references(() => apiTokens.id, { onDelete: "set null" }),
+    /** Current runtime-only MCP token broker capability. Plaintext is returned once at staging. */
+    mcpBrokerTokenId: uuid("mcp_broker_token_id"),
     createdAt: now(),
     updatedAt: updatedAt(),
   },
   (t) => ({
     uniqueOrgCompanion: unique("companion_runtime_instances_org_companion_uq").on(t.orgId, t.companionId),
+    mcpBrokerTokenFk: foreignKey({
+      columns: [t.mcpBrokerTokenId],
+      foreignColumns: [companionMcpBrokerTokens.id],
+      name: "companion_runtime_instances_mcp_broker_token_id_fkey",
+    }).onDelete("set null"),
     boxIdUnique: uniqueIndex("companion_runtime_instances_box_id_uq").on(t.boxId).where(sql`${t.boxId} is not null`),
     healthDue: index("companion_runtime_instances_health_due_idx")
       .on(t.healthDueAt, t.companionId).where(sql`${t.retirementState} <> 'retired'`),
@@ -1390,7 +1400,7 @@ export interface CompanionStoredDecision {
   decided_by_name: string | null;
   decided_at: string | null;
   expires_at: string;
-  proposal: Record<string, unknown> | null;
+  proposal: SchemaJsonObject | null;
 }
 
 /**
@@ -1568,7 +1578,7 @@ export const companionMessageAttachments = pgTable(
     // Two rows sharing one key would mean two rows owning the same bytes, and purging either would
     // strand the other.
     ownedObject: unique("companion_message_attachments_storage_key_uq").on(t.storageKey),
-    storageKeyShape: check(
+    storageKeyCheck: check(
       "companion_message_attachments_storage_key_check",
       sql`${t.storageKey} ~ '^[A-Za-z0-9][A-Za-z0-9/._-]*$'
         and char_length(${t.storageKey}) between 1 and 512`,
@@ -1606,7 +1616,7 @@ export const companionMessageAttachments = pgTable(
       "companion_message_attachments_position_check",
       sql`${t.position} between 0 and 9`,
     ),
-    entryEventShape: check(
+    entryEventCheck: check(
       "companion_message_attachments_entry_event_check",
       sql`char_length(${t.entryEventId}) between 1 and 200 and ${t.entryEventId} !~ E'[\\n\\r]'`,
     ),
@@ -1639,7 +1649,7 @@ export const companionProviderConnections = pgTable(
   },
   (t) => ({
     pk: primaryKey({ columns: [t.orgId, t.providerId] }),
-    providerIdShape: check(
+    providerIdCheck: check(
       "companion_provider_connections_provider_id_check",
       sql`${t.providerId} ~ '^[a-z][a-z0-9-]{0,62}$'`,
     ),
@@ -1668,8 +1678,10 @@ export const companionMcpAccounts = pgTable(
     provider: text("provider").notNull(),
     label: text("label").notNull(),
     transport: text("transport").notNull(),
-    accountConfig: jsonb("account_config").$type<Record<string, unknown>>().notNull(),
+    accountConfig: jsonb("account_config").$type<SchemaJsonObject>().notNull(),
     credentialGeneration: uuid("credential_generation").notNull().defaultRandom(),
+    /** Monotonic envelope revision. OAuth refresh keeps the connection generation stable. */
+    credentialVersion: integer("credential_version").notNull().default(1),
     ciphertext: text("ciphertext").notNull(),
     iv: text("iv").notNull(),
     authTag: text("auth_tag").notNull(),
@@ -1693,7 +1705,7 @@ export const companionMcpAccounts = pgTable(
       sql`lower(${t.label})`,
     ),
     byOwner: index("companion_mcp_accounts_owner_idx").on(t.orgId, t.ownerId, t.updatedAt),
-    providerShape: check(
+    providerCheck: check(
       "companion_mcp_accounts_provider_check",
       sql`${t.provider} ~ '^[a-z][a-z0-9-]{0,62}$'`,
     ),
@@ -1701,9 +1713,50 @@ export const companionMcpAccounts = pgTable(
       "companion_mcp_accounts_label_check",
       sql`char_length(${t.label}) between 1 and 40`,
     ),
-    transportShape: check(
+    transportCheck: check(
       "companion_mcp_accounts_transport_check",
       sql`${t.transport} in ('http', 'stdio')`,
+    ),
+    credentialVersionCheck: check(
+      "companion_mcp_accounts_credential_version_check",
+      sql`${t.credentialVersion} >= 1`,
+    ),
+  }),
+);
+
+/** Runtime-minted, hash-only capability used by the Box-local MCP credential gateway. */
+export const companionMcpBrokerTokens = pgTable(
+  "companion_mcp_broker_tokens",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    companionId: uuid("companion_id").notNull(),
+    actorId: text("actor_id").notNull(),
+    tokenPrefix: text("token_prefix").notNull(),
+    tokenHash: text("token_hash").notNull().unique(),
+    accountRefs: jsonb("account_refs")
+      .$type<Array<{ account_id: string; credential_generation: string }>>()
+      .notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    createdAt: now(),
+  },
+  (t) => ({
+    companionFk: foreignKey({
+      columns: [t.orgId, t.companionId],
+      foreignColumns: [companions.orgId, companions.id],
+      name: "companion_mcp_broker_tokens_companion_fk",
+    }).onDelete("cascade"),
+    actorMembershipFk: foreignKey({
+      columns: [t.orgId, t.actorId],
+      foreignColumns: [memberships.orgId, memberships.userId],
+      name: "companion_mcp_broker_tokens_actor_membership_fk",
+    }).onDelete("cascade"),
+    byExpiry: index("companion_mcp_broker_tokens_expiry_idx").on(t.expiresAt),
+    accountRefsCheck: check(
+      "companion_mcp_broker_tokens_account_refs_check",
+      sql`jsonb_typeof(${t.accountRefs}) = 'array' and jsonb_array_length(${t.accountRefs}) between 1 and 50`,
     ),
   }),
 );
@@ -2371,7 +2424,7 @@ export const auditLog = pgTable("audit_log", {
   action: text("action").notNull(),
   targetType: text("target_type").notNull(),
   targetId: text("target_id").notNull(),
-  metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+  metadata: jsonb("metadata").$type<SchemaJsonObject>().notNull().default({}),
   createdAt: now(),
 });
 
@@ -2583,7 +2636,7 @@ export const secrets = pgTable(
     uniqueOrgIdOwner: unique("secrets_org_id_id_owner_uq").on(t.orgId, t.id, t.ownerId),
     byOwner: index("secrets_org_owner_idx").on(t.orgId, t.ownerId),
     byAudience: index("secrets_org_audience_idx").on(t.orgId, t.audience),
-    keyShape: check("secrets_key_check", sql`${t.key} ~ '^[A-Za-z_][A-Za-z0-9_]*$'`),
+    keyCheck: check("secrets_key_check", sql`${t.key} ~ '^[A-Za-z_][A-Za-z0-9_]*$'`),
   }),
 );
 
@@ -2688,7 +2741,7 @@ export const skillVersionSecretSlots = pgTable(
       foreignColumns: [skillVersions.orgId, skillVersions.id],
       name: "skill_version_secret_slots_version_org_fk",
     }).onDelete("cascade"),
-    envKeyShape: check("skill_version_secret_slots_key_check", sql`${t.envKey} ~ '^[A-Za-z_][A-Za-z0-9_]*$'`),
+    envKeyCheck: check("skill_version_secret_slots_key_check", sql`${t.envKey} ~ '^[A-Za-z_][A-Za-z0-9_]*$'`),
   }),
 );
 

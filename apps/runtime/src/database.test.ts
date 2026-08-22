@@ -14,7 +14,7 @@ const validProfile = {
   ownsDatabaseOrSchema: false,
   ownsRelations: false,
   ownsFunctionsOrTypes: false,
-  protectedRelationCount: 11,
+  protectedRelationCount: 12,
   hasPublicRelationPrivileges: false,
   requiredFunctionsReady: true,
   ownsRequiredFunctions: false,
@@ -29,6 +29,7 @@ describe("runtime database role verification", () => {
       return [validProfile];
     });
     await expect(verifyRuntimeDatabaseRole(
+      // SAFETY: The test double implements the single `unsafe` method consumed by the verifier.
       { unsafe } as never,
       "companion_runtime_v2",
     )).resolves.toBeUndefined();
@@ -58,12 +59,14 @@ describe("runtime database role verification", () => {
     ["required function ownership", { ownsRequiredFunctions: true }],
     ["an extra definer grant", { hasUnexpectedDefinerGrant: true }],
   ])("rejects %s", async (_label, override) => {
+    // SAFETY: The test double implements the single `unsafe` method consumed by the verifier.
     await expect(verifyRuntimeDatabaseRole({
       unsafe: vi.fn(async () => [{ ...validProfile, ...override }]),
     } as never, "companion_runtime_v2")).rejects.toBeInstanceOf(RuntimeDatabaseRoleError);
   });
 
   it("fails closed for a missing profile", async () => {
+    // SAFETY: The test double implements the single `unsafe` method consumed by the verifier.
     await expect(verifyRuntimeDatabaseRole({
       unsafe: vi.fn(async () => []),
     } as never, "companion_runtime_v2")).rejects.toBeInstanceOf(RuntimeDatabaseRoleError);
@@ -71,6 +74,7 @@ describe("runtime database role verification", () => {
 
   it("fails closed for a partial profile", async () => {
     const { hasMemberships: _missing, ...partial } = validProfile;
+    // SAFETY: The test double implements the single `unsafe` method consumed by the verifier.
     await expect(verifyRuntimeDatabaseRole({
       unsafe: vi.fn(async () => [partial]),
     } as never, "companion_runtime_v2")).rejects.toBeInstanceOf(RuntimeDatabaseRoleError);
@@ -80,6 +84,7 @@ describe("runtime database role verification", () => {
     const secretRole = "role-that-should-not-be-echoed";
     let message = "";
     try {
+      // SAFETY: The test double implements the single `unsafe` method consumed by the verifier.
       await verifyRuntimeDatabaseRole({
         unsafe: vi.fn(async () => [{ ...validProfile, currentRole: "other" }]),
       } as never, secretRole);

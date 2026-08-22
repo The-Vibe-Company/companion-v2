@@ -17,11 +17,12 @@ import type {
   CompanionClientSurface,
   CompanionDaemonState,
   CompanionDesktopTransport,
-  CompanionMcpAccount,
   CompanionMcpCredential,
   CompanionRuntimeState,
 } from "@companion/contracts";
 import { COMPANION_RUNTIME_ERROR_MAX_LENGTH } from "@companion/core";
+import type { CompanionRuntimeProviderCredential } from "@companion/core";
+import { z } from "zod";
 import {
   COMPANION_DECISION_TIMEOUT_MS,
   COMPANION_PERMISSION_BROKER_EXTENSION_FILE,
@@ -31,10 +32,13 @@ import { COMPANION_PLUGIN_SKILLS } from "./companionPluginSkills";
 import {
   buildMcpAdapterInjection,
   companionGitCredentialHelperInstallCommand,
+  COMPANION_GH_WRAPPER_PATH,
+  COMPANION_GH_WRAPPER_SOURCE,
   COMPANION_GIT_CREDENTIAL_HELPER_PATH,
   COMPANION_GIT_CREDENTIAL_HELPER_SOURCE,
   runtimeSkillArchivePath,
   type CompanionRuntimeSkill,
+  type CompanionStagedMcpAccount,
 } from "./companionPiInjection";
 import {
   COMPANION_PI_BROKER_JOURNAL_PATH,
@@ -43,6 +47,7 @@ import {
   COMPANION_PI_BROKER_SOURCE,
   type CompanionPiBrokerCounters,
   type CompanionPiJournalRecord,
+  type PiJsonObject,
 } from "./companionPiBroker";
 import {
   COMPANION_PI_LAYOUT_REFRESH_LABEL,
@@ -233,7 +238,6 @@ const PI_DAEMON_DIAGNOSTIC_MINIMUM = 12;
 const PI_DAEMON_DIAGNOSTIC_SEPARATOR = "; ";
 type PiDaemonDiagnosticKey = (typeof PI_DAEMON_DIAGNOSTIC_BUDGETS)[number]["key"];
 const READY_STATES = new Set<BoxState>(["ready", "idle", "running"]);
-const STARTING_STATES = new Set<BoxState>(["init", "provisioning", "provisioned", "cloning"]);
 /** Printed by the probe that proves an explicitly resumed Box is running commands for staging. */
 const BOX_RUNNABLE_MARKER = "companion-box-runnable";
 /** Printed by the staging command when Pi's auth file already exists on the Box disk. */
@@ -304,7 +308,58 @@ export const BOX_PROVIDER_STATES = [
 
 export type BoxState = (typeof BOX_PROVIDER_STATES)[number];
 
-const BOX_PROVIDER_STATE_SET = new Set<string>(BOX_PROVIDER_STATES);
+const boxProviderStateSchema = z.enum(BOX_PROVIDER_STATES);
+
+type BoxJsonValue = string | number | boolean | null | BoxJsonValue[] | BoxJsonObject;
+
+interface BoxJsonObject {
+  [key: string]: BoxJsonValue;
+}
+
+const boxJsonObjectSchema: z.ZodType<BoxJsonObject> = z.record(
+  z.string(),
+  z.lazy(() => boxJsonValueSchema),
+);
+const boxJsonValueSchema: z.ZodType<BoxJsonValue> = z.union([
+  z.string(),
+  z.number(),
+  z.boolean(),
+  z.null(),
+  z.array(z.lazy(() => boxJsonValueSchema)),
+  z.lazy(() => boxJsonObjectSchema),
+]);
+
+interface CompanionProviderAuth {
+  [providerId: string]: CompanionRuntimeProviderCredential;
+}
+
+interface CompanionPiLayoutInput {
+  layoutVersion: number;
+  packages: readonly string[];
+  qmdPackage: string;
+  minimumPiVersion: string;
+  companionSkillChecksum?: string;
+  imageIdentitySalt?: string;
+}
+
+interface BoxRequestHeaders {
+  [header: string]: string;
+}
+
+interface BoxFilePayload {
+  path: string;
+  content: string;
+  encoding?: "base64";
+}
+
+interface CompanionOutboxChunkInput {
+  boxId: string;
+  encodedName: string;
+  index: number;
+  expectedLength: number;
+  deadlineAt?: Date;
+  signal?: AbortSignal;
+}
 
 /**
  * Map a live Box `state` onto the control-plane enum. Official lifecycle docs treat
@@ -336,10 +391,9 @@ export function observedBoxStateFromProvider(
   }
 }
 
-export function parseProviderBoxState(value: unknown): BoxState | undefined {
-  return typeof value === "string" && BOX_PROVIDER_STATE_SET.has(value)
-    ? value as BoxState
-    : undefined;
+export function parseProviderBoxState<T>(value: T): BoxState | undefined {
+  const parsed = boxProviderStateSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
 }
 
 interface BoxInfo {
@@ -778,12 +832,12 @@ export interface CompanionBoxRuntimeV2 {
     orgId: string;
     boxId: string;
     clientSurface: CompanionClientSurface;
-    providerAuth: Record<string, Record<string, unknown>>;
+    providerAuth: CompanionProviderAuth;
     replaceProviderAuth: boolean;
     instructions?: string | null;
     modelId: string;
     mcpCredentials: McpRuntimeCredential[];
-    mcpAccounts: CompanionMcpAccount[];
+    mcpAccounts: CompanionStagedMcpAccount[];
     skills: CompanionRuntimeSkill[];
     reuseSkills?: boolean;
     preserveSkills?: boolean;
@@ -874,7 +928,7 @@ export interface CompanionBoxRuntimeV2 {
     boxId: string;
     attemptId?: string;
     requestId?: string;
-    response: Record<string, unknown>;
+    response: object;
     signal?: AbortSignal;
   }): Promise<CompanionPiExtensionUiDispatch>;
   /** Read the layout-14 journal after an exclusive monotonic cursor. */
@@ -942,66 +996,78 @@ function commandFailureDetail(result: CommandEnvelope): string {
   return output ? `${suffix}: ${output}` : suffix;
 }
 
-function parseCommandEnvelope(body: unknown): CommandEnvelope {
-  if (!body || typeof body !== "object") {
+function parseCommandEnvelope<T>(body: T): CommandEnvelope {
+  const parsed = z.record(z.string(), z.unknown()).safeParse(body);
+  if (!parsed.success) {
     throw new BoxRuntimeProviderError("Box API returned an invalid command response", 502);
   }
-  const record = body as Record<string, unknown>;
-  if (typeof record.success !== "boolean") {
-    const type = typeof record.type === "string" ? ` type=${record.type.slice(0, 80)}` : "";
+  const record = parsed.data;
+  const success = z.boolean().safeParse(record.success);
+  if (!success.success) {
+    const typeResult = z.string().safeParse(record.type);
+    const type = typeResult.success ? ` type=${typeResult.data.slice(0, 80)}` : "";
     throw new BoxRuntimeProviderError(`Box API returned an invalid command response${type}`, 502);
   }
-  return {
-    success: record.success,
-    exitCode: typeof record.exitCode === "number" ? record.exitCode : null,
-    stdout: typeof record.stdout === "string" ? record.stdout : "",
-    stderr: typeof record.stderr === "string" ? record.stderr : "",
-    ...(record.timedOut === true ? { timedOut: true } : {}),
-    ...(typeof record.signal === "string" || typeof record.signal === "number"
-      ? { signal: record.signal }
-      : {}),
+  const exitCode = z.number().safeParse(record.exitCode);
+  const stdout = z.string().safeParse(record.stdout);
+  const stderr = z.string().safeParse(record.stderr);
+  const envelope: CommandEnvelope = {
+    success: success.data,
+    exitCode: exitCode.success ? exitCode.data : null,
+    stdout: stdout.success ? stdout.data : "",
+    stderr: stderr.success ? stderr.data : "",
   };
+  if (record.timedOut === true) envelope.timedOut = true;
+  const signal = z.union([z.string(), z.number()]).safeParse(record.signal);
+  if (signal.success) envelope.signal = signal.data;
+  return envelope;
 }
 
-function parseBoxEnvelope(body: unknown): BoxInfo {
-  if (!body || typeof body !== "object") {
+function parseBoxEnvelope<T>(body: T): BoxInfo {
+  const parsed = z.record(z.string(), z.unknown()).safeParse(body);
+  if (!parsed.success) {
     throw new BoxRuntimeProviderError("Box API returned an invalid Box envelope", 502);
   }
-  const record = body as Record<string, unknown>;
-  const type = typeof record.type === "string" ? record.type.slice(0, 80) : undefined;
-  const box = record.box;
-  if (!box || typeof box !== "object") {
+  const record = parsed.data;
+  const typeResult = z.string().safeParse(record.type);
+  const type = typeResult.success ? typeResult.data.slice(0, 80) : undefined;
+  const boxResult = z.record(z.string(), z.unknown()).safeParse(record.box);
+  if (!boxResult.success) {
     throw new BoxRuntimeProviderError(
       `Box API returned an invalid Box envelope${type ? ` type=${type}` : ""}`,
       502,
     );
   }
-  const info = box as Record<string, unknown>;
+  const info = boxResult.data;
   const state = parseProviderBoxState(info.state);
-  if (typeof info.id !== "string" || !state) {
+  const id = z.string().safeParse(info.id);
+  if (!id.success || !state) {
+    const stateText = z.string().safeParse(info.state);
     throw new BoxRuntimeProviderError(
       `Box API returned an invalid Box${type ? ` type=${type}` : ""}${
-        typeof info.state === "string" ? ` state=${info.state.slice(0, 40)}` : ""
+        stateText.success ? ` state=${stateText.data.slice(0, 40)}` : ""
       }`,
       502,
     );
   }
-  return {
-    id: info.id,
+  const result: BoxInfo = {
+    id: id.data,
     state,
     desktopAvailable: info.desktopAvailable === true,
-    ...(typeof info.name === "string" ? { name: info.name } : {}),
-    ...(info.setupStatus === "pending"
-      || info.setupStatus === "running"
-      || info.setupStatus === "done"
-      || info.setupStatus === "failed"
-      || info.setupStatus === null
-      ? { setupStatus: info.setupStatus }
-      : {}),
-    ...(typeof info.setupError === "string" || info.setupError === null
-      ? { setupError: info.setupError }
-      : {}),
   };
+  const name = z.string().safeParse(info.name);
+  if (name.success) result.name = name.data;
+  const setupStatus = z.union([
+    z.literal("pending"),
+    z.literal("running"),
+    z.literal("done"),
+    z.literal("failed"),
+    z.null(),
+  ]).safeParse(info.setupStatus);
+  if (setupStatus.success) result.setupStatus = setupStatus.data;
+  const setupError = z.union([z.string(), z.null()]).safeParse(info.setupError);
+  if (setupError.success) result.setupError = setupError.data;
+  return result;
 }
 
 /**
@@ -1068,7 +1134,7 @@ export function composeDaemonFailureDetail(stdout: string): string {
   // Both come from the same grep, so each is picked by what it says rather than by where it landed:
   // a unit that prints only one of them must not have it read as the other.
   const active = daemonActiveDetail(status.find((line) => line.startsWith("Active:")));
-  const values: Record<PiDaemonDiagnosticKey, string | undefined> = {
+  const values = {
     active,
     // `is-active` prints the same word `Active:` opens with, so it is the account for a unit whose
     // status the Box would not print rather than a second copy of one it did.
@@ -1077,7 +1143,7 @@ export function composeDaemonFailureDetail(stdout: string): string {
     restarts: daemonRestartDetail(lines(PI_DAEMON_DIAGNOSTIC_LABELS.restarts).at(-1)),
     stderr: lines(PI_DAEMON_DIAGNOSTIC_LABELS.stderr).at(-1),
     journal: lines(PI_DAEMON_DIAGNOSTIC_LABELS.journal).at(-1),
-  };
+  } satisfies { [key in PiDaemonDiagnosticKey]: string | undefined };
   const fragments: string[] = [];
   let remaining =
     COMPANION_RUNTIME_ERROR_MAX_LENGTH - PI_DAEMON_FAILURE_MESSAGE.length - ": ".length;
@@ -1100,30 +1166,40 @@ export function composeDaemonFailureDetail(stdout: string): string {
  * happened: without it there is nothing to project and nothing to resume from, and with it the
  * remainder is projectable whether the reader ran to the read limit or was cut short.
  */
-function isJsonObject(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
+function isJsonObject<T>(value: T): value is T & BoxJsonObject {
+  return boxJsonObjectSchema.safeParse(value).success;
 }
 
-function brokerSafeCode(value: unknown, fallback: string): string {
-  return typeof value === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(value) ? value : fallback;
+function stringValue<T>(value: T): string | null {
+  const parsed = z.string().safeParse(value);
+  return parsed.success ? parsed.data : null;
 }
 
-function brokerSafeMessage(value: unknown, fallback: string): string {
-  if (typeof value !== "string") return fallback;
-  const collapsed = value.replace(/\s+/g, " ").trim();
+function brokerSafeCode<T>(value: T, fallback: string): string {
+  const text = stringValue(value);
+  return text !== null && /^[a-z][a-z0-9_]{0,63}$/.test(text) ? text : fallback;
+}
+
+function brokerSafeMessage<T>(value: T, fallback: string): string {
+  const text = stringValue(value);
+  if (text === null) return fallback;
+  const collapsed = text.replace(/\s+/g, " ").trim();
   return collapsed ? collapsed.slice(0, COMPANION_RUNTIME_ERROR_MAX_LENGTH) : fallback;
 }
 
-function nonNegativeSafeInteger(value: unknown): value is number {
-  return Number.isSafeInteger(value) && Number(value) >= 0;
+function nonNegativeSafeInteger<T>(value: T): value is T & number {
+  const parsed = z.number().int().safeParse(value);
+  return parsed.success && Number.isSafeInteger(parsed.data) && parsed.data >= 0;
 }
 
-function positiveSafeInteger(value: unknown): value is number {
-  return Number.isSafeInteger(value) && Number(value) > 0;
+function positiveSafeInteger<T>(value: T): value is T & number {
+  const parsed = z.number().int().safeParse(value);
+  return parsed.success && Number.isSafeInteger(parsed.data) && parsed.data > 0;
 }
 
-function opaqueBrokerId(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= 256;
+function opaqueBrokerId<T>(value: T): value is T & string {
+  const text = stringValue(value);
+  return text !== null && text.length > 0 && text.length <= 256;
 }
 
 const BROKER_COUNTER_KEYS = [
@@ -1135,17 +1211,24 @@ const BROKER_COUNTER_KEYS = [
   "orphanResponses",
 ] as const satisfies readonly (keyof CompanionPiBrokerCounters)[];
 
-function parseBrokerCounters(value: unknown): CompanionPiBrokerCounters | null {
+function parseBrokerCounters<T>(value: T): CompanionPiBrokerCounters | null {
   if (!isJsonObject(value)) return null;
-  const counters = {} as CompanionPiBrokerCounters;
+  const counters: CompanionPiBrokerCounters = {
+    malformedLines: 0,
+    oversizedLines: 0,
+    unterminatedLines: 0,
+    unknownEvents: 0,
+    unboundEvents: 0,
+    orphanResponses: 0,
+  };
   for (const key of BROKER_COUNTER_KEYS) {
     if (!nonNegativeSafeInteger(value[key])) return null;
-    counters[key] = value[key];
+    counters[key] = Number(value[key]);
   }
   return counters;
 }
 
-function parseBrokerJournalRecord(value: unknown): CompanionPiJournalRecord | null {
+function parseBrokerJournalRecord<T>(value: T): CompanionPiJournalRecord | null {
   if (
     !isJsonObject(value)
     || !positiveSafeInteger(value.sequence)
@@ -1164,9 +1247,10 @@ function parseBrokerJournalRecord(value: unknown): CompanionPiJournalRecord | nu
   if (value.kind !== "pi_process_exit" || !isJsonObject(value.exit)) return null;
   const code = value.exit.code;
   const signal = value.exit.signal;
+  const signalText = signal === null ? null : stringValue(signal);
   if (
     (code !== null && !Number.isSafeInteger(code))
-    || (signal !== null && (typeof signal !== "string" || signal.length > 32))
+    || (signal !== null && (signalText === null || signalText.length > 32))
     || !opaqueBrokerId(value.attemptId)
   ) return null;
   return {
@@ -1174,7 +1258,7 @@ function parseBrokerJournalRecord(value: unknown): CompanionPiJournalRecord | nu
     invocationId: value.invocationId,
     attemptId: value.attemptId,
     kind: "pi_process_exit",
-    exit: { code: code as number | null, signal: signal as string | null },
+    exit: { code: code === null ? null : Number(code), signal: signalText },
   };
 }
 
@@ -1309,10 +1393,9 @@ export PI_CODING_AGENT_DIR="$HOME/.companion/pi"
 export TMPDIR="$root/tmp"
 export JITI_RESPECT_TMPDIR_ENV=1
 # The optional memory search binary is installed under the Companion's own prefix, which no login
-# shell contributes to a systemd user unit's PATH. It is appended, not prepended: the resolved Pi
-# directory has to stay ahead of it so nothing landing in this prefix can shadow the pinned Pi or
-# node for a process Pi spawns.
-PATH="$PATH:$HOME/.companion/tools/bin"
+# shell contributes to a systemd user unit's PATH. Keep Pi's resolved directory first, then expose
+# Companion's audited wrappers before system tools; neither directory can shadow the pinned Pi.
+PATH="$(dirname "$PI_BIN"):$HOME/.companion/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.companion/tools/bin"
 export PATH
 # A Box restore may remount the image with Node at a different absolute path than the baker used.
 # Keep the baked path when it still exists, otherwise resolve Node from the unit's controlled PATH.
@@ -1634,7 +1717,7 @@ function desktopEnvelopeUrl(envelope: DesktopEnvelope): string | null {
  * is one bad moment inside a budget that still has room to ask again, and reading those as a
  * refusal is what would hand a panel a WebRTC URL over a VNC stream that was about to work.
  */
-function isVncRefusal(error: unknown): boolean {
+function isVncRefusal<T>(error: T): boolean {
   if (!(error instanceof BoxRuntimeProviderError)) return false;
   return error.status < 500 && !VNC_RETRYABLE_STATUSES.has(error.status);
 }
@@ -1693,7 +1776,7 @@ export async function mintBoxDesktopUrl(input: {
     // deadline the previous interval already crossed.
     if (now() >= deadline) break;
   }
-  const fallback = await input.webrtc().catch((error: unknown) => {
+  const fallback = await input.webrtc().catch((error) => {
     // Two refusals, one report: the VNC one is the reason this mint went looking for a fallback.
     throw vncFailure ?? error;
   });
@@ -1767,16 +1850,15 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
   }
 
   layoutIdentity() {
-    return companionPiLayoutIdentity({
+    const layoutInput: CompanionPiLayoutInput = {
       layoutVersion: COMPANION_PI_DISK_LAYOUT_VERSION,
       packages: this.#piPackages,
       qmdPackage: this.#qmdPackage,
       minimumPiVersion: MINIMUM_IMAGE_SAFE_PI_VERSION,
-      ...(this.#companionSkillChecksum
-        ? { companionSkillChecksum: this.#companionSkillChecksum }
-        : {}),
-      ...(this.#imageIdentitySalt ? { imageIdentitySalt: this.#imageIdentitySalt } : {}),
-    });
+    };
+    if (this.#companionSkillChecksum) layoutInput.companionSkillChecksum = this.#companionSkillChecksum;
+    if (this.#imageIdentitySalt) layoutInput.imageIdentitySalt = this.#imageIdentitySalt;
+    return companionPiLayoutIdentity(layoutInput);
   }
 
   async #stageTimed<T>(phase: CompanionRuntimeStagePhase, action: () => Promise<T>): Promise<T> {
@@ -1815,25 +1897,32 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
   ): Promise<T> {
     const startedAt = Date.now();
     try {
+      const headers: BoxRequestHeaders = {
+        Authorization: `Bearer ${this.#apiKey}`,
+      };
+      if (init?.body) headers["Content-Type"] = "application/json";
+      if (init?.headers) Object.assign(headers, init.headers);
       const response = await fetch(`${this.#baseUrl}${path}`, {
         ...init,
-        headers: {
-          Authorization: `Bearer ${this.#apiKey}`,
-          ...(init?.body ? { "Content-Type": "application/json" } : {}),
-          ...init?.headers,
-        },
+        headers,
         signal: this.#requestSignal(timeoutMs, init?.signal, budget),
       });
       if (!response.ok) {
-        const body = await response.json().catch(() => null) as
-          | { code?: string; message?: string; error?: { message?: string } }
-          | null;
+        const errorBodySchema = z.object({
+          code: z.string().optional(),
+          message: z.string().optional(),
+          error: z.object({ message: z.string().optional() }).optional(),
+        });
+        const bodyResult = errorBodySchema.safeParse(await response.json().catch(() => null));
+        const body = bodyResult.success ? bodyResult.data : null;
         throw new BoxRuntimeProviderError(
           body?.message || body?.error?.message || `Box API request failed with ${response.status}`,
           response.status,
           body?.code,
         );
       }
+      // SAFETY: Every call supplies its response type and validates external envelopes before use;
+      // generic requests that cannot validate here are parsed at their immediate caller.
       const result = await response.json() as T;
       this.#onTiming?.({ operation, durationMs: Date.now() - startedAt, ok: true });
       return result;
@@ -1877,13 +1966,14 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
 
 
   async #resume(boxId: string, signal?: AbortSignal): Promise<BoxInfo> {
+    const requestInit: RequestInit = {
+      method: "POST",
+      body: JSON.stringify({ noEnv: true, ttlSeconds: this.#ttlSeconds }),
+    };
+    if (signal) requestInit.signal = signal;
     return parseBoxEnvelope(await this.#request<unknown>(
       `/boxes/${encodeURIComponent(boxId)}/resume`,
-      {
-        method: "POST",
-        body: JSON.stringify({ noEnv: true, ttlSeconds: this.#ttlSeconds }),
-        ...(signal ? { signal } : {}),
-      },
+      requestInit,
       30_000,
       this.#stagingSignal ?? null,
       "resume_box",
@@ -1907,13 +1997,14 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
     signal?: AbortSignal,
     operation: BoxProviderCallOperation = "execute_command",
   ): Promise<CommandEnvelope> {
+    const requestInit: RequestInit = {
+      method: "POST",
+      body: JSON.stringify({ command, timeoutSeconds }),
+    };
+    if (signal) requestInit.signal = signal;
     return parseCommandEnvelope(await this.#request<unknown>(
       `/boxes/${encodeURIComponent(boxId)}/commands`,
-      {
-        method: "POST",
-        body: JSON.stringify({ command, timeoutSeconds }),
-        ...(signal ? { signal } : {}),
-      },
+      requestInit,
       (timeoutSeconds + 10) * 1_000,
       this.#stagingSignal ?? null,
       operation,
@@ -1950,12 +2041,12 @@ fi`,
    */
   async #rpcCommandResponse(input: {
     boxId: string;
-    command: Record<string, unknown> & { id: string };
+    command: PiJsonObject & { id: string };
     responseCommand: string;
     acceptTimeoutSeconds?: number;
     signal?: AbortSignal;
     operation?: "broker_state" | "prompt" | "execute_command";
-  }): Promise<Record<string, unknown> | null> {
+  }): Promise<PiJsonObject | null> {
     const encodedCommand = Buffer.from(JSON.stringify(input.command), "utf8").toString("base64");
     const acceptTimeoutSeconds = Math.max(
       1,
@@ -2020,7 +2111,9 @@ COMPANION_PI_BROKER_CLIENT`,
     if (!result.success) return null;
     for (const line of result.stdout.trim().split(/[\r\n]+/).reverse()) {
       try {
-        const response = JSON.parse(line) as Record<string, unknown>;
+        const parsed = z.record(z.string(), z.unknown()).safeParse(JSON.parse(line));
+        if (!parsed.success) continue;
+        const response = parsed.data;
         if (
           response.type === "response"
           && response.command === input.responseCommand
@@ -2119,15 +2212,13 @@ done`,
     options?: { encoding?: "base64"; timeoutMs?: number },
   ): Promise<void> {
     try {
+      const payload: BoxFilePayload = { path, content };
+      if (options?.encoding) payload.encoding = options.encoding;
       await this.#request(
         `/boxes/${encodeURIComponent(boxId)}/files`,
         {
           method: "PUT",
-          body: JSON.stringify({
-            path,
-            content,
-            ...(options?.encoding ? { encoding: options.encoding } : {}),
-          }),
+          body: JSON.stringify(payload),
         },
         options?.timeoutMs,
         this.#stagingSignal ?? null,
@@ -2153,6 +2244,7 @@ done`,
     const allowed = new Set([
       ".companion/pi/auth.json",
       ".companion/pi/mcp.json",
+      ".companion/runtime/state/mcp-gateway.json",
       ".companion/runtime/state/mcp-accounts.json",
       ".companion/runtime/state/skills.json",
       ".companion/runtime/state/config-catalog.json",
@@ -2160,6 +2252,7 @@ done`,
       ".companion/runtime/state/model.txt",
       ".companion/runtime/state/providers.env",
       COMPANION_GIT_CREDENTIAL_HELPER_PATH,
+      COMPANION_GH_WRAPPER_PATH,
     ]);
     if (
       files.length === 0
@@ -2624,12 +2717,12 @@ fi`,
   async #injectPiResources(input: {
     boxId: string;
     clientSurface: CompanionClientSurface;
-    providerAuth: Record<string, Record<string, unknown>>;
+    providerAuth: CompanionProviderAuth;
     replaceProviderAuth: boolean;
     modelId: string;
     instructions?: string | null;
     mcpCredentials: McpRuntimeCredential[];
-    mcpAccounts: CompanionMcpAccount[];
+    mcpAccounts: CompanionStagedMcpAccount[];
     skills: CompanionRuntimeSkill[];
     reuseSkills: boolean;
     preserveSkills: boolean;
@@ -2676,6 +2769,11 @@ fi`,
         mode: 0o600,
       },
       {
+        path: ".companion/runtime/state/mcp-gateway.json",
+        content: `${JSON.stringify({ accounts: mcp.gatewayAccounts })}\n`,
+        mode: 0o600,
+      },
+      {
         path: ".companion/runtime/state/mcp-accounts.json",
         content: `${JSON.stringify({ accounts: mcp.accounts }, null, 2)}\n`,
         mode: 0o600,
@@ -2715,7 +2813,7 @@ fi`,
         mode: 0o600,
       },
     );
-    if (input.mcpCredentials.some((credential) => credential.env_key === "GITHUB_TOKEN")) {
+    if (mcp.gatewayAccounts.some((account) => account.github)) {
       controlFiles.push({
         path: COMPANION_GIT_CREDENTIAL_HELPER_PATH,
         content: COMPANION_GIT_CREDENTIAL_HELPER_SOURCE.endsWith("\n")
@@ -2723,9 +2821,15 @@ fi`,
           : `${COMPANION_GIT_CREDENTIAL_HELPER_SOURCE}\n`,
         mode: 0o700,
       });
+      controlFiles.push({
+        path: COMPANION_GH_WRAPPER_PATH,
+        content: COMPANION_GH_WRAPPER_SOURCE.endsWith("\n")
+          ? COMPANION_GH_WRAPPER_SOURCE
+          : `${COMPANION_GH_WRAPPER_SOURCE}\n`,
+        mode: 0o700,
+      });
     }
-    const gitHelperNeeded = input.mcpCredentials.some((credential) =>
-      credential.env_key === "GITHUB_TOKEN");
+    const gitHelperNeeded = mcp.gatewayAccounts.some((account) => account.github);
     try {
       const staged = new Map<string, string>();
       let skillBytesTransferred = 0;
@@ -3147,13 +3251,14 @@ exit 1`;
     let box = observed ?? await this.#get(input.boxId, input.signal);
     if (box.state !== "archived" && box.state !== "archiving") {
       try {
+        const requestInit: RequestInit = {
+          method: "POST",
+          body: JSON.stringify({ force: false }),
+        };
+        if (input.signal) requestInit.signal = input.signal;
         const response = await this.#request<unknown>(
           `/boxes/${encodeURIComponent(input.boxId)}/stop`,
-          {
-            method: "POST",
-            body: JSON.stringify({ force: false }),
-            ...(input.signal ? { signal: input.signal } : {}),
-          },
+          requestInit,
           30_000,
           null,
           "archive_box",
@@ -3179,12 +3284,12 @@ exit 1`;
     orgId: string;
     boxId: string;
     clientSurface: CompanionClientSurface;
-    providerAuth: Record<string, Record<string, unknown>>;
+    providerAuth: CompanionProviderAuth;
     replaceProviderAuth: boolean;
     instructions?: string | null;
     modelId: string;
     mcpCredentials: McpRuntimeCredential[];
-    mcpAccounts: CompanionMcpAccount[];
+    mcpAccounts: CompanionStagedMcpAccount[];
     skills: CompanionRuntimeSkill[];
     reuseSkills?: boolean;
     preserveSkills?: boolean;
@@ -3424,7 +3529,7 @@ exit 1`;
     const chunks = Math.ceil(input.entry.byteSize / OUTBOX_CHUNK_BYTES);
     const parts: Buffer[] = [];
     for (let index = 0; index < chunks; index += 1) {
-      parts.push(await this.#readOutboxChunk({
+      const chunkInput: CompanionOutboxChunkInput = {
         boxId: input.boxId,
         encodedName: input.entry.encodedName,
         index,
@@ -3432,9 +3537,10 @@ exit 1`;
           OUTBOX_CHUNK_BYTES,
           input.entry.byteSize - index * OUTBOX_CHUNK_BYTES,
         ),
-        ...(input.deadlineAt ? { deadlineAt: input.deadlineAt } : {}),
-        ...(input.signal ? { signal: input.signal } : {}),
-      }));
+      };
+      if (input.deadlineAt) chunkInput.deadlineAt = input.deadlineAt;
+      if (input.signal) chunkInput.signal = input.signal;
+      parts.push(await this.#readOutboxChunk(chunkInput));
     }
     const bytes = Buffer.concat(parts);
     // The whole-file digest is checked against the manifest, not against the chunks: that is what
@@ -3457,14 +3563,7 @@ exit 1`;
    * transport has a demonstrated history of truncating large command output, which is exactly what
    * the per-chunk length and digest here detect.
    */
-  async #readOutboxChunk(input: {
-    boxId: string;
-    encodedName: string;
-    index: number;
-    expectedLength: number;
-    deadlineAt?: Date;
-    signal?: AbortSignal;
-  }): Promise<Buffer> {
+  async #readOutboxChunk(input: CompanionOutboxChunkInput): Promise<Buffer> {
     const { boxId, encodedName, index } = input;
     let lastDetail = "";
     for (let attempt = 0; attempt < OUTBOX_CHUNK_ATTEMPTS; attempt += 1) {
@@ -3580,7 +3679,7 @@ done`,
     requestId?: string;
     signal?: AbortSignal;
   }): Promise<CompanionPiPromptDispatch> {
-    let response: Record<string, unknown> | null;
+    let response: PiJsonObject | null;
     try {
       response = await this.#rpcCommandResponse({
         boxId: input.boxId,
@@ -3648,7 +3747,7 @@ done`,
     requestId?: string;
     signal?: AbortSignal;
   }): Promise<CompanionPiControlDispatch> {
-    let response: Record<string, unknown> | null;
+    let response: PiJsonObject | null;
     try {
       response = await this.#rpcCommandResponse({
         boxId: input.boxId,
@@ -3720,13 +3819,24 @@ done`,
       operation: "broker_state",
     });
     const data = response?.success === true && isJsonObject(response.data) ? response.data : null;
-    const layoutMarker = typeof data?.layoutMarker === "string" && data.layoutMarker.length <= 1024
-      ? data.layoutMarker
+    const layoutMarkerText = stringValue(data?.layoutMarker);
+    const layoutMarker = layoutMarkerText !== null && layoutMarkerText.length <= 1024
+      ? layoutMarkerText
       : null;
     const counters = parseBrokerCounters(data?.counters);
-    const modelInput = Array.isArray(data?.modelInput)
-      && data.modelInput.every((item) => item === "text" || item === "image")
-      ? [...new Set(data.modelInput)] as Array<"text" | "image">
+    const modelInputValues: Array<"text" | "image"> = [];
+    if (Array.isArray(data?.modelInput)) {
+      for (const item of data.modelInput) {
+        const text = stringValue(item);
+        if (text !== "text" && text !== "image") {
+          modelInputValues.length = 0;
+          break;
+        }
+        modelInputValues.push(text);
+      }
+    }
+    const modelInput = modelInputValues.length > 0
+      ? [...new Set(modelInputValues)]
       : null;
     if (
       !data
@@ -3755,20 +3865,25 @@ done`,
     boxId: string;
     attemptId?: string;
     requestId?: string;
-    response: Record<string, unknown>;
+    response: object;
     signal?: AbortSignal;
   }): Promise<CompanionPiExtensionUiDispatch> {
-    let response: Record<string, unknown> | null;
+    let response: PiJsonObject | null;
+    const responsePayload = boxJsonObjectSchema.safeParse(input.response);
+    if (!responsePayload.success) {
+      throw new BoxRuntimeProviderError("Pi decision response is not valid JSON", 400);
+    }
+    const command: PiJsonObject & { id: string } = {
+      id: input.requestId ?? `companion-decision:${randomUUID()}`,
+      type: "extension_ui_response",
+      response: responsePayload.data,
+    };
+    if (input.attemptId !== undefined) command.attemptId = input.attemptId;
     try {
       response = await this.#rpcCommandResponse({
         boxId: input.boxId,
         responseCommand: "extension_ui_response",
-        command: {
-          id: input.requestId ?? `companion-decision:${randomUUID()}`,
-          type: "extension_ui_response",
-          ...(input.attemptId === undefined ? {} : { attemptId: input.attemptId }),
-          response: input.response,
-        },
+        command,
         signal: input.signal,
       });
     } catch {
@@ -3821,11 +3936,18 @@ done`,
     ttlSeconds?: number;
     signal?: AbortSignal;
   }): Promise<void> {
-    await this.#request(`/boxes/${encodeURIComponent(input.boxId)}`, {
+    const requestInit: RequestInit = {
       method: "PATCH",
       body: JSON.stringify({ ttlSeconds: input.ttlSeconds ?? this.#ttlSeconds }),
-      ...(input.signal ? { signal: input.signal } : {}),
-    }, 30_000, null, "apply_box_settings");
+    };
+    if (input.signal) requestInit.signal = input.signal;
+    await this.#request(
+      `/boxes/${encodeURIComponent(input.boxId)}`,
+      requestInit,
+      30_000,
+      null,
+      "apply_box_settings",
+    );
   }
 
   async ackEvents(input: {
@@ -3856,33 +3978,42 @@ done`,
     limit?: number;
     signal?: AbortSignal;
   }): Promise<CompanionPiBrokerEventPage> {
+    const command: PiJsonObject & { id: string } = {
+      id: `companion-read-events:${randomUUID()}`,
+      type: "read_events",
+      after: input.after,
+    };
+    if (input.limit !== undefined) command.limit = input.limit;
     const response = await this.#rpcCommandResponse({
       boxId: input.boxId,
       responseCommand: "read_events",
-      command: {
-        id: `companion-read-events:${randomUUID()}`,
-        type: "read_events",
-        after: input.after,
-        ...(input.limit === undefined ? {} : { limit: input.limit }),
-      },
+      command,
       signal: input.signal,
     });
     const data = response?.success === true && isJsonObject(response.data) ? response.data : null;
-    const events = Array.isArray(data?.events)
+    const parsedEvents = Array.isArray(data?.events)
       ? data.events.map(parseBrokerJournalRecord)
       : null;
+    const hasMore = z.boolean().safeParse(data?.hasMore);
     if (
       !data
-      || !events
-      || events.some((event) => event === null)
+      || !parsedEvents
+      || parsedEvents.some((event) => event === null)
       || !nonNegativeSafeInteger(data.nextCursor)
       || !nonNegativeSafeInteger(data.acknowledgedCursor)
-      || typeof data.hasMore !== "boolean"
+      || !hasMore.success
     ) {
       throw new BoxRuntimeProviderError("Pi broker event journal could not be read", 502);
     }
+    const events: CompanionPiJournalRecord[] = [];
+    for (const event of parsedEvents) {
+      if (event === null) {
+        throw new BoxRuntimeProviderError("Pi broker event journal could not be read", 502);
+      }
+      events.push(event);
+    }
     let prior = Math.max(input.after, data.acknowledgedCursor);
-    for (const event of events as CompanionPiJournalRecord[]) {
+    for (const event of events) {
       if (event.sequence <= prior || event.sequence > data.nextCursor) {
         throw new BoxRuntimeProviderError("Pi broker event journal is not monotonic", 502);
       }
@@ -3892,10 +4023,10 @@ done`,
       throw new BoxRuntimeProviderError("Pi broker event cursor does not match its page", 502);
     }
     return {
-      events: events as CompanionPiJournalRecord[],
+      events,
       nextCursor: data.nextCursor,
       acknowledgedCursor: data.acknowledgedCursor,
-      hasMore: data.hasMore,
+      hasMore: hasMore.data,
     };
   }
 
@@ -3911,17 +4042,26 @@ done`,
       throw new BoxRuntimeProviderError("Box must already be running before requesting desktop access", 409);
     }
     const desktopPath = `/boxes/${encodeURIComponent(input.boxId)}/desktop`;
+    const desktopRequest = (): RequestInit => {
+      const requestInit: RequestInit = { method: "POST", body: "{}" };
+      if (input.signal) requestInit.signal = input.signal;
+      return requestInit;
+    };
     return mintBoxDesktopUrl({
-      vnc: () => this.#request<DesktopEnvelope>(`${desktopPath}?vnc=1`, {
-        method: "POST",
-        body: "{}",
-        ...(input.signal ? { signal: input.signal } : {}),
-      }, 30_000, null, "desktop"),
-      webrtc: () => this.#request<DesktopEnvelope>(desktopPath, {
-        method: "POST",
-        body: "{}",
-        ...(input.signal ? { signal: input.signal } : {}),
-      }, 30_000, null, "desktop"),
+      vnc: () => this.#request<DesktopEnvelope>(
+        `${desktopPath}?vnc=1`,
+        desktopRequest(),
+        30_000,
+        null,
+        "desktop",
+      ),
+      webrtc: () => this.#request<DesktopEnvelope>(
+        desktopPath,
+        desktopRequest(),
+        30_000,
+        null,
+        "desktop",
+      ),
       budgetMs: this.#desktopMintBudgetMs,
       pause: () => this.#pause(input.signal),
     });

@@ -231,9 +231,10 @@ manually mark an ambiguous attempt queued.
 
 ### MCP OAuth refresh failed
 
-`mcp_oauth_refresh_failed` with action `retry` means runtime could not obtain a selected MCP access
-token that outlives the full turn reserve. Check only the safe OAuth code; never capture the provider
-response. Diagnose by cause:
+`mcp_oauth_refresh_failed` with action `retry` means the loopback gateway could no longer obtain a
+usable selected MCP access token. Token lifetime alone is never an error: one-second, short-lived,
+and non-expiring access tokens are all accepted while they remain positive and renewable. Check only
+the safe OAuth code; never capture the provider response. Diagnose by cause:
 
 - for GitHub deployment-secret drift, verify `api` and `runtime` both reference the same shared
   `COMPANION_MCP_GITHUB_CLIENT_ID` and `COMPANION_MCP_GITHUB_CLIENT_SECRET`; the API-side value is the
@@ -243,11 +244,12 @@ response. Diagnose by cause:
 - if GitHub configuration is absent, restore both shared variables before retrying;
 - for GitHub, Linear, Notion, or another revoked/expired user grant, reconnect that account in
   Plugins; repeated messages cannot repair a revoked grant;
-- if a provider returns a token shorter than two hours and five minutes, no Box write occurred, but
-  that provider cannot safely back a maximum-length turn until its grant/token policy changes.
+- reconnect in Plugins only when the refresh token is absent, expired, revoked, or bound to a client
+  configuration that can no longer refresh it. Do not reconnect merely because the access token is
+  shorter than two hours and five minutes.
 
-After repair, send a new message. Do not inject the refresh token into Box, restart the Box, or replay
-the failed turn.
+After repair, send a new message. Do not inject a refresh token, `GITHUB_TOKEN`, or `GH_TOKEN` into
+Box, restart the Box, or replay an ambiguously failed MCP/Git operation.
 
 ### A turn's attachments failed
 

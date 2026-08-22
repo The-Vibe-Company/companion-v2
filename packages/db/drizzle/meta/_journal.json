@@ -841,6 +841,13 @@
       "when": 1790096800001,
       "tag": "0119_companion_icons",
       "breakpoints": true
+    },
+    {
+      "idx": 120,
+      "version": "7",
+      "when": 1790183200000,
+      "tag": "0120_companion_mcp_token_broker",
+      "breakpoints": true
     }
   ]
 }

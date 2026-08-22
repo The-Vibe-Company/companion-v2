@@ -197,7 +197,7 @@ describe("runtime material resolution", () => {
     expect(resources.mcpCredentials).toEqual([{ env_key: "MCP_TOKEN", value: "sensitive-value" }]);
   });
 
-  it("delegates expiring OAuth refresh while retaining the account's authorized env binding", async () => {
+  it("keeps OAuth access and refresh tokens out of staged credentials", async () => {
     const stored = {
       kind: "oauth" as const,
       version: 1 as const,
@@ -217,8 +217,6 @@ describe("runtime material resolution", () => {
       credentialGeneration: generation,
       credential: stored,
     }, masterKey);
-    const resolveOauth = vi.fn(async () => ({ ...stored, accessToken: "new-token" }));
-
     const resources = await resolveRuntimeResources({
       orgId,
       masterKey,
@@ -241,24 +239,20 @@ describe("runtime material resolution", () => {
         }],
       },
       loadSkillArchive: vi.fn(),
-      resolveOauth,
-      now: () => Date.parse("2027-01-01T00:00:00.000Z"),
       signal: new AbortController().signal,
     });
 
-    expect(resolveOauth).toHaveBeenCalledWith({
-      accountId,
-      credentialGeneration: generation,
-      credential: stored,
-    });
-    expect(resources.mcpCredentials).toEqual([{
-      env_key: "LINEAR_AUTH",
-      value: "Bearer new-token",
+    expect(resources.mcpCredentials).toEqual([]);
+    expect(resources.mcpAccounts).toEqual([{
+      account: expect.objectContaining({ id: accountId, url: "https://mcp.linear.app/mcp" }),
+      oauthBroker: { credentialGeneration: generation, github: false },
     }]);
+    expect(JSON.stringify(resources)).not.toContain("old-token");
+    expect(JSON.stringify(resources)).not.toContain("refresh-token");
     expect(resources.extraEnv).toEqual({});
   });
 
-  it("stages GitHub MCP OAuth as Bearer MCP plus git/gh tokens", async () => {
+  it("stages GitHub OAuth as a broker account plus token-free Git and gh metadata", async () => {
     const stored = {
       kind: "oauth" as const,
       version: 1 as const,
@@ -313,12 +307,13 @@ describe("runtime material resolution", () => {
       signal: new AbortController().signal,
     });
 
-    expect(resources.mcpCredentials).toEqual([
-      { env_key: "GITHUB_MCP_AUTH", value: "Bearer gho_secret" },
-      { env_key: "GITHUB_TOKEN", value: "gho_secret" },
-      { env_key: "GH_TOKEN", value: "gho_secret" },
-    ]);
+    expect(resources.mcpCredentials).toEqual([]);
+    expect(resources.mcpAccounts).toEqual([{
+      account: expect.objectContaining({ id: accountId }),
+      oauthBroker: { credentialGeneration: generation, github: true },
+    }]);
     expect(resources.extraEnv).toEqual({
+      COMPANION_GITHUB_MCP_ACCOUNT_ID: accountId,
       GIT_TERMINAL_PROMPT: "0",
       GH_PROMPT_DISABLED: "1",
       GIT_AUTHOR_NAME: "Stan Girard",
@@ -328,7 +323,7 @@ describe("runtime material resolution", () => {
     });
   });
 
-  it("looks up GitHub identity at stage time when the stored grant has none", async () => {
+  it("does not use an access token to look up missing GitHub identity during staging", async () => {
     const stored = {
       kind: "oauth" as const,
       version: 1 as const,
@@ -352,12 +347,6 @@ describe("runtime material resolution", () => {
       credentialGeneration: generation,
       credential: stored,
     }, masterKey);
-    const resolveGithubIdentity = vi.fn(async () => ({
-      login: "stan",
-      name: "Stan Girard",
-      email: "stan@users.noreply.github.com",
-    }));
-
     const resources = await resolveRuntimeResources({
       orgId,
       masterKey,
@@ -380,24 +369,18 @@ describe("runtime material resolution", () => {
         }],
       },
       loadSkillArchive: vi.fn(),
-      resolveGithubIdentity,
       signal: new AbortController().signal,
     });
 
-    expect(resolveGithubIdentity).toHaveBeenCalledWith({
-      accountId,
-      credentialGeneration: generation,
-      accessToken: "gho_secret",
+    expect(resources.mcpCredentials).toEqual([]);
+    expect(resources.extraEnv).toEqual({
+      COMPANION_GITHUB_MCP_ACCOUNT_ID: accountId,
+      GIT_TERMINAL_PROMPT: "0",
+      GH_PROMPT_DISABLED: "1",
     });
-    expect(resources.mcpCredentials).toEqual([
-      { env_key: "GITHUB_MCP_AUTH", value: "Bearer gho_secret" },
-      { env_key: "GITHUB_TOKEN", value: "gho_secret" },
-      { env_key: "GH_TOKEN", value: "gho_secret" },
-    ]);
-    expect(resources.extraEnv.GIT_AUTHOR_NAME).toBe("Stan Girard");
   });
 
-  it("still stages GitHub git tokens when identity lookup returns nothing", async () => {
+  it("still enables token-on-demand Git and gh when GitHub identity is unavailable", async () => {
     const stored = {
       kind: "oauth" as const,
       version: 1 as const,
@@ -444,16 +427,12 @@ describe("runtime material resolution", () => {
         }],
       },
       loadSkillArchive: vi.fn(),
-      resolveGithubIdentity: async () => null,
       signal: new AbortController().signal,
     });
 
-    expect(resources.mcpCredentials.map((credential) => credential.env_key)).toEqual([
-      "GITHUB_MCP_AUTH",
-      "GITHUB_TOKEN",
-      "GH_TOKEN",
-    ]);
+    expect(resources.mcpCredentials).toEqual([]);
     expect(resources.extraEnv).toEqual({
+      COMPANION_GITHUB_MCP_ACCOUNT_ID: accountId,
       GIT_TERMINAL_PROMPT: "0",
       GH_PROMPT_DISABLED: "1",
     });
@@ -535,9 +514,10 @@ describe("runtime material resolution", () => {
       signal: new AbortController().signal,
     });
 
-    expect(resources.mcpCredentials).toEqual([
-      { env_key: "GITHUB_PERSONAL", value: "Bearer gho_personal" },
-      { env_key: "GITHUB_WORK", value: "Bearer gho_work" },
+    expect(resources.mcpCredentials).toEqual([]);
+    expect(resources.mcpAccounts).toEqual([
+      expect.objectContaining({ oauthBroker: { credentialGeneration: generation, github: true } }),
+      expect.objectContaining({ oauthBroker: { credentialGeneration: secondGeneration, github: true } }),
     ]);
     expect(resources.extraEnv).toEqual({});
   });
@@ -583,7 +563,7 @@ function snakeEnvelope(envelope: {
   wrapIv: string;
   wrapAuthTag: string;
   keyId: string;
-}): Record<string, string> {
+}) {
   return {
     ciphertext: envelope.ciphertext,
     iv: envelope.iv,

@@ -21,6 +21,6 @@ export * from "./companionPluginTriggerKeys";
 export * from "./companionProviderCatalog";
 export * from "./companionProviderOAuth";
 export * from "./companionPluginOAuth";
-export * from "./companionGithubGit";
 export * from "./companionRuntimeErrors";
 export * from "./companionRuntimeCredentials";
+export * from "./companionMcpBroker";

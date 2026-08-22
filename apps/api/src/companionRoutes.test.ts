@@ -1,16 +1,18 @@
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import * as contextModule from "./context";
 import type { ApiVariables } from "./context";
 import {
-  registerCompanionRoutes as registerCompanionRoutesImpl,
-  registerCompanionTriggerWebhookRoutes,
-} from "./companionRoutes";
-import {
+  CompanionMcpBrokerAuthorizationError,
   CompanionTriggerNotFoundError,
   composeTriggerPrompt,
   triggerFireMessageId,
 } from "@companion/core";
+import * as coreModule from "@companion/core";
+import * as dbModule from "@companion/db";
+import * as storageModule from "@companion/storage";
+import * as desktopModule from "./runtimeDesktopClient";
 
 const COMPANION_ID = "11111111-1111-4111-8111-111111111111";
 const TURN_ID = "22222222-2222-4222-8222-222222222222";
@@ -22,83 +24,74 @@ const TRIGGER_ID = "99999999-9999-4999-8999-999999999999";
 const TRIGGER_SECRET = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const NOW = "2026-08-17T00:00:00.000Z";
 
-const contextMocks = vi.hoisted(() => ({
-  actorFromContext: vi.fn(),
-  jsonError: vi.fn(),
-  orgIdFromContext: vi.fn(),
-}));
+type TestJsonValue = string | number | boolean | null | TestJsonValue[] | TestJsonObject;
+interface TestJsonObject {
+  [key: string]: TestJsonValue;
+}
 
-const coreMocks = vi.hoisted(() => ({
-  answerCompanionConfigDecisionV2: vi.fn(),
-  answerCompanionDecisionV2: vi.fn(),
-  readCompanionAttachmentV2: vi.fn(),
-  cancelCompanionTurnV2: vi.fn(),
-  createCompanionV2: vi.fn(),
-  duplicateCompanionV2: vi.fn(),
-  enqueueCompanionOperationV2: vi.fn(),
-  enqueueCompanionTurnV2: vi.fn(),
-  getCompanionDecisionV2: vi.fn(),
-  getCompanionV2: vi.fn(),
-  listCompanionsV2: vi.fn(),
-  listCompanionRoutinesV2: vi.fn(),
-  createCompanionRoutineV2: vi.fn(),
-  updateCompanionRoutineV2: vi.fn(),
-  deleteCompanionRoutineV2: vi.fn(),
-  answerCompanionRoutineDecisionV2: vi.fn(),
-  listCompanionTriggersV2: vi.fn(),
-  createCompanionTriggerV2: vi.fn(),
-  updateCompanionTriggerV2: vi.fn(),
-  deleteCompanionTriggerV2: vi.fn(),
-  rotateCompanionTriggerSecretV2: vi.fn(),
-  answerCompanionTriggerDecisionV2: vi.fn(),
-  getCompanionTriggerForWebhook: vi.fn(),
-  fireCompanionTrigger: vi.fn(),
-  failCompanionTriggerFire: vi.fn(),
-  readCompanionThreadV2: vi.fn(),
-  retryCompanionTurnV2: vi.fn(),
-  setCompanionProviderV2: vi.fn(),
-  setCompanionWorkspaceShareV2: vi.fn(),
-  updateCompanionMemberStateV2: vi.fn(),
-  updateCompanionV2: vi.fn(),
-}));
+const contextMocks = {
+  actorFromContext: vi.fn<typeof contextModule.actorFromContext>(),
+  jsonError: vi.fn<typeof contextModule.jsonError>(),
+  orgIdFromContext: vi.fn<typeof contextModule.orgIdFromContext>(),
+};
 
-const desktopMocks = vi.hoisted(() => ({
-  mintCompanionDesktop: vi.fn(),
-}));
+const coreMocks = {
+  answerCompanionConfigDecisionV2: vi.fn<typeof coreModule.answerCompanionConfigDecisionV2>(),
+  answerCompanionDecisionV2: vi.fn<typeof coreModule.answerCompanionDecisionV2>(),
+  readCompanionAttachmentV2: vi.fn<typeof coreModule.readCompanionAttachmentV2>(),
+  cancelCompanionTurnV2: vi.fn<typeof coreModule.cancelCompanionTurnV2>(),
+  createCompanionV2: vi.fn<typeof coreModule.createCompanionV2>(),
+  duplicateCompanionV2: vi.fn<typeof coreModule.duplicateCompanionV2>(),
+  enqueueCompanionOperationV2: vi.fn<typeof coreModule.enqueueCompanionOperationV2>(),
+  enqueueCompanionTurnV2: vi.fn<typeof coreModule.enqueueCompanionTurnV2>(),
+  getCompanionDecisionV2: vi.fn<typeof coreModule.getCompanionDecisionV2>(),
+  getCompanionV2: vi.fn<typeof coreModule.getCompanionV2>(),
+  listCompanionsV2: vi.fn<typeof coreModule.listCompanionsV2>(),
+  listCompanionRoutinesV2: vi.fn<typeof coreModule.listCompanionRoutinesV2>(),
+  createCompanionRoutineV2: vi.fn<typeof coreModule.createCompanionRoutineV2>(),
+  updateCompanionRoutineV2: vi.fn<typeof coreModule.updateCompanionRoutineV2>(),
+  deleteCompanionRoutineV2: vi.fn<typeof coreModule.deleteCompanionRoutineV2>(),
+  answerCompanionRoutineDecisionV2: vi.fn<typeof coreModule.answerCompanionRoutineDecisionV2>(),
+  listCompanionTriggersV2: vi.fn<typeof coreModule.listCompanionTriggersV2>(),
+  createCompanionTriggerV2: vi.fn<typeof coreModule.createCompanionTriggerV2>(),
+  updateCompanionTriggerV2: vi.fn<typeof coreModule.updateCompanionTriggerV2>(),
+  deleteCompanionTriggerV2: vi.fn<typeof coreModule.deleteCompanionTriggerV2>(),
+  rotateCompanionTriggerSecretV2: vi.fn<typeof coreModule.rotateCompanionTriggerSecretV2>(),
+  answerCompanionTriggerDecisionV2: vi.fn<typeof coreModule.answerCompanionTriggerDecisionV2>(),
+  getCompanionTriggerForWebhook: vi.fn<typeof coreModule.getCompanionTriggerForWebhook>(),
+  fireCompanionTrigger: vi.fn<typeof coreModule.fireCompanionTrigger>(),
+  failCompanionTriggerFire: vi.fn<typeof coreModule.failCompanionTriggerFire>(),
+  readCompanionThreadV2: vi.fn<typeof coreModule.readCompanionThreadV2>(),
+  retryCompanionTurnV2: vi.fn<typeof coreModule.retryCompanionTurnV2>(),
+  setCompanionProviderV2: vi.fn<typeof coreModule.setCompanionProviderV2>(),
+  setCompanionWorkspaceShareV2: vi.fn<typeof coreModule.setCompanionWorkspaceShareV2>(),
+  updateCompanionMemberStateV2: vi.fn<typeof coreModule.updateCompanionMemberStateV2>(),
+  updateCompanionV2: vi.fn<typeof coreModule.updateCompanionV2>(),
+  resolveCompanionMcpBrokerAuthorization: vi.fn<typeof coreModule.resolveCompanionMcpBrokerAuthorization>(),
+  issueCompanionMcpAccessToken: vi.fn<typeof coreModule.issueCompanionMcpAccessToken>(),
+};
 
-const storageMocks = vi.hoisted(() => ({
-  putSkillArchive: vi.fn(),
-  getSkillArchive: vi.fn(),
-  deleteStorageObject: vi.fn(),
-}));
+const desktopMocks = {
+  mintCompanionDesktop: vi.fn<typeof desktopModule.mintCompanionDesktop>(),
+};
 
-vi.mock("@companion/storage", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@companion/storage")>()),
-  ...storageMocks,
-}));
+const storageMocks = {
+  putSkillArchive: vi.fn<typeof storageModule.putSkillArchive>(),
+  getSkillArchive: vi.fn<typeof storageModule.getSkillArchive>(),
+  deleteStorageObject: vi.fn<typeof storageModule.deleteStorageObject>(),
+};
 
-vi.mock("./context", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./context")>()),
-  ...contextMocks,
-}));
+async function testWithTenantContext<T>(
+  _input: { orgId: string; userId: string },
+  fn: (database: typeof dbModule.db) => Promise<T>,
+): Promise<T> {
+  return await fn(dbModule.db);
+}
 
-vi.mock("@companion/core", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@companion/core")>()),
-  ...coreMocks,
-}));
-
-vi.mock("@companion/db", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@companion/db")>()),
-  withTenantContext: vi.fn(async (
-    _context: unknown,
-    fn: (database: { tenant: true }) => Promise<unknown>,
-  ) => fn({ tenant: true })),
-}));
-
-vi.mock("./runtimeDesktopClient", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./runtimeDesktopClient")>()),
-  mintCompanionDesktop: desktopMocks.mintCompanionDesktop,
-}));
+const {
+  registerCompanionRoutes: registerCompanionRoutesImpl,
+  registerCompanionTriggerWebhookRoutes,
+} = await import("./companionRoutes");
 
 const owner = {
   id: "user-1",
@@ -243,7 +236,14 @@ function registerCompanionRoutes(
 ): void {
   registerCompanionRoutesImpl(app, {
     COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS: "example.test",
+    COMPANION_SECRETS_MASTER_KEY: Buffer.alloc(32, 7).toString("base64"),
     ...env,
+  }, {
+    ...contextMocks,
+    ...coreMocks,
+    ...desktopMocks,
+    ...storageMocks,
+    withTenantContext: testWithTenantContext,
   });
 }
 
@@ -253,7 +253,7 @@ function appWithRoutes() {
   return app;
 }
 
-function jsonPost(path: string, body: unknown): Request {
+function jsonPost(path: string, body: TestJsonValue): Request {
   return new Request(`http://localhost${path}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -266,8 +266,10 @@ describe("Companions Runtime v2 API", () => {
     vi.clearAllMocks();
     contextMocks.actorFromContext.mockReturnValue(owner);
     contextMocks.orgIdFromContext.mockResolvedValue(ORG_ID);
-    contextMocks.jsonError.mockImplementation((_context, error: Error, status: number) =>
-      Response.json({ ok: false, error: error.message }, { status }));
+    contextMocks.jsonError.mockImplementation((_context, error, status = 400) => {
+      const message = error instanceof Error ? error.message : String(error);
+      return Response.json({ ok: false, error: message }, { status });
+    });
     coreMocks.listCompanionsV2.mockResolvedValue([companion]);
     coreMocks.getCompanionV2.mockResolvedValue(companion);
     coreMocks.readCompanionThreadV2.mockResolvedValue(thread);
@@ -323,6 +325,85 @@ describe("Companions Runtime v2 API", () => {
       automation: "lux",
       transport: "webrtc",
     });
+    coreMocks.resolveCompanionMcpBrokerAuthorization.mockResolvedValue(null);
+    coreMocks.issueCompanionMcpAccessToken.mockResolvedValue({
+      access_token: "temporary-access",
+      token_type: "Bearer",
+      expires_at: "2026-08-17T00:15:00.000Z",
+      credential_version: 4,
+    });
+  });
+
+  it("vends MCP access only to the dedicated runtime capability and never to sessions or ordinary tokens", async () => {
+    const app = appWithRoutes();
+    const accountId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const credentialGeneration = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const capability = `cmp_mcp_${"a".repeat(48)}`;
+    const body = {
+      account_id: accountId,
+      credential_generation: credentialGeneration,
+      force_refresh: false,
+    };
+
+    const deniedHeaders: Array<Record<string, string>> = [
+      { cookie: "companion_session=session-value" },
+      { authorization: "Bearer cmp_pat_ordinary" },
+      { authorization: "Bearer cmp_agent_auth" },
+    ];
+    for (const headers of deniedHeaders) {
+      const requestHeaders = new Headers(headers);
+      requestHeaders.set("content-type", "application/json");
+      const denied = await app.request("/v1/runtime/mcp-access-token", {
+        method: "POST",
+        headers: requestHeaders,
+        body: JSON.stringify(body),
+      });
+      expect(denied.status).toBe(401);
+      expect(denied.headers.get("cache-control")).toBe("private, no-store");
+      expect(JSON.stringify(await denied.json())).not.toContain("temporary-access");
+    }
+
+    coreMocks.resolveCompanionMcpBrokerAuthorization.mockResolvedValue({
+      orgId: ORG_ID,
+      companionId: COMPANION_ID,
+      actorId: owner.id,
+      accountRefs: [{ account_id: accountId, credential_generation: credentialGeneration }],
+    });
+    const accepted = await app.request("/v1/runtime/mcp-access-token", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${capability}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+    expect(accepted.status).toBe(200);
+    expect(accepted.headers.get("cache-control")).toBe("private, no-store");
+    expect(accepted.headers.get("pragma")).toBe("no-cache");
+    expect(await accepted.json()).toEqual({
+      access_token: "temporary-access",
+      token_type: "Bearer",
+      expires_at: "2026-08-17T00:15:00.000Z",
+      credential_version: 4,
+    });
+    expect(coreMocks.issueCompanionMcpAccessToken).toHaveBeenCalledWith(expect.objectContaining({
+      accountId,
+      credentialGeneration,
+      forceRefresh: false,
+    }));
+
+    coreMocks.issueCompanionMcpAccessToken.mockRejectedValueOnce(
+      new CompanionMcpBrokerAuthorizationError(),
+    );
+    const unselected = await app.request("/v1/runtime/mcp-access-token", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${capability}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ ...body, account_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" }),
+    });
+    expect(unselected.status).toBe(401);
   });
 
   it("registers nothing unless both the feature flag and allowlist are configured", async () => {
@@ -373,6 +454,7 @@ describe("Companions Runtime v2 API", () => {
     const response = await appWithRoutes().request(
       `/v1/companions/${COMPANION_ID}/thread`,
     );
+    // SAFETY: this route serializes the fixture returned by readCompanionThreadV2.
     const payload = await response.json() as { thread: typeof viewerThread };
 
     expect(response.status).toBe(200);
@@ -402,6 +484,7 @@ describe("Companions Runtime v2 API", () => {
       const response = await appWithRoutes().request(
         `/v1/companions/${COMPANION_ID}/thread`,
       );
+      // SAFETY: this route serializes the fixture returned by readCompanionThreadV2.
       const payload = await response.json() as { thread: typeof operatorThread };
 
       expect(response.status).toBe(200);
@@ -466,8 +549,10 @@ describe("Companions Runtime v2 API", () => {
     ]);
     // Content-addressed: the key ends in the digest of the exact bytes, so a retried send lands on
     // the same object instead of orphaning one.
-    expect(attachments?.[0].storage_key).toBe(
-      `companion-attachments/${ORG_ID}/${COMPANION_ID}/${MESSAGE_ID}/0-${attachments[0].sha256}`,
+    const firstAttachment = attachments?.[0];
+    if (!firstAttachment) throw new Error("expected the first stored attachment");
+    expect(firstAttachment.storage_key).toBe(
+      `companion-attachments/${ORG_ID}/${COMPANION_ID}/${MESSAGE_ID}/0-${firstAttachment.sha256}`,
     );
     expect(storageMocks.deleteStorageObject).not.toHaveBeenCalled();
   });
@@ -823,15 +908,14 @@ describe("Companions Runtime v2 API", () => {
     ["restart Box", `/v1/companions/${COMPANION_ID}/runtime/restart`, "POST", { target: "box" }, "restart_box"],
   ])("accepts %s as a durable operation", async (_label, path, method, body, kind) => {
     const app = appWithRoutes();
+    const headers = new Headers({ "Idempotency-Key": RETRY_ID });
+    const request: RequestInit = { method, headers };
+    if (body !== undefined) {
+      headers.set("content-type", "application/json");
+      request.body = JSON.stringify(body);
+    }
     const response = await app.request(path, {
-      method,
-      headers: {
-        "Idempotency-Key": RETRY_ID,
-        ...(body === undefined ? {} : { "content-type": "application/json" }),
-      },
-      ...(body === undefined ? {} : {
-        body: JSON.stringify(body),
-      }),
+      ...request,
     });
 
     expect(response.status).toBe(202);
@@ -1055,7 +1139,9 @@ describe("Companions Runtime v2 API", () => {
       companion_id: COMPANION_ID,
       name: "CI failed on main",
       prompt: "Investigate the failing workflow.",
-      provider: "github",
+      provider: "github" as const,
+      target: { repo: "acme/widgets", events: ["workflow_run"] },
+      registration_status: "registered" as const,
       enabled: true,
       webhook_url: `http://127.0.0.1:3000/v1/hooks/triggers/${TRIGGER_ID}/${TRIGGER_SECRET}`,
       last_fired_at: null,
@@ -1085,6 +1171,7 @@ describe("Companions Runtime v2 API", () => {
         name: trigger.name,
         prompt: trigger.prompt,
         provider: trigger.provider,
+        target: trigger.target,
         enabled: true,
       }),
     );
@@ -1256,7 +1343,12 @@ describe("Companion trigger webhook", () => {
     COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS: "example.test",
   }) {
     const app = new Hono<{ Variables: ApiVariables }>();
-    registerCompanionTriggerWebhookRoutes(app, env);
+    registerCompanionTriggerWebhookRoutes(app, env, {
+      jsonError: contextMocks.jsonError,
+      getCompanionTriggerForWebhook: coreMocks.getCompanionTriggerForWebhook,
+      fireCompanionTrigger: coreMocks.fireCompanionTrigger,
+      failCompanionTriggerFire: coreMocks.failCompanionTriggerFire,
+    });
     return app;
   }
 
@@ -1279,11 +1371,10 @@ describe("Companion trigger webhook", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     // The webhook path is pre-session: no actor, no tenant resolution, only the URL secret.
-    contextMocks.jsonError.mockImplementation((_context, error: unknown, status: number) =>
-      Response.json(
-        { ok: false, error: error instanceof Error ? error.message : String(error) },
-        { status },
-      ));
+    contextMocks.jsonError.mockImplementation((_context, error, status = 400) => {
+      const message = error instanceof Error ? error.message : String(error);
+      return Response.json({ ok: false, error: message }, { status });
+    });
     coreMocks.getCompanionTriggerForWebhook.mockResolvedValue(webhookRow);
     coreMocks.fireCompanionTrigger.mockResolvedValue({
       outcome: "fired",

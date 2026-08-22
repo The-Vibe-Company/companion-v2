@@ -10,8 +10,6 @@ import {
   type DuplicateCleanup,
   type DuplicateCleanupStatus,
   type LeaseFence,
-  type McpOauthCasResult,
-  type McpOauthEnvelope,
   type RuntimeAuthorization,
   type RuntimeCheckpointInput,
   type RuntimeClaim,
@@ -72,6 +70,10 @@ export interface RuntimeStore {
     fence: LeaseFence,
     leaseSeconds: typeof RUNTIME_LEASE_SECONDS,
   ): Promise<{ token: string; expiresAt: Date } | null>;
+  mintMcpBrokerToken(
+    fence: LeaseFence,
+    leaseSeconds: typeof RUNTIME_LEASE_SECONDS,
+  ): Promise<{ token: string; expiresAt: Date } | null>;
   recordMaterialSnapshot(fence: LeaseFence, input: {
     clientSurface: ClientSurface;
     materialExpiresAt: Date | null;
@@ -115,20 +117,29 @@ export interface RuntimeStore {
     nextStatus: DuplicateCleanupStatus;
     providerOperationId?: string;
   }): Promise<DuplicateCleanup | null>;
-  casMcpOauth(fence: LeaseFence, input: {
-    accountId: string;
-    expectedGeneration: string;
-    nextGeneration: string;
-    envelope: McpOauthEnvelope;
-  }): Promise<McpOauthCasResult | null>;
   settle(fence: LeaseFence, input: RuntimeSettlementInput): Promise<boolean>;
   deferDelete(fence: LeaseFence): Promise<boolean>;
   release(fence: LeaseFence): Promise<boolean>;
 }
 
 /** Structural subset of `postgres.Sql`; useful for tests and avoids owning connection lifecycle. */
+export type RuntimeSqlRow = RuntimeWorkMaterial["providerMaterial"][number];
+type RuntimeSqlValue = RuntimeSqlRow[keyof RuntimeSqlRow];
+
+interface RuntimeEphemeralToken {
+  token: string;
+  expiresAt: Date;
+}
+
+interface RuntimeAttemptTerminalProjection {
+  checkpoint: "agent_settled" | "process_exited";
+  eventCursor: bigint;
+  hasVisibleOutput: boolean;
+  outputsHarvested: boolean;
+}
+
 export interface RuntimeSqlClient {
-  unsafe<T extends Record<string, unknown>[]>(query: string, parameters?: unknown[]): Promise<T>;
+  unsafe<T extends RuntimeSqlRow[]>(query: string, parameters?: unknown[]): Promise<T>;
 }
 
 export class RuntimeStoreSerializationError extends Error {
@@ -169,10 +180,9 @@ export class RuntimeStoreIndeterminateError extends Error {
   }
 }
 
-function sqlState(error: unknown): string | undefined {
-  if (!error || typeof error !== "object") return undefined;
-  const value = (error as { code?: unknown }).code;
-  return typeof value === "string" ? value : undefined;
+function sqlState(error: RuntimeSqlValue): string | undefined {
+  const row = objectValue(error);
+  return row === null ? undefined : stringValue(row.code) ?? undefined;
 }
 
 async function mapped<T>(operation: () => Promise<T>, mutating = false): Promise<T> {
@@ -193,24 +203,24 @@ async function mapped<T>(operation: () => Promise<T>, mutating = false): Promise
   }
 }
 
-function one(rows: Record<string, unknown>[], _name: string): Record<string, unknown> {
+function one(rows: RuntimeSqlRow[], _name: string): RuntimeSqlRow {
   if (rows.length !== 1 || !rows[0]) throw new RuntimeStoreContractError();
   return rows[0];
 }
 
-function nullableBigintResult(rows: Record<string, unknown>[], key: string): bigint | null {
+function nullableBigintResult(rows: RuntimeSqlRow[], key: string): bigint | null {
   const row = one(rows, key);
-  const value = row[key];
+  const value = stringValue(row[key]);
   if (value === null) return null;
-  if (typeof value !== "string" || !/^(0|[1-9][0-9]*)$/.test(value)) {
+  if (!/^(0|[1-9][0-9]*)$/.test(value)) {
     throw new RuntimeStoreContractError();
   }
   return BigInt(value);
 }
 
-function booleanResult(rows: Record<string, unknown>[], key: string): boolean {
-  const value = one(rows, key)[key];
-  if (typeof value !== "boolean") throw new RuntimeStoreContractError();
+function booleanResult(rows: RuntimeSqlRow[], key: string): boolean {
+  const value = booleanValue(one(rows, key)[key]);
+  if (value === null) throw new RuntimeStoreContractError();
   return value;
 }
 
@@ -226,27 +236,61 @@ const ATTACHMENT_STORAGE_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9/._-]{0,511}$/;
  */
 const ATTACHMENT_CONTENT_TYPES = new Set<string>(COMPANION_ATTACHMENT_MIME_TYPES);
 
-function nullableText(row: Record<string, unknown>, key: string): string | null {
-  const value = row[key];
-  if (value === null) return null;
-  if (typeof value !== "string" || /[\r\n]/.test(value) || value.length === 0) {
+function stringValue(value: RuntimeSqlValue): string | null {
+  const text = String(value);
+  return value === text ? text : null;
+}
+
+function booleanValue(value: RuntimeSqlValue): boolean | null {
+  if (value === true) return true;
+  if (value === false) return false;
+  return null;
+}
+
+function numberValue(value: RuntimeSqlValue): number | null {
+  return Number.isSafeInteger(value) ? Number(value) : null;
+}
+
+function arrayValue(value: RuntimeSqlValue): RuntimeSqlValue[] | null {
+  return Array.isArray(value) ? value : null;
+}
+
+function objectValue(value: RuntimeSqlValue): RuntimeSqlRow | null {
+  if (!value || Array.isArray(value) || Object.prototype.toString.call(value) !== "[object Object]") {
+    return null;
+  }
+  // SAFETY: The object-tag check above excludes primitives and arrays at this SQL JSON boundary.
+  return value as RuntimeSqlRow;
+}
+
+function nullableText(row: RuntimeSqlRow, key: string): string | null {
+  const raw = row[key];
+  if (raw === null) return null;
+  const value = stringValue(raw);
+  if (value === null || /[\r\n]/.test(value) || value.length === 0) {
     throw new RuntimeStoreContractError();
   }
   return value;
 }
 
-function nullableUuidText(row: Record<string, unknown>, key: string): string | null {
+function nullableUuidText(row: RuntimeSqlRow, key: string): string | null {
   const value = nullableText(row, key);
   if (value !== null && !UUID_PATTERN.test(value)) throw new RuntimeStoreContractError();
   return value;
 }
 
-function objectArray(row: Record<string, unknown>, key: string): Record<string, unknown>[] {
-  const value = row[key];
-  if (!Array.isArray(value) || value.some((entry) => !entry || typeof entry !== "object" || Array.isArray(entry))) {
+function objectArray(row: RuntimeSqlRow, key: string): RuntimeSqlRow[] {
+  const value = arrayValue(row[key]);
+  if (value === null) {
     throw new RuntimeStoreContractError();
   }
-  return value as Record<string, unknown>[];
+  const objects: RuntimeSqlRow[] = [];
+  for (const entry of value) {
+    const object = objectValue(entry);
+    if (object === null) throw new RuntimeStoreContractError();
+    objects.push(object);
+  }
+  return objects;
 }
 
 /**
@@ -254,23 +298,21 @@ function objectArray(row: Record<string, unknown>, key: string): Record<string, 
  * runtime writes these names into Box paths and into the prompt that tells Pi where to find them:
  * whatever crosses that boundary is validated on this side of it too, not merely trusted.
  */
-function decodeAttachments(row: Record<string, unknown>): RuntimeAttachment[] {
-  const value = row.attachments;
-  if (!Array.isArray(value) || value.length > COMPANION_MESSAGE_ATTACHMENT_MAX_COUNT) {
+function decodeAttachments(row: RuntimeSqlRow): RuntimeAttachment[] {
+  const value = arrayValue(row.attachments);
+  if (value === null || value.length > COMPANION_MESSAGE_ATTACHMENT_MAX_COUNT) {
     throw new RuntimeStoreContractError();
   }
   return value.map((entry, index) => {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-      throw new RuntimeStoreContractError();
-    }
-    const attachment = entry as Record<string, unknown>;
+    const attachment = objectValue(entry);
+    if (attachment === null) throw new RuntimeStoreContractError();
     const id = nullableUuidText(attachment, "id");
     const storageKey = nullableText(attachment, "storage_key");
     const contentType = nullableText(attachment, "content_type");
     const sha256 = nullableText(attachment, "sha256");
     const filename = nullableText(attachment, "filename");
-    const byteSize = attachment.byte_size;
-    const position = attachment.position;
+    const byteSize = numberValue(attachment.byte_size);
+    const position = numberValue(attachment.position);
     if (
       id === null
       || storageKey === null
@@ -281,16 +323,16 @@ function decodeAttachments(row: Record<string, unknown>): RuntimeAttachment[] {
       || !SHA256_PATTERN.test(sha256)
       || filename === null
       || !COMPANION_ATTACHMENT_FILENAME_PATTERN.test(filename)
-      || !Number.isSafeInteger(byteSize)
-      || (byteSize as number) < 1
-      || (byteSize as number) > COMPANION_ATTACHMENT_MAX_BYTES
+      || byteSize === null
+      || byteSize < 1
+      || byteSize > COMPANION_ATTACHMENT_MAX_BYTES
       || position !== index
     ) throw new RuntimeStoreContractError();
     return {
       id,
       storageKey,
       contentType,
-      byteSize: byteSize as number,
+      byteSize,
       sha256,
       filename,
       position: index,
@@ -298,15 +340,17 @@ function decodeAttachments(row: Record<string, unknown>): RuntimeAttachment[] {
   });
 }
 
-function decodeMaterial(row: Record<string, unknown>): RuntimeWorkMaterial {
-  if (typeof row.credential_snapshot_matches !== "boolean") {
+function decodeMaterial(row: RuntimeSqlRow): RuntimeWorkMaterial {
+  const credentialSnapshotMatches = booleanValue(row.credential_snapshot_matches);
+  if (credentialSnapshotMatches === null) {
     throw new RuntimeStoreContractError();
   }
-  if (!row.credential_snapshot_matches) {
+  if (!credentialSnapshotMatches) {
     throw new RuntimeCredentialSnapshotChangedError();
   }
-  const prompt = row.prompt_text;
-  if (prompt !== null && (typeof prompt !== "string" || prompt.length > 1_000_000)) {
+  const rawPrompt = row.prompt_text;
+  const prompt = rawPrompt === null ? null : stringValue(rawPrompt);
+  if (rawPrompt !== null && (prompt === null || prompt.length > 1_000_000)) {
     throw new RuntimeStoreContractError();
   }
   const requestKind = row.decision_request_kind;
@@ -320,18 +364,22 @@ function decodeMaterial(row: Record<string, unknown>): RuntimeWorkMaterial {
   ) {
     throw new RuntimeStoreContractError();
   }
-  const decisionPayload = row.decision_response_payload;
-  if (decisionPayload !== null && (
-    !decisionPayload
-    || typeof decisionPayload !== "object"
-    || Array.isArray(decisionPayload)
-  )) throw new RuntimeStoreContractError();
-  const modelInput = row.model_input;
-  if (modelInput !== null && (
-    !Array.isArray(modelInput)
-    || modelInput.some((item) => item !== "text" && item !== "image")
-  )) throw new RuntimeStoreContractError();
-  if (typeof row.has_visible_output !== "boolean") throw new RuntimeStoreContractError();
+  const rawDecisionPayload = row.decision_response_payload;
+  const decisionPayload = rawDecisionPayload === null ? null : objectValue(rawDecisionPayload);
+  if (rawDecisionPayload !== null && decisionPayload === null) throw new RuntimeStoreContractError();
+  const rawModelInput = row.model_input;
+  const modelInput: RuntimeWorkMaterial["modelInput"] = [];
+  if (rawModelInput !== null) {
+    const modelInputValues = arrayValue(rawModelInput);
+    if (modelInputValues === null) throw new RuntimeStoreContractError();
+    for (const item of modelInputValues) {
+      if (item === "text") modelInput.push("text");
+      else if (item === "image") modelInput.push("image");
+      else throw new RuntimeStoreContractError();
+    }
+  }
+  const hasVisibleOutput = booleanValue(row.has_visible_output);
+  if (hasVisibleOutput === null) throw new RuntimeStoreContractError();
   const messageEventId = nullableText(row, "message_event_id");
   if (messageEventId !== null && !MESSAGE_EVENT_ID_PATTERN.test(messageEventId)) {
     throw new RuntimeStoreContractError();
@@ -340,20 +388,20 @@ function decodeMaterial(row: Record<string, unknown>): RuntimeWorkMaterial {
     turnId: nullableUuidText(row, "turn_id"),
     attemptId: nullableUuidText(row, "attempt_id"),
     messageEventId,
-    promptText: prompt as string | null,
-    decisionRequestKind: requestKind as RuntimeWorkMaterial["decisionRequestKind"],
-    decisionResponsePayload: decisionPayload as RuntimeWorkMaterial["decisionResponsePayload"],
+    promptText: prompt,
+    decisionRequestKind: requestKind,
+    decisionResponsePayload: decisionPayload,
     providerMaterial: objectArray(row, "provider_material"),
     skillMaterial: objectArray(row, "skill_material"),
     mcpMaterial: objectArray(row, "mcp_material"),
-    modelInput: modelInput as RuntimeWorkMaterial["modelInput"],
-    hasVisibleOutput: row.has_visible_output,
+    modelInput: rawModelInput === null ? null : modelInput,
+    hasVisibleOutput,
     attachments: decodeAttachments(row),
     configCatalog: null,
   };
 }
 
-function decodeSkillUpdateMaterial(row: Record<string, unknown>): RuntimeSkillUpdateMaterial {
+function decodeSkillUpdateMaterial(row: RuntimeSqlRow): RuntimeSkillUpdateMaterial {
   const revision = row.target_skills_revision;
   const requiredRevision = row.required_skills_revision;
   const selected = row.selected_skill_ids;
@@ -384,112 +432,124 @@ function decodeSkillUpdateMaterial(row: Record<string, unknown>): RuntimeSkillUp
   };
 }
 
-function decodeConfigCatalog(row: Record<string, unknown>): RuntimeConfigCatalog {
+function decodeConfigCatalog(row: RuntimeSqlRow): RuntimeConfigCatalog {
   const catalog = row.catalog;
-  if (!catalog || typeof catalog !== "object" || Array.isArray(catalog)) {
-    throw new RuntimeStoreContractError();
-  }
-  const value = catalog as Record<string, unknown>;
+  const value = objectValue(catalog);
+  if (value === null) throw new RuntimeStoreContractError();
   const companion = value.companion;
   const skills = value.skills;
   const plugins = value.plugins;
   const note = value.note;
+  const companionRecord = objectValue(companion);
+  const skillValues = arrayValue(skills);
+  const pluginValues = arrayValue(plugins);
+  const noteText = stringValue(note);
   if (
-    !companion || typeof companion !== "object" || Array.isArray(companion)
-    || !Array.isArray(skills) || skills.length > 100
-    || !Array.isArray(plugins) || plugins.length > 100
-    || typeof note !== "string"
+    companionRecord === null
+    || skillValues === null || skillValues.length > 100
+    || pluginValues === null || pluginValues.length > 100
+    || noteText === null
   ) {
     throw new RuntimeStoreContractError();
   }
-  const companionRecord = companion as Record<string, unknown>;
-  for (const skill of skills) {
-    if (
-      !skill || typeof skill !== "object" || Array.isArray(skill)
-      || typeof (skill as Record<string, unknown>).id !== "string"
-      || typeof (skill as Record<string, unknown>).slug !== "string"
-      || typeof (skill as Record<string, unknown>).name !== "string"
-      || typeof (skill as Record<string, unknown>).description !== "string"
-      || typeof (skill as Record<string, unknown>).selected !== "boolean"
-    ) throw new RuntimeStoreContractError();
+  const decodedSkills: RuntimeConfigCatalog["skills"] = [];
+  for (const skillValue of skillValues) {
+    const skill = objectValue(skillValue);
+    const id = skill === null ? null : stringValue(skill.id);
+    const slug = skill === null ? null : stringValue(skill.slug);
+    const name = skill === null ? null : stringValue(skill.name);
+    const description = skill === null ? null : stringValue(skill.description);
+    const selected = skill === null ? null : booleanValue(skill.selected);
+    if (id === null || slug === null || name === null || description === null || selected === null) {
+      throw new RuntimeStoreContractError();
+    }
+    decodedSkills.push({ id, slug, name, description, selected });
   }
-  for (const plugin of plugins) {
-    if (
-      !plugin || typeof plugin !== "object" || Array.isArray(plugin)
-      || typeof (plugin as Record<string, unknown>).id !== "string"
-      || typeof (plugin as Record<string, unknown>).label !== "string"
-      || typeof (plugin as Record<string, unknown>).provider !== "string"
-      || typeof (plugin as Record<string, unknown>).transport !== "string"
-      || typeof (plugin as Record<string, unknown>).selected !== "boolean"
-    ) throw new RuntimeStoreContractError();
+  const decodedPlugins: RuntimeConfigCatalog["plugins"] = [];
+  for (const pluginValue of pluginValues) {
+    const plugin = objectValue(pluginValue);
+    const id = plugin === null ? null : stringValue(plugin.id);
+    const label = plugin === null ? null : stringValue(plugin.label);
+    const provider = plugin === null ? null : stringValue(plugin.provider);
+    const transport = plugin === null ? null : stringValue(plugin.transport);
+    const selected = plugin === null ? null : booleanValue(plugin.selected);
+    if (id === null || label === null || provider === null || transport === null || selected === null) {
+      throw new RuntimeStoreContractError();
+    }
+    decodedPlugins.push({ id, label, provider, transport, selected });
   }
   return {
     companion: {
-      model_id: typeof companionRecord.model_id === "string" ? companionRecord.model_id : null,
-      provider_id: typeof companionRecord.provider_id === "string" ? companionRecord.provider_id : null,
-      persona: typeof companionRecord.persona === "string" ? companionRecord.persona : null,
+      model_id: stringValue(companionRecord.model_id),
+      provider_id: stringValue(companionRecord.provider_id),
+      persona: stringValue(companionRecord.persona),
     },
-    skills: skills as RuntimeConfigCatalog["skills"],
-    plugins: plugins as RuntimeConfigCatalog["plugins"],
-    note,
+    skills: decodedSkills,
+    plugins: decodedPlugins,
+    note: noteText,
   };
 }
 
-function decodeHubToken(row: Record<string, unknown>): { token: string; expiresAt: Date } {
+function decodeEphemeralToken(
+  row: RuntimeSqlRow,
+  prefix: "cmp_pat_" | "cmp_mcp_",
+): RuntimeEphemeralToken {
   const token = row.token;
   const expiresAt = row.expires_at;
+  const tokenText = stringValue(token);
   if (
-    typeof token !== "string" || !token.startsWith("cmp_pat_") || token.length > 80
+    tokenText === null || !tokenText.startsWith(prefix) || tokenText.length > 80
     || !(expiresAt instanceof Date) || !Number.isFinite(expiresAt.getTime())
   ) {
     throw new RuntimeStoreContractError();
   }
-  return { token, expiresAt };
+  return { token: tokenText, expiresAt };
 }
 
-function decodeAttemptTerminalProjection(row: Record<string, unknown>): {
-  checkpoint: "agent_settled" | "process_exited";
-  eventCursor: bigint;
-  hasVisibleOutput: boolean;
-  outputsHarvested: boolean;
-} {
+function decodeAttemptTerminalProjection(row: RuntimeSqlRow): RuntimeAttemptTerminalProjection {
   const checkpoint = row.checkpoint;
   const eventCursor = row.event_cursor;
   const hasVisibleOutput = row.has_visible_output;
   const outputsHarvested = row.outputs_harvested;
+  const eventCursorText = stringValue(eventCursor);
+  const visible = booleanValue(hasVisibleOutput);
+  const harvested = booleanValue(outputsHarvested);
   if (
     (checkpoint !== "agent_settled" && checkpoint !== "process_exited")
-    || typeof eventCursor !== "string"
-    || !/^[1-9][0-9]*$/.test(eventCursor)
-    || typeof hasVisibleOutput !== "boolean"
-    || typeof outputsHarvested !== "boolean"
+    || eventCursorText === null
+    || !/^[1-9][0-9]*$/.test(eventCursorText)
+    || visible === null
+    || harvested === null
   ) throw new RuntimeStoreContractError();
-  return { checkpoint, eventCursor: BigInt(eventCursor), hasVisibleOutput, outputsHarvested };
+  return { checkpoint, eventCursor: BigInt(eventCursorText), hasVisibleOutput: visible, outputsHarvested: harvested };
 }
 
-function duplicateCleanup(row: Record<string, unknown>): DuplicateCleanup {
+function duplicateCleanup(row: RuntimeSqlRow): DuplicateCleanup {
   const boxId = row.box_id;
   const status = row.status;
   const sequence = row.checkpoint_sequence;
+  const boxIdText = stringValue(boxId);
+  const statusText = stringValue(status);
+  const sequenceText = stringValue(sequence);
   if (
-    typeof boxId !== "string"
-    || !BOX_ID_PATTERN.test(boxId)
+    boxIdText === null
+    || !BOX_ID_PATTERN.test(boxIdText)
     || (
-      status !== "pending"
-      && status !== "delete_requested"
-      && status !== "waiting_deleted"
-      && status !== "deleted"
-      && status !== "already_deleted"
-      && status !== "blocked"
+      statusText !== "pending"
+      && statusText !== "delete_requested"
+      && statusText !== "waiting_deleted"
+      && statusText !== "deleted"
+      && statusText !== "already_deleted"
+      && statusText !== "blocked"
     )
-    || typeof sequence !== "string"
-    || !/^(0|[1-9][0-9]*)$/.test(sequence)
+    || sequenceText === null
+    || !/^(0|[1-9][0-9]*)$/.test(sequenceText)
   ) throw new RuntimeStoreContractError();
   return {
-    boxId,
-    status,
+    boxId: boxIdText,
+    status: statusText,
     providerOperationId: nullableText(row, "provider_operation_id"),
-    checkpointSequence: BigInt(sequence),
+    checkpointSequence: BigInt(sequenceText),
   };
 }
 
@@ -596,7 +656,7 @@ export class PostgresRuntimeStore implements RuntimeStore {
 
   async gateStatus(): Promise<GateStatus> {
     return await mapped(async () => {
-      const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
+      const rows = await this.sql.unsafe<RuntimeSqlRow[]>(`
         SELECT enabled, gate_epoch::text AS gate_epoch, updated_at
         FROM public.companion_runtime_gate_status()
       `);
@@ -606,7 +666,7 @@ export class PostgresRuntimeStore implements RuntimeStore {
 
   async disable(expectedGateEpoch: bigint, actorId: string): Promise<GateStatus> {
     return await mapped(async () => {
-      const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
+      const rows = await this.sql.unsafe<RuntimeSqlRow[]>(`
         SELECT enabled, gate_epoch::text AS gate_epoch, updated_at
         FROM public.companion_runtime_disable($1::bigint, $2::text)
       `, [expectedGateEpoch.toString(), actorId]);
@@ -621,10 +681,10 @@ export class PostgresRuntimeStore implements RuntimeStore {
     gateEpoch: bigint;
   }): Promise<RuntimeClaim[]> {
     return await mapped(async () => {
-      const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
+      const rows = await this.sql.unsafe<RuntimeSqlRow[]>(`
         SELECT ${CLAIM_COLUMNS}
         FROM public.companion_runtime_claim_work(
-          $1::text, $2::integer, $3::integer, $4::bigint, 1::integer, 1::integer
+          $1::text, $2::integer, $3::integer, $4::bigint, 2::integer, 1::integer
         )
       `, [input.executorId, input.limit, input.leaseSeconds, input.gateEpoch.toString()]);
       return rows.map(decodeRuntimeClaimRow);
@@ -636,7 +696,7 @@ export class PostgresRuntimeStore implements RuntimeStore {
     leaseSeconds: typeof RUNTIME_LEASE_SECONDS,
   ): Promise<RuntimeAuthorization | null> {
     return await mapped(async () => {
-      const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
+      const rows = await this.sql.unsafe<RuntimeSqlRow[]>(`
         SELECT ${AUTHORIZATION_COLUMNS}
         FROM public.companion_runtime_renew_and_authorize(
           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
@@ -650,7 +710,7 @@ export class PostgresRuntimeStore implements RuntimeStore {
 
   async checkpoint(fence: LeaseFence, input: RuntimeCheckpointInput): Promise<bigint | null> {
     return await mapped(async () => {
-      const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
+      const rows = await this.sql.unsafe<RuntimeSqlRow[]>(`
         SELECT public.companion_runtime_checkpoint(
           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
           $6::text, $7::public.companion_runtime_work_kind, $8::uuid,
@@ -676,7 +736,7 @@ export class PostgresRuntimeStore implements RuntimeStore {
 
   async observeInstance(fence: LeaseFence, input: RuntimeObservationInput): Promise<bigint | null> {
     return await mapped(async () => {
-      const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
+      const rows = await this.sql.unsafe<RuntimeSqlRow[]>(`
         SELECT public.companion_runtime_observe_instance(
           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
           $6::text, $7::public.companion_runtime_work_kind, $8::uuid,
@@ -707,7 +767,7 @@ export class PostgresRuntimeStore implements RuntimeStore {
     leaseSeconds: typeof RUNTIME_LEASE_SECONDS,
   ): Promise<RuntimeWorkMaterial | null> {
     return await mapped(async () => {
-      const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
+      const rows = await this.sql.unsafe<RuntimeSqlRow[]>(`
         SELECT turn_id, attempt_id, message_event_id, prompt_text, decision_request_kind,
                decision_response_payload, provider_material, skill_material, mcp_material,
                model_input, has_visible_output, attachments, credential_snapshot_matches
@@ -790,7 +850,7 @@ export class PostgresRuntimeStore implements RuntimeStore {
     leaseSeconds: typeof RUNTIME_LEASE_SECONDS,
   ): Promise<RuntimeConfigCatalog | null> {
     return await mapped(async () => {
-      const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
+      const rows = await this.sql.unsafe<RuntimeSqlRow[]>(`
         SELECT catalog
         FROM public.companion_runtime_get_config_catalog(
           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
@@ -807,7 +867,7 @@ export class PostgresRuntimeStore implements RuntimeStore {
     leaseSeconds: typeof RUNTIME_LEASE_SECONDS,
   ): Promise<{ token: string; expiresAt: Date } | null> {
     return await mapped(async () => {
-      const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
+      const rows = await this.sql.unsafe<RuntimeSqlRow[]>(`
         SELECT token, expires_at
         FROM public.companion_runtime_mint_hub_token(
           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
@@ -815,7 +875,24 @@ export class PostgresRuntimeStore implements RuntimeStore {
         )
       `, [...fenceParameters(fence), leaseSeconds]);
       if (rows.length === 0) return null;
-      return decodeHubToken(one(rows, "hub token"));
+      return decodeEphemeralToken(one(rows, "hub token"), "cmp_pat_");
+    }, true);
+  }
+
+  async mintMcpBrokerToken(
+    fence: LeaseFence,
+    leaseSeconds: typeof RUNTIME_LEASE_SECONDS,
+  ): Promise<{ token: string; expiresAt: Date } | null> {
+    return await mapped(async () => {
+      const rows = await this.sql.unsafe<RuntimeSqlRow[]>(`
+        SELECT token, expires_at
+        FROM public.companion_runtime_mint_mcp_broker_token(
+          $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
+          $6::text, $7::public.companion_runtime_work_kind, $8::uuid, $9::integer
+        )
+      `, [...fenceParameters(fence), leaseSeconds]);
+      if (rows.length === 0) return null;
+      return decodeEphemeralToken(one(rows, "MCP broker token"), "cmp_mcp_");
     }, true);
   }
 
@@ -824,7 +901,7 @@ export class PostgresRuntimeStore implements RuntimeStore {
     materialExpiresAt: Date | null;
   }): Promise<true | null> {
     return await mapped(async () => {
-      const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
+      const rows = await this.sql.unsafe<RuntimeSqlRow[]>(`
         SELECT public.companion_runtime_record_material_snapshot(
           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
           $6::text, $7::public.companion_runtime_work_kind, $8::uuid,
@@ -832,8 +909,9 @@ export class PostgresRuntimeStore implements RuntimeStore {
         ) AS recorded
       `, [...fenceParameters(fence), input.clientSurface, input.materialExpiresAt]);
       const recorded = one(rows, "record material snapshot").recorded;
-      if (typeof recorded !== "boolean") throw new RuntimeStoreContractError();
-      return recorded ? true : null;
+      const recordedValue = booleanValue(recorded);
+      if (recordedValue === null) throw new RuntimeStoreContractError();
+      return recordedValue ? true : null;
     }, true);
   }
 
@@ -841,15 +919,16 @@ export class PostgresRuntimeStore implements RuntimeStore {
     piInvocationId: string;
   }): Promise<true | null> {
     return await mapped(async () => {
-      const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
+      const rows = await this.sql.unsafe<RuntimeSqlRow[]>(`
         SELECT public.companion_runtime_publish_material_snapshot(
           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
           $6::text, $7::public.companion_runtime_work_kind, $8::uuid, $9::text
         ) AS published
       `, [...fenceParameters(fence), input.piInvocationId]);
       const published = one(rows, "publish material snapshot").published;
-      if (typeof published !== "boolean") throw new RuntimeStoreContractError();
-      return published ? true : null;
+      const publishedValue = booleanValue(published);
+      if (publishedValue === null) throw new RuntimeStoreContractError();
+      return publishedValue ? true : null;
     }, true);
   }
 
@@ -860,7 +939,7 @@ export class PostgresRuntimeStore implements RuntimeStore {
     outputsHarvested: boolean;
   } | null> {
     return await mapped(async () => {
-      const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
+      const rows = await this.sql.unsafe<RuntimeSqlRow[]>(`
         SELECT checkpoint, event_cursor::text AS event_cursor, has_visible_output, outputs_harvested
         FROM public.companion_runtime_get_attempt_terminal_projection(
           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
@@ -887,7 +966,7 @@ export class PostgresRuntimeStore implements RuntimeStore {
         filename: attachment.filename,
         position,
       }));
-      const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
+      const rows = await this.sql.unsafe<RuntimeSqlRow[]>(`
         SELECT recorded, has_visible_output
         FROM public.companion_runtime_record_attempt_outputs(
           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
@@ -897,12 +976,12 @@ export class PostgresRuntimeStore implements RuntimeStore {
       `, [...fenceParameters(fence), attachments, input.activityAt]);
       if (rows.length === 0) return null;
       const row = one(rows, "attempt outputs");
-      if (
-        !Number.isSafeInteger(row.recorded)
-        || (row.recorded as number) < 0
-        || typeof row.has_visible_output !== "boolean"
-      ) throw new RuntimeStoreContractError();
-      return { recorded: row.recorded as number, hasVisibleOutput: row.has_visible_output };
+      const recorded = numberValue(row.recorded);
+      const hasVisibleOutput = booleanValue(row.has_visible_output);
+      if (recorded === null || recorded < 0 || hasVisibleOutput === null) {
+        throw new RuntimeStoreContractError();
+      }
+      return { recorded, hasVisibleOutput };
     }, true);
   }
 
@@ -925,7 +1004,7 @@ export class PostgresRuntimeStore implements RuntimeStore {
         ...event,
         sequence: event.sequence.toString(),
       }));
-      const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
+      const rows = await this.sql.unsafe<RuntimeSqlRow[]>(`
         SELECT checkpoint_sequence::text AS checkpoint_sequence,
                event_cursor::text AS event_cursor,
                has_visible_output
@@ -948,15 +1027,15 @@ export class PostgresRuntimeStore implements RuntimeStore {
       ]);
       if (rows.length === 0) return null;
       const row = one(rows, "event projection");
-      const checkpointSequence = row.checkpoint_sequence;
-      const eventCursor = row.event_cursor;
-      const hasVisibleOutput = row.has_visible_output;
+      const checkpointSequence = stringValue(row.checkpoint_sequence);
+      const eventCursor = stringValue(row.event_cursor);
+      const hasVisibleOutput = booleanValue(row.has_visible_output);
       if (
-        typeof checkpointSequence !== "string"
+        checkpointSequence === null
         || !/^[1-9][0-9]*$/.test(checkpointSequence)
-        || typeof eventCursor !== "string"
+        || eventCursor === null
         || !/^(0|[1-9][0-9]*)$/.test(eventCursor)
-        || typeof hasVisibleOutput !== "boolean"
+        || hasVisibleOutput === null
       ) throw new RuntimeStoreContractError();
       return {
         checkpointSequence: BigInt(checkpointSequence),
@@ -971,7 +1050,7 @@ export class PostgresRuntimeStore implements RuntimeStore {
     boxIds: string[],
   ): Promise<DuplicateCleanup[]> {
     return await mapped(async () => {
-      const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
+      const rows = await this.sql.unsafe<RuntimeSqlRow[]>(`
         SELECT box_id, status, provider_operation_id,
                checkpoint_sequence::text AS checkpoint_sequence
         FROM public.companion_runtime_register_duplicate_cleanups(
@@ -990,7 +1069,7 @@ export class PostgresRuntimeStore implements RuntimeStore {
     providerOperationId?: string;
   }): Promise<DuplicateCleanup | null> {
     return await mapped(async () => {
-      const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
+      const rows = await this.sql.unsafe<RuntimeSqlRow[]>(`
         SELECT box_id, status, provider_operation_id,
                checkpoint_sequence::text AS checkpoint_sequence
         FROM public.companion_runtime_checkpoint_duplicate_cleanup(
@@ -1010,51 +1089,9 @@ export class PostgresRuntimeStore implements RuntimeStore {
     }, true);
   }
 
-  async casMcpOauth(fence: LeaseFence, input: {
-    accountId: string;
-    expectedGeneration: string;
-    nextGeneration: string;
-    envelope: McpOauthEnvelope;
-  }): Promise<McpOauthCasResult | null> {
-    return await mapped(async () => {
-      const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
-        SELECT updated, credential_generation
-        FROM public.companion_runtime_cas_mcp_oauth(
-          $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
-          $6::text, $7::public.companion_runtime_work_kind, $8::uuid,
-          $9::uuid, $10::uuid, $11::uuid,
-          $12::text, $13::text, $14::text, $15::text, $16::text, $17::text, $18::text
-        )
-      `, [
-        ...fenceParameters(fence),
-        input.accountId,
-        input.expectedGeneration,
-        input.nextGeneration,
-        input.envelope.ciphertext,
-        input.envelope.iv,
-        input.envelope.authTag,
-        input.envelope.wrappedDek,
-        input.envelope.wrapIv,
-        input.envelope.wrapAuthTag,
-        input.envelope.keyId,
-      ]);
-      if (rows.length === 0) return null;
-      const row = one(rows, "MCP OAuth CAS");
-      if (
-        typeof row.updated !== "boolean"
-        || typeof row.credential_generation !== "string"
-        || !UUID_PATTERN.test(row.credential_generation)
-      ) throw new RuntimeStoreContractError();
-      return {
-        updated: row.updated,
-        credentialGeneration: row.credential_generation,
-      };
-    }, true);
-  }
-
   async settle(fence: LeaseFence, input: RuntimeSettlementInput): Promise<boolean> {
     return await mapped(async () => {
-      const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
+      const rows = await this.sql.unsafe<RuntimeSqlRow[]>(`
         SELECT public.companion_runtime_settle(
           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
           $6::text, $7::public.companion_runtime_work_kind, $8::uuid,
@@ -1074,7 +1111,7 @@ export class PostgresRuntimeStore implements RuntimeStore {
 
   async release(fence: LeaseFence): Promise<boolean> {
     return await mapped(async () => {
-      const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
+      const rows = await this.sql.unsafe<RuntimeSqlRow[]>(`
         SELECT public.companion_runtime_release_lease(
           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
           $6::text, $7::public.companion_runtime_work_kind, $8::uuid

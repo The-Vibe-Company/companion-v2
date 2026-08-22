@@ -64,6 +64,7 @@ DECLARE
     'companion_runtime_duplicate_cleanups',
     'companion_runtime_event_projections',
     'companion_runtime_desktop_requests',
+    'companion_mcp_broker_tokens',
     'companion_legacy_purge_runs',
     'companion_legacy_purge_targets',
     'companion_message_attachments',
@@ -402,12 +403,12 @@ BEGIN
       companion_runtime_functions := companion_runtime_functions || ARRAY[
         'public.companion_runtime_get_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)'::regprocedure,
         'public.companion_runtime_get_attempt_terminal_projection(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)'::regprocedure,
-        'public.companion_runtime_cas_mcp_oauth(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,uuid,uuid,uuid,text,text,text,text,text,text,text)'::regprocedure,
         'public.companion_runtime_register_duplicate_cleanups(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text[])'::regprocedure,
         'public.companion_runtime_checkpoint_duplicate_cleanup(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text,bigint,public.companion_duplicate_cleanup_status,text)'::regprocedure,
         'public.companion_runtime_authorize_desktop(uuid,uuid,text)'::regprocedure,
         'public.companion_runtime_consume_desktop_request(text,bigint,integer)'::regprocedure,
-        'public.companion_runtime_project_event_batch(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,bigint,text,jsonb,bigint,timestamp with time zone,integer,integer,integer)'::regprocedure
+        'public.companion_runtime_project_event_batch(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,bigint,text,jsonb,bigint,timestamp with time zone,integer,integer,integer)'::regprocedure,
+        'public.companion_runtime_cas_mcp_oauth(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,uuid,uuid,uuid,text,text,text,text,text,text,text)'::regprocedure
       ];
       internal_runtime_functions := internal_runtime_functions || ARRAY[
         'public.companion_runtime_guard_duplicate_cleanup()'::regprocedure,
@@ -563,6 +564,27 @@ BEGIN
     ) IS NOT NULL THEN
       companion_runtime_functions := companion_runtime_functions || ARRAY[
         'public.companion_runtime_mint_hub_token(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)'::regprocedure
+      ];
+    END IF;
+
+    -- 0120 vends a hash-only capability to the Box-local MCP OAuth gateway.
+    IF pg_catalog.to_regprocedure(
+      'public.companion_runtime_mint_mcp_broker_token(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)'
+    ) IS NOT NULL THEN
+      companion_runtime_functions := array_remove(
+        companion_runtime_functions,
+        'public.companion_runtime_cas_mcp_oauth(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,uuid,uuid,uuid,text,text,text,text,text,text,text)'::regprocedure
+      );
+      companion_runtime_functions := companion_runtime_functions || ARRAY[
+        'public.companion_runtime_mint_mcp_broker_token(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)'::regprocedure
+      ];
+      internal_runtime_functions := internal_runtime_functions || ARRAY[
+        'public.companion_runtime_claim_work_material_v1(text,integer,integer,bigint,integer,integer)'::regprocedure,
+        'public.companion_revoke_inactive_mcp_broker_token()'::regprocedure,
+        'public.companion_runtime_cas_mcp_oauth(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,uuid,uuid,uuid,text,text,text,text,text,text,text)'::regprocedure
+      ];
+      companion_api_functions := companion_api_functions || ARRAY[
+        'public.companion_resolve_mcp_broker_token(text)'::regprocedure
       ];
     END IF;
 

@@ -21,6 +21,7 @@ describe("Skills Hub runtime-role grants", () => {
       "companion_operations",
       "companion_decision_deliveries",
       "companion_runtime_leases",
+      "companion_mcp_broker_tokens",
       "companion_routines",
     ]) {
       expect(sql).toContain(`'${table}'`);
@@ -84,6 +85,10 @@ describe("Skills Hub runtime-role grants", () => {
       "companion_runtime_mint_hub_token(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)",
     );
     expect(sql).toContain(
+      "companion_runtime_mint_mcp_broker_token(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)",
+    );
+    expect(sql).toContain("companion_resolve_mcp_broker_token(text)");
+    expect(sql).toContain(
       "companion_runtime_record_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,public.companion_client_surface,timestamp with time zone)",
     );
     expect(sql).toContain(
@@ -100,6 +105,9 @@ describe("Skills Hub runtime-role grants", () => {
     );
     expect(sql).toContain(
       "'public.companion_runtime_claim_work_without_delete_resume_guard(text,integer,integer,bigint,integer)'::regprocedure",
+    );
+    expect(sql).toContain(
+      "'public.companion_runtime_claim_work_material_v1(text,integer,integer,bigint,integer,integer)'::regprocedure",
     );
     expect(sql).toContain("pg_catalog.aclexplode(");
     expect(sql).toContain("acl.grantee <> protected_proc.proowner");

@@ -16,7 +16,27 @@ export interface CompanionMcpAdapterConfig {
     elicitation: false;
     oauthDir: string;
   };
-  mcpServers: Record<string, Record<string, unknown>>;
+  mcpServers: Record<string, CompanionMcpServerConfig>;
+}
+
+type CompanionMcpJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | CompanionMcpJsonObject
+  | CompanionMcpJsonValue[];
+
+interface CompanionMcpJsonObject {
+  [key: string]: CompanionMcpJsonValue;
+}
+
+interface CompanionMcpServerConfig extends CompanionMcpJsonObject {}
+
+export interface CompanionMcpAdapterInjection {
+  config: CompanionMcpAdapterConfig;
+  accounts: CompanionMcpAccountMetadata[];
+  gatewayAccounts: CompanionMcpGatewayAccount[];
 }
 
 export interface CompanionMcpAccountMetadata {
@@ -26,10 +46,25 @@ export interface CompanionMcpAccountMetadata {
   transport: CompanionMcpAccount["transport"];
 }
 
+export interface CompanionStagedMcpAccount {
+  account: CompanionMcpAccount;
+  oauthBroker?: {
+    credentialGeneration: string;
+    github: boolean;
+  };
+}
+
+export interface CompanionMcpGatewayAccount {
+  accountId: string;
+  credentialGeneration: string;
+  upstreamUrl: string;
+  github: boolean;
+}
+
 function adapterName(account: Pick<CompanionMcpAccount, "id" | "label">): string {
   const label = account.label
     .normalize("NFKD")
-    .replace(/[^\x00-\x7F]/g, "")
+    .replace(/[^\p{ASCII}]/gu, "")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
@@ -47,19 +82,26 @@ function environmentReference(envKey: string): string {
  * environment references enter the durable JSON; credential values are inherited from Pi's
  * transient process environment.
  */
-export function buildMcpAdapterInjection(accounts: CompanionMcpAccount[]): {
-  config: CompanionMcpAdapterConfig;
-  accounts: CompanionMcpAccountMetadata[];
-} {
-  const mcpServers: Record<string, Record<string, unknown>> = {};
+export function buildMcpAdapterInjection(
+  stagedAccounts: Array<CompanionStagedMcpAccount | CompanionMcpAccount>,
+): CompanionMcpAdapterInjection {
+  const mcpServers: Record<string, CompanionMcpServerConfig> = {};
   const metadata: CompanionMcpAccountMetadata[] = [];
+  const gatewayAccounts: CompanionMcpGatewayAccount[] = [];
 
-  for (const account of accounts) {
+  for (const candidate of stagedAccounts) {
+    const staged: CompanionStagedMcpAccount = "account" in candidate
+      ? candidate
+      : { account: candidate };
+    const account = staged.account;
     const name = adapterName(account);
     const common = {
       lifecycle: account.lifecycle,
       directTools: account.direct_tools,
     };
+    if (staged.oauthBroker && account.transport !== "http") {
+      throw new Error("OAuth-brokered MCP accounts must use HTTP");
+    }
     mcpServers[name] = account.transport === "stdio"
       ? {
           ...common,
@@ -71,11 +113,23 @@ export function buildMcpAdapterInjection(accounts: CompanionMcpAccount[]): {
         }
       : {
           ...common,
-          url: account.url,
-          headers: Object.fromEntries(
-            Object.entries(account.headers).map(([key, envKey]) => [key, environmentReference(envKey)]),
-          ),
+          url: staged.oauthBroker
+            ? `\${COMPANION_MCP_GATEWAY_ORIGIN}/mcp/${account.id}`
+            : account.url,
+          headers: staged.oauthBroker
+            ? {}
+            : Object.fromEntries(
+              Object.entries(account.headers).map(([key, envKey]) => [key, environmentReference(envKey)]),
+            ),
         };
+    if (staged.oauthBroker && account.transport === "http") {
+      gatewayAccounts.push({
+        accountId: account.id,
+        credentialGeneration: staged.oauthBroker.credentialGeneration,
+        upstreamUrl: account.url,
+        github: staged.oauthBroker.github,
+      });
+    }
     metadata.push({
       id: account.id,
       label: account.label,
@@ -96,6 +150,7 @@ export function buildMcpAdapterInjection(accounts: CompanionMcpAccount[]): {
       mcpServers,
     },
     accounts: metadata,
+    gatewayAccounts,
   };
 }
 
@@ -103,12 +158,13 @@ export function runtimeSkillArchivePath(skill: Pick<CompanionRuntimeSkill, "slug
   return `.companion/runtime/state/skill-archives/${skill.slug}.tar.gz.b64`;
 }
 
-/** Secret-free git credential helper. The token is inherited from Pi's tmpfs environment. */
+/** Secret-free helpers. A token is requested from the loopback gateway for each command. */
 export const COMPANION_GIT_CREDENTIAL_HELPER_PATH = ".companion/bin/git-credential-github";
+export const COMPANION_GH_WRAPPER_PATH = ".companion/bin/gh";
 
 export const COMPANION_GIT_CREDENTIAL_HELPER_SOURCE = `#!/bin/sh
 # Companion GitHub credential helper. Answers only HTTPS github.com / gist.github.com.
-# The token lives in the transient runtime environment, not this file.
+# The OAuth token remains in the broker and this helper's short-lived process.
 action="\${1-}"
 if [ "$action" != "get" ]; then
   exit 0
@@ -122,10 +178,32 @@ while IFS= read -r line || [ -n "$line" ]; do
     host=github.com|host=gist.github.com) host="\${line#host=}" ;;
   esac
 done
-if [ "$protocol" != "https" ] || [ -z "$host" ] || [ -z "\${GITHUB_TOKEN-}" ]; then
+if [ "$protocol" != "https" ] || [ -z "$host" ] \
+  || [ -z "\${COMPANION_MCP_GATEWAY_ORIGIN-}" ] \
+  || [ -z "\${COMPANION_GITHUB_MCP_ACCOUNT_ID-}" ]; then
   exit 0
 fi
-printf 'username=x-access-token\\npassword=%s\\n' "$GITHUB_TOKEN"
+token="$(curl --fail --silent --show-error \
+  "$COMPANION_MCP_GATEWAY_ORIGIN/git/$COMPANION_GITHUB_MCP_ACCOUNT_ID")" || exit 1
+[ -n "$token" ] || exit 1
+printf 'username=x-access-token\\npassword=%s\\n' "$token"
+`;
+
+export const COMPANION_GH_WRAPPER_SOURCE = `#!/bin/sh
+set -eu
+real=""
+for candidate in /usr/local/bin/gh /usr/bin/gh /bin/gh; do
+  if [ -x "$candidate" ]; then real="$candidate"; break; fi
+done
+[ -n "$real" ] || { echo 'gh is unavailable' >&2; exit 127; }
+if [ -z "\${COMPANION_MCP_GATEWAY_ORIGIN-}" ] \
+  || [ -z "\${COMPANION_GITHUB_MCP_ACCOUNT_ID-}" ]; then
+  exec "$real" "$@"
+fi
+token="$(curl --fail --silent --show-error \
+  "$COMPANION_MCP_GATEWAY_ORIGIN/git/$COMPANION_GITHUB_MCP_ACCOUNT_ID")" || exit 1
+[ -n "$token" ] || exit 1
+GH_TOKEN="$token" exec "$real" "$@"
 `;
 
 export function companionGitCredentialHelperInstallCommand(): string {
@@ -134,4 +212,3 @@ command -v git >/dev/null 2>&1 || exit 0
 git config --global --unset-all credential.helper >/dev/null 2>&1 || true
 git config --global credential.helper "$HOME/${COMPANION_GIT_CREDENTIAL_HELPER_PATH}"`;
 }
-

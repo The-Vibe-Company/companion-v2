@@ -12,8 +12,12 @@ import type { OrgRole } from "@companion/contracts";
  * ordinary RLS policies.
  */
 
-function resultRows<T>(result: unknown): T[] {
-  return Array.from(result as Iterable<T>);
+type PreTenantQueryResult = Awaited<ReturnType<Db["execute"]>>;
+
+function resultRows<T>(result: PreTenantQueryResult): T[] {
+  // SAFETY: Each caller supplies the row contract for its fixed SQL function, and postgres-js
+  // yields exactly those rows through the Drizzle execute result.
+  return Array.from(result) as T[];
 }
 
 export interface PreTenantOrganizationRow {
@@ -99,6 +103,24 @@ export async function resolvePreTenantApiToken(
     select * from companion_resolve_api_token(${tokenHash}, ${targetWorkspaceId})
   `);
   return resultRows<PreTenantApiTokenRow>(result)[0] ?? null;
+}
+
+export interface PreTenantMcpBrokerTokenRow {
+  org_id: string;
+  companion_id: string;
+  actor_id: string;
+  account_refs: unknown;
+}
+
+/** Resolve only the hash-only runtime MCP capability before its tenant is known. */
+export async function resolvePreTenantMcpBrokerToken(
+  database: Db,
+  tokenHash: string,
+): Promise<PreTenantMcpBrokerTokenRow | null> {
+  const result = await database.execute(sql`
+    select * from companion_resolve_mcp_broker_token(${tokenHash})
+  `);
+  return resultRows<PreTenantMcpBrokerTokenRow>(result)[0] ?? null;
 }
 
 export interface PreTenantRefreshableApiTokenRow {

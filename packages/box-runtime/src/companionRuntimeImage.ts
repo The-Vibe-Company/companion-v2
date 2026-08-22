@@ -7,18 +7,24 @@ import { COMPANION_PI_BROKER_SOURCE } from "./companionPiBrokerSource";
  * Bump when the daemon wrapper or systemd unit changes without a broker/extension source change.
  * Overlay writes are the cheap in-place path for companions that are already running.
  */
-export const COMPANION_PI_OVERLAY_REVISION = 5;
+export const COMPANION_PI_OVERLAY_REVISION = 6;
 /** Bump when the archive/resume warmup profile changes without changing the runtime layout. */
 export const COMPANION_RUNTIME_BOOT_PROFILE_REVISION = 1;
 
 /** What a Box reports after `ensure-pi-layout.sh`. */
 export type CompanionPiLayoutRefresh = "none" | "overlay" | "base";
 
-export const COMPANION_PI_LAYOUT_REFRESH_LABEL: Record<CompanionPiLayoutRefresh, string> = {
+interface CompanionPiLayoutRefreshLabels {
+  readonly none: string;
+  readonly overlay: string;
+  readonly base: string;
+}
+
+export const COMPANION_PI_LAYOUT_REFRESH_LABEL = {
   none: "companion-layout-unchanged",
   overlay: "companion-layout-overlay",
   base: "companion-layout-base",
-};
+} satisfies CompanionPiLayoutRefreshLabels;
 
 const IMAGE_NAME_PATTERN = /^companion-l[0-9]+-[a-f0-9]{12}$/;
 

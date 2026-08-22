@@ -187,7 +187,8 @@ rechecks the same Pi-invocation binding, freshness, surface, and reserve under t
 before it claims a queued turn, so waiting behind another turn cannot consume the safety margin.
 The 0110 migration makes this a claim-protocol boundary as well as a data invariant. A pre-0110
 runtime may finish work it already holds but its legacy claim signature is quarantined and returns
-no new rows. The material-aware claimer takes over expired legacy work and rewinds a start,
+no new rows. Migration 0120 advances the six-argument material protocol to version 2, quarantining
+protocol-1 replicas during the OAuth-gateway rollout. The current claimer takes over expired legacy work and rewinds a start,
 `restart_pi`, settings operation, or implicit settings claim to its staging boundary whenever the
 new staged-expiry ledger is absent. The takeover therefore restages and recycles Pi once instead of
 publishing an expiry for an old invocation or synthesizing start operations indefinitely.
@@ -626,27 +627,45 @@ Native mobile receives no Skills source.
 The control plane never executes package scripts.
 
 Member MCP accounts are selected by id, labeled, envelope-encrypted, and write-only. Runtime decrypts
-only accounts authorized for the current operation and injects values through the transient
-owner-only runtime channel. Durable Box JSON contains references, not values. Native mobile receives
-no MCP accounts.
+only accounts authorized for the current operation. Static credentials use the transient owner-only
+runtime channel. OAuth accounts stage only a stable generation and pinned HTTPS endpoint; access and
+refresh tokens are absent from durable Box JSON and `providers.env`. Native mobile receives no MCP
+accounts.
 
 Provider connections are workspace-scoped and Owner/Admin-managed. Runtime resolves only the
 Companion's selected provider/model after ACL revalidation. API keys and OAuth refresh material stay
 encrypted server-side except for the minimal owner-only Pi auth entry required on Box disk. Provider
-and MCP plaintext never appears in responses, projections, audit metadata, fixtures, or logs.
+and MCP plaintext never appears in user-facing responses, projections, audit metadata, fixtures, or
+logs. The sole internal response carrying MCP plaintext is the private, `no-store` runtime
+token-vending route described below.
 
-Before dispatch, the attempt pins the exact provider and MCP credential revisions used to stage Pi.
-Every takeover that may still project Pi events must resolve the same revisions; if an account
-rotates after Pi accepted the prompt, runtime interrupts rather than projecting output with a
-different redaction dictionary. Once a terminal projection is already committed, takeover reads
-only its fenced cursor/output proof and may ACK and settle without loading credentials. OAuth
-refresh compare-and-swap is allowed only while applying settings or another pre-dispatch operation,
-never while consuming an accepted attempt or decision. The refresh token remains encrypted in the
-control plane; staging injects only the access token. A failed refresh is persisted as
-`mcp_oauth_refresh_failed` with action `retry`, and neither provider body nor token material is
-logged. A refreshed access token that cannot outlive the two-hour-five-minute reserve is rejected
-before any Box write with the same safe code; runtime does not pretend it can keep that credential
-alive during a two-hour turn.
+Before dispatch, the attempt pins the exact provider revision and MCP connection generation used to
+stage Pi. Every takeover that may still project Pi events must resolve the same generations; if an
+account is deleted and reconnected after Pi accepted the prompt, runtime interrupts rather than
+projecting output with a different redaction dictionary. Once a terminal projection is already
+committed, takeover reads only its fenced cursor/output proof and may ACK and settle without loading
+credentials.
+
+OAuth renewal happens on demand while consuming an accepted attempt or decision. Staging mints a
+six-hour, hash-only `cmp_mcp_*` capability bound to the Companion, acting member, and selected
+account-generation refs. The Pi broker starts a loopback HTTP gateway before Pi and configures
+`pi-mcp-adapter` with its dynamic local URLs. That gateway calls
+`POST /v1/runtime/mcp-access-token` just before remote access; the API revalidates the active
+Companion instance, membership, owner, current plugin selection, and generation on every request.
+The route rejects sessions, ordinary PATs, Agent Auth, other Companions, and unselected accounts.
+
+Access tokens remain only in gateway memory until an adaptive proportional expiry margin. Concurrent
+requests for one account share renewal. An upstream `401` with no MCP response byte forces one
+renewal and one retry; timeouts, disconnects, redirects, or ambiguous results are never replayed.
+The refresh token remains encrypted in the control plane. Refresh rotates only the encrypted
+envelope and increments `credential_version` with a row-locked CAS; `credential_generation` stays
+stable for the connection. Delete/reconnect creates a new account identity. A failed or revoked
+refresh is surfaced only when access is actually unusable, as `mcp_oauth_refresh_failed`; provider
+bodies and token material are never logged. There is no minimum OAuth access-token lifetime.
+
+For a uniquely selected GitHub OAuth account, Git's credential helper and the staged `gh` wrapper
+ask the loopback gateway for every command. `GITHUB_TOKEN` and `GH_TOKEN` are never written to the
+Box environment or disk; only each helper process receives the temporary access token.
 
 The projection boundary receives an in-memory dictionary built from every string leaf of those
 validated, decrypted credentials. Assistant text and decision copy are scrubbed against those exact
@@ -679,8 +698,9 @@ fenced claim: it issues a `source_type = 'companion'` token acting as the settin
 Box's six-hour warm TTL, revokes the Companion's previous token, and returns the plaintext once with
 its database-authored expiry. Revoking that previous token invalidates the active material proof in
 the same transaction, so a staging or restart failure cannot leave the old Pi warm-dispatch eligible.
-Runtime takes the minimum of that expiry and each bounded selected OAuth access-token expiry. The
-staged value stays on the active operation/settings claim across takeover, but the instance snapshot
+Runtime takes the minimum of that expiry and the six-hour MCP broker capability expiry. OAuth access
+token expiry is deliberately excluded because the gateway renews it during the turn. The staged
+value stays on the active operation/settings claim across takeover, but the instance snapshot
 is bound and published only after a new idle Pi invocation proves activation. A changed invocation
 clears the proof as a mixed-version rollout guard. The
 runtime injects it as `COMPANION_DELEGATION_TOKEN` in `providers.env`, which is tmpfs-only, never

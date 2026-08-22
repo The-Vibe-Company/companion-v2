@@ -1,6 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { z } from "zod";
+import { startCompanionMcpGateway } from "./companionMcpGateway";
 
 import {
   COMPANION_PI_BROKER_MAX_LINE_BYTES,
@@ -30,6 +32,25 @@ const segmentBytes = optionalPositiveInteger("COMPANION_PI_SEGMENT_BYTES");
 const rpcTimeoutMs = optionalPositiveInteger("COMPANION_PI_RPC_TIMEOUT_MS") ?? 8_000;
 const PI_STARTUP_READY_TIMEOUT_MS = 150_000;
 const PI_STARTUP_READY_RETRY_MS = 250;
+const piCommandIdentitySchema = z.object({ id: z.string(), type: z.string() });
+const piResponseIdentitySchema = z.object({ type: z.literal("response"), id: z.string() });
+const processErrorSchema = z.object({
+  code: z.string().optional(),
+  syscall: z.string().optional(),
+});
+
+interface CompanionPiJournalOptions {
+  directory: string;
+  segmentBytes?: number;
+}
+
+interface CompanionPiBrokerOptions {
+  invocationId: string;
+  transport: CompanionPiRpcTransport;
+  journal: SegmentedCompanionPiJournal;
+  outboxPath: string;
+  layoutMarker?: string;
+}
 
 class SpawnedPiTransport implements CompanionPiRpcTransport {
   readonly #child: ChildProcessWithoutNullStreams;
@@ -46,14 +67,14 @@ class SpawnedPiTransport implements CompanionPiRpcTransport {
   readonly ready: Promise<void>;
   readonly exited: Promise<{ code: number | null; signal: string | null }>;
 
-  constructor() {
+  constructor(environment: NodeJS.ProcessEnv = process.env) {
     const decoder = new StrictLfJsonlDecoder({
       maxLineBytes,
       onRecord: (record) => this.#acceptRecord(record),
       onFault: (fault) => this.#onFault(fault),
     });
     this.#child = spawn(piBin, piArguments(root), {
-      env: process.env,
+      env: environment,
       stdio: ["pipe", "pipe", "pipe"],
     });
     // Drain but never retain/log raw Pi stderr: it may contain provider diagnostics or secrets.
@@ -97,8 +118,9 @@ class SpawnedPiTransport implements CompanionPiRpcTransport {
   }
 
   request(command: PiJsonObject): Promise<PiJsonObject> {
-    const id = typeof command.id === "string" ? command.id : "";
-    const commandName = typeof command.type === "string" ? command.type : "invalid";
+    const identity = piCommandIdentitySchema.safeParse(command);
+    const id = identity.success ? identity.data.id : "";
+    const commandName = identity.success ? identity.data.type : "invalid";
     if (!id || this.#pending.has(id)) return Promise.reject(new Error("Pi command id is invalid"));
     return new Promise((resolveResponse, rejectResponse) => {
       const timeout = setTimeout(() => {
@@ -155,17 +177,18 @@ class SpawnedPiTransport implements CompanionPiRpcTransport {
   }
 
   #acceptRecord(record: PiJsonObject): void {
-    if (record.type !== "response" || typeof record.id !== "string") {
+    const identity = piResponseIdentitySchema.safeParse(record);
+    if (!identity.success) {
       this.#onEvent(record);
       return;
     }
-    const pending = this.#pending.get(record.id);
+    const pending = this.#pending.get(identity.data.id);
     if (!pending || record.command !== pending.command) {
       this.#onEvent(record);
       return;
     }
     clearTimeout(pending.timeout);
-    this.#pending.delete(record.id);
+    this.#pending.delete(identity.data.id);
     pending.resolve(record);
   }
 
@@ -179,18 +202,27 @@ class SpawnedPiTransport implements CompanionPiRpcTransport {
 }
 
 async function main(): Promise<void> {
-  const journal = new SegmentedCompanionPiJournal({
-    directory: journalPath,
-    ...(segmentBytes === undefined ? {} : { segmentBytes }),
+  const journalOptions: CompanionPiJournalOptions = { directory: journalPath };
+  if (segmentBytes !== undefined) journalOptions.segmentBytes = segmentBytes;
+  const journal = new SegmentedCompanionPiJournal(journalOptions);
+  const gatewayToken = process.env.COMPANION_MCP_BROKER_TOKEN ?? "";
+  const gateway = await startCompanionMcpGateway({
+    configPath: join(root, "state", "mcp-gateway.json"),
+    apiUrl: process.env.COMPANION_API_URL ?? "",
+    brokerToken: gatewayToken,
   });
-  const transport = new SpawnedPiTransport();
-  const broker = new CompanionPiBroker({
+  const piEnvironment = { ...process.env };
+  delete piEnvironment.COMPANION_MCP_BROKER_TOKEN;
+  if (gateway) piEnvironment.COMPANION_MCP_GATEWAY_ORIGIN = gateway.origin;
+  const transport = new SpawnedPiTransport(piEnvironment);
+  const brokerOptions: CompanionPiBrokerOptions = {
     invocationId,
     transport,
     journal,
     outboxPath,
-    ...(layoutMarker ? { layoutMarker } : {}),
-  });
+  };
+  if (layoutMarker) brokerOptions.layoutMarker = layoutMarker;
+  const broker = new CompanionPiBroker(brokerOptions);
   transport.bind({
     onEvent(record) {
       if (record.type === "response") {
@@ -218,6 +250,7 @@ async function main(): Promise<void> {
   } catch (error) {
     // A spawned Pi and its pipes would otherwise keep this failed systemd invocation alive forever.
     await transport.terminate();
+    await gateway?.close();
     throw error;
   }
   let stopping = false;
@@ -232,6 +265,7 @@ async function main(): Promise<void> {
     stopping = true;
     server.close();
     void transport.terminate();
+    void gateway?.close();
     removeSocket();
   };
   process.once("SIGTERM", stop);
@@ -240,6 +274,7 @@ async function main(): Promise<void> {
     removeSocket();
     if (stopping) return;
     server.close();
+    void gateway?.close();
     // A broker without its Pi child must fail so systemd restarts the whole control boundary.
     process.exitCode = 1;
   });
@@ -352,14 +387,15 @@ function optionalPositiveInteger(name: string): number | undefined {
   return value;
 }
 
-void main().catch((error: unknown) => {
-  const code = (error as { code?: unknown } | null)?.code;
-  const syscall = (error as { syscall?: unknown } | null)?.syscall;
+void main().catch((error) => {
+  const parsedError = processErrorSchema.safeParse(error);
+  const code = parsedError.success ? parsedError.data.code : undefined;
+  const syscall = parsedError.success ? parsedError.data.syscall : undefined;
   const errorName = error instanceof Error && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(error.name)
     ? error.name
     : "Error";
-  const reason = typeof code === "string" && /^[A-Z0-9_]{1,32}$/.test(code)
-    ? typeof syscall === "string" && /^[a-z0-9_]{1,32}$/.test(syscall) ? `${code} ${syscall}` : code
+  const reason = code !== undefined && /^[A-Z0-9_]{1,32}$/.test(code)
+    ? syscall !== undefined && /^[a-z0-9_]{1,32}$/.test(syscall) ? `${code} ${syscall}` : code
     : errorName;
   // Never log the raw error: it may contain a Box path or provider payload.
   process.stderr.write(`companion-pi-broker: startup failed (${reason})\n`);

@@ -94,6 +94,11 @@ import {
   saveCompanionPluginTriggerKey,
   saveCompanionOAuthPlugin,
   setDefaultCompanionProvider,
+  CompanionMcpBrokerAuthorizationError,
+  companionMcpAccessTokenInputSchema,
+  companionMcpAccessTokenSchema,
+  issueCompanionMcpAccessToken,
+  resolveCompanionMcpBrokerAuthorization,
 } from "@companion/core";
 import {
   COMPANION_ATTACHMENT_MAX_BYTES,
@@ -111,6 +116,7 @@ import {
   sanitizeCompanionAttachmentFilename,
   sniffCompanionAttachmentMime,
   cancelCompanionTurnInputSchema,
+  companionClientSurfaceSchema,
   companionProviderIdSchema,
   companionProviderOAuthCompleteInputSchema,
   companionProviderOAuthStartInputSchema,
@@ -138,6 +144,7 @@ import { db, withTenantContext, type Db } from "@companion/db";
 import {
   actorFromContext,
   AuthenticationRequiredError,
+  bearerFromHeader,
   jsonError,
   orgIdFromContext,
   type ApiVariables,
@@ -150,6 +157,71 @@ const COMPANION_PLUGIN_OAUTH_FLOW_PURPOSE = "companion-mcp-oauth-flow";
 const COMPANION_PLUGIN_OAUTH_TTL_MS = 10 * 60_000;
 const COMPANION_PROVIDER_OAUTH_FLOW_PURPOSE = "companion-provider-oauth-flow";
 const COMPANION_PROVIDER_OAUTH_COOKIE = "companion_provider_oauth";
+
+type CompanionUpdatePatch = Parameters<typeof updateCompanionV2>[0]["patch"];
+type CompanionMessageFormInput = {
+  content: string;
+  client_message_id: string | undefined;
+  client_surface?: SendCompanionMessageInput["client_surface"];
+};
+
+interface CompanionCreatedStorageObject {
+  key: string;
+  etag?: string;
+}
+
+interface CompanionStorageDeleteInput {
+  key: string;
+  ifMatch?: string;
+}
+
+function defaultCompanionRouteDependencies() {
+  return {
+    actorFromContext,
+    jsonError,
+    orgIdFromContext,
+    withTenantContext,
+    putSkillArchive,
+    getSkillArchive,
+    deleteStorageObject,
+    mintCompanionDesktop,
+    answerCompanionConfigDecisionV2,
+    answerCompanionDecisionV2,
+    readCompanionAttachmentV2,
+    cancelCompanionTurnV2,
+    createCompanionV2,
+    duplicateCompanionV2,
+    enqueueCompanionOperationV2,
+    enqueueCompanionTurnV2,
+    getCompanionDecisionV2,
+    getCompanionV2,
+    listCompanionsV2,
+    listCompanionRoutinesV2,
+    createCompanionRoutineV2,
+    updateCompanionRoutineV2,
+    deleteCompanionRoutineV2,
+    answerCompanionRoutineDecisionV2,
+    listCompanionTriggersV2,
+    createCompanionTriggerV2,
+    updateCompanionTriggerV2,
+    deleteCompanionTriggerV2,
+    rotateCompanionTriggerSecretV2,
+    answerCompanionTriggerDecisionV2,
+    getCompanionTriggerForWebhook,
+    fireCompanionTrigger,
+    failCompanionTriggerFire,
+    readCompanionThreadV2,
+    retryCompanionTurnV2,
+    setCompanionProviderV2,
+    setCompanionWorkspaceShareV2,
+    updateCompanionMemberStateV2,
+    updateCompanionV2,
+    resolveCompanionMcpBrokerAuthorization,
+    issueCompanionMcpAccessToken,
+  };
+}
+
+type CompanionRouteDependencies = Partial<ReturnType<typeof defaultCompanionRouteDependencies>>;
 
 const VIEWER_RUNTIME_ERROR: CompanionRuntimeSafeError = {
   code: "runtime_unavailable",
@@ -194,6 +266,11 @@ type CompanionPluginOAuthState = {
   expiresAt: number;
 };
 
+type CompanionPluginOAuthFlowEnvelope = {
+  label: string;
+  flow: Awaited<ReturnType<typeof beginCompanionPluginOAuth>>["flow"];
+};
+
 function companionPluginOAuthRedirectUri(env: NodeJS.ProcessEnv): string {
   const base = env.COMPANION_WEB_URL ?? "http://127.0.0.1:3000";
   return new URL("/v1/companion-plugins/oauth/callback", base).toString();
@@ -228,7 +305,8 @@ function verifyCompanionPluginOAuthState(
   if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
     throw new Error("invalid OAuth state");
   }
-  // SAFETY: the state cookie was produced by encodeCompanionPluginOAuthState below, so its JSON decodes to CompanionPluginOAuthState.
+  // SAFETY: The state was signed above with the deployment master key; the decoded value is only
+  // accepted after the required identity and expiry fields are checked below.
   const parsed = JSON.parse(
     Buffer.from(encoded, "base64url").toString("utf8"),
   ) as CompanionPluginOAuthState;
@@ -263,8 +341,9 @@ function decodeCompanionPluginOAuthFlow(input: {
   nonce: string;
   value: string;
   masterKey: Buffer;
-}): { label: string; flow: Awaited<ReturnType<typeof beginCompanionPluginOAuth>>["flow"] } {
-  // SAFETY: the cookie value was produced by encodeCompanionPluginOAuthFlow, so its JSON decodes to OpaqueCiphertext.
+}): CompanionPluginOAuthFlowEnvelope {
+  // SAFETY: This ciphertext is produced by encodeCompanionPluginOAuthFlow and is authenticated by
+  // decryptOpaqueValue before the decrypted flow is parsed.
   const encrypted = JSON.parse(
     Buffer.from(input.value, "base64url").toString("utf8"),
   ) as OpaqueCiphertext;
@@ -274,11 +353,8 @@ function decodeCompanionPluginOAuthFlow(input: {
     subjectId: input.nonce,
     ...encrypted,
   }, input.masterKey);
-  // SAFETY: the plaintext was encrypted by encodeCompanionPluginOAuthFlow, so it decodes to the label+flow shape.
-  return JSON.parse(plaintext) as {
-    label: string;
-    flow: Awaited<ReturnType<typeof beginCompanionPluginOAuth>>["flow"];
-  };
+  // SAFETY: The decrypted payload is the exact envelope written by the paired encoder above.
+  return JSON.parse(plaintext) as CompanionPluginOAuthFlowEnvelope;
 }
 
 type CompanionProviderOAuthCookie = {
@@ -286,6 +362,17 @@ type CompanionProviderOAuthCookie = {
   nonce: string;
   encrypted: OpaqueCiphertext;
 };
+
+type CompanionProviderOAuthPending = {
+  userId: string;
+  flow:
+    | ReturnType<typeof beginAnthropicProviderOAuth>["flow"]
+    | Awaited<ReturnType<typeof beginOpenAICodexProviderOAuth>>["flow"];
+};
+
+type CompanionProviderOAuthDecoded = {
+  orgId: string;
+} & CompanionProviderOAuthPending;
 
 function encodeCompanionProviderOAuthFlow(input: {
   orgId: string;
@@ -306,19 +393,12 @@ function encodeCompanionProviderOAuthFlow(input: {
     .toString("base64url");
 }
 
-interface DecodedCompanionProviderOAuthFlow {
-  orgId: string;
-  userId: string;
-  flow:
-    | ReturnType<typeof beginAnthropicProviderOAuth>["flow"]
-    | Awaited<ReturnType<typeof beginOpenAICodexProviderOAuth>>["flow"];
-}
-
 function decodeCompanionProviderOAuthFlow(input: {
   value: string;
   masterKey: Buffer;
-}): DecodedCompanionProviderOAuthFlow {
-  // SAFETY: the cookie was produced by encodeCompanionProviderOAuthFlow, so its JSON decodes to CompanionProviderOAuthCookie.
+}): CompanionProviderOAuthDecoded {
+  // SAFETY: The cookie is signed/encrypted by encodeCompanionProviderOAuthFlow and its fields are
+  // consumed only after decryption and the pending-flow checks below.
   const cookie = JSON.parse(
     Buffer.from(input.value, "base64url").toString("utf8"),
   ) as CompanionProviderOAuthCookie;
@@ -328,8 +408,9 @@ function decodeCompanionProviderOAuthFlow(input: {
     subjectId: cookie.nonce,
     ...cookie.encrypted,
   }, input.masterKey);
-  // SAFETY: the plaintext was encrypted by encodeCompanionProviderOAuthFlow, so it decodes to the userId+flow shape.
-  const pending = JSON.parse(plaintext) as Omit<DecodedCompanionProviderOAuthFlow, "orgId">;
+  // SAFETY: The plaintext is authenticated by decryptOpaqueValue and was written by the paired
+  // provider-flow encoder with this exact pending payload shape.
+  const pending = JSON.parse(plaintext) as CompanionProviderOAuthPending;
   if (!pending.userId || !pending.flow || pending.flow.expiresAt < Date.now()) {
     throw new CompanionProviderOAuthError("oauth_expired", "Provider sign-in expired. Start again.");
   }
@@ -343,36 +424,24 @@ class CompanionAccessForbiddenError extends Error {
   }
 }
 
-const databaseErrorNodeSchema = z.object({
+const databaseErrorSchema = z.object({
   code: z.string().optional(),
-  cause: z.unknown(),
+  cause: z.unknown().optional(),
 }).passthrough();
 
-/** The AWS SDK stamps `$metadata` on every error it produces; nothing else in these routes does. */
-const storageFailureSchema = z.object({ "$metadata": z.unknown() }).passthrough()
-  .refine((value) => "$metadata" in value);
-
-interface CreatedCompanionAttachmentKey {
-  key: string;
-  etag?: string;
-}
-
-type DeleteStorageObjectInput = Parameters<typeof deleteStorageObject>[0];
-
-function databaseErrorCode(cause: unknown): string | null {
-  const seen = new Set<unknown>();
-  let current: unknown = cause;
-  while (current !== null && !seen.has(current)) {
-    const node = databaseErrorNodeSchema.safeParse(current);
-    if (!node.success) break;
-    seen.add(current);
-    if (node.data.code !== undefined) return node.data.code;
-    current = "cause" in node.data ? node.data.cause : null;
+function databaseErrorCode<T>(error: T): string | null {
+  const seen = new Set<object>();
+  let current: unknown = error;
+  while (current !== null && current !== undefined) {
+    const parsed = databaseErrorSchema.safeParse(current);
+    if (!parsed.success || seen.has(parsed.data)) break;
+    seen.add(parsed.data);
+    if (parsed.data.code) return parsed.data.code;
+    current = parsed.data.cause;
   }
   return null;
 }
-function errorStatus(cause: unknown): number {
-  const error = cause;
+function errorStatus<T>(error: T): number {
   const databaseCode = databaseErrorCode(error);
   if (databaseCode === "42501") return 403;
   if (databaseCode === "P0002" || databaseCode === "02000") return 404;
@@ -414,17 +483,20 @@ function errorStatus(cause: unknown): number {
   return 400;
 }
 
-function routeError(c: Context, cause: unknown): Response {
-  if (cause instanceof CompanionProviderError) {
-    // SAFETY: errorStatus only returns literal HTTP status codes accepted by Hono's status type.
-    return c.json({
+function routeError<T>(c: Context, error: T): Response {
+  if (error instanceof CompanionProviderError) {
+    const providerError = {
       ok: false,
-      error: cause.message,
-      code: cause.code,
-      provider_id: cause.providerId,
-    }, errorStatus(cause) as never);
+      error: error.message,
+      code: error.code,
+      provider_id: error.providerId,
+    };
+    const status = errorStatus(error);
+    // SAFETY: errorStatus only returns the status codes accepted by Hono; its numeric return type
+    // cannot express that finite union to the framework's generic response overload.
+    return c.json(providerError, status as never);
   }
-  return jsonError(c, cause, errorStatus(cause));
+  return jsonError(c, error, errorStatus(error));
 }
 
 /**
@@ -438,21 +510,64 @@ const COMPANION_MESSAGE_UPLOAD_LIMIT_BYTES = 64 * 1024 * 1024;
  * The AWS SDK stamps `$metadata` on every error it produces, which is what distinguishes it from a
  * `ZodError`, a domain error, or a database error.
  */
-function isStorageFailure(cause: unknown): boolean {
-  return storageFailureSchema.safeParse(cause).success;
+function isStorageFailure<T>(error: T): boolean {
+  return z.object({ $metadata: z.object({}).passthrough() }).passthrough().safeParse(error).success;
 }
 
 /** One text field of a multipart send, or null when the part is absent or is a file. */
 function formField(form: FormData, name: string): string | undefined {
-  const parsed = z.string().safeParse(form.get(name));
+  const value = form.get(name);
+  const parsed = z.string().safeParse(value);
   return parsed.success ? parsed.data : undefined;
 }
 
 export function registerCompanionRoutes(
   app: Hono<{ Variables: ApiVariables }>,
   env: NodeJS.ProcessEnv = process.env,
+  dependencies: CompanionRouteDependencies = {},
 ): void {
   if (!companionsEnabled(env)) return;
+
+  const {
+    actorFromContext,
+    jsonError,
+    orgIdFromContext,
+    withTenantContext,
+    putSkillArchive,
+    getSkillArchive,
+    deleteStorageObject,
+    mintCompanionDesktop,
+    answerCompanionConfigDecisionV2,
+    answerCompanionDecisionV2,
+    readCompanionAttachmentV2,
+    cancelCompanionTurnV2,
+    createCompanionV2,
+    duplicateCompanionV2,
+    enqueueCompanionOperationV2,
+    enqueueCompanionTurnV2,
+    getCompanionDecisionV2,
+    getCompanionV2,
+    listCompanionsV2,
+    listCompanionRoutinesV2,
+    createCompanionRoutineV2,
+    updateCompanionRoutineV2,
+    deleteCompanionRoutineV2,
+    answerCompanionRoutineDecisionV2,
+    listCompanionTriggersV2,
+    createCompanionTriggerV2,
+    updateCompanionTriggerV2,
+    deleteCompanionTriggerV2,
+    rotateCompanionTriggerSecretV2,
+    answerCompanionTriggerDecisionV2,
+    readCompanionThreadV2,
+    retryCompanionTurnV2,
+    setCompanionProviderV2,
+    setCompanionWorkspaceShareV2,
+    updateCompanionMemberStateV2,
+    updateCompanionV2,
+    resolveCompanionMcpBrokerAuthorization,
+    issueCompanionMcpAccessToken,
+  } = { ...defaultCompanionRouteDependencies(), ...dependencies };
 
   async function tenant<T>(
     c: Context<{ Variables: ApiVariables }>,
@@ -470,6 +585,39 @@ export function registerCompanionRoutes(
     return withTenantContext({ orgId, userId: actor.id }, (database) =>
       fn({ actor, orgId, database }));
   }
+
+  app.post("/v1/runtime/mcp-access-token", async (c) => {
+    try {
+      const bearer = bearerFromHeader(c.req.header("authorization"));
+      if (!bearer) throw new CompanionMcpBrokerAuthorizationError();
+      const authorization = await resolveCompanionMcpBrokerAuthorization(bearer);
+      if (!authorization) throw new CompanionMcpBrokerAuthorizationError();
+      const body = companionMcpAccessTokenInputSchema.parse(await c.req.json());
+      const result = await withTenantContext({
+        orgId: authorization.orgId,
+        userId: authorization.actorId,
+      }, async (database) => await issueCompanionMcpAccessToken({
+        authorization,
+        accountId: body.account_id,
+        credentialGeneration: body.credential_generation,
+        forceRefresh: body.force_refresh,
+        masterKey: loadSecretsMasterKey(env.COMPANION_SECRETS_MASTER_KEY),
+        database,
+      }));
+      c.header("Cache-Control", "private, no-store");
+      c.header("Pragma", "no-cache");
+      return c.json(companionMcpAccessTokenSchema.parse(result));
+    } catch (error) {
+      c.header("Cache-Control", "private, no-store");
+      if (error instanceof CompanionMcpBrokerAuthorizationError) {
+        return c.json({ error: "MCP authorization is unavailable" }, 401);
+      }
+      if (error instanceof CompanionPluginOAuthError) {
+        return c.json({ error: "MCP authorization could not be refreshed" }, 503);
+      }
+      return c.json({ error: "MCP authorization is unavailable" }, 400);
+    }
+  });
 
   app.get("/v1/companions", async (c) => {
     try {
@@ -943,7 +1091,6 @@ export function registerCompanionRoutes(
     try {
       const companionId = companionIdSchema.parse(c.req.param("id"));
       const body = updateCompanionInputSchema.parse(await c.req.json());
-      type CompanionUpdatePatch = Partial<z.infer<typeof updateCompanionInputSchema>>;
       const patch: CompanionUpdatePatch = {};
       if (body.name !== undefined) patch.name = body.name;
       if (body.persona !== undefined) patch.persona = body.persona;
@@ -1268,7 +1415,7 @@ export function registerCompanionRoutes(
       onError: (c) => jsonError(c, "message exceeds the 64 MB upload limit", 413),
     }),
     async (c) => {
-      const createdKeys: Array<{ key: string; etag?: string }> = [];
+      const createdKeys: CompanionCreatedStorageObject[] = [];
       try {
         const companionId = companionIdSchema.parse(c.req.param("id"));
         const contentType = c.req.header("content-type") ?? "";
@@ -1281,12 +1428,19 @@ export function registerCompanionRoutes(
           const authorized = { orgId: await orgIdFromContext(c) };
 
           const form = await c.req.formData();
-          body = sendCompanionMessageInputSchema.parse({
+          const formInput: CompanionMessageFormInput = {
             content: formField(form, "content") ?? "",
             client_message_id: formField(form, "client_message_id"),
-            client_surface: formField(form, "client_surface"),
-          });
-          const files = form.getAll("file").filter((part) => part instanceof File);
+          };
+          const clientSurface = formField(form, "client_surface");
+          if (clientSurface) {
+            const parsedSurface = companionClientSurfaceSchema.safeParse(clientSurface);
+            if (!parsedSurface.success) throw parsedSurface.error;
+            formInput.client_surface = parsedSurface.data;
+          }
+          body = sendCompanionMessageInputSchema.parse(formInput);
+          const files = form.getAll("file")
+            .filter((part): part is Exclude<typeof part, string> => part instanceof File);
           if (files.length > COMPANION_MESSAGE_ATTACHMENT_MAX_COUNT) {
             throw new Error(
               `a message carries at most ${COMPANION_MESSAGE_ATTACHMENT_MAX_COUNT} attachments`,
@@ -1329,7 +1483,7 @@ export function registerCompanionRoutes(
               // Remember the exact version this request wrote. If a concurrent request for the same
               // client_message_id adopts this key and commits a row for it, the delete below no
               // longer matches and is refused rather than stranding that row.
-              const created: CreatedCompanionAttachmentKey = { key };
+              const created: CompanionCreatedStorageObject = { key };
               if (etag) created.etag = etag;
               createdKeys.push(created);
             } catch (error) {
@@ -1382,9 +1536,9 @@ export function registerCompanionRoutes(
         // client_message_id is already accepted, and these are its files.
         if (databaseErrorCode(error) !== "23505") {
           await Promise.allSettled(createdKeys.map((created) => {
-            const options: DeleteStorageObjectInput = { key: created.key };
-            if (created.etag) options.ifMatch = created.etag;
-            return deleteStorageObject(options);
+            const deletion: CompanionStorageDeleteInput = { key: created.key };
+            if (created.etag) deletion.ifMatch = created.etag;
+            return deleteStorageObject(deletion);
           }));
         }
         // An object-storage failure names the bucket, and a connection failure names the internal
@@ -1667,8 +1821,16 @@ export function registerCompanionRoutes(
 export function registerCompanionTriggerWebhookRoutes(
   app: Hono<{ Variables: ApiVariables }>,
   env: NodeJS.ProcessEnv = process.env,
+  dependencies: CompanionRouteDependencies = {},
 ): void {
   if (!companionsEnabled(env)) return;
+
+  const {
+    jsonError,
+    getCompanionTriggerForWebhook,
+    fireCompanionTrigger,
+    failCompanionTriggerFire,
+  } = { ...defaultCompanionRouteDependencies(), ...dependencies };
 
   app.post(
     "/v1/hooks/triggers/:triggerId/:secret",

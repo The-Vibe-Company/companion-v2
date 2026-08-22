@@ -1,12 +1,14 @@
 /* oxlint-disable anti-slop/no-known-value-widening, anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Existing simulator command parsing predates the incremental anti-slop gate. */
 
 import { createHash } from "node:crypto";
+import { z } from "zod";
 
 import type { BoxSimCommandResult, BoxSimPiController } from "./protocol";
 
 const CONTROL_BUNDLE_ALLOWED_PATHS = new Set([
   ".companion/pi/auth.json",
   ".companion/pi/mcp.json",
+  ".companion/runtime/state/mcp-gateway.json",
   ".companion/runtime/state/mcp-accounts.json",
   ".companion/runtime/state/skills.json",
   ".companion/runtime/state/config-catalog.json",
@@ -14,8 +16,42 @@ const CONTROL_BUNDLE_ALLOWED_PATHS = new Set([
   ".companion/runtime/state/model.txt",
   ".companion/runtime/state/providers.env",
   ".companion/bin/git-credential-github",
+  ".companion/bin/gh",
 ]);
 const CONTROL_BUNDLE_FILE_LIMIT_BYTES = 4 * 1024 * 1024;
+
+type BoxSimJsonValue = string | number | boolean | null | BoxSimJsonObject | BoxSimJsonValue[];
+
+interface BoxSimJsonObject {
+  [key: string]: BoxSimJsonValue;
+}
+
+const boxSimJsonValueSchema: z.ZodType<BoxSimJsonValue> = z.lazy(() => z.union([
+  z.string(),
+  z.number(),
+  z.boolean(),
+  z.null(),
+  boxSimJsonObjectSchema,
+  z.array(boxSimJsonValueSchema),
+]));
+const boxSimJsonObjectSchema: z.ZodType<BoxSimJsonObject> = z.record(
+  z.string(),
+  boxSimJsonValueSchema,
+);
+const brokerCorrelationIdSchema = z.union([
+  z.string().min(1).max(256),
+  z.number().finite(),
+]);
+const controlBundleManifestSchema = z.object({
+  revision: z.number().optional(),
+  files: z.array(z.object({
+    path: z.string().optional(),
+    mode: z.number().optional(),
+    byteSize: z.number().optional(),
+    sha256: z.string().optional(),
+    content: z.string().optional(),
+  })).optional(),
+});
 
 export type BoxSimCommandKind =
   | "box-runnable"
@@ -63,7 +99,7 @@ export type BoxSimBrokerJournalRecord =
       invocationId: string;
       attemptId: string;
       kind: "pi_event";
-      event: Record<string, unknown>;
+      event: BoxSimJsonObject;
     }
   | {
       sequence: number;
@@ -167,31 +203,39 @@ export function putBoxFile(
   destination.set(normalizeBoxPath(path), Buffer.from(bytes));
 }
 
-export function appendPiEvent(
+export function appendPiEvent<Event extends object>(
   machine: BoxSimCommandMachine,
-  event: Record<string, unknown> | string,
+  event: Event | string,
 ): void {
-  if (typeof event === "string") {
+  const textEvent = z.string().safeParse(event);
+  if (textEvent.success) {
     appendPiFault(
       machine,
-      Buffer.byteLength(event, "utf8") > BROKER_MAX_LINE_BYTES ? "oversized" : "malformed",
+      Buffer.byteLength(textEvent.data, "utf8") > BROKER_MAX_LINE_BYTES ? "oversized" : "malformed",
     );
     return;
   }
-  const serialized = JSON.stringify(event);
+  const parsedEvent = boxSimJsonObjectSchema.safeParse(event);
+  if (!parsedEvent.success) {
+    appendPiFault(machine, "malformed");
+    return;
+  }
+  const validatedEvent = parsedEvent.data;
+  const serialized = JSON.stringify(validatedEvent);
   if (Buffer.byteLength(serialized, "utf8") > BROKER_MAX_LINE_BYTES) {
     incrementBrokerCounter(machine, "oversizedLines");
     return;
   }
-  if (event.type === "response") {
+  if (validatedEvent.type === "response") {
     incrementBrokerCounter(machine, "orphanResponses");
     return;
   }
-  const eventType = typeof event.type === "string" ? event.type : null;
+  const eventTypeResult = z.string().safeParse(validatedEvent.type);
+  const eventType = eventTypeResult.success ? eventTypeResult.data : null;
   if (
     !eventType
     || !BROKER_SUPPORTED_EVENT_TYPES.has(eventType)
-    || (eventType === "agent_settled" && Object.keys(event).length !== 1)
+    || (eventType === "agent_settled" && Object.keys(validatedEvent).length !== 1)
   ) {
     incrementBrokerCounter(machine, "unknownEvents");
     return;
@@ -206,7 +250,7 @@ export function appendPiEvent(
     invocationId,
     attemptId: activeAttemptId,
     kind: "pi_event",
-    event: structuredClone(event),
+    event: structuredClone(validatedEvent),
   });
   if (eventType === "agent_settled" && machine.daemon.activeAttemptId === activeAttemptId) {
     machine.daemon.activeAttemptId = null;
@@ -544,15 +588,15 @@ export function decodeShellQuoted(value: string): string | null {
 }
 
 /** Pull the base64-encoded JSON command from layout 14's owner-only socket client. */
-export function extractBrokerJson(command: string): Record<string, unknown> | null {
+export function extractBrokerJson(command: string): BoxSimJsonObject | null {
   const match = /\bCOMPANION_PI_BROKER_COMMAND=('(?:[^']|'"'"')*')/.exec(command);
   const encoded = match?.[1] ? decodeShellQuoted(match[1]) : null;
   if (!encoded) return null;
   try {
-    const parsed = JSON.parse(Buffer.from(encoded, "base64").toString("utf8")) as unknown;
-    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
-      ? parsed as Record<string, unknown>
-      : null;
+    const parsed = boxSimJsonObjectSchema.safeParse(
+      JSON.parse(Buffer.from(encoded, "base64").toString("utf8")),
+    );
+    return parsed.success ? parsed.data : null;
   } catch {
     return null;
   }
@@ -612,23 +656,24 @@ async function startDaemon(machine: BoxSimCommandMachine, restart: boolean): Pro
   );
 }
 
-function responseFor(command: Record<string, unknown>, data?: Record<string, unknown>): Record<string, unknown> {
-  const type = typeof command.type === "string" ? command.type : "unknown";
-  const response: Record<string, unknown> = {
+function responseFor(command: BoxSimJsonObject, data?: BoxSimJsonObject): BoxSimJsonObject {
+  const typeResult = z.string().safeParse(command.type);
+  const type = typeResult.success ? typeResult.data : "unknown";
+  const response: BoxSimJsonObject = {
     type: "response",
     command: type,
-    id: command.id,
     success: true,
   };
+  if (command.id !== undefined) response.id = command.id;
   if (data !== undefined) response.data = data;
   return response;
 }
 
 function brokerFailureFor(
-  command: Record<string, unknown>,
+  command: BoxSimJsonObject,
   code: string,
   message: string,
-): Record<string, unknown> {
+): BoxSimJsonObject {
   return {
     ...responseFor(command),
     success: false,
@@ -636,24 +681,22 @@ function brokerFailureFor(
   };
 }
 
-function brokerNonNegativeInteger(value: unknown): number | null {
+function brokerNonNegativeInteger(value: BoxSimJsonValue | undefined): number | null {
   return Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : null;
 }
 
-function validBrokerCorrelationId(value: unknown): value is string | number {
-  return (typeof value === "string" && value.length > 0 && value.length <= 256)
-    || (typeof value === "number" && Number.isFinite(value));
+function validBrokerCorrelationId(value: BoxSimJsonValue | undefined): value is string | number {
+  return brokerCorrelationIdSchema.safeParse(value).success;
 }
 
-function objectRecord(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
+function objectRecord(value: BoxSimJsonValue | undefined): BoxSimJsonObject | null {
+  const parsed = boxSimJsonObjectSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
 }
 
 async function executeBrokerControl(
   machine: BoxSimCommandMachine,
-  command: Record<string, unknown>,
+  command: BoxSimJsonObject,
 ): Promise<BoxSimCommandResult | null> {
   const tailCursor = brokerTailCursor(machine);
   switch (command.type) {
@@ -667,17 +710,19 @@ async function executeBrokerControl(
         counters: { ...machine.daemon.brokerCounters },
       }))}\n`);
     case "runtime_state": {
-      let piState: Record<string, unknown> | null;
+      let piState: BoxSimJsonObject | null;
       try {
-        piState = await machine.piController?.handleRpc({
-          id: command.id,
-          type: "get_state",
-        }) ?? responseFor({ id: command.id, type: "get_state" }, {
+        const getStateCommand: BoxSimJsonObject = { type: "get_state" };
+        if (command.id !== undefined) getStateCommand.id = command.id;
+        const rawPiState = await machine.piController?.handleRpc(getStateCommand)
+          ?? responseFor(getStateCommand, {
           model: { input: [] },
           isStreaming: false,
           isCompacting: false,
           pendingMessageCount: 0,
         });
+        const parsedPiState = boxSimJsonObjectSchema.safeParse(rawPiState);
+        piState = parsedPiState.success ? parsedPiState.data : null;
       } catch {
         return ok(`${JSON.stringify(brokerFailureFor(
           command,
@@ -685,7 +730,7 @@ async function executeBrokerControl(
           "Pi broker command failed",
         ))}\n`);
       }
-      const state = piState.success === true ? objectRecord(piState.data) : null;
+      const state = piState?.success === true ? objectRecord(piState.data) : null;
       if (!state) {
         return ok(`${JSON.stringify(brokerFailureFor(
           command,
@@ -783,22 +828,24 @@ async function executeRpc(
       "another Pi attempt is already active",
     ))}\n`);
   }
-  const promptAttemptId = brokerCommand.type === "prompt"
-    && typeof brokerCommand.attemptId === "string"
-    ? brokerCommand.attemptId
+  const promptAttemptIdResult = z.string().safeParse(brokerCommand.attemptId);
+  const promptAttemptId = brokerCommand.type === "prompt" && promptAttemptIdResult.success
+    ? promptAttemptIdResult.data
     : null;
   const initialCursor = brokerCommand.type === "prompt" ? brokerTailCursor(machine) : null;
   if (brokerCommand.type === "prompt" && brokerCommand.clearOutbox === true) {
-    for (const path of [...machine.persistentFiles.keys()]) {
+    for (const path of machine.persistentFiles.keys()) {
       if (path.startsWith("outbox/")) machine.persistentFiles.delete(path);
     }
   }
   // The production broker binds before writing to Pi: Pi may emit an event before its correlated
   // command response arrives. Roll this provisional binding back only when Pi proves rejection.
   if (promptAttemptId) machine.daemon.activeAttemptId = promptAttemptId;
-  let response: Record<string, unknown> | null;
+  let response: BoxSimJsonObject | null;
   try {
-    response = await machine.piController?.handleRpc(brokerCommand) ?? null;
+    const rawResponse = await machine.piController?.handleRpc(brokerCommand) ?? null;
+    const parsedResponse = boxSimJsonObjectSchema.safeParse(rawResponse);
+    response = parsedResponse.success ? parsedResponse.data : null;
   } catch {
     appendPiProcessExit(machine);
     machine.daemon.status = "failed";
@@ -814,15 +861,18 @@ async function executeRpc(
     response = responseFor(brokerCommand, response);
   }
   if (brokerCommand.type === "prompt") {
+    const promptResponseData: BoxSimJsonObject = {
+      invocationId: machine.daemon.invocationId,
+      piAcknowledged: true,
+      initialCursor,
+      clearOutbox: true,
+    };
+    if (promptAttemptId !== null) promptResponseData.attemptId = promptAttemptId;
+    if (brokerCommand.requiredInput !== undefined) {
+      promptResponseData.requiredInput = brokerCommand.requiredInput;
+    }
     response = response.success === true
-      ? responseFor(brokerCommand, {
-          attemptId: brokerCommand.attemptId,
-          invocationId: machine.daemon.invocationId,
-          piAcknowledged: true,
-          initialCursor,
-          requiredInput: brokerCommand.requiredInput,
-          clearOutbox: true,
-        })
+      ? responseFor(brokerCommand, promptResponseData)
       : {
           ...responseFor(brokerCommand),
           success: false,
@@ -852,8 +902,9 @@ async function executeExtensionResponse(
   }
   const brokerCommand = extractBrokerJson(commandText);
   if (!brokerCommand) return failed("Pi extension response was not valid JSON");
-  const requestedAttemptId = typeof brokerCommand.attemptId === "string"
-    ? brokerCommand.attemptId
+  const requestedAttemptIdResult = z.string().safeParse(brokerCommand.attemptId);
+  const requestedAttemptId = requestedAttemptIdResult.success
+    ? requestedAttemptIdResult.data
     : machine.daemon.activeAttemptId;
   if (
     (
@@ -871,11 +922,9 @@ async function executeExtensionResponse(
       error: { code, message: "decision does not match an active Pi attempt", ambiguous: false },
     })}\n`);
   }
-  const response = brokerCommand.type === "extension_ui_response"
-    && brokerCommand.response !== null
-    && typeof brokerCommand.response === "object"
-    && !Array.isArray(brokerCommand.response)
-    ? brokerCommand.response as Record<string, unknown>
+  const responseResult = boxSimJsonObjectSchema.safeParse(brokerCommand.response);
+  const response = brokerCommand.type === "extension_ui_response" && responseResult.success
+    ? responseResult.data
     : null;
   if (
     !response
@@ -901,23 +950,24 @@ async function executeExtensionResponse(
 }
 
 function joinedFileCommand(machine: BoxSimCommandMachine, command: string): BoxSimCommandResult {
-  const match = /\bcat\s+(.+?)\s+>\s+('(?:[^']|'\"'\"')*')\s*;/.exec(command);
+  const match = /\bcat\s+(.+?)\s+>\s+('(?:[^']|'"'"')*')\s*;/.exec(command);
   if (!match?.[1] || !match[2]) return failed("simulated file join could not parse command", 2);
   const target = decodeShellQuoted(match[2]);
-  const quotedParts = match[1].match(/'(?:[^']|'\"'\"')*'/g) ?? [];
+  const quotedParts = match[1].match(/'(?:[^']|'"'"')*'/g) ?? [];
   const parts = quotedParts.map(decodeShellQuoted);
   if (!target || parts.some((part) => part === null)) {
     return failed("simulated file join could not parse paths", 2);
   }
+  const decodedParts = parts.filter((part): part is string => part !== null);
   const chunks: Buffer[] = [];
-  for (const part of parts as string[]) {
+  for (const part of decodedParts) {
     const normalized = normalizeBoxPath(part);
     const bytes = machine.persistentFiles.get(normalized);
     if (!bytes) return failed(`simulated file part is missing: ${normalized}`);
     chunks.push(bytes);
   }
   machine.persistentFiles.set(normalizeBoxPath(target), Buffer.concat(chunks));
-  for (const part of parts as string[]) machine.persistentFiles.delete(normalizeBoxPath(part));
+  for (const part of decodedParts) machine.persistentFiles.delete(normalizeBoxPath(part));
   return ok();
 }
 
@@ -935,16 +985,7 @@ function appliedControlBundle(machine: BoxSimCommandMachine): BoxSimCommandResul
   const bytes = machine.persistentFiles.get(bundlePath);
   if (!bytes) return failed("simulated runtime control bundle is missing");
   try {
-    const manifest = JSON.parse(bytes.toString("utf8")) as {
-      revision?: unknown;
-      files?: Array<{
-        path?: unknown;
-        mode?: unknown;
-        byteSize?: unknown;
-        sha256?: unknown;
-        content?: unknown;
-      }>;
-    };
+    const manifest = controlBundleManifestSchema.parse(JSON.parse(bytes.toString("utf8")));
     if (
       manifest.revision !== 1
       || !Array.isArray(manifest.files)
@@ -956,11 +997,11 @@ function appliedControlBundle(machine: BoxSimCommandMachine): BoxSimCommandResul
     const validated: Array<{ path: string; content: Buffer }> = [];
     for (const file of manifest.files) {
       if (
-        typeof file.path !== "string"
+        file.path === undefined
         || !CONTROL_BUNDLE_ALLOWED_PATHS.has(file.path)
         || seen.has(file.path)
         || ![0o600, 0o700].includes(Number(file.mode))
-        || typeof file.content !== "string"
+        || file.content === undefined
       ) return failed("simulated runtime control file is invalid");
       const content = Buffer.from(file.content, "base64");
       if (
@@ -1113,7 +1154,7 @@ export async function executeBoxCommand(
     }
     case "remove-control-bundle":
       machine.persistentFiles.delete(".companion/runtime/state/control-bundle-v1.json");
-      for (const path of [...machine.persistentFiles.keys()]) {
+      for (const path of machine.persistentFiles.keys()) {
         if (path.startsWith(".companion/runtime/control-transaction-v1/")) {
           machine.persistentFiles.delete(path);
         }
@@ -1128,7 +1169,7 @@ export async function executeBoxCommand(
       if (command.includes("control-bundle-v1.json")) {
         machine.persistentFiles.delete(".companion/runtime/state/control-bundle-v1.json");
       }
-      for (const path of [...machine.persistentFiles.keys()]) {
+      for (const path of machine.persistentFiles.keys()) {
         if (path.startsWith(".companion/runtime/control-transaction-v1/")) {
           machine.persistentFiles.delete(path);
         }
@@ -1158,7 +1199,7 @@ export async function executeBoxCommand(
           return failed(`rm: cannot remove '${locked}': Permission denied`);
         }
       }
-      for (const path of [...machine.persistentFiles.keys()]) {
+      for (const path of machine.persistentFiles.keys()) {
         if (path.startsWith(`${directory}/`)) machine.persistentFiles.delete(path);
       }
       return ok();
@@ -1171,7 +1212,7 @@ export async function executeBoxCommand(
       return ok();
     }
     case "clear-outbox":
-      for (const path of [...machine.persistentFiles.keys()]) {
+      for (const path of machine.persistentFiles.keys()) {
         if (path.startsWith("outbox/")) machine.persistentFiles.delete(path);
       }
       return ok();

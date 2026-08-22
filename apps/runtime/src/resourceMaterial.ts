@@ -1,37 +1,30 @@
 import type { CompanionMcpAccount, CompanionMcpCredential } from "@companion/contracts";
-import { companionMcpAccountSchema, companionMcpCredentialSchema } from "@companion/contracts";
+import { companionMcpAccountSchema } from "@companion/contracts";
 import {
-  COMPANION_MCP_OAUTH_REFRESH_SKEW_MS,
   decryptCompanionMcpRuntimeCredential,
   decryptCompanionProviderRuntimeCredential,
-  githubGitRuntimeMaterial,
-  type CompanionPluginGithubIdentity,
-  type CompanionPluginStoredOAuthCredential,
   type CompanionRuntimeMcpCredential,
   type CompanionRuntimeProviderCredential,
 } from "@companion/core";
-import type { CompanionRuntimeSkill } from "@companion/box-runtime";
-import type { RuntimeAuthorization } from "@companion/companion-runtime";
+import type { CompanionRuntimeSkill, CompanionStagedMcpAccount } from "@companion/box-runtime";
+import type { RuntimeAuthorization, RuntimeWorkMaterial } from "@companion/companion-runtime";
 import { MAX_ARCHIVE_BYTES, skillChecksum, toTar } from "@companion/skills";
 
 export interface RuntimeMaterialRows {
-  providerMaterial: Record<string, unknown>[];
-  skillMaterial: Record<string, unknown>[];
-  mcpMaterial: Record<string, unknown>[];
+  providerMaterial: RuntimeMaterialRow[];
+  skillMaterial: RuntimeMaterialRow[];
+  mcpMaterial: RuntimeMaterialRow[];
 }
+
+type RuntimeMaterialRow = RuntimeWorkMaterial["providerMaterial"][number];
+type RuntimeUntrustedValue = RuntimeMaterialRow[keyof RuntimeMaterialRow];
 
 export interface ResolvedRuntimeResources {
   providerAuth: Record<string, CompanionRuntimeProviderCredential>;
   skills: CompanionRuntimeSkill[];
-  mcpAccounts: CompanionMcpAccount[];
+  mcpAccounts: CompanionStagedMcpAccount[];
   mcpCredentials: CompanionMcpCredential[];
   extraEnv: Record<string, string>;
-}
-
-export interface RuntimeOauthResolutionInput {
-  accountId: string;
-  credentialGeneration: string;
-  credential: CompanionPluginStoredOAuthCredential;
 }
 
 export interface DecryptedRuntimeMcpRow {
@@ -42,19 +35,20 @@ export interface DecryptedRuntimeMcpRow {
 }
 
 function collectCredentialStrings(
-  value: unknown,
+  value: RuntimeUntrustedValue,
   output: Set<string>,
 ): void {
-  if (typeof value === "string") {
-    if (value.length > 0) output.add(value);
+  const text = stringValue(value);
+  if (text !== null) {
+    if (text.length > 0) output.add(text);
     return;
   }
   if (Array.isArray(value)) {
     for (const item of value) collectCredentialStrings(item, output);
     return;
   }
-  if (!value || typeof value !== "object") return;
-  for (const child of Object.values(value as Record<string, unknown>)) {
+  if (!value || Array.isArray(value) || Object.prototype.toString.call(value) !== "[object Object]") return;
+  for (const child of Object.values(value)) {
     collectCredentialStrings(child, output);
   }
 }
@@ -173,14 +167,7 @@ export async function resolveRuntimeResources(input: {
   material: RuntimeMaterialRows;
   masterKey: Buffer;
   loadSkillArchive(storagePath: string, signal: AbortSignal): Promise<Buffer>;
-  resolveOauth?(input: RuntimeOauthResolutionInput): Promise<CompanionPluginStoredOAuthCredential>;
-  resolveGithubIdentity?(input: {
-    accountId: string;
-    credentialGeneration: string;
-    accessToken: string;
-  }): Promise<CompanionPluginGithubIdentity | null>;
   signal: AbortSignal;
-  now?: () => number;
 }): Promise<ResolvedRuntimeResources> {
   try {
     input.signal.throwIfAborted();
@@ -232,7 +219,7 @@ export async function resolveRuntimeResources(input: {
       row.decrypted.kind === "oauth"
       && row.decrypted.credential.serverName === "io.github.github/github-mcp-server"
     ).length === 1;
-    const mcpAccounts: CompanionMcpAccount[] = [];
+    const mcpAccounts: CompanionStagedMcpAccount[] = [];
     const mcpCredentials: CompanionMcpCredential[] = [];
     const extraEnv: Record<string, string> = {};
     const accountIds = new Set<string>();
@@ -240,47 +227,29 @@ export async function resolveRuntimeResources(input: {
       if (accountIds.has(row.accountId)) throw new RuntimeMaterialError("runtime_material_invalid");
       accountIds.add(row.accountId);
       const { account, decrypted } = row;
-      mcpAccounts.push(account);
       if (decrypted.kind === "environment") {
+        mcpAccounts.push({ account });
         mcpCredentials.push(...decrypted.credentials);
         continue;
       }
-      let oauth = decrypted.credential;
-      const expiresAt = oauth.accessExpiresAt === null ? null : Date.parse(oauth.accessExpiresAt);
-      if (
-        expiresAt !== null
-        && expiresAt <= (input.now ?? Date.now)() + COMPANION_MCP_OAUTH_REFRESH_SKEW_MS
-      ) {
-        if (!input.resolveOauth) throw new RuntimeMaterialError("runtime_material_invalid");
-        oauth = await input.resolveOauth({
-          accountId: row.accountId,
+      const oauth = decrypted.credential;
+      mcpAccounts.push({
+        account,
+        oauthBroker: {
           credentialGeneration: row.credentialGeneration,
-          credential: oauth,
-        });
-      }
-      const envKey = account.transport === "http"
-        ? Object.values(account.headers)[0]
-        : undefined;
-      mcpCredentials.push(companionMcpCredentialSchema.parse({
-        env_key: envKey,
-        value: `Bearer ${oauth.accessToken}`,
-      }));
+          github: oauth.serverName === "io.github.github/github-mcp-server",
+        },
+      });
       if (uniqueGithubGit && oauth.serverName === "io.github.github/github-mcp-server") {
-        let identity = oauth.githubIdentity ?? null;
-        if (!identity && input.resolveGithubIdentity) {
-          identity = await input.resolveGithubIdentity({
-            accountId: row.accountId,
-            credentialGeneration: row.credentialGeneration,
-            accessToken: oauth.accessToken,
-          });
+        extraEnv.COMPANION_GITHUB_MCP_ACCOUNT_ID = row.accountId;
+        extraEnv.GIT_TERMINAL_PROMPT = "0";
+        extraEnv.GH_PROMPT_DISABLED = "1";
+        if (oauth.githubIdentity) {
+          extraEnv.GIT_AUTHOR_NAME = oauth.githubIdentity.name;
+          extraEnv.GIT_AUTHOR_EMAIL = oauth.githubIdentity.email;
+          extraEnv.GIT_COMMITTER_NAME = oauth.githubIdentity.name;
+          extraEnv.GIT_COMMITTER_EMAIL = oauth.githubIdentity.email;
         }
-        const git = githubGitRuntimeMaterial({
-          accessToken: oauth.accessToken,
-          identity,
-          occupiedEnvKeys: mcpCredentials.map((credential) => credential.env_key),
-        });
-        mcpCredentials.push(...git.credentials);
-        Object.assign(extraEnv, git.env);
       }
     }
     input.signal.throwIfAborted();
@@ -295,7 +264,7 @@ export async function resolveRuntimeResources(input: {
 
 export function decryptRuntimeMcpRows(input: {
   orgId: string;
-  mcpMaterial: Record<string, unknown>[];
+  mcpMaterial: RuntimeMaterialRow[];
   masterKey: Buffer;
 }): DecryptedRuntimeMcpRow[] {
   try {
@@ -334,7 +303,7 @@ interface EncryptedRow {
   };
 }
 
-function providerRow(row: Record<string, unknown>): EncryptedRow & {
+function providerRow(row: RuntimeMaterialRow): EncryptedRow & {
   providerId: string;
   authMethod: string;
   credentialVersion: number;
@@ -353,7 +322,7 @@ function providerRow(row: Record<string, unknown>): EncryptedRow & {
   };
 }
 
-function mcpRow(row: Record<string, unknown>): EncryptedRow & {
+function mcpRow(row: RuntimeMaterialRow): EncryptedRow & {
   accountId: string;
   accountConfig: unknown;
 } {
@@ -364,7 +333,7 @@ function mcpRow(row: Record<string, unknown>): EncryptedRow & {
   };
 }
 
-function encryptedRow(row: Record<string, unknown>): EncryptedRow {
+function encryptedRow(row: RuntimeMaterialRow): EncryptedRow {
   return {
     credentialGeneration: uuid(row.credential_generation),
     envelope: {
@@ -379,7 +348,7 @@ function encryptedRow(row: Record<string, unknown>): EncryptedRow {
   };
 }
 
-function skillRow(row: Record<string, unknown>): {
+interface RuntimeSkillRow {
   skillId: string;
   versionId: string;
   slug: string;
@@ -387,7 +356,9 @@ function skillRow(row: Record<string, unknown>): {
   checksum: string;
   sizeBytes: number;
   storagePath: string;
-} {
+}
+
+function skillRow(row: RuntimeMaterialRow): RuntimeSkillRow {
   const checksum = boundedString(row.checksum);
   const sizeBytes = row.size_bytes;
   if (!/^sha256:[0-9a-f]{64}$/.test(checksum)) {
@@ -415,17 +386,18 @@ function sameUniqueRefs(left: string[], right: string[]): boolean {
   return [...leftSet].every((value) => rightSet.has(value));
 }
 
-function boundedString(value: unknown, max = 1_000_000): string {
+function boundedString(value: RuntimeUntrustedValue, max = 1_000_000): string {
+  const text = stringValue(value);
   if (
-    typeof value !== "string"
-    || value.length < 1
-    || value.length > max
-    || /[\r\n\0]/.test(value)
+    text === null
+    || text.length < 1
+    || text.length > max
+    || /[\r\n\0]/.test(text)
   ) throw new RuntimeMaterialError("runtime_material_invalid");
-  return value;
+  return text;
 }
 
-function stableString(value: unknown, max: number): string {
+function stableString(value: RuntimeUntrustedValue, max: number): string {
   const text = boundedString(value, max);
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._+@:/-]*$/.test(text)) {
     throw new RuntimeMaterialError("runtime_material_invalid");
@@ -433,10 +405,15 @@ function stableString(value: unknown, max: number): string {
   return text;
 }
 
-function uuid(value: unknown): string {
+function uuid(value: RuntimeUntrustedValue): string {
   const text = boundedString(value, 36);
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(text)) {
     throw new RuntimeMaterialError("runtime_material_invalid");
   }
   return text;
+}
+
+function stringValue(value: RuntimeUntrustedValue): string | null {
+  const text = String(value);
+  return value === text ? text : null;
 }

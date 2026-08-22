@@ -218,9 +218,11 @@ is deliverable only when both actors can access the attempt's resources.
 
 Provider connections and member MCP accounts are workspace/member-scoped, envelope-encrypted, and
 write-only. Runtime decrypts only the selected values after authorization. Durable Box config uses
-references where possible; transient connector values use the owner-only runtime channel and never
-appear in logs, API responses, audit metadata, or projections. The provider auth file remains on
-Box disk only where Pi must refresh it.
+references where possible. Static connector values use the owner-only runtime channel. OAuth refresh
+tokens never leave the control plane; OAuth access tokens reach only a loopback gateway's memory and
+the one outbound request it is forwarding. They never appear in user-facing responses, logs, audit
+metadata, projections, or durable Box files. The provider auth file remains on Box disk only where
+Pi itself must refresh the model provider connection.
 
 PostgreSQL distinguishes the latest available selected-Skills revision from the minimum revision
 required before dispatch. A publication advances only the available revision, so waking a Box
@@ -237,20 +239,41 @@ Each request re-checks that the Companion still exists for that member, so delet
 removing the member refuses it immediately; `/v1/companions*` remains cookie-only.
 
 An attempt pins the exact provider and MCP credential revisions before prompt dispatch. A takeover
-that observes a later revision interrupts an already-accepted attempt instead of interpreting
-unprojected events with new credentials. A terminal projection already committed is read through a
-separate fenced metadata-only function, then ACKed and settled without credential material. OAuth
-refresh compare-and-swap is limited to pre-dispatch settings and operation staging. Staging records
-the earliest bounded expiry across the Skills Hub token and selected OAuth access tokens. That
-expiry becomes active only after a different idle Pi invocation is observed. A warm non-native send
+that observes a later generation interrupts an already-accepted attempt instead of interpreting
+unprojected events with a different connection. A terminal projection already committed is read
+through a separate fenced metadata-only function, then ACKed and settled without credential
+material. For each selected OAuth account, staging writes only its account id, stable credential
+generation, and pinned HTTPS MCP URL. It mints a six-hour `cmp_mcp_*` capability bound to that
+Companion, actor, and exact account refs. The Pi broker starts an ephemeral loopback-only HTTP
+gateway before Pi and points `pi-mcp-adapter` at that gateway.
+
+Before forwarding a request, the gateway asks `POST /v1/runtime/mcp-access-token` for a usable
+access token, caches it in memory only until an adaptive margin proportional to its lifetime, and
+coalesces concurrent renewals. The endpoint accepts only `cmp_mcp_*`, revalidates the active
+Companion, membership, account owner, current plugin selection, and stable credential generation,
+and answers `private, no-store`. Sessions, ordinary PATs, Agent Auth, other Companions, and
+unselected accounts cannot use it. An explicit upstream `401` before any MCP response byte forces
+one refresh and one retry. Timeouts, disconnects, redirects, and other ambiguous outcomes are never
+replayed.
+
+Git uses a credential helper and `gh` uses an audited wrapper; each command asks the same loopback
+gateway, so neither `GITHUB_TOKEN` nor `GH_TOKEN` is persisted in the Box environment or on disk.
+OAuth refresh updates the encrypted envelope with a credential-version CAS while keeping the
+connection generation stable. Deleting and reconnecting the plugin creates a new account identity
+and generation.
+
+Staging records the earliest bounded expiry across the Skills Hub token and MCP broker capability,
+not OAuth access tokens. That expiry becomes active only after a different idle Pi invocation is
+observed. A warm non-native send
 dispatches directly only while the snapshot is bound to the current Pi invocation and has more than
 two hours and five minutes remaining. Eligibility is checked both at enqueue and again under the
 runtime lease immediately before claim; otherwise the ordinary `start` operation restages and
 recycles Pi without a Full Box restart. Changing the observed invocation or minting a replacement
 Hub token invalidates the old proof before another turn can use it.
-Migration 0110 also versions the Runtime claim entrypoint. Replicas from before 0110 retain their
+Migration 0110 versions the Runtime claim entrypoint. Replicas from before 0110 retain their
 current lease but the legacy four-argument claim returns no new work after the migration commits.
-The material-aware five-argument claimer repairs an expired legacy lease by rewinding any
+Migration 0120 advances the six-argument material protocol to version 2, so protocol-1 replicas
+also stop claiming during the OAuth-gateway rollout. The current claimer repairs an expired legacy lease by rewinding any
 post-staging operation or settings checkpoint that has no staged-expiry ledger, then restages under
 the new fence. This prevents a rolling deploy from either publishing an unproven snapshot or
 repeating proof-less start operations.
