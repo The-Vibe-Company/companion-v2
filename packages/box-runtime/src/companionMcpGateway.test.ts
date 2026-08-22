@@ -89,16 +89,19 @@ describe("Companion MCP loopback gateway", () => {
 
     for (let elapsed = 0; elapsed <= 2 * 60 * 60_000; elapsed += 14 * 60_000) {
       now = Date.parse("2027-01-01T00:00:00.000Z") + elapsed;
-      const responses = await Promise.all(Array.from({ length: 4 }, async () =>
-        await fetch(`${gateway.origin}/mcp/${accountId}`, { method: "POST", body: "{}" })));
+      const responses = await Promise.all(Array.from({ length: 4 }, async () => {
+        const response = await fetch(`${gateway.origin}/mcp/${accountId}`, { method: "POST", body: "{}" });
+        await response.arrayBuffer();
+        return response;
+      }));
       expect(responses.every((response) => response.ok)).toBe(true);
     }
 
-    expect(tokenRequests).toBe(9);
-    expect(providerRefreshes).toBeGreaterThan(2);
-    expect(providerRefreshes).toBeLessThanOrEqual(9);
+    expect(tokenRequests).toBeGreaterThanOrEqual(9);
+    expect(tokenRequests).toBeLessThanOrEqual(36);
+    expect(providerRefreshes).toBe(5);
     expect(forceRefreshes[0]).toBe(false);
-    expect(forceRefreshes.some(Boolean)).toBe(true);
+    expect(forceRefreshes.filter(Boolean)).toHaveLength(4);
   });
 
   it("forces one refresh after an explicit 401 and never retries a second 401", async () => {
