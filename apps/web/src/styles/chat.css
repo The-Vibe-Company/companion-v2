@@ -178,3 +178,9 @@
   outline-offset: 2px;
   box-shadow: 0 0 0 3px var(--ring);
 }
+
+/* The composer field already draws the focus boundary around the textarea and its controls. Keep
+   the transparent outline for forced-colors, but do not draw a second rectangular ring inside it. */
+.aui-scope [data-slot="composer-field"] textarea:focus-visible {
+  box-shadow: none;
+}
