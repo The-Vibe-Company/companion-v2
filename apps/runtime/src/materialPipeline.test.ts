@@ -1,10 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   encryptCompanionMcpRuntimeCredential,
-  type CompanionPluginStoredOAuthCredential,
 } from "@companion/core";
 import {
-  RuntimeStoreSerializationError,
   type LeaseFence,
   type RuntimeAuthorization,
   type RuntimeStore,
@@ -25,14 +23,17 @@ const skillVersionId = "99999999-9999-4999-8999-999999999999";
 const nextSkillVersionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const masterKey = Buffer.alloc(32, 71);
 
-function oauth(accessToken: string) {
+function oauth(
+  accessToken: string,
+  accessExpiresAt: string | null = "2027-01-01T00:00:00.000Z",
+) {
   return {
     kind: "oauth" as const,
     version: 1 as const,
     serverName: "app.linear/linear" as const,
     accessToken,
     refreshToken: "refresh-token",
-    accessExpiresAt: "2027-01-01T00:00:00.000Z",
+    accessExpiresAt,
     scope: "read write",
     tokenType: "Bearer" as const,
     tokenEndpoint: "https://mcp.linear.app/token",
@@ -41,12 +42,12 @@ function oauth(accessToken: string) {
   };
 }
 
-function workMaterial(): RuntimeWorkMaterial {
+function workMaterial(accessExpiresAt?: string | null): RuntimeWorkMaterial {
   const envelope = encryptCompanionMcpRuntimeCredential({
     orgId,
     accountId,
     credentialGeneration: generation,
-    credential: oauth("old-token"),
+    credential: oauth("old-token", accessExpiresAt),
   }, masterKey);
   return {
     turnId: null,
@@ -89,14 +90,53 @@ const fence = {
   workId: "77777777-7777-4777-8777-777777777777",
 } satisfies LeaseFence;
 
-const authorization = {
+const authorization: RuntimeAuthorization = {
+  authorized: true,
+  denialCode: null,
+  leaseExpiresAt: new Date("2027-01-01T01:00:00.000Z"),
+  authorizationActorId: "actor-1",
+  decisionActorId: null,
+  clientSurface: "web",
   runtimeGeneration: 1n,
+  boxId: "bx_23456789",
+  boxState: "ready",
+  piState: "idle",
+  piInvocationId: "pi-invocation-1",
+  diskLayoutVersion: 14,
+  appliedSettingsRevision: 1n,
+  appliedSkillsRevision: 1,
   modelId: "provider/model",
   persona: "Be useful",
+  canWriteSkills: true,
   providerRefs: [],
   skillRefs: [],
   mcpRefs: [],
-} as unknown as RuntimeAuthorization;
+  desiredSettingsRevision: 1n,
+  skillsRevision: 1,
+  workCheckpoint: "starting",
+  workCheckpointSequence: 0n,
+  turnId: null,
+  turnStatus: null,
+  attemptStatus: null,
+  dispatchState: null,
+  eventCursor: null,
+  unknownEventCount: null,
+  malformedEventCount: null,
+  oversizedEventCount: null,
+  coldStartDeadlineAt: null,
+  inactivityDeadlineAt: null,
+  absoluteDeadlineAt: null,
+  operationKind: null,
+  operationStartedAt: null,
+  operationAttemptCount: null,
+  providerOperationId: null,
+  targetSettingsRevision: null,
+  targetSkillsRevision: null,
+  decisionStatus: null,
+  decisionDeliveryState: null,
+  decisionRequestKey: null,
+  decisionResponseText: null,
+};
 
 describe("runtime material provider and Box stager", () => {
   it("normalizes the staged Skills Hub API base to /v1", () => {
@@ -106,7 +146,7 @@ describe("runtime material provider and Box stager", () => {
     expect(companionHubApiUrl("https://api.example.test/v1/")).toBe("https://api.example.test/v1");
   });
 
-  it("persists an OAuth refresh through fenced CAS before staging its plaintext", async () => {
+  it("stages OAuth through a dedicated broker capability without exposing an access token", async () => {
     const material = workMaterial();
     const catalog = {
       companion: { model_id: "claude-opus-4-8", provider_id: "anthropic", persona: null },
@@ -114,19 +154,18 @@ describe("runtime material provider and Box stager", () => {
       plugins: [],
       note: "Propose changes with propose_config.",
     };
-    const casMcpOauth = vi.fn(async (_fence: LeaseFence, _input: unknown) => ({
-      updated: true,
-      credentialGeneration: nextGeneration,
-    }));
-    const store = {
+    const store = fakeStore({
       getMaterial: vi.fn(async () => material),
       getConfigCatalog: vi.fn(async () => catalog),
       mintHubToken: vi.fn(async () => ({
         token: "cmp_pat_hubtokenfixture000000000000000000000000",
         expiresAt: new Date("2027-01-01T04:00:00.000Z"),
       })),
-      casMcpOauth,
-    } as unknown as RuntimeStore;
+      mintMcpBrokerToken: vi.fn(async () => ({
+        token: `cmp_mcp_${"a".repeat(48)}`,
+        expiresAt: new Date("2027-01-01T02:00:00.000Z"),
+      })),
+    });
     const stageExistingBox = vi.fn(async () => ({
       boxId: "bx_23456789",
       diskLayoutVersion: 14 as const,
@@ -140,29 +179,18 @@ describe("runtime material provider and Box stager", () => {
         checksum: `sha256:${"1".repeat(64)}`,
         archive: Buffer.from("bundled"),
       },
-      runtime: () => ({ stageExistingBox }) as unknown as CompanionBoxRuntimeV2,
+      runtime: () => fakeRuntime(stageExistingBox),
       loadSkillArchive: vi.fn(),
       loadAttachment: vi.fn(),
       storeAttachment: vi.fn(),
-      refreshOauth: async () => ({
-        ...oauth("new-token"),
-        accessExpiresAt: "2027-01-01T08:00:00.000Z",
-      }),
-      uuid: () => nextGeneration,
       now: () => Date.parse("2027-01-01T00:00:00.000Z"),
     });
 
     const frozen = await pipeline.materialProvider.getMaterial({ store, fence });
     expect(frozen).toBe(material);
-    expect(casMcpOauth).toHaveBeenCalledWith(fence, expect.objectContaining({
-      accountId,
-      expectedGeneration: generation,
-      nextGeneration,
-      envelope: expect.objectContaining({ ciphertext: expect.any(String) }),
-    }));
-    expect(JSON.stringify(casMcpOauth.mock.calls[0]?.[1])).not.toContain("new-token");
     expect(store.getConfigCatalog).toHaveBeenCalled();
     expect(store.mintHubToken).toHaveBeenCalled();
+    expect(store.mintMcpBrokerToken).toHaveBeenCalledWith(fence, expect.any(Number));
 
     await expect(pipeline.resourceStager.stageExistingBox({
       orgId,
@@ -171,7 +199,7 @@ describe("runtime material provider and Box stager", () => {
       allowBoxCreate: false,
       authorization: {
         ...authorization,
-        mcpRefs: [{ account_id: accountId, credential_generation: nextGeneration }],
+        mcpRefs: [{ account_id: accountId, credential_generation: generation }],
       },
       material,
       clientSurface: "web",
@@ -182,17 +210,22 @@ describe("runtime material provider and Box stager", () => {
       diskLayoutVersion: 14,
       appliedSettingsRevision: 3n,
       appliedSkillsRevision: 4,
-      materialExpiresAt: new Date("2027-01-01T04:00:00.000Z"),
+      materialExpiresAt: new Date("2027-01-01T02:00:00.000Z"),
     });
     expect(stageExistingBox).toHaveBeenCalledWith(expect.objectContaining({
       boxId: "bx_23456789",
       runtimeGeneration: 1,
-      mcpCredentials: [{ env_key: "LINEAR_AUTH", value: "Bearer new-token" }],
+      mcpCredentials: [],
+      mcpAccounts: [{
+        account: expect.objectContaining({ id: accountId, url: "https://mcp.linear.app/mcp" }),
+        oauthBroker: { credentialGeneration: generation, github: false },
+      }],
       skills: [expect.objectContaining({ slug: "companion" })],
       hubEnv: {
         COMPANION_API_URL: "https://api.example.test/v1",
         COMPANION_WORKSPACE_ID: orgId,
         COMPANION_DELEGATION_TOKEN: "cmp_pat_hubtokenfixture000000000000000000000000",
+        COMPANION_MCP_BROKER_TOKEN: `cmp_mcp_${"a".repeat(48)}`,
       },
       configCatalog: catalog,
       signal: expect.any(AbortSignal),
@@ -200,21 +233,16 @@ describe("runtime material provider and Box stager", () => {
   });
 
   it.each([
-    { label: "below", ttlMs: 125 * 60 * 1_000 - 1, accepted: false },
-    { label: "at", ttlMs: 125 * 60 * 1_000, accepted: false },
-    { label: "above", ttlMs: 125 * 60 * 1_000 + 1, accepted: true },
-  ])("rejects an OAuth token $label the turn reserve before Box staging", async ({
-    ttlMs,
-    accepted,
-  }) => {
+    { label: "without expiry", ttlMs: null },
+    { label: "lasting one second", ttlMs: 1_000 },
+    { label: "lasting thirty seconds", ttlMs: 30_000 },
+    { label: "lasting fifteen minutes", ttlMs: 15 * 60 * 1_000 },
+    { label: "lasting more than two hours", ttlMs: 126 * 60 * 1_000 },
+  ])("accepts an OAuth access token $label at startup", async ({ ttlMs }) => {
     const nowMs = Date.parse("2027-01-01T00:00:00.000Z");
-    const material = workMaterial();
-    const store = {
+    const material = workMaterial(ttlMs === null ? null : new Date(nowMs + ttlMs).toISOString());
+    const store = fakeStore({
       getMaterial: vi.fn(async () => material),
-      casMcpOauth: vi.fn(async () => ({
-        updated: true,
-        credentialGeneration: nextGeneration,
-      })),
       getConfigCatalog: vi.fn(async () => ({
         companion: { model_id: "model", provider_id: "provider", persona: null },
         skills: [],
@@ -225,8 +253,15 @@ describe("runtime material provider and Box stager", () => {
         token: "cmp_pat_hubtokenfixture000000000000000000000000",
         expiresAt: new Date(nowMs + 6 * 60 * 60 * 1_000),
       })),
-    } as unknown as RuntimeStore;
-    const stageExistingBox = vi.fn();
+      mintMcpBrokerToken: vi.fn(async () => ({
+        token: `cmp_mcp_${"b".repeat(48)}`,
+        expiresAt: new Date(nowMs + 6 * 60 * 60 * 1_000),
+      })),
+    });
+    const stageExistingBox = vi.fn(async () => ({
+      boxId: "bx_23456789",
+      diskLayoutVersion: 14 as const,
+    }));
     const pipeline = createRuntimeMaterialPipeline({
       masterKey,
       apiUrl: "https://api.example.test",
@@ -236,108 +271,33 @@ describe("runtime material provider and Box stager", () => {
         checksum: `sha256:${"1".repeat(64)}`,
         archive: Buffer.from("bundled"),
       },
-      runtime: () => ({ stageExistingBox }) as unknown as CompanionBoxRuntimeV2,
+      runtime: () => fakeRuntime(stageExistingBox),
       loadSkillArchive: vi.fn(),
       loadAttachment: vi.fn(),
       storeAttachment: vi.fn(),
-      refreshOauth: async () => ({
-        ...oauth("short-lived-token"),
-        accessExpiresAt: new Date(nowMs + ttlMs).toISOString(),
-      }),
-      uuid: () => nextGeneration,
       now: () => nowMs,
     });
 
-    const reading = pipeline.materialProvider.getMaterial({ store, fence });
-    if (accepted) {
-      await expect(reading).resolves.toBe(material);
-    } else {
-      await expect(reading).rejects.toMatchObject({
-        stableCode: "mcp_oauth_refresh_failed",
-        action: "retry",
-      });
-      expect(store.mintHubToken).not.toHaveBeenCalled();
-    }
-    expect(stageExistingBox).not.toHaveBeenCalled();
-  });
-
-  it("treats a lost OAuth CAS as fence loss and never stages the token", async () => {
-    const material = workMaterial();
-    const store = {
-      getMaterial: vi.fn(async () => material),
-      casMcpOauth: vi.fn(async () => ({
-        updated: false,
-        credentialGeneration: "88888888-8888-4888-8888-888888888888",
-      })),
-    } as unknown as RuntimeStore;
-    const stageExistingBox = vi.fn();
-    const pipeline = createRuntimeMaterialPipeline({
-      masterKey,
-      apiUrl: "https://api.example.test",
-      bundledSkill: {
-        slug: "companion",
-        version: "1.0.0",
-        checksum: `sha256:${"1".repeat(64)}`,
-        archive: Buffer.from("bundled"),
+    await expect(pipeline.materialProvider.getMaterial({ store, fence })).resolves.toBe(material);
+    await expect(pipeline.resourceStager.stageExistingBox({
+      orgId,
+      companionId,
+      boxId: "bx_23456789",
+      allowBoxCreate: false,
+      authorization: {
+        ...authorization,
+        mcpRefs: [{ account_id: accountId, credential_generation: generation }],
       },
-      runtime: () => ({ stageExistingBox }) as unknown as CompanionBoxRuntimeV2,
-      loadSkillArchive: vi.fn(),
-      loadAttachment: vi.fn(),
-      storeAttachment: vi.fn(),
-      refreshOauth: async () => oauth("new-token"),
-      uuid: () => nextGeneration,
-      now: () => Date.parse("2027-01-01T00:00:00.000Z"),
-    });
-
-    await expect(pipeline.materialProvider.getMaterial({ store, fence }))
-      .rejects.toBeInstanceOf(RuntimeStoreSerializationError);
-    expect(stageExistingBox).not.toHaveBeenCalled();
-  });
-
-  it("does not enter the OAuth CAS after runtime shutdown aborts a refresh", async () => {
-    const material = workMaterial();
-    const casMcpOauth = vi.fn();
-    const store = {
-      getMaterial: vi.fn(async () => material),
-      casMcpOauth,
-    } as unknown as RuntimeStore;
-    const controller = new AbortController();
-    let finishRefresh!: (credential: ReturnType<typeof oauth>) => void;
-    const refreshOauth = vi.fn(async (
-      _credential: CompanionPluginStoredOAuthCredential,
-      _signal?: AbortSignal,
-    ) =>
-      await new Promise<ReturnType<typeof oauth>>((resolve) => { finishRefresh = resolve; }));
-    const pipeline = createRuntimeMaterialPipeline({
-      masterKey,
-      apiUrl: "https://api.example.test",
-      bundledSkill: {
-        slug: "companion",
-        version: "1.0.0",
-        checksum: `sha256:${"1".repeat(64)}`,
-        archive: Buffer.from("bundled"),
-      },
-      runtime: () => ({ stageExistingBox: vi.fn() }) as unknown as CompanionBoxRuntimeV2,
-      loadSkillArchive: vi.fn(),
-      loadAttachment: vi.fn(),
-      storeAttachment: vi.fn(),
-      refreshOauth,
-      uuid: () => nextGeneration,
-      now: () => Date.parse("2027-01-01T00:00:00.000Z"),
-    });
-
-    const reading = pipeline.materialProvider.getMaterial({
-      store,
-      fence,
-      signal: controller.signal,
-    });
-    await vi.waitFor(() => expect(refreshOauth).toHaveBeenCalledOnce());
-    const stopped = new Error("runtime stopped");
-    controller.abort(stopped);
-    finishRefresh(oauth("new-token"));
-
-    await expect(reading).rejects.toBe(stopped);
-    expect(casMcpOauth).not.toHaveBeenCalled();
+      material,
+      clientSurface: "web",
+      targetSettingsRevision: 3n,
+      targetSkillsRevision: 4,
+      signal: new AbortController().signal,
+    })).resolves.toMatchObject({ diskLayoutVersion: 14 });
+    expect(stageExistingBox).toHaveBeenCalledWith(expect.objectContaining({
+      mcpCredentials: [],
+      hubEnv: expect.not.objectContaining({ GITHUB_TOKEN: expect.anything() }),
+    }));
   });
 
   it.each([
@@ -413,7 +373,7 @@ describe("runtime material provider and Box stager", () => {
         checksum: `sha256:${"1".repeat(64)}`,
         archive: Buffer.from("bundled"),
       },
-      runtime: () => ({ stageExistingBox }) as unknown as CompanionBoxRuntimeV2,
+      runtime: () => fakeRuntime(stageExistingBox),
       loadSkillArchive,
       loadAttachment: vi.fn(),
       storeAttachment: vi.fn(),
@@ -424,7 +384,7 @@ describe("runtime material provider and Box stager", () => {
       companionId,
       boxId: "bx_23456789",
       allowBoxCreate: false,
-      authorization: { ...authorization, ...refs } as RuntimeAuthorization,
+      authorization: { ...authorization, ...refs },
       material,
       clientSurface: "web",
       targetSettingsRevision: 3n,
@@ -436,7 +396,7 @@ describe("runtime material provider and Box stager", () => {
   });
 });
 
-function fakeEncryptedEnvelope(): Record<string, string> {
+function fakeEncryptedEnvelope() {
   return {
     ciphertext: "ciphertext",
     iv: "iv",
@@ -456,7 +416,7 @@ function snakeEnvelope(envelope: {
   wrapIv: string;
   wrapAuthTag: string;
   keyId: string;
-}): Record<string, string> {
+}) {
   return {
     ciphertext: envelope.ciphertext,
     iv: envelope.iv,
@@ -466,4 +426,24 @@ function snakeEnvelope(envelope: {
     wrap_auth_tag: envelope.wrapAuthTag,
     key_id: envelope.keyId,
   };
+}
+
+function fakeRuntime(
+  stageExistingBox: (
+    ...args: Parameters<CompanionBoxRuntimeV2["stageExistingBox"]>
+  ) => Promise<{ boxId: string; diskLayoutVersion: 14 }>,
+): CompanionBoxRuntimeV2 {
+  // SAFETY: The pipeline tests exercise only `stageExistingBox`; every other runtime call is
+  // unreachable in these cases and the fake is intentionally scoped to that seam.
+  return { stageExistingBox } as CompanionBoxRuntimeV2;
+}
+
+type MaterialTestStore = Pick<
+  RuntimeStore,
+  "getMaterial" | "getConfigCatalog" | "mintHubToken" | "mintMcpBrokerToken"
+>;
+
+function fakeStore(value: MaterialTestStore): RuntimeStore {
+  // SAFETY: The material pipeline tests exercise only the four material/token store methods.
+  return value as RuntimeStore;
 }

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { buildMcpAdapterInjection, companionGitCredentialHelperInstallCommand, COMPANION_GIT_CREDENTIAL_HELPER_PATH, COMPANION_GIT_CREDENTIAL_HELPER_SOURCE } from "./companionPiInjection";
+import {
+  buildMcpAdapterInjection,
+  companionGitCredentialHelperInstallCommand,
+  COMPANION_GH_WRAPPER_SOURCE,
+  COMPANION_GIT_CREDENTIAL_HELPER_PATH,
+  COMPANION_GIT_CREDENTIAL_HELPER_SOURCE,
+} from "./companionPiInjection";
 
 describe("Pi MCP injection", () => {
   it("keeps labeled accounts distinct and writes only environment references", () => {
@@ -41,11 +47,42 @@ describe("Pi MCP injection", () => {
     });
   });
 
+  it("routes OAuth HTTP accounts through the loopback gateway without durable headers", () => {
+    const accountId = "11111111-1111-4111-8111-111111111111";
+    const credentialGeneration = "22222222-2222-4222-8222-222222222222";
+    const injected = buildMcpAdapterInjection([{
+      account: {
+        id: accountId,
+        label: "GitHub",
+        transport: "http",
+        url: "https://api.githubcopilot.com/mcp/",
+        headers: { Authorization: "GITHUB_MCP_AUTH" },
+        lifecycle: "lazy",
+        direct_tools: false,
+      },
+      oauthBroker: { credentialGeneration, github: true },
+    }]);
+
+    expect(Object.values(injected.config.mcpServers)[0]).toMatchObject({
+      url: `\${COMPANION_MCP_GATEWAY_ORIGIN}/mcp/${accountId}`,
+      headers: {},
+    });
+    expect(injected.gatewayAccounts).toEqual([{
+      accountId,
+      credentialGeneration,
+      upstreamUrl: "https://api.githubcopilot.com/mcp/",
+      github: true,
+    }]);
+    expect(JSON.stringify(injected)).not.toContain("GITHUB_MCP_AUTH");
+  });
+
   it("installs a GitHub-only credential helper that never embeds a token", () => {
     expect(COMPANION_GIT_CREDENTIAL_HELPER_SOURCE).toContain("protocol=https");
     expect(COMPANION_GIT_CREDENTIAL_HELPER_SOURCE).toContain("host=github.com");
     expect(COMPANION_GIT_CREDENTIAL_HELPER_SOURCE).toContain("host=gist.github.com");
-    expect(COMPANION_GIT_CREDENTIAL_HELPER_SOURCE).toContain("$GITHUB_TOKEN");
+    expect(COMPANION_GIT_CREDENTIAL_HELPER_SOURCE).toContain("$COMPANION_MCP_GATEWAY_ORIGIN/git/");
+    expect(COMPANION_GIT_CREDENTIAL_HELPER_SOURCE).not.toContain("GITHUB_TOKEN");
+    expect(COMPANION_GH_WRAPPER_SOURCE).toContain('GH_TOKEN="$token" exec');
     expect(COMPANION_GIT_CREDENTIAL_HELPER_SOURCE).not.toMatch(/gho_|ghp_|github_pat_/);
     expect(companionGitCredentialHelperInstallCommand()).toContain(
       COMPANION_GIT_CREDENTIAL_HELPER_PATH,

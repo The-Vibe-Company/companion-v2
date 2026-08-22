@@ -13,11 +13,12 @@
  * the guarantees depend on real SECURITY DEFINER ownership, FORCE RLS, triggers, enum/check
  * constraints, and transactional cursor/projection writes.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { z } from "zod";
 import {
   companionOperationSchema,
   companionTranscriptEntrySchema,
@@ -54,6 +55,14 @@ runtimeUrl.search = "";
 
 type Sql = ReturnType<typeof postgres>;
 type Tx = postgres.TransactionSql;
+
+const integrationJsonObjectSchema = z.record(z.string(), z.unknown());
+type IntegrationJsonObject = z.infer<typeof integrationJsonObjectSchema>;
+
+function stringValue<T>(value: T): string | null {
+  const parsed = z.string().safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
 
 interface Claim {
   orgId: string;
@@ -305,7 +314,7 @@ async function claimWork(): Promise<Claim> {
       runtime_generation::text as "runtimeGeneration"
     from public.companion_runtime_claim_work(${executorId}, 1, 30, (
       select gate_epoch from public.companion_runtime_gate_status()
-    ), 1)
+    ), 2)
   `);
   if (!rows[0]) throw new Error("expected one Runtime v2 claim");
   return rows[0];
@@ -522,7 +531,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
             'companion_turn_attempts', 'companion_operations', 'companion_decision_deliveries',
             'companion_runtime_leases', 'companion_runtime_duplicate_cleanups',
             'companion_runtime_event_projections', 'companion_runtime_desktop_requests',
-            'companion_message_attachments', 'companion_routines'
+            'companion_message_attachments', 'companion_routines', 'companion_mcp_broker_tokens'
           ]) protected(table_name)
           where has_table_privilege(${runtimeRole}, 'public.' || protected.table_name, 'SELECT')
         ) as "privateTableReads",
@@ -531,10 +540,10 @@ describe("Companion runtime executor PostgreSQL surface", () => {
             'public.companion_runtime_get_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)',
             'public.companion_runtime_get_config_catalog(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)',
             'public.companion_runtime_mint_hub_token(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)',
+            'public.companion_runtime_mint_mcp_broker_token(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)',
             'public.companion_runtime_record_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,public.companion_client_surface,timestamp with time zone)',
             'public.companion_runtime_publish_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text)',
             'public.companion_runtime_get_attempt_terminal_projection(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)',
-            'public.companion_runtime_cas_mcp_oauth(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,uuid,uuid,uuid,text,text,text,text,text,text,text)',
             'public.companion_runtime_register_duplicate_cleanups(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text[])',
             'public.companion_runtime_checkpoint_duplicate_cleanup(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text,bigint,public.companion_duplicate_cleanup_status,text)',
             'public.companion_runtime_authorize_desktop(uuid,uuid,text)',
@@ -572,7 +581,10 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     expect(materialAcl.every((entry) => entry.runtime && !entry.api && !entry.worker)).toBe(true);
 
     await expect(asRuntime(async (tx) => {
-      await verifyRuntimeDatabaseRole(tx as unknown as Pick<Sql, "unsafe">, runtimeRole);
+      // SAFETY: The transaction exposes the same `unsafe` execution method required by the role
+      // verifier; this test deliberately limits the view to that one method.
+      const roleClient = tx as Pick<Sql, "unsafe">;
+      await verifyRuntimeDatabaseRole(roleClient, runtimeRole);
     })).resolves.toBeUndefined();
 
     const [owner] = await sql<Array<{ name: string }>>`
@@ -1093,13 +1105,14 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     const thread = await asApi({
       orgId: ids.orgA,
       actorId: ids.ownerA,
-      action: (tx) => tx<Array<{ entries: Array<Record<string, unknown>> }>>`
+      action: (tx) => tx<Array<{ entries: Array<IntegrationJsonObject> }>>`
         select entries from public.companion_api_read_thread(
           ${ids.orgA}::uuid, ${companionId}::uuid
         )
       `,
     });
-    const projected = thread[0]!.entries[0]!.attachments as Array<Record<string, unknown>>;
+    // SAFETY: The SQL projection is the JSONB attachment array returned by the API read function.
+    const projected = thread[0]!.entries[0]!.attachments as Array<IntegrationJsonObject>;
     expect(projected).toEqual([
       expect.objectContaining({
         kind: "user_upload",
@@ -1113,7 +1126,8 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     expect(JSON.stringify(projected)).not.toContain("companion-attachments/");
 
     // The read route re-authorizes on every request: an Editor may read, a non-member may not.
-    const attachmentId = projected[0]!.id as string;
+    const attachmentId = stringValue(projected[0]?.id);
+    if (!attachmentId) throw new Error("projected attachment has no id");
     const asset = await asApi({
       orgId: ids.orgA,
       actorId: ids.ownerA,
@@ -1279,7 +1293,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     const thread = await asApi({
       orgId: ids.orgA,
       actorId: ids.ownerA,
-      action: (tx) => tx<Array<{ entries: Array<Record<string, unknown>> }>>`
+      action: (tx) => tx<Array<{ entries: Array<IntegrationJsonObject> }>>`
         select entries from public.companion_api_read_thread(
           ${ids.orgA}::uuid, ${fixture.companionId}::uuid
         )
@@ -1428,7 +1442,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       const [duplicateAudit] = await sql<Array<{
         action: string;
         actorId: string | null;
-        metadata: Record<string, unknown>;
+        metadata: IntegrationJsonObject;
       }>>`
         select action, actor_id as "actorId", metadata
         from audit_log
@@ -1535,8 +1549,8 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         orgId: ids.orgA,
         actorId: ids.editorA,
         action: (tx: Tx) => tx<Array<{
-          turn: Record<string, unknown>;
-          operation: Record<string, unknown>;
+          turn: IntegrationJsonObject;
+          operation: IntegrationJsonObject;
           replayed: boolean;
         }>>`
           select * from public.companion_api_enqueue_turn(
@@ -1638,7 +1652,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         actorId: ids.editorA,
         action: (tx) => tx<Array<{
           accessRole: string;
-          entries: Array<Record<string, unknown>>;
+          entries: Array<IntegrationJsonObject>;
           queuedCount: number;
           interruptedTurn: unknown;
         }>>`
@@ -1801,7 +1815,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       const enqueueStop = () => asApi({
         orgId: ids.orgA,
         actorId: ids.editorA,
-        action: (tx: Tx) => tx<Array<{ operation: Record<string, unknown>; replayed: boolean }>>`
+      action: (tx: Tx) => tx<Array<{ operation: IntegrationJsonObject; replayed: boolean }>>`
           select * from public.companion_api_enqueue_operation(
             ${ids.orgA}::uuid, ${companionId}::uuid, ${stopRequestId}::uuid,
             'stop', 'web'
@@ -1844,7 +1858,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       const enqueueDelete = () => asApi({
         orgId: ids.orgA,
         actorId: ids.ownerA,
-        action: (tx: Tx) => tx<Array<{ operation: Record<string, unknown>; replayed: boolean }>>`
+        action: (tx: Tx) => tx<Array<{ operation: IntegrationJsonObject; replayed: boolean }>>`
           select * from public.companion_api_enqueue_operation(
             ${ids.orgA}::uuid, ${companionId}::uuid, ${deleteRequestId}::uuid,
             'delete', 'web'
@@ -1861,7 +1875,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       const audits = await sql<Array<{
         action: string;
         actorId: string | null;
-        metadata: Record<string, unknown>;
+        metadata: IntegrationJsonObject;
       }>>`
         select action, actor_id as "actorId", metadata
         from audit_log
@@ -1926,8 +1940,8 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         orgId: ids.orgA,
         actorId: ids.ownerA,
         action: (tx: Tx) => tx<Array<{
-          turn: Record<string, unknown>;
-          operation: Record<string, unknown> | null;
+          turn: IntegrationJsonObject;
+          operation: IntegrationJsonObject | null;
           replayed: boolean;
         }>>`
           select * from public.companion_api_enqueue_turn(
@@ -1946,7 +1960,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       const replay = await asApi({
         orgId: ids.orgA,
         actorId: ids.ownerA,
-        action: (tx: Tx) => tx<Array<{ turn: Record<string, unknown>; replayed: boolean }>>`
+        action: (tx: Tx) => tx<Array<{ turn: IntegrationJsonObject; replayed: boolean }>>`
           select turn, replayed from public.companion_api_enqueue_turn(
             ${ids.orgA}::uuid, ${companionId}::uuid, ${clientMessageId}::uuid,
             'Already warm, no wake needed', 'web', '[]'::jsonb
@@ -1986,7 +2000,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     }
   });
 
-  it("quarantines pre-0110 claimers while the material-aware executor can claim the work", async () => {
+  it("quarantines pre-0113 claimers while the broker-aware executor can claim the work", async () => {
     if (!sql) throw new Error("runtime executor database is not initialized");
     let companionId = "";
     try {
@@ -2010,6 +2024,13 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         ))
       `);
       expect(legacyClaims).toEqual([]);
+      const protocolOneClaims = await asRuntime((tx) => tx<Array<{ workId: string }>>`
+        select work_id::text as "workId"
+        from public.companion_runtime_claim_work(${executorId}, 1, 30, (
+          select gate_epoch from public.companion_runtime_gate_status()
+        ), 1)
+      `);
+      expect(protocolOneClaims).toEqual([]);
       const [unclaimed] = await sql<Array<{ workKind: string | null; workId: string | null }>>`
         select work_kind::text as "workKind", work_id::text as "workId"
         from companion_runtime_leases where companion_id = ${companionId}::uuid
@@ -2190,7 +2211,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         const [enqueued] = await asApi({
           orgId: ids.orgA,
           actorId: ids.ownerA,
-          action: (tx: Tx) => tx<Array<{ operation: Record<string, unknown> | null }>>`
+          action: (tx: Tx) => tx<Array<{ operation: IntegrationJsonObject | null }>>`
             select operation from public.companion_api_enqueue_turn(
               ${ids.orgA}::uuid, ${companionId}::uuid, ${clientMessageId}::uuid,
               ${`Restage ${variant.name}`},
@@ -2258,7 +2279,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       const [enqueued] = await asApi({
         orgId: ids.orgA,
         actorId: ids.ownerA,
-        action: (tx: Tx) => tx<Array<{ operation: Record<string, unknown> | null }>>`
+          action: (tx: Tx) => tx<Array<{ operation: IntegrationJsonObject | null }>>`
           select operation from public.companion_api_enqueue_turn(
             ${ids.orgA}::uuid, ${companionId}::uuid, ${clientMessageId}::uuid,
             'Wait beyond the material reserve', 'web', '[]'::jsonb
@@ -2350,7 +2371,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       const [enqueued] = await asApi({
         orgId: ids.orgA,
         actorId: ids.ownerA,
-        action: (tx: Tx) => tx<Array<{ operation: Record<string, unknown> | null }>>`
+          action: (tx: Tx) => tx<Array<{ operation: IntegrationJsonObject | null }>>`
           select operation from public.companion_api_enqueue_turn(
             ${ids.orgA}::uuid, ${companionId}::uuid, ${randomUUID()}::uuid,
             'Mixed runtime send', ${to}::public.companion_client_surface, '[]'::jsonb
@@ -2646,8 +2667,8 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         orgId: ids.orgA,
         actorId: ids.ownerA,
         action: (tx: Tx) => tx<Array<{
-          turn: Record<string, unknown>;
-          operation: Record<string, unknown> | null;
+          turn: IntegrationJsonObject;
+          operation: IntegrationJsonObject | null;
           replayed: boolean;
         }>>`
           select * from public.companion_api_enqueue_turn(
@@ -2703,7 +2724,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         orgId: ids.orgA,
         actorId,
         action: (tx: Tx) => tx<Array<{
-          turn: Record<string, unknown>;
+          turn: IntegrationJsonObject;
           replayed: boolean;
         }>>`
           select turn, replayed from public.companion_api_enqueue_turn(
@@ -2763,7 +2784,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       const enqueue = (clientMessageId: string, content: string) => asApi({
         orgId: ids.orgA,
         actorId: ids.ownerA,
-        action: (tx: Tx) => tx<Array<{ turn: Record<string, unknown> }>>`
+        action: (tx: Tx) => tx<Array<{ turn: { id: string } }>>`
           select turn from public.companion_api_enqueue_turn(
             ${ids.orgA}::uuid, ${companionId}::uuid, ${clientMessageId}::uuid,
             ${content}, 'web', '[]'::jsonb
@@ -2772,9 +2793,9 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       });
       const [first] = await enqueue(randomUUID(), "First ambiguous turn");
       const [later] = await enqueue(randomUUID(), "Later ordered turn");
-      const firstTurnId = first?.turn.id;
-      const laterTurnId = later?.turn.id;
-      if (typeof firstTurnId !== "string" || typeof laterTurnId !== "string") {
+      const firstTurnId = stringValue(first?.turn.id);
+      const laterTurnId = stringValue(later?.turn.id);
+      if (firstTurnId === null || laterTurnId === null) {
         throw new Error("expected durable turn ids");
       }
 
@@ -2796,7 +2817,15 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       const retry = () => asApi({
         orgId: ids.orgA,
         actorId: ids.ownerA,
-        action: (tx: Tx) => tx<Array<{ operation: Record<string, unknown>; replayed: boolean }>>`
+        action: (tx: Tx) => tx<Array<{ operation: {
+          id: string;
+          request_id: string;
+          source_turn_id: string;
+          kind: string;
+          trigger: string;
+          status: string;
+          queue_sequence: number;
+        }; replayed: boolean }>>`
           select * from public.companion_api_retry_turn(
             ${ids.orgA}::uuid, ${companionId}::uuid, ${firstTurnId}::uuid,
             ${retryId}::uuid, 'web'
@@ -2885,7 +2914,12 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       const cancelled = await asApi({
         orgId: ids.orgA,
         actorId: ids.ownerA,
-        action: (tx) => tx<Array<{ turn: Record<string, unknown> }>>`
+        action: (tx) => tx<Array<{ turn: {
+          id: string;
+          status: string;
+          error: string | null;
+          settled_at: string;
+        } }>>`
           select * from public.companion_api_cancel_turn(
             ${ids.orgA}::uuid, ${companionId}::uuid, ${laterTurnId}::uuid
           )
@@ -2903,7 +2937,12 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       const cancelledReplay = await asApi({
         orgId: ids.orgA,
         actorId: ids.ownerA,
-        action: (tx) => tx<Array<{ turn: Record<string, unknown> }>>`
+        action: (tx) => tx<Array<{ turn: {
+          id: string;
+          status: string;
+          error: string | null;
+          settled_at: string;
+        } }>>`
           select * from public.companion_api_cancel_turn(
             ${ids.orgA}::uuid, ${companionId}::uuid, ${laterTurnId}::uuid
           )
@@ -2941,8 +2980,8 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           )
         `,
       });
-      const followUpTurnId = enqueued?.turn.id;
-      if (typeof followUpTurnId !== "string") throw new Error("expected a queued follow-up");
+      const followUpTurnId = stringValue(enqueued?.turn.id);
+      if (followUpTurnId === null) throw new Error("expected a queued follow-up");
       expect(enqueued?.turn.status).toBe("queued");
 
       const [queuedThread] = await asApi({
@@ -3150,7 +3189,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         actorId: string | null;
         responseText: string | null;
         decisionStatus: string;
-        transcriptDecision: Record<string, unknown>;
+        transcriptDecision: IntegrationJsonObject;
       }>>`
         select delivery.actor_id as "actorId", delivery.response_text as "responseText",
           delivery.decision_status::text as "decisionStatus",
@@ -3297,7 +3336,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       expect(decisionClaim.workKind).toBe("decision");
       const response = await asRuntime((tx) => tx<Array<{
         kind: string;
-        payload: Record<string, unknown>;
+        payload: IntegrationJsonObject;
       }>>`
         select decision_request_kind::text as kind, decision_response_payload as payload
         from public.companion_runtime_get_material(
@@ -3536,7 +3575,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     const fixture = await createCompanion();
     try {
       const claim = await claimWork();
-      const [row] = await asRuntime((tx) => tx<Array<{ catalog: Record<string, unknown> }>>`
+      const [row] = await asRuntime((tx) => tx<Array<{ catalog: IntegrationJsonObject }>>`
         select catalog
         from public.companion_runtime_get_config_catalog(
           ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
@@ -3550,7 +3589,13 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           provider_id: providerId,
         },
       });
-      const skills = row?.catalog.skills as Array<{ id: string; selected: boolean; slug: string }>;
+      const skillsResult = z.array(z.object({
+        id: z.string(),
+        selected: z.boolean(),
+        slug: z.string(),
+      })).safeParse(row?.catalog.skills);
+      if (!skillsResult.success) throw new Error("runtime catalog skills are invalid");
+      const skills = skillsResult.data;
       expect(skills.some((skill) => skill.id === ids.skill && skill.selected)).toBe(true);
       expect(skills.some((skill) => skill.id === ids.orgSkill)).toBe(true);
       expect(JSON.stringify(row?.catalog)).not.toMatch(/ciphertext|wrapped_dek|auth_tag|storage_path/i);
@@ -3725,12 +3770,139 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     }
   });
 
+  it("mints, resolves, rotates, and revokes an account-bound MCP broker capability", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    let companionId = "";
+    let claim: Claim | undefined;
+    try {
+      const [created] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ companionId: string }>>`
+          select companion_id::text as "companionId"
+          from public.companion_api_create_companion(
+            ${ids.orgA}::uuid, 'MCP broker fixture', null, ${providerId}, 'fixture-model',
+            '[]'::jsonb, false, ${tx.json([ids.mcpAccount])}::jsonb
+          )
+        `,
+      });
+      companionId = created?.companionId ?? "";
+      await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          select * from public.companion_api_enqueue_turn(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${randomUUID()}::uuid,
+            'Start the broker fixture', 'web', '[]'::jsonb
+          )
+        `,
+      });
+      claim = await claimWork();
+      expect(claim).toMatchObject({ companionId, workKind: "operation" });
+      const heldClaim = claim;
+      const [selection] = await sql<Array<{ companion: unknown; operation: unknown }>>`
+        select c.selected_mcp_account_ids as companion,
+          o.selected_mcp_account_ids as operation
+        from companions c join companion_operations o on o.companion_id = c.id
+        where o.id = ${claim.workId}::uuid
+      `;
+      expect(selection).toEqual({ companion: [ids.mcpAccount], operation: [ids.mcpAccount] });
+      const [authorization] = await asRuntime(async (tx) => await tx<Array<{
+        authorized: boolean;
+        actorId: string | null;
+        surface: string | null;
+        refs: unknown;
+        denialCode: string | null;
+      }>>`
+        select authorized, denial_code as "denialCode", authorization_actor_id as "actorId",
+          client_surface::text as surface, mcp_refs as refs
+        from public.companion_runtime_renew_and_authorize(
+          ${heldClaim.orgId}::uuid, ${heldClaim.companionId}::uuid, ${heldClaim.claimToken}::uuid,
+          ${heldClaim.claimEpoch}::bigint, ${heldClaim.gateEpoch}::bigint, ${executorId},
+          ${heldClaim.workKind}, ${heldClaim.workId}::uuid, 30
+        )
+      `);
+      expect(authorization).toEqual({
+        authorized: true,
+        denialCode: null,
+        actorId: ids.ownerA,
+        surface: "web",
+        refs: [{ account_id: ids.mcpAccount, credential_generation: ids.mcpGeneration }],
+      });
+      const mint = () => asRuntime(async (tx) => await tx<Array<{ token: string; expiresAt: Date }>>`
+        select token, expires_at as "expiresAt"
+        from public.companion_runtime_mint_mcp_broker_token(
+          ${heldClaim.orgId}::uuid, ${heldClaim.companionId}::uuid, ${heldClaim.claimToken}::uuid,
+          ${heldClaim.claimEpoch}::bigint, ${heldClaim.gateEpoch}::bigint, ${executorId},
+          ${heldClaim.workKind}, ${heldClaim.workId}::uuid, 30
+        )
+      `);
+      const [first] = await mint();
+      expect(first?.token).toMatch(/^cmp_mcp_[0-9a-f]{48}$/);
+      expect(first?.expiresAt.getTime()).toBeGreaterThan(Date.now() + 5 * 60 * 60_000);
+      const hash = createHash("sha256").update(first?.token ?? "").digest("hex");
+      const resolved = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ companionId: string; actorId: string; refs: unknown }>>`
+          select companion_id::text as "companionId", actor_id as "actorId", account_refs as refs
+          from public.companion_resolve_mcp_broker_token(${hash})
+        `,
+      });
+      expect(resolved).toEqual([{
+        companionId,
+        actorId: ids.ownerA,
+        refs: [{ account_id: ids.mcpAccount, credential_generation: ids.mcpGeneration }],
+      }]);
+      await expect(asRuntime(async (tx) => await tx`
+        select * from public.companion_resolve_mcp_broker_token(${hash})
+      `)).rejects.toThrow(/permission denied.*companion_resolve_mcp_broker_token/i);
+
+      const [second] = await mint();
+      expect(second?.token).toMatch(/^cmp_mcp_[0-9a-f]{48}$/);
+      expect(second?.token).not.toBe(first?.token);
+      const firstAfterRotation = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`select * from public.companion_resolve_mcp_broker_token(${hash})`,
+      });
+      expect(firstAfterRotation).toEqual([]);
+
+      await sql`
+        update companion_runtime_instances
+        set box_state = 'archived'
+        where companion_id = ${companionId}::uuid
+      `;
+      const secondHash = createHash("sha256").update(second?.token ?? "").digest("hex");
+      const afterStop = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`select * from public.companion_resolve_mcp_broker_token(${secondHash})`,
+      });
+      expect(afterStop).toEqual([]);
+      const [counts] = await sql<Array<{ live: number; revoked: number }>>`
+        select count(*) filter (where revoked_at is null)::int as live,
+          count(*) filter (where revoked_at is not null)::int as revoked
+        from companion_mcp_broker_tokens where companion_id = ${companionId}::uuid
+      `;
+      expect(counts).toEqual({ live: 0, revoked: 2 });
+      await release(heldClaim);
+      claim = undefined;
+    } finally {
+      if (claim) await release(claim).catch(() => undefined);
+      if (companionId) await removeCompanion(companionId);
+    }
+  });
+
   it("rejects effective CREATE inherited through PUBLIC in verification and the real grant hook", async () => {
     if (!sql) throw new Error("runtime executor database is not initialized");
     await sql.unsafe(`grant create on database "${databaseName}" to public`);
     try {
       await expect(asRuntime(async (tx) => {
-        await verifyRuntimeDatabaseRole(tx as unknown as Pick<Sql, "unsafe">, runtimeRole);
+        // SAFETY: The transaction exposes the same `unsafe` execution method required by the role
+        // verifier; this test deliberately limits the view to that one method.
+        const roleClient = tx as Pick<Sql, "unsafe">;
+        await verifyRuntimeDatabaseRole(roleClient, runtimeRole);
       })).rejects.toBeInstanceOf(RuntimeDatabaseRoleError);
       await expect(applySplitGrants()).rejects.toThrow(/must not have database or public schema CREATE/i);
     } finally {
@@ -3775,9 +3947,10 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       };
       const wrapped = await storeSql.begin(async (tx) => {
         await tx.unsafe(`set local role ${runtimeRole}`);
-        return { result: await new PostgresRuntimeStore(
-          tx as unknown as RuntimeSqlClient,
-        ).projectEventBatch(fence, {
+        // SAFETY: postgres.js transactions implement RuntimeSqlClient.unsafe; this integration test
+        // uses the narrow adapter contract to exercise the production serializer.
+        const runtimeClient = tx as RuntimeSqlClient;
+        return { result: await new PostgresRuntimeStore(runtimeClient).projectEventBatch(fence, {
           expectedSequence: BigInt(claim.checkpointSequence),
           piInvocationId: `pi-${fixture.attemptId}`,
           events: [{
@@ -3829,9 +4002,9 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       expect(claim.workKind).toBe("attempt");
       const material = await asRuntime((tx) => tx<Array<{
         promptText: string;
-        providerMaterial: Array<Record<string, unknown>>;
-        skillMaterial: Array<Record<string, unknown>>;
-        mcpMaterial: Array<Record<string, unknown>>;
+        providerMaterial: Array<IntegrationJsonObject>;
+        skillMaterial: Array<IntegrationJsonObject>;
+        mcpMaterial: Array<IntegrationJsonObject>;
       }>>`
         select prompt_text as "promptText", provider_material as "providerMaterial",
           skill_material as "skillMaterial", mcp_material as "mcpMaterial"
@@ -3879,7 +4052,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           'ciphertext-mcp-next', 'iv-mcp-next', 'tag-mcp-next', 'wrapped-mcp-next',
           'wrap-iv-mcp-next', 'wrap-tag-mcp-next', 'key-mcp-next'
         )
-      `)).rejects.toMatchObject({ code: "22023" });
+      `)).rejects.toThrow(/permission denied.*companion_runtime_cas_mcp_oauth/i);
 
       // Rotation after the prompt material was pinned is detected before a takeover can project
       // output with only the new credential in its redaction dictionary.
@@ -4104,7 +4277,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       const response = await asRuntime((tx) => tx<Array<{
         attemptId: string;
         kind: string;
-        payload: Record<string, unknown>;
+        payload: IntegrationJsonObject;
         visible: boolean;
       }>>`
         select attempt_id::text as "attemptId", decision_request_kind::text as kind,
@@ -4223,7 +4396,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       const delegated = (
         sequence: string,
         content: string,
-        tool: Record<string, unknown>,
+        tool: IntegrationJsonObject,
       ) => ({
         sequence,
         type: "tool",

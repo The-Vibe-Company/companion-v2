@@ -21,7 +21,6 @@ import type {
   DuplicateCleanup,
   GateStatus,
   LeaseFence,
-  McpOauthCasResult,
   OperationRuntimeClaim,
   RuntimeAuthorization,
   RuntimeCheckpointInput,
@@ -44,6 +43,12 @@ export const BOX_ID = "bx_23456789";
 export const PI_INVOCATION_ID = "pi-invocation-1";
 export const OPERATION_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
+type TestTimerHandle = number;
+
+interface HarvestState {
+  failure: { incomplete: boolean; throws?: boolean } | null;
+}
+
 export class TestClock implements RuntimeClock {
   readonly sleeps: number[] = [];
   readonly timers = new Map<number, { callback: () => void; milliseconds: number }>();
@@ -65,22 +70,20 @@ export class TestClock implements RuntimeClock {
     this.advance(milliseconds);
   }
 
-  setTimeout(callback: () => void, milliseconds: number): unknown {
+  setTimeout(callback: () => void, milliseconds: number): TestTimerHandle {
     const id = this.#nextTimer++;
     this.timers.set(id, { callback, milliseconds });
     return id;
   }
 
-  clearTimeout(handle: unknown): void {
-    if (typeof handle === "number") this.timers.delete(handle);
+  clearTimeout(handle: TestTimerHandle): void {
+    this.timers.delete(handle);
   }
 
   runNextTimer(): void {
-    const entry = this.timers.entries().next().value as
-      | [number, { callback: () => void; milliseconds: number }]
-      | undefined;
-    if (!entry) return;
-    const [id, timer] = entry;
+    const next = this.timers.entries().next();
+    if (next.done) return;
+    const [id, timer] = next.value;
     this.timers.delete(id);
     this.advance(timer.milliseconds);
     timer.callback();
@@ -460,6 +463,10 @@ export class MemoryRuntimeStore implements RuntimeStore {
     return null;
   }
 
+  async mintMcpBrokerToken(): Promise<{ token: string; expiresAt: Date } | null> {
+    return null;
+  }
+
   async recordMaterialSnapshot(_fence: LeaseFence, input: {
     clientSurface: ClientSurface;
     materialExpiresAt: Date | null;
@@ -591,10 +598,6 @@ export class MemoryRuntimeStore implements RuntimeStore {
     return { ...cleanup };
   }
 
-  async casMcpOauth(): Promise<McpOauthCasResult | null> {
-    return null;
-  }
-
   async settle(fence: LeaseFence, input: RuntimeSettlementInput): Promise<boolean> {
     this.settlements.push(input);
     if (fence.workKind === "settings" && input.terminalStatus === "succeeded") {
@@ -641,7 +644,7 @@ export function fakePorts(store: MemoryRuntimeStore): FakePorts {
   const stagedAttachments: FakePorts["stagedAttachments"] = [];
   const harvestedOutputs: RuntimeOutputAttachment[] = [];
   const clearedOutboxes: string[] = [];
-  const harvest: { failure: { incomplete: boolean; throws?: boolean } | null } = { failure: null };
+  const harvest: HarvestState = { failure: null };
   const box: RuntimeBoxControl = {
     findGenerationBoxes: async ({ companionId, generation }) => ({
       name: `Companion ${companionId} g${generation.toString()}`,
@@ -725,16 +728,17 @@ export function fakePorts(store: MemoryRuntimeStore): FakePorts {
   const eventProjector: RuntimeEventProjector = {
     projectEventBatch: async (input) => {
       log.push("project");
-      return await store.projectEventBatch(input.fence, {
+      const projectInput: Parameters<RuntimeStore["projectEventBatch"]>[1] = {
         expectedSequence: input.expectedSequence,
         piInvocationId: input.piInvocationId,
         events: input.projections,
         throughCursor: input.throughCursor,
-        ...(input.activityAt ? { activityAt: input.activityAt } : {}),
         unknownEventCount: input.unknownEventCount,
         malformedEventCount: input.malformedEventCount,
         oversizedEventCount: input.oversizedEventCount,
-      });
+      };
+      if (input.activityAt) projectInput.activityAt = input.activityAt;
+      return await store.projectEventBatch(input.fence, projectInput);
     },
   };
   const attachmentStager: RuntimeAttachmentStager = {
@@ -799,7 +803,7 @@ export function engineDependencies(input: {
   log?: RuntimeEngineDependencies["log"];
 }): RuntimeEngineDependencies {
   const ports = input.ports ?? fakePorts(input.store);
-  return {
+  const dependencies: RuntimeEngineDependencies = {
     store: input.store,
     box: ports.box,
     pi: ports.pi,
@@ -818,6 +822,7 @@ export function engineDependencies(input: {
     jitter: () => 0.5,
     executorId: "executor-test",
     eventPollIntervalMs: 1,
-    ...(input.log ? { log: input.log } : {}),
   };
+  if (input.log) dependencies.log = input.log;
+  return dependencies;
 }

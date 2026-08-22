@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   PostgresRuntimeStore,
   RuntimeCredentialSnapshotChangedError,
-  RuntimeStoreIndeterminateError,
   type RuntimeSqlClient,
+  type RuntimeSqlRow,
 } from "./store";
 import type { LeaseFence } from "./types";
 import {
@@ -17,13 +17,14 @@ import {
 
 class RecordingSql implements RuntimeSqlClient {
   readonly calls: Array<{ query: string; parameters: unknown[] }> = [];
-  rows: Record<string, unknown>[] = [];
+  rows: RuntimeSqlRow[] = [];
 
-  async unsafe<T extends Record<string, unknown>[]>(
+  async unsafe<T extends RuntimeSqlRow[]>(
     query: string,
     parameters: unknown[] = [],
   ): Promise<T> {
     this.calls.push({ query, parameters });
+    // SAFETY: The fixture rows are the exact shape requested by each SQL call in these tests.
     return this.rows as T;
   }
 }
@@ -340,6 +341,23 @@ describe("PostgresRuntimeStore", () => {
       token: "cmp_pat_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       expiresAt,
     });
+  });
+
+  it("claims only material protocol 2 and reads the dedicated MCP broker capability", async () => {
+    const sql = new RecordingSql();
+    const expiresAt = new Date("2026-08-16T18:00:00.000Z");
+    sql.rows = [];
+    const store = new PostgresRuntimeStore(sql);
+
+    await store.claimWork({ executorId: "executor-1", limit: 2, leaseSeconds: 30, gateEpoch: 4n });
+    expect(sql.calls[0]?.query).toContain("$4::bigint, 2::integer");
+
+    sql.rows = [{ token: `cmp_mcp_${"a".repeat(48)}`, expires_at: expiresAt }];
+    await expect(store.mintMcpBrokerToken(fence, 30)).resolves.toEqual({
+      token: `cmp_mcp_${"a".repeat(48)}`,
+      expiresAt,
+    });
+    expect(sql.calls[1]?.query).toContain("public.companion_runtime_mint_mcp_broker_token(");
   });
 
   it("records and publishes material only through the narrow fenced functions", async () => {

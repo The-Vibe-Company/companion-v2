@@ -12,6 +12,7 @@ import {
   COMPANION_TRIGGER_MAX_PER_COMPANION,
 } from "@companion/contracts";
 import { COMPANION_RUNTIME_ERROR_MAX_LENGTH } from "@companion/core";
+import { z } from "zod";
 
 import {
   AsciiBoxCompanionRuntime,
@@ -27,6 +28,8 @@ import {
   resolvePiPackages,
 } from "./boxCompanionRuntime";
 import { companionPiLayoutIdentity } from "./companionRuntimeImage";
+import type { PiJsonObject } from "./companionPiBroker";
+import type { CompanionStagedMcpAccount } from "./companionPiInjection";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -106,7 +109,7 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
     vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
       const method = init?.method ?? "GET";
-      const body = init?.body ? JSON.parse(String(init.body)) as unknown : null;
+      const body = init?.body ? parseBoxTestBody(init.body) : null;
       requests.push({ method, url, body });
       if (url.endsWith("/boxes/bx_23456789") && method === "GET") {
         return response({ box: box(state) });
@@ -156,10 +159,9 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
       .toEqual({ ttlSeconds: 21_600 });
     const archiveCleanup = requests.findIndex((request) =>
       request.url.endsWith("/commands")
-      && typeof request.body === "object"
-      && request.body !== null
-      && "command" in request.body
-      && String(request.body.command).includes("control-bundle-v1.json"));
+      && boxTestBodySchema.safeParse(request.body).success
+      && requiredText(boxTestBodySchema.parse(request.body), "command")
+        .includes("control-bundle-v1.json"));
     const archiveRequest = requests.findIndex((request) => request.url.endsWith("/stop"));
     expect(archiveCleanup).toBeGreaterThanOrEqual(0);
     expect(archiveCleanup).toBeLessThan(archiveRequest);
@@ -168,9 +170,11 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
   it("waits for Pi readiness inside one Box command instead of polling the provider", async () => {
     const commands: Array<{ command: string; timeoutSeconds: number }> = [];
     vi.stubGlobal("fetch", vi.fn(async (_rawUrl: string | URL | Request, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as { command: string; timeoutSeconds: number };
-      commands.push(body);
-      if (body.command.includes("for companion_pi_probe")) {
+      const body = parseBoxTestBody(init?.body);
+      const command = requiredText(body, "command");
+      const timeoutSeconds = requiredNumber(body, "timeoutSeconds");
+      commands.push({ command, timeoutSeconds });
+      if (command.includes("for companion_pi_probe")) {
         return response(commandResult(
           "active\ncompanion-pi-broker-ready\ncompanion-pi-invocation invocation-1\n",
         ));
@@ -222,8 +226,8 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
   it("expunges persistent and runtime provider credentials for disposable Box cleanup", async () => {
     let command = "";
     vi.stubGlobal("fetch", vi.fn(async (_rawUrl: string | URL | Request, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as { command: string };
-      command = body.command;
+      const body = parseBoxTestBody(init?.body);
+      command = requiredText(body, "command");
       return response(commandResult());
     }));
 
@@ -249,13 +253,14 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
         return response({ box: box("ready") });
       }
       if (url.endsWith("/files") && method === "PUT") {
-        files.push((JSON.parse(String(init?.body)) as { path: string }).path);
+        files.push(requiredText(parseBoxTestBody(init?.body), "path"));
         return response({ ok: true });
       }
       if (url.endsWith("/commands") && method === "POST") {
-        const body = JSON.parse(String(init?.body)) as { command: string };
-        commands.push(body.command);
-        if (body.command.includes("COMPANION_CONTROL_APPLY") && !rejectedApply) {
+        const body = parseBoxTestBody(init?.body);
+        const command = requiredText(body, "command");
+        commands.push(command);
+        if (command.includes("COMPANION_CONTROL_APPLY") && !rejectedApply) {
           rejectedApply = true;
           throw new BoxRuntimeProviderError("control apply rate limited", 429);
         }
@@ -270,7 +275,7 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
       orgId: "22222222-2222-4222-8222-222222222222",
       boxId: "bx_23456789",
       clientSurface: "web",
-      providerAuth: { provider: { token: "ephemeral-test-token" } },
+      providerAuth: { provider: { type: "api_key", key: "ephemeral-test-token" } },
       replaceProviderAuth: true,
       modelId: "glm-4.6",
       mcpCredentials: [],
@@ -314,7 +319,7 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
       orgId: "22222222-2222-4222-8222-222222222222",
       boxId: "bx_23456789",
       clientSurface: "web",
-      providerAuth: { provider: { token: "ephemeral-test-token" } },
+      providerAuth: { provider: { type: "api_key", key: "ephemeral-test-token" } },
       replaceProviderAuth: true,
       modelId: "glm-4.6",
       mcpCredentials: [],
@@ -343,9 +348,10 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
       }
       if (url.endsWith("/files") && method === "PUT") return response({ ok: true });
       if (url.endsWith("/commands") && method === "POST") {
-        const body = JSON.parse(String(init?.body)) as { command: string };
-        commands.push(body.command);
-        if (body.command.includes("COMPANION_CONTROL_APPLY")) {
+        const body = parseBoxTestBody(init?.body);
+        const command = requiredText(body, "command");
+        commands.push(command);
+        if (command.includes("COMPANION_CONTROL_APPLY")) {
           throw new Error("control apply transport failed");
         }
         return response(commandResult("companion-box-runnable\n"));
@@ -359,7 +365,7 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
       orgId: "22222222-2222-4222-8222-222222222222",
       boxId: "bx_23456789",
       clientSurface: "web",
-      providerAuth: { provider: { token: "ephemeral-test-token" } },
+      providerAuth: { provider: { type: "api_key", key: "ephemeral-test-token" } },
       replaceProviderAuth: true,
       modelId: "glm-4.6",
       mcpCredentials: [],
@@ -387,7 +393,7 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
       }
       if (url.endsWith("/files") && method === "PUT") return response({ ok: true });
       if (url.endsWith("/commands") && method === "POST") {
-        const command = (JSON.parse(String(init?.body)) as { command: string }).command;
+        const command = requiredText(parseBoxTestBody(init?.body), "command");
         commands.push(command);
         if (command.includes("credential.helper")) {
           return response({ success: false, exitCode: 1, stdout: "", stderr: "git refused" });
@@ -403,11 +409,11 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
       orgId: "22222222-2222-4222-8222-222222222222",
       boxId: "bx_23456789",
       clientSurface: "web",
-      providerAuth: { provider: { token: "ephemeral-test-token" } },
+      providerAuth: { provider: { type: "api_key", key: "ephemeral-test-token" } },
       replaceProviderAuth: true,
       modelId: "glm-4.6",
-      mcpCredentials: [{ env_key: "GITHUB_TOKEN", value: "gho_test_token" }],
-      mcpAccounts: [],
+      mcpCredentials: [],
+      mcpAccounts: [githubBrokerAccount()],
       skills: [],
     })).rejects.toThrow("git refused");
 
@@ -428,12 +434,14 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
         return response({ box: box("ready") });
       }
       if (url.endsWith("/files") && method === "PUT") {
-        const body = JSON.parse(String(init?.body)) as { path: string; content: string };
-        if (body.path.endsWith("control-bundle-v1.json")) bundle = body.content;
+        const body = parseBoxTestBody(init?.body);
+        const path = requiredText(body, "path");
+        const content = requiredText(body, "content");
+        if (path.endsWith("control-bundle-v1.json")) bundle = content;
         return response({ ok: true });
       }
       if (url.endsWith("/commands") && method === "POST") {
-        const command = (JSON.parse(String(init?.body)) as { command: string }).command;
+        const command = requiredText(parseBoxTestBody(init?.body), "command");
         if (command.includes("COMPANION_CONTROL_APPLY")) applyCommand = command;
         return response(commandResult("companion-box-runnable\n"));
       }
@@ -445,7 +453,7 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
       orgId: "22222222-2222-4222-8222-222222222222",
       boxId: "bx_23456789",
       clientSurface: "web",
-      providerAuth: { provider: { token: "ephemeral-test-token" } },
+      providerAuth: { provider: { type: "api_key", key: "ephemeral-test-token" } },
       replaceProviderAuth: true,
       modelId: "glm-4.6",
       mcpCredentials: [],
@@ -483,8 +491,8 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
   it("dispatches only correlated layout-14 commands and validates monotonic journal pages", async () => {
     const commandTypes: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (_rawUrl: string | URL | Request, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as { command: string };
-      const command = decodeBrokerCommand(body.command);
+      const body = parseBoxTestBody(init?.body);
+      const command = decodeBrokerCommand(requiredText(body, "command"));
       commandTypes.push(String(command.type));
       const id = String(command.id);
       if (command.type === "prompt") {
@@ -744,6 +752,24 @@ function runtimeClient(): AsciiBoxCompanionRuntime {
   });
 }
 
+function githubBrokerAccount(): CompanionStagedMcpAccount {
+  return {
+    account: {
+      id: "33333333-3333-4333-8333-333333333333",
+      label: "GitHub",
+      transport: "http",
+      url: "https://api.githubcopilot.com/mcp/",
+      headers: { Authorization: "GITHUB_MCP_AUTH" },
+      lifecycle: "lazy",
+      direct_tools: false,
+    },
+    oauthBroker: {
+      credentialGeneration: "44444444-4444-4444-8444-444444444444",
+      github: true,
+    },
+  };
+}
+
 describe("default Pi packages on the Box disk", () => {
   const layoutCommands: Array<{ command: string; timeoutSeconds: number }> = [];
   const stagedFiles = new Map<string, string>();
@@ -753,6 +779,7 @@ describe("default Pi packages on the Box disk", () => {
     env: Record<string, string> = {},
     mcpCredentials: Array<{ env_key: string; value: string }> = [],
     companionSkillChecksum?: string,
+    mcpAccounts: CompanionStagedMcpAccount[] = [],
   ): Promise<string> {
     stagedFiles.clear();
     layoutCommands.length = 0;
@@ -761,12 +788,16 @@ describe("default Pi packages on the Box disk", () => {
       const method = init?.method ?? "GET";
       if (url.endsWith("/boxes/bx_23456789") && method === "GET") return response({ box: box("ready") });
       if (url.endsWith("/files") && method === "PUT") {
-        const body = JSON.parse(String(init?.body)) as { path: string; content: string };
-        stagedFiles.set(body.path, body.content);
-        if (body.path.endsWith("control-bundle-v1.json")) {
-          const bundle = JSON.parse(body.content) as {
-            files: Array<{ path: string; content: string }>;
-          };
+        const body = parseBoxTestBody(init?.body);
+        const path = requiredText(body, "path");
+        const content = requiredText(body, "content");
+        stagedFiles.set(path, content);
+        if (path.endsWith("control-bundle-v1.json")) {
+          const bundleResult = z.object({
+            files: z.array(z.object({ path: z.string(), content: z.string() })),
+          }).safeParse(JSON.parse(content));
+          if (!bundleResult.success) throw new Error("control bundle is invalid");
+          const bundle = bundleResult.data;
           for (const file of bundle.files) {
             stagedFiles.set(file.path, Buffer.from(file.content, "base64").toString("utf8"));
           }
@@ -774,12 +805,11 @@ describe("default Pi packages on the Box disk", () => {
         return response({ ok: true });
       }
       if (url.endsWith("/commands") && method === "POST") {
-        const body = JSON.parse(String(init?.body)) as {
-          command: string;
-          timeoutSeconds: number;
-        };
-        if (body.command.includes("ensure-pi-layout.sh") || body.command.includes("git-credential-github")) {
-          layoutCommands.push(body);
+        const body = parseBoxTestBody(init?.body);
+        const command = requiredText(body, "command");
+        const timeoutSeconds = requiredNumber(body, "timeoutSeconds");
+        if (command.includes("ensure-pi-layout.sh") || command.includes("git-credential-github")) {
+          layoutCommands.push({ command, timeoutSeconds });
         }
         return response(commandResult("companion-box-runnable\n"));
       }
@@ -800,7 +830,7 @@ describe("default Pi packages on the Box disk", () => {
         replaceProviderAuth: false,
         modelId: "glm-4.6",
         mcpCredentials,
-        mcpAccounts: [],
+        mcpAccounts,
         skills: [],
       });
     const script = stagedFiles.get(".companion/bin/ensure-pi-layout.sh");
@@ -820,14 +850,13 @@ describe("default Pi packages on the Box disk", () => {
         return response({ box: box("ready") });
       }
       if (url.endsWith("/files") && method === "PUT") {
-        const body = JSON.parse(String(init?.body)) as { path: string };
-        stagedPaths.push(body.path);
+        stagedPaths.push(requiredText(parseBoxTestBody(init?.body), "path"));
         return response({ ok: true });
       }
       if (url.endsWith("/commands") && method === "POST") {
-        const body = JSON.parse(String(init?.body)) as { command: string };
-        commands.push(body.command);
-        if (body.command.includes("pi-layout.version")) return response(commandResult(`${layoutMarker}\n`));
+        const command = requiredText(parseBoxTestBody(init?.body), "command");
+        commands.push(command);
+        if (command.includes("pi-layout.version")) return response(commandResult(`${layoutMarker}\n`));
         return response(commandResult("companion-box-runnable\n"));
       }
       throw new Error(`unexpected Box request: ${method} ${url}`);
@@ -896,9 +925,11 @@ describe("default Pi packages on the Box disk", () => {
     expect(script).toContain('timeout 90 "$pi_bin" --help');
     expect(script).toContain("pi-startup-cache.version");
     expect(script).toContain('!= "$expected_layout"');
-    expect(script).toContain('\"$expected_layout\" > \"$startup_cache_marker\"');
-    // Appended, not prepended: the resolved Pi directory stays ahead of the optional prefix.
-    expect(script).toContain('PATH="$PATH:$HOME/.companion/tools/bin"');
+    expect(script).toContain('"$expected_layout" > "$startup_cache_marker"');
+    // Pi stays first while audited Companion wrappers precede system GitHub tooling.
+    expect(script).toContain(
+      'PATH="$(dirname "$PI_BIN"):$HOME/.companion/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.companion/tools/bin"',
+    );
     expect(script).toContain('if [ ! -x "$NODE_BIN" ]; then');
     expect(script).toContain('NODE_BIN="$(command -v node 2>/dev/null || true)"');
     // npm's own words never reach stdout, which is what the control plane falls back to for the
@@ -931,16 +962,18 @@ describe("default Pi packages on the Box disk", () => {
     ]);
   });
 
-  it("stages a GitHub git credential helper only when a GitHub token is present", async () => {
+  it("stages token-on-demand Git and gh helpers only for one brokered GitHub account", async () => {
     await stagedLayoutScript();
     expect(stagedFiles.get(".companion/bin/git-credential-github")).toBeUndefined();
 
-    await stagedLayoutScript({}, [{ env_key: "GITHUB_TOKEN", value: "gho_test_token" }]);
+    await stagedLayoutScript({}, [], undefined, [githubBrokerAccount()]);
     const helper = stagedFiles.get(".companion/bin/git-credential-github");
+    const wrapper = stagedFiles.get(".companion/bin/gh");
     expect(helper).toContain("protocol=https");
     expect(helper).toContain("host=github.com");
-    expect(helper).toContain("$GITHUB_TOKEN");
-    expect(helper).not.toContain("gho_test_token");
+    expect(helper).toContain("$COMPANION_MCP_GATEWAY_ORIGIN/git/");
+    expect(helper).not.toContain("GITHUB_TOKEN");
+    expect(wrapper).toContain('GH_TOKEN="$token" exec');
     expect(layoutCommands.some((command) => command.command.includes("credential.helper"))).toBe(true);
   });
 
@@ -1139,10 +1172,10 @@ describe("Pi outbox transfer", () => {
     vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
       if (!url.endsWith("/commands")) throw new Error(`unexpected Box request: ${url}`);
-      const sent = JSON.parse(String(init?.body)) as { command: string; timeoutSeconds: number };
-      const command = sent.command;
+      const sent = parseBoxTestBody(init?.body);
+      const command = requiredText(sent, "command");
       commands.push(command);
-      options.timeouts?.push(sent.timeoutSeconds);
+      options.timeouts?.push(requiredNumber(sent, "timeoutSeconds"));
       const chunk = /bs=(\d+)/.exec(command);
       const skip = /skip=(\d+)/.exec(command);
       if (!chunk?.[1] || !skip?.[1]) throw new Error("not a chunk read");
@@ -1206,7 +1239,7 @@ describe("Pi outbox transfer", () => {
     // base64 -- so the retry has to be driven by the whole-file digest, and it has to actually retry.
     let firstChunkReads = 0;
     vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
-      const command = (JSON.parse(String(init?.body)) as { command: string }).command;
+      const command = requiredText(parseBoxTestBody(init?.body), "command");
       const size = Number(/bs=(\d+)/.exec(command)![1]);
       const skip = Number(/skip=(\d+)/.exec(command)![1]);
       const slice = bytes.subarray(skip * size, (skip + 1) * size);
@@ -1278,7 +1311,7 @@ describe("Pi outbox maintenance", () => {
     vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
       if (!url.endsWith("/commands")) throw new Error(`unexpected Box request: ${url}`);
-      commands.push((JSON.parse(String(init?.body)) as { command: string }).command);
+      commands.push(requiredText(parseBoxTestBody(init?.body), "command"));
       return result.success
         ? response(commandResult())
         : response({ success: false, exitCode: 1, stdout: "", stderr: "refused" });
@@ -1321,13 +1354,13 @@ describe("staged Companion attachments", () => {
     const files: Array<{ path: string; encoding?: string }> = [];
     vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
-      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const body = parseBoxTestBody(init?.body);
       if (url.endsWith("/commands")) {
-        commands.push(body.command as string);
+        commands.push(requiredText(body, "command"));
         return response(commandResult());
       }
       if (url.endsWith("/files")) {
-        files.push({ path: body.path as string, encoding: body.encoding as string | undefined });
+        files.push({ path: requiredText(body, "path"), encoding: body.encoding });
         return response({ ok: true });
       }
       throw new Error(`unexpected Box request: ${url}`);
@@ -1370,14 +1403,14 @@ describe("staged Companion attachments", () => {
     const commands: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
-      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const body = parseBoxTestBody(init?.body);
       if (url.endsWith("/commands")) {
-        commands.push(body.command as string);
+        commands.push(requiredText(body, "command"));
         return response(commandResult());
       }
-      files.push(body.path as string);
+      files.push(requiredText(body, "path"));
       // Nothing this adapter sends may exceed the provider's body limit once encoded.
-      expect((body.content as string).length).toBeLessThan(5 * 1024 * 1024);
+      expect(requiredText(body, "content").length).toBeLessThan(5 * 1024 * 1024);
       return response({ ok: true });
     }));
     const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
@@ -1402,9 +1435,9 @@ describe("staged Companion attachments", () => {
     const commands: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
-      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const body = parseBoxTestBody(init?.body);
       if (url.endsWith("/commands")) {
-        commands.push(body.command as string);
+        commands.push(requiredText(body, "command"));
         return response(commandResult());
       }
       return response({ ok: true });
@@ -1484,14 +1517,45 @@ function expectCleanupFailsWhenRmFails(command: string): void {
   }
 }
 
-function response(value: unknown, status = 200): Response {
+const boxTestBodySchema = z.object({
+  command: z.string().optional(),
+  content: z.string().optional(),
+  encoding: z.string().optional(),
+  path: z.string().optional(),
+  timeoutSeconds: z.number().optional(),
+}).passthrough();
+type BoxTestBody = z.infer<typeof boxTestBodySchema>;
+
+function parseBoxTestBody(rawBody: RequestInit["body"]): BoxTestBody {
+  const parsed = boxTestBodySchema.safeParse(JSON.parse(String(rawBody)));
+  if (!parsed.success) throw new Error("test request body is invalid");
+  return parsed.data;
+}
+
+function requiredText(body: BoxTestBody, key: "command" | "content" | "path"): string {
+  const value = body[key];
+  if (value === undefined) throw new Error(`test request body is missing ${key}`);
+  return value;
+}
+
+function requiredNumber(body: BoxTestBody, key: "timeoutSeconds"): number {
+  const value = body[key];
+  if (value === undefined) throw new Error(`test request body is missing ${key}`);
+  return value;
+}
+
+function response(value: PiJsonObject, status = 200): Response {
   return Response.json(value, { status });
 }
 
-function decodeBrokerCommand(command: string): Record<string, unknown> {
+function decodeBrokerCommand(command: string): PiJsonObject {
   const encoded = /COMPANION_PI_BROKER_COMMAND='([A-Za-z0-9+/=]+)'/.exec(command)?.[1];
   if (!encoded) throw new Error("adapter did not send a layout-14 broker command");
-  return JSON.parse(Buffer.from(encoded, "base64").toString("utf8")) as Record<string, unknown>;
+  const parsed = z.record(z.string(), z.unknown()).safeParse(
+    JSON.parse(Buffer.from(encoded, "base64").toString("utf8")),
+  );
+  if (!parsed.success) throw new Error("adapter sent an invalid broker command");
+  return parsed.data;
 }
 
 function zeroCounters() {

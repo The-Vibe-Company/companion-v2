@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { COMPANION_SKILL_KEY, companionSkillDir } from "@companion/companion-skill";
 import { getCompanionSkillPackage } from "@companion/companion-skill/package";
 import {
@@ -6,17 +6,7 @@ import {
   type CompanionRuntimeSkill,
 } from "@companion/box-runtime";
 import {
-  COMPANION_MCP_OAUTH_REFRESH_SKEW_MS,
-  CompanionPluginOAuthError,
-  encryptCompanionMcpRuntimeCredential,
-  githubUserIdentity,
-  refreshCompanionPluginOAuth,
-  type CompanionPluginStoredOAuthCredential,
-} from "@companion/core";
-import {
   RUNTIME_LEASE_SECONDS,
-  COMPANION_RUNTIME_MATERIAL_MIN_TTL_MS,
-  RuntimeStoreSerializationError,
   createRuntimeVisibleTextRedactor,
   type RuntimeAttachmentStager,
   type RuntimeMaterialProvider,
@@ -24,7 +14,6 @@ import {
   type RuntimeOutputAttachment,
   type RuntimeProjectionRedactorFactory,
   type RuntimeResourceStager,
-  type RuntimeStore,
   type RuntimeWorkMaterial,
 } from "@companion/companion-runtime";
 import {
@@ -54,6 +43,10 @@ export interface RuntimeMaterialPipeline {
   outboxHarvester: RuntimeOutboxHarvester;
 }
 
+interface RuntimeHubEnvironment {
+  [key: string]: string;
+}
+
 export function companionHubApiUrl(apiUrl: string): string {
   const trimmed = apiUrl.trim().replace(/\/+$/, "");
   if (trimmed.endsWith("/v1")) return trimmed;
@@ -75,121 +68,39 @@ export function createRuntimeMaterialPipeline(input: {
     contentType: string;
     signal: AbortSignal;
   }): Promise<void>;
-  refreshOauth?(
-    credential: CompanionPluginStoredOAuthCredential,
-    signal?: AbortSignal,
-  ): Promise<CompanionPluginStoredOAuthCredential>;
-  uuid?: () => string;
   now?: () => number;
 }): RuntimeMaterialPipeline {
-  const refreshedByMaterial = new WeakMap<
-    RuntimeWorkMaterial,
-    Map<string, CompanionPluginStoredOAuthCredential>
-  >();
   const now = input.now ?? Date.now;
-  const uuid = input.uuid ?? randomUUID;
-  const refreshOauth = input.refreshOauth
-    ?? (async (credential, signal) => await refreshCompanionPluginOAuth({ credential, signal }));
   const hubTokensByMaterial = new WeakMap<
     RuntimeWorkMaterial,
     { token: string; expiresAt: Date }
   >();
-  const oauthExpiresAtByMaterial = new WeakMap<RuntimeWorkMaterial, Date | null>();
+  const mcpBrokerTokensByMaterial = new WeakMap<
+    RuntimeWorkMaterial,
+    { token: string; expiresAt: Date }
+  >();
+  const oauthMaterialByMaterial = new WeakMap<RuntimeWorkMaterial, boolean>();
 
   const materialProvider: RuntimeMaterialProvider = {
-    async getMaterial({ store, fence, signal }) {
+    async getMaterial({ store, fence }) {
       const material = await store.getMaterial(fence, RUNTIME_LEASE_SECONDS);
       if (!material) return null;
-      const refreshed = new Map<string, CompanionPluginStoredOAuthCredential>();
-      for (const row of fence.workKind === "attempt" || fence.workKind === "decision"
-        ? []
-        : decryptRuntimeMcpRows({
-          orgId: fence.orgId,
-          mcpMaterial: material.mcpMaterial,
-          masterKey: input.masterKey,
-        })) {
-        if (row.decrypted.kind !== "oauth") continue;
-        const expiresAt = row.decrypted.credential.accessExpiresAt === null
-          ? null
-          : Date.parse(row.decrypted.credential.accessExpiresAt);
-        if (
-          expiresAt === null
-          || expiresAt > now() + Math.max(
-            COMPANION_MCP_OAUTH_REFRESH_SKEW_MS,
-            COMPANION_RUNTIME_MATERIAL_MIN_TTL_MS,
-          )
-        ) continue;
-        const active = await refreshOauth(row.decrypted.credential, signal);
-        if (signal?.aborted) throw signal.reason ?? new Error("Runtime material refresh aborted");
-        const nextGeneration = uuid();
-        const envelope = encryptCompanionMcpRuntimeCredential({
-          orgId: fence.orgId,
-          accountId: row.accountId,
-          credentialGeneration: nextGeneration,
-          credential: active,
-        }, input.masterKey);
-        if (signal?.aborted) throw signal.reason ?? new Error("Runtime material refresh aborted");
-        const persisted = await store.casMcpOauth(fence, {
-          accountId: row.accountId,
-          expectedGeneration: row.credentialGeneration,
-          nextGeneration,
-          envelope,
-        });
-        if (!persisted?.updated || persisted.credentialGeneration !== nextGeneration) {
-          // The active lease or frozen credential snapshot moved. Engine treats this exact class as
-          // fence loss and does not stage the uncommitted plaintext.
-          throw new RuntimeStoreSerializationError();
-        }
-        material.mcpMaterial = material.mcpMaterial.map((raw) => {
-          if (
-            raw.account_id !== row.accountId
-            || raw.credential_generation !== row.credentialGeneration
-          ) return raw;
-          return {
-            ...raw,
-            credential_generation: nextGeneration,
-            ciphertext: envelope.ciphertext,
-            iv: envelope.iv,
-            auth_tag: envelope.authTag,
-            wrapped_dek: envelope.wrappedDek,
-            wrap_iv: envelope.wrapIv,
-            wrap_auth_tag: envelope.wrapAuthTag,
-            key_id: envelope.keyId,
-          };
-        });
-        refreshed.set(oauthKey(row.accountId, nextGeneration), active);
-      }
-      let oauthExpiresAt: Date | null = null;
-      for (const row of decryptRuntimeMcpRows({
+      const hasOauth = decryptRuntimeMcpRows({
         orgId: fence.orgId,
         mcpMaterial: material.mcpMaterial,
         masterKey: input.masterKey,
-      })) {
-        if (row.decrypted.kind !== "oauth" || row.decrypted.credential.accessExpiresAt === null) {
-          continue;
-        }
-        const expiresAt = new Date(row.decrypted.credential.accessExpiresAt);
-        if (!Number.isFinite(expiresAt.getTime())) {
-          throw new RuntimeMaterialError("runtime_material_invalid");
-        }
-        if (oauthExpiresAt === null || expiresAt < oauthExpiresAt) oauthExpiresAt = expiresAt;
-      }
-      if (
-        oauthExpiresAt !== null
-        && oauthExpiresAt.getTime() <= now() + COMPANION_RUNTIME_MATERIAL_MIN_TTL_MS
-      ) {
-        throw new CompanionPluginOAuthError(
-          "The MCP authorization expires too soon for a Companion turn. Reconnect it in Plugins.",
-          "oauth_refresh_failed",
-        );
-      }
-      oauthExpiresAtByMaterial.set(material, oauthExpiresAt);
+      }).some((row) => row.decrypted.kind === "oauth");
+      oauthMaterialByMaterial.set(material, hasOauth);
       if (fence.workKind === "settings" || fence.workKind === "operation") {
         material.configCatalog = await store.getConfigCatalog(fence, RUNTIME_LEASE_SECONDS);
         const hubToken = await store.mintHubToken(fence, RUNTIME_LEASE_SECONDS);
         if (hubToken) hubTokensByMaterial.set(material, hubToken);
+        // Mint on every staging claim: the SQL function rotates an old capability, or revokes it
+        // when the current surface has no selected account. Environment-only accounts may produce
+        // an unusable capability, but it is never staged or included in material expiry.
+        const mcpBrokerToken = await store.mintMcpBrokerToken(fence, RUNTIME_LEASE_SECONDS);
+        if (hasOauth && mcpBrokerToken) mcpBrokerTokensByMaterial.set(material, mcpBrokerToken);
       }
-      refreshedByMaterial.set(material, refreshed);
       return material;
     },
   };
@@ -224,29 +135,21 @@ export function createRuntimeMaterialPipeline(input: {
         material: stage.material,
         masterKey: input.masterKey,
         loadSkillArchive: input.loadSkillArchive,
-        resolveOauth: async (oauth) => {
-          const active = refreshedByMaterial.get(stage.material)?.get(
-            oauthKey(oauth.accountId, oauth.credentialGeneration),
-          );
-          if (!active) throw new RuntimeMaterialError("runtime_material_invalid");
-          return active;
-        },
-        resolveGithubIdentity: async ({ accessToken }) => await githubUserIdentity({
-          accessToken,
-          signal: stage.signal,
-        }),
         signal: stage.signal,
-        now,
       });
       const nativeMobile = stage.clientSurface === "native_mobile";
       const hubCredential = nativeMobile ? undefined : hubTokensByMaterial.get(stage.material);
       if (!nativeMobile && !hubCredential) {
         throw new RuntimeMaterialError("runtime_material_invalid");
       }
-      const oauthExpiresAt = oauthExpiresAtByMaterial.get(stage.material) ?? null;
+      const hasOauth = oauthMaterialByMaterial.get(stage.material) ?? false;
+      const mcpBrokerCredential = mcpBrokerTokensByMaterial.get(stage.material);
+      if (!nativeMobile && hasOauth && !mcpBrokerCredential) {
+        throw new RuntimeMaterialError("runtime_material_invalid");
+      }
       const materialExpiresAt = nativeMobile
         ? null
-        : earliestDate(hubCredential?.expiresAt ?? null, oauthExpiresAt);
+        : earliestDate(hubCredential?.expiresAt ?? null, mcpBrokerCredential?.expiresAt ?? null);
       const skills = nativeMobile
         ? []
         : [
@@ -275,16 +178,14 @@ export function createRuntimeMaterialPipeline(input: {
         reuseSkills: !nativeMobile
           && stage.authorization.diskLayoutVersion === 14
           && stage.authorization.appliedSkillsRevision === stage.targetSkillsRevision,
-        hubEnv: nativeMobile
-          ? {}
-          : {
-            COMPANION_API_URL: companionHubApiUrl(input.apiUrl),
-            COMPANION_WORKSPACE_ID: stage.orgId,
-            ...resources.extraEnv,
-            ...(hubCredential
-              ? { COMPANION_DELEGATION_TOKEN: hubCredential.token }
-              : {}),
-          },
+        hubEnv: buildRuntimeHubEnvironment({
+          nativeMobile,
+          apiUrl: input.apiUrl,
+          orgId: stage.orgId,
+          extraEnv: resources.extraEnv,
+          hubCredential: hubCredential?.token,
+          mcpBrokerCredential: mcpBrokerCredential?.token,
+        }),
         configCatalog: nativeMobile ? null : stage.material.configCatalog,
         signal: stage.signal,
       });
@@ -467,16 +368,31 @@ export function loadBundledCompanionRuntimeSkill(): Promise<CompanionRuntimeSkil
     version: metadata.version,
     checksum: packed.checksum,
     archive: packed.archive,
-  })).catch((error: unknown) => {
+  })).catch((error) => {
     bundledSkillPromise = null;
     throw error;
   });
   return bundledSkillPromise;
 }
 
-function oauthKey(accountId: string, generation: string): string {
-  return `${accountId}:${generation}`;
+function buildRuntimeHubEnvironment(input: {
+  nativeMobile: boolean;
+  apiUrl: string;
+  orgId: string;
+  extraEnv: RuntimeHubEnvironment;
+  hubCredential?: string;
+  mcpBrokerCredential?: string;
+}): RuntimeHubEnvironment {
+  const environment: RuntimeHubEnvironment = {};
+  if (input.nativeMobile) return environment;
+  environment.COMPANION_API_URL = companionHubApiUrl(input.apiUrl);
+  environment.COMPANION_WORKSPACE_ID = input.orgId;
+  Object.assign(environment, input.extraEnv);
+  if (input.hubCredential) environment.COMPANION_DELEGATION_TOKEN = input.hubCredential;
+  if (input.mcpBrokerCredential) environment.COMPANION_MCP_BROKER_TOKEN = input.mcpBrokerCredential;
+  return environment;
 }
+
 
 function generationNumber(value: bigint): number {
   const number = Number(value);
