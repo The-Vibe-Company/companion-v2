@@ -508,6 +508,11 @@ export const COMPANION_THREAD_INSTRUCTIONS = [
   "collapsible block in the thread. Nothing you write to disk is visible to them unless you say it",
   "or show it.",
   "",
+  "Ordinary assistant text is shown immediately as your reply. Do not use it to restate the request,",
+  "choose tools aloud, narrate internal plans or progress checks, or write self-talk. Keep that work in",
+  "structured reasoning when available, or omit it. Call tools directly, then write one user-facing",
+  "answer after the tool work is complete; use ask_user only when the person must decide something.",
+  "",
   "The thread is one continuous conversation that survives restarts of your runtime, so an earlier turn",
   "you can no longer see in context still happened for the person you are talking to.",
 ].join("\n");

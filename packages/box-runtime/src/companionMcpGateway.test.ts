@@ -2,14 +2,22 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { z } from "zod";
 
 import { startCompanionMcpGateway, type CompanionMcpGateway } from "./companionMcpGateway";
 
 const accountId = "11111111-1111-4111-8111-111111111111";
 const credentialGeneration = "22222222-2222-4222-8222-222222222222";
+const conductorAccountId = "33333333-3333-4333-8333-333333333333";
+const conductorCredentialGeneration = "44444444-4444-4444-8444-444444444444";
 const brokerToken = `cmp_mcp_${"a".repeat(48)}`;
 const apiUrl = "https://control.example.test/v1";
 const upstreamUrl = "https://mcp.example.test/rpc";
+const brokerRequestSchema = z.object({
+  account_id: z.string().uuid(),
+  credential_generation: z.string().uuid(),
+  force_refresh: z.boolean(),
+}).strict();
 
 const temporaryDirectories: string[] = [];
 const gateways: CompanionMcpGateway[] = [];
@@ -243,6 +251,44 @@ describe("Companion MCP loopback gateway", () => {
       .resolves.toBe("github-2");
     expect(tokenRequests).toBe(2);
   });
+
+  it("vends GitHub and Conductor access through the same account-bound broker", async () => {
+    const tokenRequests: Array<{ account_id: string; credential_generation: string }> = [];
+    const upstreamAuthorizations: string[] = [];
+    const gateway = await startGatewayWithAccounts(async (rawUrl, init) => {
+      if (String(rawUrl).startsWith(apiUrl)) {
+        const body = brokerRequestSchema.parse(JSON.parse(String(init?.body)));
+        tokenRequests.push(body);
+        return tokenResponse(`access-${body.account_id}`, null);
+      }
+      upstreamAuthorizations.push(new Headers(init?.headers).get("authorization") ?? "");
+      return new Response("conductor-ok", { status: 200 });
+    }, [
+      { accountId, credentialGeneration, upstreamUrl: "https://api.github.test/mcp", github: true },
+      {
+        accountId: conductorAccountId,
+        credentialGeneration: conductorCredentialGeneration,
+        upstreamUrl: "https://mcp.conductor.test/rpc",
+        github: false,
+      },
+    ]);
+
+    await expect(fetch(`${gateway.origin}/git/${accountId}`).then(async (response) => await response.text()))
+      .resolves.toBe(`access-${accountId}`);
+    await expect(fetch(`${gateway.origin}/mcp/${conductorAccountId}`, {
+      method: "POST",
+      body: "{}",
+    }).then(async (response) => await response.text())).resolves.toBe("conductor-ok");
+    expect(tokenRequests).toEqual([
+      { account_id: accountId, credential_generation: credentialGeneration, force_refresh: false },
+      {
+        account_id: conductorAccountId,
+        credential_generation: conductorCredentialGeneration,
+        force_refresh: false,
+      },
+    ]);
+    expect(upstreamAuthorizations).toEqual([`Bearer access-${conductorAccountId}`]);
+  });
 });
 
 async function startGateway(
@@ -250,12 +296,25 @@ async function startGateway(
   now: () => number = Date.now,
   github = false,
 ): Promise<CompanionMcpGateway> {
+  return await startGatewayWithAccounts(fetchImpl, [
+    { accountId, credentialGeneration, upstreamUrl, github },
+  ], now);
+}
+
+async function startGatewayWithAccounts(
+  fetchImpl: typeof fetch,
+  accounts: Array<{
+    accountId: string;
+    credentialGeneration: string;
+    upstreamUrl: string;
+    github: boolean;
+  }>,
+  now: () => number = Date.now,
+): Promise<CompanionMcpGateway> {
   const directory = mkdtempSync(join(tmpdir(), "companion-mcp-gateway-"));
   temporaryDirectories.push(directory);
   const configPath = join(directory, "mcp-gateway.json");
-  writeFileSync(configPath, JSON.stringify({
-    accounts: [{ accountId, credentialGeneration, upstreamUrl, github }],
-  }));
+  writeFileSync(configPath, JSON.stringify({ accounts }));
   const gateway = await startCompanionMcpGateway({
     configPath,
     apiUrl,

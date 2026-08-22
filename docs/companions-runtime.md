@@ -654,7 +654,11 @@ account-generation refs. The Pi broker starts a loopback HTTP gateway before Pi 
 `pi-mcp-adapter` with its dynamic local URLs. That gateway calls
 `POST /v1/runtime/mcp-access-token` just before remote access; the API revalidates the active
 Companion instance, membership, owner, current plugin selection, and generation on every request.
-The route rejects sessions, ordinary PATs, Agent Auth, other Companions, and unselected accounts.
+The API role keeps `companions` read-only: a narrow `SECURITY DEFINER` capability pins the acting
+member, Companion selection, and any Editor grant while the existing account-row lock vends or
+refreshes the token. Concurrent membership, ACL, or plugin detachment waits for that transaction;
+the next request then fails closed. The route rejects sessions, ordinary PATs, Agent Auth, other
+Companions, and unselected accounts.
 
 Access tokens remain only in gateway memory until an adaptive proportional expiry margin. Concurrent
 requests for one account share renewal. An upstream `401` with no MCP response byte forces one

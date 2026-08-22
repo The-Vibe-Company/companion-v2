@@ -122,6 +122,7 @@ const companion = {
     provider_credential_generation: null,
     disk_layout_version: 14,
     desktop_available: true,
+    replying: false,
     last_error: null,
     skills_revision: 1,
     skills_applied_revision: 1,
