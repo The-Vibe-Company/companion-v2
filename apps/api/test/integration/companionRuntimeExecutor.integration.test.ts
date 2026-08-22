@@ -623,6 +623,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       "public.companion_api_update_routine(uuid,uuid,uuid,text,text,text,text,boolean,timestamp with time zone)",
       "public.companion_api_delete_routine(uuid,uuid,uuid)",
       "public.companion_api_answer_trigger_decision(uuid,uuid,text,text,uuid,text)",
+      "public.companion_api_lock_selected_mcp_account(uuid,uuid,uuid)",
       "public.companion_api_list_triggers(uuid,uuid)",
       "public.companion_api_create_trigger(uuid,uuid,uuid,text,text,text,text,boolean)",
       "public.companion_api_update_trigger(uuid,uuid,uuid,text,text,text,boolean)",
@@ -4112,6 +4113,140 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       claim = undefined;
     } finally {
       if (claim) await release(claim).catch(() => undefined);
+      if (companionId) await removeCompanion(companionId);
+    }
+  });
+
+  it("locks the current MCP selection through the restricted API capability", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    let companionId = "";
+    try {
+      const [created] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ companionId: string }>>`
+          select companion_id::text as "companionId"
+          from public.companion_api_create_companion(
+            ${ids.orgA}::uuid, 'MCP selection lock fixture', null, ${providerId}, 'fixture-model',
+            '[]'::jsonb, false, ${tx.json([ids.mcpAccount])}::jsonb
+          )
+        `,
+      });
+      companionId = created?.companionId ?? "";
+
+      const authorize = (actorId: string, accountId: string = ids.mcpAccount) => asApi({
+        orgId: ids.orgA,
+        actorId,
+        action: (tx) => tx<Array<{ authorized: boolean }>>`
+          select public.companion_api_lock_selected_mcp_account(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${accountId}::uuid
+          ) as authorized
+        `,
+      });
+      await expect(authorize(ids.ownerA)).resolves.toEqual([{ authorized: true }]);
+      await expect(authorize(ids.ownerA, randomUUID())).resolves.toEqual([{ authorized: false }]);
+
+      // This is the production regression: FOR UPDATE requires UPDATE even though no row changes.
+      await expect(asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          select id from public.companions
+          where org_id = ${ids.orgA}::uuid and id = ${companionId}::uuid
+          for update
+        `,
+      })).rejects.toThrow(/permission denied.*companions/i);
+      await expect(asRuntime((tx) => tx`
+        select public.companion_api_lock_selected_mcp_account(
+          ${ids.orgA}::uuid, ${companionId}::uuid, ${ids.mcpAccount}::uuid
+        )
+      `)).rejects.toThrow(/permission denied.*companion_api_lock_selected_mcp_account/i);
+      await expect(asWorker((tx) => tx`
+        select public.companion_api_lock_selected_mcp_account(
+          ${ids.orgA}::uuid, ${companionId}::uuid, ${ids.mcpAccount}::uuid
+        )
+      `)).rejects.toThrow(/permission denied.*companion_api_lock_selected_mcp_account/i);
+
+      await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          select * from public.companion_api_set_workspace_access(
+            ${ids.orgA}::uuid, ${companionId}::uuid, 'editor'
+          )
+        `,
+      });
+      await expect(authorize(ids.editorA)).resolves.toEqual([{ authorized: true }]);
+      await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          select * from public.companion_api_set_workspace_access(
+            ${ids.orgA}::uuid, ${companionId}::uuid, 'viewer'
+          )
+        `,
+      });
+      await expect(authorize(ids.viewerA)).resolves.toEqual([{ authorized: false }]);
+      await expect(authorize(ids.ownerB)).resolves.toEqual([{ authorized: false }]);
+      await expect(asApi({
+        orgId: ids.orgB,
+        actorId: ids.ownerB,
+        action: (tx) => tx`
+          select public.companion_api_lock_selected_mcp_account(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${ids.mcpAccount}::uuid
+          ) as authorized
+        `,
+      })).resolves.toEqual([{ authorized: false }]);
+
+      let releaseSelectionLock = () => undefined;
+      let markSelectionLocked = () => undefined;
+      const selectionLocked = new Promise<void>((resolve) => { markSelectionLocked = resolve; });
+      const holdSelectionLock = new Promise<void>((resolve) => { releaseSelectionLock = resolve; });
+      const holder = asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: async (tx) => {
+          await tx`
+            select public.companion_api_lock_selected_mcp_account(
+              ${ids.orgA}::uuid, ${companionId}::uuid, ${ids.mcpAccount}::uuid
+            )
+          `;
+          markSelectionLocked();
+          await holdSelectionLock;
+        },
+      });
+      await selectionLocked;
+      try {
+        await expect(asApi({
+          orgId: ids.orgA,
+          actorId: ids.ownerA,
+          action: async (tx) => {
+            await tx.unsafe("set local lock_timeout = '100ms'");
+            await tx`
+              select * from public.companion_api_update_companion(
+                ${ids.orgA}::uuid, ${companionId}::uuid,
+                ${tx.json({ selected_mcp_account_ids: [] })}::jsonb
+              )
+            `;
+          },
+        })).rejects.toThrow(/lock timeout/i);
+      } finally {
+        releaseSelectionLock();
+        await holder;
+      }
+
+      await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          select * from public.companion_api_update_companion(
+            ${ids.orgA}::uuid, ${companionId}::uuid,
+            ${tx.json({ selected_mcp_account_ids: [] })}::jsonb
+          )
+        `,
+      });
+      await expect(authorize(ids.ownerA)).resolves.toEqual([{ authorized: false }]);
+    } finally {
       if (companionId) await removeCompanion(companionId);
     }
   });

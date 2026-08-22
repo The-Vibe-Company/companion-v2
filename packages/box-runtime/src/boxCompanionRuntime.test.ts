@@ -1301,6 +1301,18 @@ describe("staged Companion instructions", () => {
     expect(text).toContain("compact cards for each tool run");
     expect(text).toContain("collapsible block");
   });
+
+  it("reserves ordinary assistant text for the user-facing answer", () => {
+    const text = composedInstructions("Keep a warm, conversational voice.");
+    expect(text).toContain("Ordinary assistant text is shown immediately as your reply.");
+    expect(text).toContain("Do not use it to restate the request");
+    expect(text).toContain("choose tools aloud");
+    expect(text).toContain("narrate internal plans or progress checks");
+    expect(text).toContain("structured reasoning when available, or omit it");
+    expect(text).toContain("one user-facing");
+    expect(text).toContain("answer after the tool work is complete");
+    expect(text.endsWith("# This Companion\n\nKeep a warm, conversational voice.\n")).toBe(true);
+  });
 });
 
 describe("Pi outbox manifest", () => {

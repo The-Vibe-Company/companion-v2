@@ -246,12 +246,13 @@ interface FakeSelectProjection {
 
 function buildFakeDatabase(input: FakeDatabaseInput) {
   let readIndex = 0;
-  let lockedSelectIndex = 0;
   let updateIndex = 0;
   const database = {
+    execute: vi.fn(async () => [{
+      authorized: (input.selected ?? [accountId]).includes(accountId),
+    }]),
     select: vi.fn((projection?: FakeSelectProjection) => {
       const credentialVersionProjection = Boolean(projection?.credentialVersion);
-      const currentSelect = credentialVersionProjection ? null : lockedSelectIndex++;
       return {
         from: vi.fn(() => ({
           where: vi.fn(() => ({
@@ -262,9 +263,7 @@ function buildFakeDatabase(input: FakeDatabaseInput) {
                 return Promise.resolve(credentialVersion === undefined ? [] : [{ credentialVersion }]);
               }
               return {
-                for: vi.fn(async () => currentSelect === 0
-                  ? [{ selectedMcpAccountIds: input.selected ?? [accountId] }]
-                  : [input.rows[Math.min(readIndex++, input.rows.length - 1)]]),
+                for: vi.fn(async () => [input.rows[Math.min(readIndex++, input.rows.length - 1)]]),
               };
             }),
           })),

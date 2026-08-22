@@ -189,7 +189,10 @@ Layout 14 installs a small Node broker under systemd between runtime commands an
 Staging writes a composed operating brief to `~/.companion/runtime/state/instructions.txt` and Pi
 receives it as `--append-system-prompt`. The brief describes the runtime contract Pi is held to —
 the thread, the durable disk, turn bounds, tools, routines, triggers, and the ask/propose surface —
-not how to speak.
+including that ordinary assistant text is immediately visible and is reserved for the user-facing
+answer rather than tool selection, internal planning, progress narration, or self-talk. Structured
+reasoning remains a separate collapsible thread part. These are delivery semantics, not a prescribed
+voice.
 The owner's persona remains one operator-authored line rather than a system prompt, and it is
 appended last so it has the final word on voice.
 

@@ -384,7 +384,9 @@ and top-level navigation remain unchanged.
 member's message is a right-aligned tinted bubble with `2xl` radius and no border; a Companion reply
 is left-aligned, unboxed rich text with copyable markdown and code. One logical turn remains one
 message however many reasoning, reply, tool, and question parts it produced. Reasoning is collapsed
-and never substitutes for the answer. A tool run is a hairline card with arguments and result folded
+and never substitutes for the answer. Ordinary assistant text is the user-facing answer, not a place
+for tool selection, internal planning, progress narration, or self-talk. A tool run is a hairline
+card with arguments and result folded
 until asked; a visual run may carry exactly one bounded stored Box frame. Pi runs shell and file
 tools without approval. `ask_user` is the one interactive card: Owner/Editor may answer or deny it,
 Viewer may only read its durable result.

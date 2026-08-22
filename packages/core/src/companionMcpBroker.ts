@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db, schema, type Db } from "@companion/db";
 import {
@@ -32,6 +32,7 @@ const accountRefsSchema = z.array(z.object({
   account_id: z.string().uuid(),
   credential_generation: z.string().uuid(),
 }).strict()).min(1).max(50);
+const selectedAccountLockSchema = z.object({ authorized: z.boolean() }).strict();
 
 export class CompanionMcpBrokerAuthorizationError extends Error {
   constructor() {
@@ -95,16 +96,15 @@ export async function issueCompanionMcpAccessToken(input: {
       .limit(1)
     : [null];
   if (input.forceRefresh && !observedAccount) throw new CompanionMcpBrokerAuthorizationError();
-  const [companion] = await database
-    .select({ selectedMcpAccountIds: schema.companions.selectedMcpAccountIds })
-    .from(schema.companions)
-    .where(and(
-      eq(schema.companions.id, input.authorization.companionId),
-      eq(schema.companions.orgId, input.authorization.orgId),
-    ))
-    .limit(1)
-    .for("update");
-  if (!companion?.selectedMcpAccountIds.includes(input.accountId)) {
+  const selectionLockResult = await database.execute(sql`
+    select public.companion_api_lock_selected_mcp_account(
+      ${input.authorization.orgId}::uuid,
+      ${input.authorization.companionId}::uuid,
+      ${input.accountId}::uuid
+    ) as authorized
+  `);
+  const selectionLock = selectedAccountLockSchema.safeParse(Array.from(selectionLockResult)[0]);
+  if (!selectionLock.success || !selectionLock.data.authorized) {
     throw new CompanionMcpBrokerAuthorizationError();
   }
   const now = input.now ?? Date.now;

@@ -588,6 +588,16 @@ BEGIN
       ];
     END IF;
 
+    -- 0121 keeps the current Companion selection row-locked during API-side token vending without
+    -- restoring ambient mutation privileges on the runtime aggregate.
+    IF pg_catalog.to_regprocedure(
+      'public.companion_api_lock_selected_mcp_account(uuid,uuid,uuid)'
+    ) IS NOT NULL THEN
+      companion_api_functions := companion_api_functions || ARRAY[
+        'public.companion_api_lock_selected_mcp_account(uuid,uuid,uuid)'::regprocedure
+      ];
+    END IF;
+
     -- 0110 records staged credential expiry and publishes it only after a new Pi invocation.
     IF pg_catalog.to_regprocedure(
       'public.companion_runtime_record_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,public.companion_client_surface,timestamp with time zone)'
