@@ -1,14 +1,21 @@
+/* oxlint-disable anti-slop/no-conditional-empty-object-spread, anti-slop/no-known-value-widening, anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Existing lifecycle orchestration predates the incremental anti-slop gate. */
+
 import { AmbiguousExternalEffectError, RuntimeInvariantError } from "./errors";
 import { mustAbandonRuntimeExecution } from "./executionControl";
 import { runtimeSucceeded, type RuntimeWorkDisposition } from "./handler";
 import type { LeaseSession } from "./leaseSession";
+import { describeThrownError } from "./logging";
 import type {
   BoxCreateResult,
   GenerationBox,
   GenerationBoxDiscovery,
   RuntimeEngineDependencies,
 } from "./ports";
-import { retryIdempotentLifecycle, type IdempotentLifecycleCall } from "./retry";
+import {
+  isRetryableProviderError,
+  retryIdempotentLifecycle,
+  type IdempotentLifecycleCall,
+} from "./retry";
 import {
   activateRuntimeSettings,
   type StagedRuntimeSettings,
@@ -21,6 +28,10 @@ import type {
 
 export const BOX_WARM_TTL_SECONDS = 21_600;
 const PROVIDER_POLL_INTERVAL_MS = 1_000;
+// Waiting for a Box to leave provisioning is the one poll where every interval lands directly on
+// the member's send-to-ack latency, and a ready GET is cheap, so this loop polls four times as
+// often as the conservative default used for absence confirmation and archival waits.
+const READY_POLL_INTERVAL_MS = 250;
 const ABSENCE_CONFIRMATION_INTERVAL_MS = 30_000;
 const PROVIDER_CALL_DEADLINE_MS = 30_000;
 const OPERATION_DEADLINE_MS = 10 * 60 * 1_000;
@@ -329,11 +340,14 @@ async function waitForReadyBox(context: OperationContext): Promise<void> {
         action: "restart_box",
       });
     }
-    await context.deps.clock.sleep(PROVIDER_POLL_INTERVAL_MS, context.session.signal);
+    await context.deps.clock.sleep(READY_POLL_INTERVAL_MS, context.session.signal);
   }
 }
 
-async function stageCapturedResources(context: OperationContext): Promise<StagedRuntimeSettings> {
+async function stageCapturedResources(
+  context: OperationContext,
+  options: { preserveInstalledSkills?: boolean } = {},
+): Promise<StagedRuntimeSettings> {
   const startedAt = context.deps.clock.now().getTime();
   const authorization = requiredAuthorization(context.session);
   if (
@@ -369,8 +383,21 @@ async function stageCapturedResources(context: OperationContext): Promise<Staged
       clientSurface,
       targetSettingsRevision,
       targetSkillsRevision,
+      preserveInstalledSkills: options.preserveInstalledSkills,
       signal,
     }));
+  if (!options.preserveInstalledSkills && staged.appliedSkillsRevision !== null && staged.skillsDigest) {
+    const committed = await context.session.fencedMutation(async () =>
+      await context.deps.store.commitSkillUpdate(context.session.fence, {
+        targetSkillsRevision: staged.appliedSkillsRevision!,
+        requiredSkillsRevision: staged.appliedSkillsRevision!,
+        selectedSkillIds: authorization.skillRefs.map((ref) => ref.skill_id),
+        skillRefs: authorization.skillRefs,
+        skillMaterial: material.skillMaterial,
+        skillsDigest: staged.skillsDigest!,
+      }));
+    if (!committed) throw new Error("Skill snapshot fence was lost");
+  }
   await context.session.fencedMutation(async () =>
     await context.deps.store.recordMaterialSnapshot(context.session.fence, {
       clientSurface,
@@ -381,6 +408,63 @@ async function stageCapturedResources(context: OperationContext): Promise<Staged
     skillBytesTransferred: staged.skillBytesTransferred ?? 0,
   });
   return staged;
+}
+
+async function applyCapturedSkillUpdate(context: OperationContext): Promise<void> {
+  const authorization = requiredAuthorization(context.session);
+  if (
+    authorization.clientSurface === "native_mobile"
+    ||
+    authorization.targetSkillsRevision === null
+    || (authorization.appliedSkillsRevision ?? 0) >= authorization.targetSkillsRevision
+  ) return;
+  const material = await context.session.fencedMutation(async () =>
+    await context.deps.store.getSkillUpdateMaterial(context.session.fence, 30));
+  const blocking = material !== null
+    && (authorization.appliedSkillsRevision ?? 0) < material.requiredSkillsRevision;
+  if (!material) {
+    await context.session.fencedMutation(async () =>
+      await context.deps.store.recordSkillUpdateError(context.session.fence, {
+        code: "skill_auto_update_unauthorized",
+        message: "The pending Skill update is no longer authorized and will be retried later.",
+      }));
+    return;
+  }
+  try {
+    const staged = await context.session.external(async (signal) =>
+      await context.deps.resourceStager.stageSkillTree({
+        orgId: context.claim.orgId,
+        companionId: context.claim.companionId,
+        boxId: requiredBoxId(context.session),
+        authorization,
+        material,
+        signal,
+      }));
+    const committed = await context.session.fencedMutation(async () =>
+      await context.deps.store.commitSkillUpdate(context.session.fence, {
+        ...material,
+        skillsDigest: staged.skillsDigest,
+      }));
+    if (!committed) throw new Error("Skill update fence was lost");
+  } catch (error) {
+    if (mustAbandonRuntimeExecution(error)) throw error;
+    context.deps.log?.warn({
+      ts: context.deps.clock.now().toISOString(),
+      event: "runtime.skills.auto_update_failed",
+      companionId: context.claim.companionId,
+      operationKind: context.claim.operationKind,
+      blocking,
+      error: describeThrownError(error),
+    });
+    await context.session.fencedMutation(async () =>
+      await context.deps.store.recordSkillUpdateError(context.session.fence, {
+        code: blocking ? "skill_update_failed" : "skill_auto_update_failed",
+        message: blocking
+          ? "The required Skill selection could not be installed."
+          : "The automatic Skill update failed and will be retried at the next Pi stop or restart.",
+      }));
+    if (blocking) throw error;
+  }
 }
 
 async function publishStagedResources(
@@ -586,6 +670,7 @@ async function handleStop(context: OperationContext): Promise<RuntimeWorkDisposi
         if (authorization.boxId) {
           await lifecycle(context, "stop_pi", async ({ signal }) =>
             await context.deps.pi.stopPiDaemon({ boxId: requiredBoxId(context.session), signal }));
+          await applyCapturedSkillUpdate(context);
         }
         await context.session.checkpoint({ nextCheckpoint: "provider_stop_requested" });
         break;
@@ -645,7 +730,10 @@ async function handleRestartPi(context: OperationContext): Promise<RuntimeWorkDi
     const authorization = await context.session.reauthorize();
     switch (authorization.workCheckpoint) {
       case "pending":
-        await stageCapturedResources(context);
+        await lifecycle(context, "stop_pi", async ({ signal }) =>
+          await context.deps.pi.stopPiDaemon({ boxId: requiredBoxId(context.session), signal }));
+        await applyCapturedSkillUpdate(context);
+        await stageCapturedResources(context, { preserveInstalledSkills: true });
         await context.session.checkpoint({ nextCheckpoint: "restarting_pi" });
         break;
       case "restarting_pi":
@@ -700,6 +788,12 @@ async function handleRestartBox(context: OperationContext): Promise<RuntimeWorkD
     const authorization = await context.session.reauthorize();
     switch (authorization.workCheckpoint) {
       case "pending":
+        await lifecycle(context, "stop_pi", async ({ signal }) =>
+          await context.deps.pi.stopPiDaemon({ boxId: requiredBoxId(context.session), signal }));
+        await applyCapturedSkillUpdate(context);
+        await context.session.checkpoint({ nextCheckpoint: "skills_updated" });
+        break;
+      case "skills_updated":
         await context.session.checkpoint({ nextCheckpoint: "restarting_box" });
         break;
       case "restarting_box":
@@ -733,7 +827,10 @@ async function handleRestartBox(context: OperationContext): Promise<RuntimeWorkD
         await context.session.checkpoint({ nextCheckpoint: "installing_layout" });
         break;
       case "installing_layout":
-        await observeStagedResources(context, await stageCapturedResources(context));
+        await observeStagedResources(
+          context,
+          await stageCapturedResources(context, { preserveInstalledSkills: true }),
+        );
         await context.session.checkpoint({ nextCheckpoint: "starting_pi" });
         break;
       case "starting_pi":
@@ -760,6 +857,9 @@ async function handleApplySettings(context: OperationContext): Promise<RuntimeWo
     const authorization = await context.session.reauthorize();
     switch (authorization.workCheckpoint) {
       case "pending":
+        await lifecycle(context, "stop_pi", async ({ signal }) =>
+          await context.deps.pi.stopPiDaemon({ boxId: requiredBoxId(context.session), signal }));
+        await applyCapturedSkillUpdate(context);
         await context.session.checkpoint({ nextCheckpoint: "applying_settings" });
         break;
       case "applying_settings": {
@@ -774,12 +874,12 @@ async function handleApplySettings(context: OperationContext): Promise<RuntimeWo
           expectedSettingsRevision: authorization.targetSettingsRevision,
           expectedSkillsRevision: authorization.clientSurface === "native_mobile"
             ? null
-            : authorization.targetSkillsRevision,
+            : authorization.appliedSkillsRevision,
           previousPiInvocationId: authorization.piInvocationId,
           deadlineAt: workDeadline(context),
           clock: context.deps.clock,
           signal: context.session.signal,
-          stage: async () => await stageCapturedResources(context),
+          stage: async () => await stageCapturedResources(context, { preserveInstalledSkills: true }),
           restartPi: async () => await lifecycle(context, "restart_pi", async ({ signal }) =>
             await context.deps.pi.restartPiDaemon({
               boxId: requiredBoxId(context.session),
@@ -892,11 +992,6 @@ async function handleDelete(context: OperationContext): Promise<RuntimeWorkDispo
         });
         break;
       case "waiting_deleted": {
-        requirePollingBudget(
-          context,
-          "box_delete_deadline_exceeded",
-          "Permanent Box deletion did not finish before its deadline.",
-        );
         const boxId = requiredBoxId(context.session);
         const operationId = authorization.providerOperationId;
         if (!operationId) {
@@ -908,18 +1003,23 @@ async function handleDelete(context: OperationContext): Promise<RuntimeWorkDispo
         }
         let poll;
         try {
-          poll = await lifecycle(context, "poll_delete", async ({ signal }) =>
+          // An accepted delete is resumed one provider read at a time. PostgreSQL schedules the
+          // next claim, so no runtime slot remains occupied and the DELETE is never replayed.
+          poll = await context.session.external(async (signal) =>
             await context.deps.box.pollPermanentDeletion({ boxId, operationId, signal }));
         } catch (error) {
-          if (!isProviderNotFound(error)) throw error;
-          poll = { status: "completed" } as const;
+          if (isProviderNotFound(error)) {
+            poll = { status: "completed" } as const;
+          } else if (isRetryableProviderError(Object(error))) {
+            return { kind: "defer_delete" };
+          } else {
+            throw error;
+          }
         }
         if (poll.status === "completed") {
           await observe(context, { boxState: "absent" });
         } else {
-          // pending, processing, and blocked are all in-progress. Official Box docs poll until
-          // `completed`; blocked has no completedAt, so treating it as terminal aborted deletes.
-          await context.deps.clock.sleep(PROVIDER_POLL_INTERVAL_MS, context.session.signal);
+          return { kind: "defer_delete" };
         }
         break;
       }

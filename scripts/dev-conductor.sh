@@ -30,6 +30,13 @@
 
 set -euo pipefail
 
+# Conductor is a GUI application on macOS and its Run processes can inherit
+# launchd's low soft limit (often 256). Next.js/Watchpack needs substantially
+# more descriptors to watch this monorepo reliably.
+if [ "${CONDUCTOR_IS_LOCAL:-0}" = "1" ]; then
+  ulimit -S -n 65536
+fi
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Load the repo-root .env (if present) so GitHub, storage, email and skill-secret settings reach the

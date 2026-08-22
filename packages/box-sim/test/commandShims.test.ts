@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-conditional-empty-object-spread, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Existing simulator fixtures predate the incremental anti-slop gate. */
+
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 
@@ -27,6 +29,10 @@ describe("semantic Box command shims", () => {
   it("classifies every adapter command family by stable semantic markers", () => {
     const commands: Array<[string, ReturnType<typeof classifyBoxCommand>]> = [
       ["printf '%s\\n' 'companion-box-runnable'", "box-runnable"],
+      [
+        "companion-box-runnable pi-layout.version companion-provider-auth-present",
+        "staging-probe",
+      ],
       ["systemctl --user is-active x; printf companion-pi-warm-ready", "warm-daemon-ready"],
       ['mkdir -p "$HOME/.companion/bin"', "mkdir-pi-bin"],
       ['bash "$HOME/.companion/bin/ensure-pi-layout.sh"', "install-layout"],
@@ -37,6 +43,10 @@ describe("semantic Box command shims", () => {
         "clear-skill-archives",
       ],
       ["companion-archive-bytes wc -c", "measure-skill-archives"],
+      [
+        `test "$(cat "$HOME/.companion/runtime/state/skills-tree.version" 2>/dev/null || true)" = '${"a".repeat(64)}'`,
+        "match-skills-revision",
+      ],
       ["cat '.part0' > '.target'; rm -f '.part0'", "join-file-parts"],
       ["skills.next base64 --decode tar --extract", "prepare-skills"],
       ["staged_credential_file=x; systemctl --user daemon-reload", "start-or-restart-daemon"],
@@ -145,6 +155,65 @@ describe("semantic Box command shims", () => {
     const payload = { id: "req-1", type: "prompt", message: "don't execute this" };
     expect(decodeShellQuoted(shellQuote("don't"))).toBe("don't");
     expect(extractBrokerJson(brokerShell(payload))).toEqual(payload);
+  });
+
+  it("models the fused layout and preserve-Skills staging probe", async () => {
+    const machine = createBoxSimCommandMachine({ boxId: "bx_23456789", scenario: "normal" });
+    const layoutMarker = "14:pins:overlay=staging-probe";
+    const skillsDigest = "a".repeat(64);
+    const files: Array<[string, string]> = [
+      [".companion/runtime/state/pi-layout.version", `${layoutMarker}\n`],
+      [".companion/bin/companion-pi-broker.mjs", "broker"],
+      [".companion/bin/pi-daemon", "daemon"],
+      [".config/systemd/user/companion-pi-daemon.service", "service"],
+      [".companion/runtime/state/skills-tree.version", `${skillsDigest}\n`],
+      [".companion/runtime/state/skill-archives/stale.tar.gz.b64", "stale"],
+      [".companion/pi/auth.json", "secret auth"],
+    ];
+    for (const [path, content] of files) putBoxFile(machine, path, Buffer.from(content));
+    const command = `set -e; root="$HOME/.companion/runtime";
+printf '%s\\n' 'companion-box-runnable';
+recorded="$(cat "$HOME/.companion/runtime/state/pi-layout.version" 2>/dev/null || true)";
+if [ "$recorded" = '${layoutMarker}' ] \\
+  && [ -x "$HOME/.companion/bin/companion-pi-broker.mjs" ] \\
+  && [ -x "$HOME/.companion/bin/pi-daemon" ] \\
+  && [ -f "$HOME/.config/systemd/user/companion-pi-daemon.service" ]; then
+  printf '%s\\n' 'companion-layout-unchanged'
+fi;
+digest="$(cat "$HOME/.companion/runtime/state/skills-tree.version" 2>/dev/null || true)";
+printf '%s' "$digest" | grep -Eq '^[0-9a-f]{64}$' || {
+  printf '%s\\n' 'companion-skills-snapshot-corrupt'; exit 1;
+};
+printf '%s\\n' "$digest";
+rm -rf "$root/state/skill-archives";
+printf '%s\\n' 'companion-skills-tree-reused';
+if [ -f "$HOME/.companion/pi/auth.json" ]; then
+  printf '%s\\n' 'companion-provider-auth-present'
+fi`;
+
+    await expect(executeBoxCommand(machine, command)).resolves.toEqual({
+      success: true,
+      exitCode: 0,
+      stdout: [
+        "companion-box-runnable",
+        "companion-layout-unchanged",
+        skillsDigest,
+        "companion-skills-tree-reused",
+        "companion-provider-auth-present",
+        "",
+      ].join("\n"),
+      stderr: "",
+    });
+    expect(machine.persistentFiles.has(
+      ".companion/runtime/state/skill-archives/stale.tar.gz.b64",
+    )).toBe(false);
+
+    machine.persistentFiles.delete(".companion/runtime/state/skills-tree.version");
+    await expect(executeBoxCommand(machine, command)).resolves.toMatchObject({
+      success: false,
+      exitCode: 1,
+      stdout: expect.stringContaining("companion-skills-snapshot-corrupt"),
+    });
   });
 
   it("models credential movement, daemon lifecycle, correlated RPC, and warm probes", async () => {

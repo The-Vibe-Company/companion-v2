@@ -21,10 +21,12 @@ from this delegated skill. Agent Auth authorizes external clients to use Skills 
 does not authorize Companion chat, turns, decisions, desktop, provider settings, or Box/Pi lifecycle.
 
 A hosted Pi teammate may propose settings with `propose_config` (skills, plugins, model, persona)
-and `request_plugin_connection` (Linear, GitHub, or Notion), may propose a scheduled routine with
+and `request_plugin_connection` (Linear, GitHub, Notion, or Conductor), may propose a scheduled routine with
 `propose_routine` (name, prompt, cron, timezone), and may propose a webhook trigger with
 `propose_trigger` (name, prompt, provider — `linear`, `github`, or `custom`, a display label rather
-than an auth scheme). Those tools only emit a decision card; they never apply changes themselves and
+than an auth scheme; `linear` and `github` triggers require the matching plugin attached to the
+Companion, and a `github` trigger also names its repo and events). Those tools only emit a decision
+card; they never apply changes themselves and
 never touch hub access, name, or provider. Owner/Editor approval in the thread applies after the
 current turn. After a plugin connection is approved, the human finishes it in the web Plugins UI; Pi
 may propose attaching that account on a later turn. After a trigger is approved, the human copies its
@@ -1372,7 +1374,7 @@ skills view shows the correct status and version. Report the version from this s
 `companion.json.version`:
 
 ```sh
-printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.80.0","agent":"<your assistant name>"}}' \
+printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.84.0","agent":"<your assistant name>"}}' \
   | node scripts/companion-agent-client.mjs
 ```
 

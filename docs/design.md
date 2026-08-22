@@ -148,6 +148,15 @@ six-hour TTL through an idempotent PATCH. An ambiguous create is interrupted and
 After naming, runtime lists again and permanently deletes duplicates. Permanent deletion is provider
 operation tracking, not stop/archive.
 
+Once Box accepts permanent deletion, runtime never sends that `DELETE` again. Each claim performs
+one `GET /deletion-operations/{id}` after reauthorization. `completed` or provider `404` proves
+absence and permits atomic removal of the Companion aggregate; `pending`, `processing`, `blocked`,
+or an explicitly retryable GET failure atomically returns the same operation to `pending`, releases
+its lease, and schedules another claim after 5, 15, 30, then at most 60 seconds based on the durable
+attempt count. Invalid responses and non-retryable errors retain the normal expurgated terminal
+failure. The protocol-versioned claim entrypoint prevents an older runtime from claiming these rows
+during a rolling deploy.
+
 After a prompt may have been written, loss of acknowledgement is ambiguous: the attempt becomes
 `interrupted`, no automatic replay occurs, and later turns remain blocked. A proven negative ACK may
 be retried. Retry warns that an earlier external effect may have succeeded; Cancel explicitly
@@ -215,9 +224,11 @@ the one outbound request it is forwarding. They never appear in user-facing resp
 metadata, projections, or durable Box files. The provider auth file remains on Box disk only where
 Pi itself must refresh the model provider connection.
 
-Runtime may reuse the extracted Skills tree only after both the durable selected-Skills revision and
-an on-disk digest of the exact archive checksums match. That digest includes the bundled Companion
-skill, whose deployment checksum changes independently of tenant selections.
+PostgreSQL distinguishes the latest available selected-Skills revision from the minimum revision
+required before dispatch. A publication advances only the available revision, so waking a Box
+reuses its installed immutable version snapshot. Explicit selection and invalidation changes remain
+blocking. User Stop, Restart Pi, Full Box restart, and settings apply stop Pi before atomically
+replacing the tree. A failed publication update preserves the old tree and does not block lifecycle.
 
 Every Companion may also call the Skills Hub API itself, with the same scopes: skills read/write,
 secret reads, and Skill Database read/write. Access is unconditional, so no surface asks anyone to
@@ -261,7 +272,7 @@ recycles Pi without a Full Box restart. Changing the observed invocation or mint
 Hub token invalidates the old proof before another turn can use it.
 Migration 0110 versions the Runtime claim entrypoint. Replicas from before 0110 retain their
 current lease but the legacy four-argument claim returns no new work after the migration commits.
-Migration 0113 advances the five-argument material protocol to version 2, so protocol-1 replicas
+Migration 0120 advances the six-argument material protocol to version 2, so protocol-1 replicas
 also stop claiming during the OAuth-gateway rollout. The current claimer repairs an expired legacy lease by rewinding any
 post-staging operation or settings checkpoint that has no staged-expiry ledger, then restages under
 the new fence. This prevents a rolling deploy from either publishing an unproven snapshot or
@@ -314,10 +325,17 @@ The web retains polling: three seconds while activity is present, slower when se
 SSE or Box push agent. “Companion is replying…” derives only from an acknowledged, non-terminal
 attempt. Viewer/list/thread/status reads remain PostgreSQL-only.
 
+Each Companion carries a cosmetic blob icon — four smallint indexes (`icon_shape`, `icon_mouth`,
+`icon_accessory`, `icon_color`) into fixed client-side catalogs rendered as inline SVG. Create and
+update accept them; the update path treats them as cosmetic only, so an icon save never bumps a
+settings revision or contacts Box. The web animates the icon from the same durable signal as
+“Companion is replying…”, never from lifecycle guesses.
+
 Desktop minting remains an Owner/Editor action that cannot wake Box. The API authorizes the member,
 then calls a private runtime endpoint with a short-lived HMAC request. Runtime revalidates the
 Companion and returns the fresh provider URL only after the current actor owns every selected
-personal resource and the applied settings/Skills revisions exactly match desired state. This gate
+personal resource and applied settings/Skills revisions satisfy required state. A publication-only
+Skills update may remain pending. This gate
 keeps a warm Box unavailable during a cross-actor restage. Each authenticated request id is
 atomically consumed through a narrow `SECURITY DEFINER` function and retained in PostgreSQL until
 its signature window expires, so replicas and restarted processes share one replay boundary;
@@ -343,8 +361,8 @@ billing, and audit rows survive.
 The stacked rollout temporarily retained old runtime columns without backfilling them. The final
 migration removes those columns together with every old executor, watermark, pool, reconciler,
 mutating purge function, and legacy grant. The release process admits that migration only after
-seven green canary days, no open P0/P1 runtime issue, and an empty purge report. The
-provider-operation ledger remains owner-readable cutover evidence.
+confirming there is no open P0/P1 runtime issue and the purge report is empty. The provider-operation
+ledger remains owner-readable cutover evidence.
 
 The feature flag remained disabled between purge and the asynchronous API/web cutover. Once v2 rows
 exist, rollback uses the kill switch rather than a legacy binary; no legacy executor may process
@@ -379,7 +397,11 @@ measured compatible gains. Candidate workspaces have provider credentials explic
 evaluator checkout runs under a separate unprivileged OS identity and receives only a short-lived
 local proxy capability scoped to the campaign's exact Box and snapshot identities; the controller
 retains the real provider credential and independently
-proves provider readiness, byte-attested broker prompt acceptance, and resource absence. It never runs from API, worker, web, or the
+proves provider readiness, byte-attested broker prompt acceptance, and resource absence. The proxy
+exposes one newest ready layout-14 parent read-only for the baker, fails closed without an eligible
+parent, and requires later Boxes to clone the deterministic target. Explicit non-2xx creates may retry
+with the same source; fetch failures or invalid 2xx observations make the create ambiguous and block
+the lease. It never runs from API, worker, web, or the
 hosted Companion runtime, and adds no product orchestration feature.
 
 The research evaluator and existing tests are immutable to candidate workspaces. Candidates may

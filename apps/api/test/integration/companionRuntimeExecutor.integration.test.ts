@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-chained-type-assertions, anti-slop/no-runtime-typeof, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Existing PostgreSQL fixture decoding predates the incremental anti-slop gate. */
+
 /**
  * Product promise:
  * the isolated Runtime v2 login can fetch only lease-authorized material and can commit a typed
@@ -314,7 +316,7 @@ async function claimWork(): Promise<Claim> {
       runtime_generation::text as "runtimeGeneration"
     from public.companion_runtime_claim_work(${executorId}, 1, 30, (
       select gate_epoch from public.companion_runtime_gate_status()
-    ), 2)
+    ), 2, 1)
   `);
   if (!rows[0]) throw new Error("expected one Runtime v2 claim");
   return rows[0];
@@ -549,7 +551,8 @@ describe("Companion runtime executor PostgreSQL surface", () => {
             'public.companion_runtime_authorize_desktop(uuid,uuid,text)',
             'public.companion_runtime_consume_desktop_request(text,bigint,integer)',
             'public.companion_runtime_project_event_batch(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,bigint,text,jsonb,bigint,timestamp with time zone,integer,integer,integer)',
-            'public.companion_runtime_record_attempt_outputs(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,jsonb,timestamp with time zone)'
+            'public.companion_runtime_record_attempt_outputs(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,jsonb,timestamp with time zone)',
+            'public.companion_runtime_defer_delete(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)'
           ]) protected(signature)
           where has_function_privilege(${runtimeRole}, protected.signature, 'EXECUTE')
         ) as "callableFunctions",
@@ -557,15 +560,17 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           ${runtimeRole}, 'public.companion_runtime_guard_duplicate_cleanup()', 'EXECUTE'
         ) as "helperCallable"
     `;
-    expect(acl).toEqual({ privateTableReads: 0, callableFunctions: 13, helperCallable: false });
+    expect(acl).toEqual({ privateTableReads: 0, callableFunctions: 14, helperCallable: false });
     await expect(asRuntime((tx) => tx`select * from companion_turn_attempts`))
       .rejects.toThrow(/permission denied/i);
 
-    const materialSignatures = [
+    const runtimeOnlySignatures = [
       "public.companion_runtime_record_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,public.companion_client_surface,timestamp with time zone)",
       "public.companion_runtime_publish_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text)",
+      "public.companion_runtime_claim_work(text,integer,integer,bigint,integer,integer)",
+      "public.companion_runtime_defer_delete(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)",
     ];
-    const materialAcl = await sql<Array<{
+    const runtimeOnlyAcl = await sql<Array<{
       signature: string;
       api: boolean;
       worker: boolean;
@@ -575,10 +580,10 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         has_function_privilege(${apiRole}, signature, 'EXECUTE') as api,
         has_function_privilege(${workerRole}, signature, 'EXECUTE') as worker,
         has_function_privilege(${runtimeRole}, signature, 'EXECUTE') as runtime
-      from unnest(${materialSignatures}::text[]) signatures(signature)
+      from unnest(${runtimeOnlySignatures}::text[]) signatures(signature)
       order by signature
     `;
-    expect(materialAcl.every((entry) => entry.runtime && !entry.api && !entry.worker)).toBe(true);
+    expect(runtimeOnlyAcl.every((entry) => entry.runtime && !entry.api && !entry.worker)).toBe(true);
 
     await expect(asRuntime(async (tx) => {
       // SAFETY: The transaction exposes the same `unsafe` execution method required by the role
@@ -594,7 +599,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       .rejects.toBeInstanceOf(RuntimeDatabaseRoleError);
 
     const apiSignatures = [
-      "public.companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid)",
+      "public.companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid,smallint,smallint,smallint,smallint)",
       "public.companion_api_update_companion(uuid,uuid,jsonb)",
       "public.companion_api_set_initial_provider(uuid,uuid,text,text)",
       "public.companion_api_set_workspace_access(uuid,uuid,public.companion_share_role)",
@@ -1489,6 +1494,16 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         `,
       });
       expect(skillBump?.changed).toBe(1);
+      const [deferredPublication] = await sql<Array<{
+        requiredRevision: number;
+        availableRevision: number;
+      }>>`
+        select skills_revision as "requiredRevision",
+          skills_available_revision as "availableRevision"
+        from companions
+        where org_id = ${ids.orgA}::uuid and id = ${companionId}::uuid
+      `;
+      expect(deferredPublication).toEqual({ requiredRevision: 1, availableRevision: 2 });
       await expect(asApi({
         orgId: ids.orgA,
         actorId: ids.editorA,
@@ -2000,7 +2015,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     }
   });
 
-  it("quarantines pre-0113 claimers while the broker-aware executor can claim the work", async () => {
+  it("quarantines old material claimers while the broker-aware executor can claim the work", async () => {
     if (!sql) throw new Error("runtime executor database is not initialized");
     let companionId = "";
     try {
@@ -2021,14 +2036,14 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         select work_id::text as "workId"
         from public.companion_runtime_claim_work(${executorId}, 1, 30, (
           select gate_epoch from public.companion_runtime_gate_status()
-        ))
+        ), 1)
       `);
       expect(legacyClaims).toEqual([]);
       const protocolOneClaims = await asRuntime((tx) => tx<Array<{ workId: string }>>`
         select work_id::text as "workId"
         from public.companion_runtime_claim_work(${executorId}, 1, 30, (
           select gate_epoch from public.companion_runtime_gate_status()
-        ), 1)
+        ), 1, 1)
       `);
       expect(protocolOneClaims).toEqual([]);
       const [unclaimed] = await sql<Array<{ workKind: string | null; workId: string | null }>>`
@@ -2042,6 +2057,96 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       await release(versionedClaim);
     } finally {
       if (companionId) await removeCompanion(companionId);
+    }
+  });
+
+  it("atomically defers an accepted delete with fenced PostgreSQL backoff", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const fixture = await createCompanion({ boxReady: true });
+    const operationId = randomUUID();
+    const providerOperationId = `delete-operation-${suffix}`;
+    try {
+      await sql`delete from companion_turn_attempts where id = ${fixture.attemptId}::uuid`;
+      await sql`
+        update companion_turns set status = 'cancelled', settled_at = now(),
+          inactivity_deadline_at = null, absolute_deadline_at = null
+        where id = ${fixture.turnId}::uuid
+      `;
+      await sql`
+        insert into companion_operations(
+          id, org_id, companion_id, request_id, kind, trigger, actor_id,
+          runtime_generation, checkpoint, provider_operation_id, started_at
+        ) values (
+          ${operationId}::uuid, ${ids.orgA}::uuid, ${fixture.companionId}::uuid,
+          ${randomUUID()}::uuid, 'delete', 'user', ${ids.ownerA}, 1,
+          'waiting_deleted', ${providerOperationId}, now() - interval '1 hour'
+        )
+      `;
+
+      const expectedDelays = [5, 15, 30, 60];
+      let staleClaim: Claim | null = null;
+      for (const expectedDelay of expectedDelays) {
+        await sql`
+          update companion_operations set available_at = now()
+          where id = ${operationId}::uuid
+        `;
+        const claim = await claimWork();
+        expect(claim).toMatchObject({
+          companionId: fixture.companionId,
+          workKind: "operation",
+          workId: operationId,
+          checkpoint: "waiting_deleted",
+        });
+        const before = Date.now();
+        const [result] = await asRuntime((tx) => tx<Array<{ deferred: boolean }>>`
+          select public.companion_runtime_defer_delete(
+            ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
+            ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
+            'operation', ${claim.workId}::uuid
+          ) as deferred
+        `);
+        const after = Date.now();
+        expect(result?.deferred).toBe(true);
+        const [durable] = await sql<Array<{
+          status: string;
+          attemptCount: number;
+          availableAt: Date;
+          providerOperationId: string | null;
+          settledAt: Date | null;
+          claimToken: string | null;
+        }>>`
+          select operation.status::text, operation.attempt_count as "attemptCount",
+            operation.available_at as "availableAt",
+            operation.provider_operation_id as "providerOperationId",
+            operation.settled_at as "settledAt", lease.claim_token::text as "claimToken"
+          from companion_operations operation
+          join companion_runtime_leases lease
+            on lease.org_id = operation.org_id and lease.companion_id = operation.companion_id
+          where operation.id = ${operationId}::uuid
+        `;
+        expect(durable).toMatchObject({
+          status: "pending",
+          providerOperationId,
+          settledAt: null,
+          claimToken: null,
+        });
+        expect(durable?.attemptCount).toBe(expectedDelays.indexOf(expectedDelay) + 1);
+        expect(durable!.availableAt.getTime()).toBeGreaterThanOrEqual(before + expectedDelay * 1_000);
+        expect(durable!.availableAt.getTime()).toBeLessThanOrEqual(after + expectedDelay * 1_000 + 250);
+        staleClaim ??= claim;
+      }
+
+      const [stale] = await asRuntime((tx) => tx<Array<{ deferred: boolean }>>`
+        select public.companion_runtime_defer_delete(
+          ${staleClaim!.orgId}::uuid, ${staleClaim!.companionId}::uuid,
+          ${staleClaim!.claimToken}::uuid, ${staleClaim!.claimEpoch}::bigint,
+          ${staleClaim!.gateEpoch}::bigint, ${executorId}, 'operation',
+          ${staleClaim!.workId}::uuid
+        ) as deferred
+      `);
+      expect(stale?.deferred).toBe(false);
+    } finally {
+      await removeCompanion(fixture.companionId);
     }
   });
 
@@ -3082,6 +3187,120 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     }
   });
 
+  it("keeps lifecycle authority when a deferred personal Skill update is no longer accessible", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    let companionId = "";
+    let claimed: Claim | undefined;
+    try {
+      const [created] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ companionId: string }>>`
+          select companion_id::text as "companionId"
+          from public.companion_api_create_companion(
+            ${ids.orgA}::uuid, 'Deferred personal Skill fixture', null,
+            ${providerId}, 'fixture-model',
+            ${tx.json([ids.skill])}::jsonb, false, '[]'::jsonb
+          )
+        `,
+      });
+      companionId = created?.companionId ?? "";
+      await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          select * from public.companion_api_set_workspace_access(
+            ${ids.orgA}::uuid, ${companionId}::uuid, 'editor'
+          )
+        `,
+      });
+      await sql`
+        update companion_runtime_instances
+        set box_id = 'bx_3456789a', box_state = 'ready', pi_state = 'idle',
+          pi_invocation_id = 'pi-deferred-personal', disk_layout_version = 14,
+          applied_settings_revision = desired_settings_revision, applied_client_surface = 'web',
+          applied_skills_revision = 1,
+          applied_selected_skill_ids = ${sql.json([ids.skill])},
+          applied_skill_refs = ${sql.json([{
+            skill_id: ids.skill,
+            current_version_id: ids.skillVersion,
+          }])},
+          applied_skills_digest = ${"a".repeat(64)}
+        where companion_id = ${companionId}::uuid
+      `;
+      await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          select public.companion_api_bump_skill_revision(${ids.orgA}::uuid, ${ids.skill}::uuid)
+        `,
+      });
+      await sql`
+        update companion_runtime_instances set applied_skills_revision = 2
+        where companion_id = ${companionId}::uuid
+      `;
+      expect(await authorizeDesktop({
+        companionId,
+        actorId: ids.ownerA,
+      })).toMatchObject([{ authorized: true, denialCode: null }]);
+      await sql`
+        update companion_runtime_instances set applied_skills_revision = 1
+        where companion_id = ${companionId}::uuid
+      `;
+      const [requested] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.editorA,
+        action: (tx) => tx<Array<{ operation: { id: string } }>>`
+          select operation from public.companion_api_enqueue_operation(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${randomUUID()}::uuid,
+            'restart_pi', 'web'
+          )
+        `,
+      });
+      claimed = await claimWork();
+      expect(claimed).toMatchObject({
+        companionId,
+        workKind: "operation",
+        workId: requested?.operation.id,
+      });
+      const lease = claimed;
+      const [renewal] = await asRuntime((tx) => tx<Array<{
+        authorized: boolean;
+        denialCode: string | null;
+        skillRefs: unknown;
+      }>>`
+        select authorized, denial_code as "denialCode", skill_refs as "skillRefs"
+        from public.companion_runtime_renew_and_authorize(
+          ${lease.orgId}::uuid, ${lease.companionId}::uuid,
+          ${lease.claimToken}::uuid, ${lease.claimEpoch}::bigint,
+          ${lease.gateEpoch}::bigint, ${executorId}, 'operation', ${lease.workId}::uuid, 30
+        )
+      `);
+      expect(renewal).toEqual({ authorized: true, denialCode: null, skillRefs: [] });
+      const material = await asRuntime((tx) => tx`
+        select * from public.companion_runtime_get_skill_update_material(
+          ${lease.orgId}::uuid, ${lease.companionId}::uuid,
+          ${lease.claimToken}::uuid, ${lease.claimEpoch}::bigint,
+          ${lease.gateEpoch}::bigint, ${executorId}, 'operation', ${lease.workId}::uuid, 30
+        )
+      `);
+      expect(material).toEqual([]);
+      const [recorded] = await asRuntime((tx) => tx<Array<{ recorded: boolean }>>`
+        select public.companion_runtime_record_skill_update_error(
+          ${lease.orgId}::uuid, ${lease.companionId}::uuid,
+          ${lease.claimToken}::uuid, ${lease.claimEpoch}::bigint,
+          ${lease.gateEpoch}::bigint, ${executorId}, 'operation', ${lease.workId}::uuid, 30,
+          'skill_auto_update_unauthorized',
+          'The pending Skill update is no longer authorized and will be retried later.'
+        ) as recorded
+      `);
+      expect(recorded?.recorded).toBe(true);
+    } finally {
+      if (claimed) await release(claimed);
+      if (companionId) await removeCompanion(companionId);
+    }
+  });
+
   it("persists decision answers as a durable outbox and updates the PostgreSQL transcript", async () => {
     if (!sql) throw new Error("runtime executor database is not initialized");
     const fixture = await createCompanion({ boxReady: true });
@@ -3371,7 +3590,10 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     };
     const connectProposal: CompanionConfigProposal = {
       kind: "config",
-      connect_plugin: { server_name: "github", reason: "Need issues" },
+      connect_plugin: {
+        server_name: "conductor",
+        reason: "Need Conductor workspace access",
+      },
     };
 
     // The module-level handle is optional, and TypeScript does not carry the guard above into a

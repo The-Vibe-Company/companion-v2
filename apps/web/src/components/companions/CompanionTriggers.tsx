@@ -13,22 +13,38 @@ import { Dialog } from "../org/primitives";
 import { Icon } from "../Icon";
 import { PluginMark } from "./PluginMark";
 
+export interface CompanionTriggersApi {
+  createCompanionTrigger: typeof createCompanionTrigger;
+  deleteCompanionTrigger: typeof deleteCompanionTrigger;
+  rotateCompanionTriggerSecret: typeof rotateCompanionTriggerSecret;
+  updateCompanionTrigger: typeof updateCompanionTrigger;
+}
+
+const defaultCompanionTriggersApi: CompanionTriggersApi = {
+  createCompanionTrigger,
+  deleteCompanionTrigger,
+  rotateCompanionTriggerSecret,
+  updateCompanionTrigger,
+};
+
 /** UI names only: the provider picks the row's mark, never an authentication scheme. */
-const PROVIDER_LABELS: Record<CompanionTriggerProvider, string> = {
+const PROVIDER_LABELS = {
   linear: "Linear",
   github: "GitHub",
   custom: "Custom",
-};
+} satisfies Record<CompanionTriggerProvider, string>;
 
 function TriggerEditor({
   orgId,
   companionId,
+  api,
   initial,
   onSaved,
   onClose,
 }: {
   orgId: string;
   companionId: string;
+  api: CompanionTriggersApi;
   initial: CompanionTrigger | null;
   onSaved: (trigger: CompanionTrigger) => void;
   onClose: () => void;
@@ -45,8 +61,8 @@ function TriggerEditor({
     setError(null);
     try {
       const trigger = initial
-        ? await updateCompanionTrigger(orgId, companionId, initial.id, { name, prompt, provider })
-        : await createCompanionTrigger(orgId, companionId, {
+        ? await api.updateCompanionTrigger(orgId, companionId, initial.id, { name, prompt, provider })
+        : await api.createCompanionTrigger(orgId, companionId, {
           id: crypto.randomUUID(),
           name,
           prompt,
@@ -96,7 +112,10 @@ function TriggerEditor({
         <span>Provider</span>
         <select
           value={provider}
-          onChange={(event) => setProvider(event.target.value as CompanionTriggerProvider)}
+          onChange={(event) => {
+            const next = COMPANION_TRIGGER_PROVIDERS.find((option) => option === event.target.value);
+            if (next) setProvider(next);
+          }}
         >
           {COMPANION_TRIGGER_PROVIDERS.map((option) => (
             <option key={option} value={option}>{PROVIDER_LABELS[option]}</option>
@@ -118,12 +137,14 @@ export function CompanionTriggers({
   triggers,
   canEdit,
   onChange,
+  api = defaultCompanionTriggersApi,
 }: {
   orgId: string;
   companionId: string;
   triggers: CompanionTrigger[];
   canEdit: boolean;
   onChange: (triggers: CompanionTrigger[]) => void;
+  api?: CompanionTriggersApi;
 }) {
   const [editing, setEditing] = useState<CompanionTrigger | null | "new">(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -142,7 +163,7 @@ export function CompanionTriggers({
     setActionError(null);
     setConfirmingRotateId(null);
     try {
-      const updated = await updateCompanionTrigger(orgId, companionId, trigger.id, {
+      const updated = await api.updateCompanionTrigger(orgId, companionId, trigger.id, {
         enabled: !trigger.enabled,
       });
       onChange(triggers.map((item) => item.id === updated.id ? updated : item));
@@ -159,7 +180,7 @@ export function CompanionTriggers({
     setActionError(null);
     setConfirmingRotateId(null);
     try {
-      await deleteCompanionTrigger(orgId, companionId, trigger.id);
+      await api.deleteCompanionTrigger(orgId, companionId, trigger.id);
       onChange(triggers.filter((item) => item.id !== trigger.id));
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : "This trigger could not be deleted.");
@@ -180,7 +201,7 @@ export function CompanionTriggers({
     setActionError(null);
     setConfirmingRotateId(null);
     try {
-      const updated = await rotateCompanionTriggerSecret(orgId, companionId, trigger.id);
+      const updated = await api.rotateCompanionTriggerSecret(orgId, companionId, trigger.id);
       onChange(triggers.map((item) => item.id === updated.id ? updated : item));
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : "The secret could not be rotated.");
@@ -303,6 +324,7 @@ export function CompanionTriggers({
         <TriggerEditor
           orgId={orgId}
           companionId={companionId}
+          api={api}
           initial={editing === "new" ? null : editing}
           onSaved={(trigger) => onChange(
             editing === "new"

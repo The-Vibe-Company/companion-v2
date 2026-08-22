@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- The recording SQL double intentionally captures unparsed driver rows so each decoder boundary can be tested. */
+
 import { describe, expect, it } from "vitest";
 import {
   PostgresRuntimeStore,
@@ -41,6 +43,37 @@ const fence: LeaseFence = {
 };
 
 describe("PostgresRuntimeStore", () => {
+  it("claims only through the material and delete-resume protocol guards", async () => {
+    const sql = new RecordingSql();
+    const store = new PostgresRuntimeStore(sql);
+
+    await store.claimWork({ executorId: "executor-1", limit: 2, leaseSeconds: 30, gateEpoch: 4n });
+
+    expect(sql.calls[0]?.query).toContain(
+      "$4::bigint, 2::integer, 1::integer",
+    );
+  });
+
+  it("uses the exact fenced parameter order for accepted delete deferral", async () => {
+    const sql = new RecordingSql();
+    sql.rows = [{ deferred: true }];
+    const store = new PostgresRuntimeStore(sql);
+
+    await expect(store.deferDelete(fence)).resolves.toBe(true);
+
+    expect(sql.calls[0]?.query).toContain("public.companion_runtime_defer_delete(");
+    expect(sql.calls[0]?.parameters).toEqual([
+      ORG_ID,
+      COMPANION_ID,
+      CLAIM_TOKEN,
+      "3",
+      "4",
+      "executor-1",
+      "operation",
+      fence.workId,
+    ]);
+  });
+
   it("uses the exact fenced parameter order for duplicate cleanup checkpoints", async () => {
     const sql = new RecordingSql();
     sql.rows = [{

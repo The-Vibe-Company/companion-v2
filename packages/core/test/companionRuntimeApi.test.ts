@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-known-value-widening, anti-slop/no-unsafe-dictionary-type -- Existing API fixtures predate the incremental anti-slop gate. */
+
 import { describe, expect, it } from "vitest";
 
 import type { Companion } from "@companion/contracts";
@@ -10,6 +12,8 @@ const companion: Companion = {
   id: "11111111-1111-4111-8111-111111111111",
   name: "Research",
   persona: null,
+  // oxlint-disable-next-line anti-slop/no-shape-in-symbol-names -- icon catalogs use geometric domain terms
+  icon: { shape: 1, mouth: 1, accessory: 1, color: 2 },
   model_id: "model-1",
   selected_skill_ids: [],
   can_write_skills: true,
@@ -59,6 +63,8 @@ function runtime(
     desired_settings_revision: 1,
     applied_settings_revision: 0,
     applied_skills_revision: 0,
+    skills_available_revision: 3,
+    skills_update_error_message: null,
     retirement_state: "active",
     last_error_code: null,
     last_error_message: null,

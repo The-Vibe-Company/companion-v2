@@ -16,6 +16,9 @@ const IGNORED_PREFIXES = [
   ".roo/",
   ".windsurf/",
   "tools/oxlint/anti-slop/",
+  // The bundled Agent Auth client is a tsup build artifact committed for distribution; the
+  // hand-written-code rules do not apply to minified generated output.
+  "packages/companion-skill/skill/scripts/companion-agent-client.mjs",
 ];
 
 export function isAntiSlopCandidatePath(file) {

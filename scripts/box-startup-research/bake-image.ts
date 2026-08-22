@@ -4,10 +4,21 @@ import {
   createCompanionRuntimeImageBaker,
 } from "../../packages/box-runtime/src/index";
 import { loadBundledCompanionRuntimeSkill } from "../../apps/runtime/src/materialPipeline";
+import { retryTrackedBakerBoxCleanup } from "./baker-cleanup.mjs";
 
 const SHA_PATTERN = /^[a-f0-9]{40}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SNAPSHOT_PATTERN = /^companion-l14-[a-f0-9]{12}$/;
+type ResearchImageResult = {
+  phase: "research_image";
+  status: "succeeded";
+  image: string;
+  tree_sha: string;
+  baked: boolean;
+  duration_ms: number;
+  provider_call_count: number;
+  snapshot_size_bytes?: number;
+};
 
 function required(name: string): string {
   const value = process.env[name]?.trim();
@@ -43,20 +54,23 @@ async function main(): Promise<void> {
       ok: sample.ok,
     }),
   });
+  const bakerBoxIds = new Set<string>();
   const bakerLifecycle = new Proxy(lifecycle, {
     get(target, property) {
       if (property === "createEphemeralBox") {
         return async (input: Parameters<typeof target.createEphemeralBox>[0]) => {
           const created = await target.createEphemeralBox(input);
+          bakerBoxIds.add(created.boxId);
           try {
-            await target.applyGenerationBoxSettings({
+            const settings: Parameters<typeof target.applyGenerationBoxSettings>[0] = {
               boxId: created.boxId,
               companionId: bakerCompanionId,
               generation: 1,
               ttlSeconds: input.ttlSeconds,
               deadlineAt: Date.now() + 30_000,
-              ...(input.signal ? { signal: input.signal } : {}),
-            });
+            };
+            if (input.signal !== undefined) settings.signal = input.signal;
+            await target.applyGenerationBoxSettings(settings);
           } catch (error) {
             await target.deletePermanentlyAndWait({
               boxId: created.boxId,
@@ -67,11 +81,13 @@ async function main(): Promise<void> {
           return created;
         };
       }
-      const value = Reflect.get(target, property, target);
-      return typeof value === "function" ? value.bind(target) : value;
+      if (!(property in target)) return undefined;
+      // SAFETY: the `in` check proves this proxy key exists on the typed client instance.
+      const value = target[property as keyof AsciiBoxMaintenanceClient];
+      return value instanceof Function ? value.bind(target) : value;
     },
   });
-  const cleanupErrors: string[] = [];
+  const cleanupErrors: Array<"baker_box_delete" | "snapshot_prune"> = [];
   const controller = new AbortController();
   const abort = () => controller.abort(new Error("research image bake interrupted"));
   process.once("SIGINT", abort);
@@ -95,8 +111,17 @@ async function main(): Promise<void> {
       onCleanupError: (_error, cleanup) => cleanupErrors.push(cleanup),
     });
     const baked = await baker.ensure(signal);
-    if (!baked.ready || cleanupErrors.length > 0) {
-      throw new Error(cleanupErrors.length > 0 ? "research image cleanup failed" : "research image failed");
+    let cleanupComplete = cleanupErrors.length === 0;
+    if (!cleanupComplete && cleanupErrors.every((cleanup) => cleanup === "baker_box_delete")) {
+      cleanupComplete = await retryTrackedBakerBoxCleanup({
+        boxIds: bakerBoxIds,
+        lifecycle,
+        signal,
+        now: Date.now,
+      });
+    }
+    if (!baked.ready || !cleanupComplete) {
+      throw new Error(!cleanupComplete ? "research image cleanup failed" : "research image failed");
     }
     const snapshot = await lifecycle.getNamedSnapshot({
       name: baked.name,
@@ -106,7 +131,7 @@ async function main(): Promise<void> {
     if (!snapshot || snapshot.status !== "ready") {
       throw new Error("research image disappeared after bake");
     }
-    process.stdout.write(`${JSON.stringify({
+    const result: ResearchImageResult = {
       phase: "research_image",
       status: "succeeded",
       image: baked.name,
@@ -114,8 +139,9 @@ async function main(): Promise<void> {
       baked: baked.baked,
       duration_ms: Date.now() - startedAt,
       provider_call_count: timings.length,
-      ...(snapshot.sizeBytes === undefined ? {} : { snapshot_size_bytes: snapshot.sizeBytes }),
-    })}\n`);
+    };
+    if (snapshot.sizeBytes !== undefined) result.snapshot_size_bytes = snapshot.sizeBytes;
+    process.stdout.write(`${JSON.stringify(result)}\n`);
   } finally {
     process.removeListener("SIGINT", abort);
     process.removeListener("SIGTERM", abort);

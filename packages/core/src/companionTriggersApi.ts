@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 
-import type { CompanionTrigger, CompanionTriggerProvider, CompanionTurn } from "@companion/contracts";
+import type { CompanionTrigger, CompanionTriggerProvider, CompanionTriggerTarget, CompanionTurn } from "@companion/contracts";
 import {
   COMPANION_TRIGGER_PAYLOAD_EXCERPT_MAX_CHARACTERS,
   COMPANION_TRIGGER_PROMPT_MAX_CHARACTERS,
@@ -10,23 +10,32 @@ import {
   companionTriggerProposalSchema,
   companionTriggerSchema,
   companionTurnSchema,
+  parseCompanionTriggerTarget,
 } from "@companion/contracts";
 import type { Db } from "@companion/db";
 
 import { getCompanionDecisionV2 } from "./companionRuntimeApi";
 import { sanitizeCompanionRuntimeError } from "./companionRuntimeErrors";
 
-function rows<T>(result: unknown): T[] {
+const databaseErrorNodeSchema = z.object({
+  code: z.string().optional(),
+  cause: z.unknown(),
+}).passthrough();
+
+function rows<T>(result: Awaited<ReturnType<Db["execute"]>>): T[] {
+  // SAFETY: each caller's SQL selects a fixed column list; T mirrors exactly those columns.
   return Array.from(result as Iterable<T>);
 }
 
-function hasDatabaseErrorCode(error: unknown, expected: string): boolean {
+function hasDatabaseErrorCode(cause: unknown, expected: string): boolean {
   const seen = new Set<unknown>();
-  let current = error;
-  while (current && typeof current === "object" && !seen.has(current)) {
+  let current: unknown = cause;
+  while (current !== null && !seen.has(current)) {
+    const node = databaseErrorNodeSchema.safeParse(current);
+    if (!node.success) break;
     seen.add(current);
-    if ("code" in current && current.code === expected) return true;
-    current = "cause" in current ? current.cause : null;
+    if (node.data.code === expected) return true;
+    current = "cause" in node.data ? node.data.cause : null;
   }
   return false;
 }
@@ -67,8 +76,16 @@ const triggerRowSchema = companionTriggerSchema.omit({ webhook_url: true }).exte
   secret: z.string().regex(/^[0-9a-f]{32,128}$/).nullable(),
 }).strict();
 
-function parseTrigger(value: unknown, webhookBaseUrl: string): CompanionTrigger {
-  const { secret, ...trigger } = triggerRowSchema.parse(value);
+/** Internal row variant that always carries the raw secret (Owner/Editor reads only). */
+const secretTriggerRowSchema = companionTriggerSchema.omit({ webhook_url: true }).extend({
+  secret: z.string().regex(/^[0-9a-f]{32,128}$/),
+}).strict();
+
+function parseTrigger<T>(
+  row: T,
+  webhookBaseUrl: string,
+): CompanionTrigger {
+  const { secret, ...trigger } = triggerRowSchema.parse(row);
   return companionTriggerSchema.parse({
     ...trigger,
     webhook_url: secret === null
@@ -101,6 +118,7 @@ export async function createCompanionTriggerV2(input: {
   name: string;
   prompt: string;
   provider: CompanionTriggerProvider;
+  target?: CompanionTriggerTarget | null;
   enabled?: boolean;
   database: Db;
   webhookBaseUrl: string;
@@ -109,8 +127,10 @@ export async function createCompanionTriggerV2(input: {
     name: input.name,
     prompt: input.prompt,
     provider: input.provider,
+    target: input.target ?? null,
     enabled: input.enabled ?? true,
   });
+  const target = parseCompanionTriggerTarget(draft.provider, draft.target);
   const result = await input.database.execute(sql`
     select public.companion_api_create_trigger(
       ${input.orgId}::uuid,
@@ -119,6 +139,7 @@ export async function createCompanionTriggerV2(input: {
       ${draft.name},
       ${draft.prompt},
       ${draft.provider},
+      ${JSON.stringify(target ?? {})}::jsonb,
       ${generateCompanionTriggerSecret()},
       ${draft.enabled}
     ) as trigger
@@ -135,6 +156,7 @@ export async function updateCompanionTriggerV2(input: {
   name?: string;
   prompt?: string;
   provider?: CompanionTriggerProvider;
+  target?: CompanionTriggerTarget | null;
   enabled?: boolean;
   database: Db;
   webhookBaseUrl: string;
@@ -146,8 +168,10 @@ export async function updateCompanionTriggerV2(input: {
     name: input.name ?? current.name,
     prompt: input.prompt ?? current.prompt,
     provider: input.provider ?? current.provider,
+    target: input.target === undefined ? current.target : input.target,
     enabled: input.enabled ?? current.enabled,
   });
+  const target = parseCompanionTriggerTarget(draft.provider, draft.target);
   try {
     const result = await input.database.execute(sql`
       select public.companion_api_update_trigger(
@@ -157,6 +181,7 @@ export async function updateCompanionTriggerV2(input: {
         ${draft.name},
         ${draft.prompt},
         ${draft.provider},
+        ${JSON.stringify(target ?? {})}::jsonb,
         ${draft.enabled}
       ) as trigger
     `);
@@ -329,7 +354,7 @@ export function extractTriggerDeliveryId(
 ): string {
   for (const header of DELIVERY_ID_HEADERS) {
     const raw = headers.get(header);
-    if (typeof raw !== "string") continue;
+    if (raw == null) continue;
     const sanitized = raw.replace(/[\r\n]/g, "").trim().slice(0, 200);
     if (sanitized.length > 0) return sanitized;
   }
@@ -388,24 +413,30 @@ export async function failCompanionTriggerFire(input: {
  * One stable, expurgated code+message for a failed fire, mirroring the worker's routine
  * classification minus the cron case a trigger cannot have. The message is already safe to persist.
  */
-export function classifyCompanionTriggerFireError(error: unknown): {
+export interface CompanionTriggerFireErrorClassification {
   code: "owner_access_revoked" | "companion_retired" | "fire_failed";
   message: string;
-} {
+}
+
+export function classifyCompanionTriggerFireError(
+  cause: unknown,
+): CompanionTriggerFireErrorClassification {
   const message = sanitizeCompanionRuntimeError(
-    error instanceof Error ? error.message : "Companion trigger fire failed",
+    cause instanceof Error ? cause.message : "Companion trigger fire failed",
   ).slice(0, 500);
   // Drizzle nests the postgres.js SQLSTATE on `cause`, so read the first code in the chain.
   let code = "";
   const seen = new Set<unknown>();
-  let current: unknown = error;
-  while (current && typeof current === "object" && !seen.has(current)) {
+  let current: unknown = cause;
+  while (current !== null && !seen.has(current)) {
+    const node = databaseErrorNodeSchema.safeParse(current);
+    if (!node.success) break;
     seen.add(current);
-    if ("code" in current && typeof current.code === "string") {
-      code = current.code;
+    if (node.data.code !== undefined) {
+      code = node.data.code;
       break;
     }
-    current = "cause" in current ? current.cause : null;
+    current = "cause" in node.data ? node.data.cause : null;
   }
   if (
     code === "42501"

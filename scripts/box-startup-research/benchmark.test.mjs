@@ -5,6 +5,8 @@ import {
   assertSafeEvaluatorOutput,
   safeEnvironment,
   sanitizeCycleEvents,
+  sanitizeFailedCycleEvents,
+  SNAPSHOT_PROPAGATION_DELAY_MS,
   validateLeaseGrant,
 } from "./benchmark.mjs";
 import { leaseTokenHash, resourcePrefix } from "./contracts.mjs";
@@ -62,6 +64,27 @@ test("preserves allowlisted staging and provider timings without arbitrary field
     operation: "write_file",
     duration_ms: 8,
   });
+});
+
+test("waits for freshly-ready snapshots to propagate before measured cycles", () => {
+  assert.equal(SNAPSHOT_PROPAGATION_DELAY_MS, 60_000);
+});
+
+test("records only bounded, cleanup-proven evaluator failures", () => {
+  const events = sanitizeFailedCycleEvents([
+    { phase: "create", status: "failed", duration_ms: 12, code: "box_not_ready", payload: "drop" },
+    { phase: "cleanup", status: "succeeded", research_tag: "box-startup-0123456789abcdef" },
+    { phase: "runtime_change_e2e", status: "failed", code: "box_not_ready", secret: "drop" },
+  ], "box-startup-0123456789abcdef");
+  assert.deepEqual(events, [
+    { phase: "create", status: "failed", duration_ms: 12, code: "box_not_ready" },
+    { phase: "cleanup", status: "succeeded", research_tag: "box-startup-0123456789abcdef" },
+    { phase: "runtime_change_e2e", status: "failed", code: "box_not_ready" },
+  ]);
+  assert.throws(() => sanitizeFailedCycleEvents([
+    { phase: "cleanup", status: "failed", research_tag: "box-startup-0123456789abcdef" },
+    { phase: "runtime_change_e2e", status: "failed", code: "cleanup_failed" },
+  ], "box-startup-0123456789abcdef"), /bounded cleanup/);
 });
 
 test("rejects a benchmark without a grant or with a bad token", () => {
@@ -127,4 +150,23 @@ test("can replace real provider credentials with controller-owned lease capabili
   assert.equal(env.BOX_STARTUP_RESEARCH_SNAPSHOT_NAME, "companion-l14-abcdef123456");
   assert.equal(Object.values(env).includes("box-real-controller-value"), false);
   assert.equal(Object.values(env).includes("zai-real-controller-value"), false);
+});
+
+test("preserves controller-owned capabilities across nested evaluator environments", () => {
+  const controllerEnv = safeEnvironment({
+    PATH: "/bin",
+    HOME: "/tmp/research",
+    BOX_API_KEY: "box-real-controller-value",
+    ZAI_API_KEY: "zai-real-controller-value",
+  }, {
+    boxApiKey: "box-disposable-proxy-token",
+    zaiApiKey: "research-prompt-ack-only",
+  });
+
+  const evaluatorEnv = safeEnvironment(controllerEnv);
+
+  assert.equal(evaluatorEnv.BOX_API_KEY, "");
+  assert.equal(evaluatorEnv.COMPANION_BOX_API_KEY, "box-disposable-proxy-token");
+  assert.equal(evaluatorEnv.ZAI_API_KEY, "");
+  assert.equal(evaluatorEnv.COMPANION_BOX_E2E_ZAI_API_KEY, "research-prompt-ack-only");
 });

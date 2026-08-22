@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Existing API boundary decoding predates the incremental anti-slop gate. */
+
 import { eq, sql } from "drizzle-orm";
 import { z } from "zod";
 
@@ -88,6 +90,8 @@ type RuntimeReadRow = {
   desired_settings_revision: number | string | bigint;
   applied_settings_revision: number | string | bigint;
   applied_skills_revision: number | string;
+  skills_available_revision: number | string;
+  skills_update_error_message: string | null;
   retirement_state: "active" | "requested" | "pending" | "blocked" | "retired";
   last_error_code: string | null;
   last_error_message: string | null;
@@ -191,6 +195,7 @@ export function projectCompanionRuntimeV2(
     ? latestOperation.error
     : null;
   const runtimeError = operationError?.message ?? row.last_error_message;
+  const skillsError = row.skills_update_error_message ?? companion.runtime.skills_last_error;
   return {
     ...companion,
     selected_skill_ids: companionSelectedSkillIdsSchema.parse(row.selected_skill_ids),
@@ -211,13 +216,14 @@ export function projectCompanionRuntimeV2(
           : runtimeError
         : null,
       skills_applied_revision: integer(row.applied_skills_revision),
+      skills_revision: integer(row.skills_available_revision),
       // Runtime v2 deliberately stores the monotonic revision, not an approximate timestamp. The
       // UI can say "up to date" without mislabeling a later health observation as the apply time.
       skills_applied_at: null,
-      skills_last_error: companion.runtime.skills_last_error
+      skills_last_error: skillsError
         ? row.access_role === "viewer"
           ? COMPANION_SKILLS_SYNC_ERROR_VIEWER_MESSAGE
-          : companion.runtime.skills_last_error
+          : skillsError
         : null,
       last_observed_at: lastObservedAt,
       latest_operation: projectedOperation(latestOperation, row.access_role === "viewer"),
@@ -232,11 +238,19 @@ export async function readCompanionRuntimeV2(input: {
 }): Promise<RuntimeReadRow> {
   const result = await input.database.execute(sql`
     select * from public.companion_api_read_runtime(
-      ${input.orgId}::uuid,
-      ${input.companionId}::uuid
+      ${input.orgId}::uuid, ${input.companionId}::uuid
     )
   `);
-  const [row] = rows<RuntimeReadRow>(result);
+  const syncResult = await input.database.execute(sql`
+    select * from public.companion_api_read_skill_sync(
+      ${input.orgId}::uuid, ${input.companionId}::uuid
+    )
+  `);
+  const [runtime] = rows<Omit<RuntimeReadRow,
+    "skills_available_revision" | "skills_update_error_message">>(result);
+  const [sync] = rows<Pick<RuntimeReadRow,
+    "skills_available_revision" | "skills_update_error_message">>(syncResult);
+  const row = runtime && sync ? { ...runtime, ...sync } : null;
   if (!row) throw new Error("companion runtime projection is unavailable");
   return row;
 }
@@ -264,13 +278,22 @@ export async function listCompanionsV2(input: {
   const result = await input.database.execute(sql`
     select * from public.companion_api_list_runtime(${input.orgId}::uuid)
   `);
-  const runtimes = new Map(rows<RuntimeReadRow & { companion_id: string }>(result).map(
-    (runtime) => [runtime.companion_id, runtime] as const,
-  ));
+  const syncResult = await input.database.execute(sql`
+    select * from public.companion_api_list_skill_sync(${input.orgId}::uuid)
+  `);
+  const syncs = new Map(rows<Pick<RuntimeReadRow,
+    "skills_available_revision" | "skills_update_error_message"> & { companion_id: string }>(
+      syncResult,
+    ).map((sync) => [sync.companion_id, sync] as const));
+  const runtimes = new Map(rows<Omit<RuntimeReadRow,
+    "skills_available_revision" | "skills_update_error_message"> & { companion_id: string }>(
+      result,
+    ).map((runtime) => [runtime.companion_id, runtime] as const));
   return companions.map((companion) => {
     const runtime = runtimes.get(companion.id);
-    if (!runtime) throw new Error("companion runtime projection is unavailable");
-    return projectCompanionRuntimeV2(companion, runtime);
+    const sync = syncs.get(companion.id);
+    if (!runtime || !sync) throw new Error("companion runtime projection is unavailable");
+    return projectCompanionRuntimeV2(companion, { ...runtime, ...sync });
   });
 }
 
@@ -283,6 +306,9 @@ export async function createCompanionV2(input: {
   modelId?: string;
   selectedSkillIds?: string[];
   selectedMcpAccountIds?: string[];
+  /* Icon field names mirror the contracts catalog; "shape" is the domain term. */
+  // oxlint-disable-next-line anti-slop/no-shape-in-symbol-names
+  icon?: { shape?: number; mouth?: number; accessory?: number; color?: number };
   sourceCompanionId?: string;
   database: Db;
 }): Promise<Companion> {
@@ -311,6 +337,8 @@ export async function createCompanionV2(input: {
   }
   // Skills Hub access is unconditional, and the legacy flag is pinned true to match the token the
   // Box receives. Nobody chooses this per Companion any more.
+  // Icon catalogs are geometric; "shape" is the domain term.
+  /* oxlint-disable anti-slop/no-shape-in-symbol-names */
   const result = await input.database.execute(sql`
     select * from public.companion_api_create_companion(
       ${input.orgId}::uuid,
@@ -321,9 +349,14 @@ export async function createCompanionV2(input: {
       ${JSON.stringify(input.selectedSkillIds ?? [])}::jsonb,
       true::boolean,
       ${JSON.stringify(input.selectedMcpAccountIds ?? [])}::jsonb,
-      ${input.sourceCompanionId ?? null}::uuid
+      ${input.sourceCompanionId ?? null}::uuid,
+      ${input.icon?.shape ?? 1}::smallint,
+      ${input.icon?.mouth ?? 1}::smallint,
+      ${input.icon?.accessory ?? 1}::smallint,
+      ${input.icon?.color ?? 2}::smallint
     )
   `);
+  /* oxlint-enable anti-slop/no-shape-in-symbol-names */
   const [created] = rows<{ companion_id: string }>(result);
   if (!created) throw new Error("failed to create Companion runtime projection");
   return getCompanionV2({ ...input, companionId: created.companion_id });
@@ -441,6 +474,7 @@ export async function duplicateCompanionV2(input: {
     modelId: source.model_id,
     selectedSkillIds: source.selected_skill_ids,
     selectedMcpAccountIds: source.selected_mcp_account_ids,
+    icon: source.icon,
     sourceCompanionId: source.id,
     database: input.database,
   });
@@ -750,7 +784,7 @@ export async function cancelCompanionTurnV2(input: {
   return companionTurnSchema.parse(row.turn);
 }
 
-export async function bumpCompanionSkillRevisionV2(input: {
+export async function bumpCompanionSkillAvailableRevisionV2(input: {
   orgId: string;
   skillId: string;
   database: Db;
@@ -759,6 +793,19 @@ export async function bumpCompanionSkillRevisionV2(input: {
     select public.companion_api_bump_skill_revision(
       ${input.orgId}::uuid,
       ${input.skillId}::uuid
+    ) as changed
+  `);
+  return integer(rows<{ changed: number | string }>(result)[0]?.changed);
+}
+
+export async function bumpCompanionSkillRevisionV2(input: {
+  orgId: string;
+  skillId: string;
+  database: Db;
+}): Promise<number> {
+  const result = await input.database.execute(sql`
+    select public.companion_api_require_skill_revision(
+      ${input.orgId}::uuid, ${input.skillId}::uuid
     ) as changed
   `);
   return integer(rows<{ changed: number | string }>(result)[0]?.changed);

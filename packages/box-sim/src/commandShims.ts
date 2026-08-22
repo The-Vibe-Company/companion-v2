@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-known-value-widening, anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Existing simulator command parsing predates the incremental anti-slop gate. */
+
 import { createHash } from "node:crypto";
 import { z } from "zod";
 
@@ -53,6 +55,7 @@ const controlBundleManifestSchema = z.object({
 
 export type BoxSimCommandKind =
   | "box-runnable"
+  | "staging-probe"
   | "warm-daemon-ready"
   | "mkdir-pi-bin"
   | "install-layout"
@@ -60,7 +63,10 @@ export type BoxSimCommandKind =
   | "apply-control-bundle"
   | "mkdir-extensions"
   | "clear-skill-archives"
+  | "remove-plugin-skills"
   | "measure-skill-archives"
+  | "read-skills-revision"
+  | "match-skills-revision"
   | "join-file-parts"
   | "prepare-skills"
   | "start-or-restart-daemon"
@@ -363,6 +369,11 @@ export function classifyBoxCommand(command: string): BoxSimCommandKind {
     return "daemon-state";
   }
   if (command.includes("companion-pi-warm-ready")) return "warm-daemon-ready";
+  if (
+    command.includes("companion-box-runnable")
+    && command.includes("pi-layout.version")
+    && command.includes("companion-provider-auth-present")
+  ) return "staging-probe";
   if (command.includes("companion-box-runnable")) return "box-runnable";
   if (
     command.includes("COMPANION_CONTROL_BUNDLE=")
@@ -384,9 +395,23 @@ export function classifyBoxCommand(command: string): BoxSimCommandKind {
   if (command.includes("companion-archive-bytes") && command.includes("wc -c")) {
     return "measure-skill-archives";
   }
+  if (
+    command.includes("skills-tree.version")
+    && command.includes("grep -Eq '^[0-9a-f]{64}$'")
+  ) return "read-skills-revision";
+  if (
+    command.includes("skills-tree.version")
+    && command.includes('test "$(cat ')
+    && command.includes("2>/dev/null || true)")
+  ) return "match-skills-revision";
   if (command.includes("cat ") && command.includes(".part") && command.includes("; rm -f ")) {
     return "join-file-parts";
   }
+  if (
+    command.includes('root="$HOME/.companion/runtime"')
+    && command.includes('rm -rf "$root/state/skill-archives"')
+    && command.includes('mkdir -p "$root/state/skill-archives"')
+  ) return "clear-skill-archives";
   if (command.includes("skills.next") && command.includes("base64 --decode") && command.includes("tar --extract")) {
     return "prepare-skills";
   }
@@ -395,6 +420,9 @@ export function classifyBoxCommand(command: string): BoxSimCommandKind {
     && command.includes("companion-provider-auth-present")
   ) {
     return "clear-skill-archives";
+  }
+  if (/rm -rf "\$HOME\/\.companion\/runtime\/skills\/plugin-[a-z]+"/.test(command)) {
+    return "remove-plugin-skills";
   }
   if (command.includes("companion-outbox-manifest-begin")) return "list-outbox";
   if (command.includes("companion-outbox-chunk-begin")) return "read-outbox-chunk";
@@ -457,6 +485,55 @@ function probedLayout(machine: BoxSimCommandMachine, command: string): BoxSimCom
     return ok("companion-layout-unchanged\n");
   }
   return ok();
+}
+
+function clearStagedSkillArchives(machine: BoxSimCommandMachine): void {
+  const prefix = ".companion/runtime/state/skill-archives/";
+  for (const path of [...machine.persistentFiles.keys()]) {
+    if (path.startsWith(prefix)) machine.persistentFiles.delete(path);
+  }
+}
+
+function stagingProbe(machine: BoxSimCommandMachine, command: string): BoxSimCommandResult {
+  const output = ["companion-box-runnable"];
+  if (probedLayout(machine, command).stdout.includes("companion-layout-unchanged")) {
+    output.push("companion-layout-unchanged");
+  }
+
+  const installedRevision = machine.persistentFiles
+    .get(".companion/runtime/state/skills-tree.version")?.toString("utf8").trim();
+  if (command.includes("companion-skills-snapshot-corrupt")) {
+    if (!installedRevision || !/^[0-9a-f]{64}$/.test(installedRevision)) {
+      output.push("companion-skills-snapshot-corrupt");
+      return failed("", 1, `${output.join("\n")}\n`);
+    }
+    output.push(installedRevision);
+    clearStagedSkillArchives(machine);
+    output.push("companion-skills-tree-reused");
+  } else {
+    const expectedRevision = /skills-tree\.version[\s\S]*?" = '([0-9a-f]{64})' \]; then/
+      .exec(command)?.[1];
+    if (expectedRevision && expectedRevision === installedRevision) {
+      output.push("companion-skills-tree-reused");
+    } else {
+      clearStagedSkillArchives(machine);
+      const bakedCopy = /if \[ -s "\$HOME\/([^"]+)" \]; then cp "\$HOME\/([^"]+)" "\$HOME\/([^"]+)";/.exec(command);
+      const source = bakedCopy?.[1] && bakedCopy[1] === bakedCopy[2]
+        ? bakedCopy[1]
+        : undefined;
+      const destination = bakedCopy?.[3];
+      const bakedArchive = source ? machine.persistentFiles.get(normalizeBoxPath(source)) : undefined;
+      if (bakedArchive && destination) {
+        machine.persistentFiles.set(normalizeBoxPath(destination), Buffer.from(bakedArchive));
+        output.push("companion-bundled-skill-reused");
+      }
+    }
+  }
+
+  if (machine.persistentFiles.has(".companion/pi/auth.json")) {
+    output.push("companion-provider-auth-present");
+  }
+  return ok(`${output.join("\n")}\n`);
 }
 
 function writeSimulatedLayoutFiles(machine: BoxSimCommandMachine, expected?: string): void {
@@ -964,6 +1041,8 @@ export async function executeBoxCommand(
   switch (classifyBoxCommand(command)) {
     case "box-runnable":
       return ok("companion-box-runnable\n");
+    case "staging-probe":
+      return stagingProbe(machine, command);
     case "warm-daemon-ready": {
       const warm = machine.daemon.status === "active"
         && machine.daemon.rpcReady
@@ -983,17 +1062,48 @@ export async function executeBoxCommand(
       return ok();
     case "clear-skill-archives": {
       if (command.includes('rm -rf "$root/state/skill-archives"')) {
-        const prefix = ".companion/runtime/state/skill-archives/";
+        clearStagedSkillArchives(machine);
+      }
+      const output: string[] = [];
+      if (machine.persistentFiles.has(".companion/pi/auth.json")) {
+        output.push("companion-provider-auth-present");
+      }
+      const installedRevision = machine.persistentFiles
+        .get(".companion/runtime/state/skills-tree.version")?.toString("utf8").trim();
+      const expectedRevision = command.match(/[0-9a-f]{64}/)?.[0];
+      if (
+        command.includes("companion-skills-tree-reused")
+        && (!expectedRevision || expectedRevision === installedRevision)
+      ) output.push("companion-skills-tree-reused");
+      return ok(output.length ? `${output.join("\n")}\n` : "");
+    }
+    case "remove-plugin-skills": {
+      // Mirrors the runtime's detached-plugin cleanup: drop the staged per-plugin skill dirs.
+      for (const match of command.matchAll(/skills\/(plugin-[a-z]+)/g)) {
+        const prefix = `.companion/runtime/skills/${match[1]}/`;
         for (const path of machine.persistentFiles.keys()) {
           if (path.startsWith(prefix)) machine.persistentFiles.delete(path);
         }
       }
-      return ok(machine.persistentFiles.has(".companion/pi/auth.json")
-        ? "companion-provider-auth-present\n"
-        : "");
+      return ok();
     }
     case "measure-skill-archives":
       return measuredArchives(machine);
+    case "read-skills-revision": {
+      const revision = machine.persistentFiles
+        .get(".companion/runtime/state/skills-tree.version")?.toString("utf8").trim();
+      return revision && /^[0-9a-f]{64}$/.test(revision)
+        ? ok(`${revision}\n`)
+        : failed("simulated Skills revision is missing or corrupt");
+    }
+    case "match-skills-revision": {
+      const revision = machine.persistentFiles
+        .get(".companion/runtime/state/skills-tree.version")?.toString("utf8").trim();
+      const expectedRevision = command.match(/[0-9a-f]{64}/)?.[0];
+      return revision && expectedRevision === revision
+        ? ok()
+        : failed("simulated Skills revision does not match");
+    }
     case "join-file-parts":
       return joinedFileCommand(machine, command);
     case "prepare-skills":
@@ -1003,6 +1113,21 @@ export async function executeBoxCommand(
         }
       }
       machine.persistentFiles.set(".companion/runtime/skills/.box-sim-prepared", Buffer.alloc(0));
+      {
+        const revision = command.match(/[0-9a-f]{64}/)?.[0];
+        if (revision) {
+          machine.persistentFiles.set(
+            ".companion/runtime/state/skills-tree.version",
+            Buffer.from(`${revision}\n`),
+          );
+        }
+        const nextManifest = machine.persistentFiles
+          .get(".companion/runtime/state/skills.json.next");
+        if (nextManifest) {
+          machine.persistentFiles.set(".companion/runtime/state/skills.json", nextManifest);
+          machine.persistentFiles.delete(".companion/runtime/state/skills.json.next");
+        }
+      }
       return ok();
     case "start-or-restart-daemon":
       return startDaemon(machine, command.includes("systemctl --user restart"));

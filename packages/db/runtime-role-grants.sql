@@ -51,6 +51,7 @@ DECLARE
   protected_table regclass;
   protected_sequence regclass;
   protected_type regtype;
+  companion_api_create_function regprocedure;
   active_roles text[] := ARRAY[api_role, worker_role, companion_runtime_role];
   private_runtime_table_names text[] := ARRAY[
     'companion_runtime_control',
@@ -236,9 +237,11 @@ BEGIN
     IF NOT FOUND THEN
       RAISE EXCEPTION 'retired companion runtime role % does not exist', retired_runtime_role;
     END IF;
+
     IF retired_attributes.rolcanlogin THEN
       RAISE EXCEPTION 'retired companion runtime role % must already be NOLOGIN', retired_runtime_role;
     END IF;
+
     IF retired_attributes.rolsuper
       OR retired_attributes.rolbypassrls
       OR retired_attributes.rolinherit THEN
@@ -415,11 +418,17 @@ BEGIN
 
     -- 0092 gives only the API login the durable intent/read surface. The worker and dedicated
     -- executor never receive these functions, and helpers remain migration-owner-only.
-    IF pg_catalog.to_regprocedure(
-      'public.companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid)'
-    ) IS NOT NULL THEN
+    companion_api_create_function := COALESCE(
+      pg_catalog.to_regprocedure(
+        'public.companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid,smallint,smallint,smallint,smallint)'
+      ),
+      pg_catalog.to_regprocedure(
+        'public.companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid)'
+      )
+    );
+    IF companion_api_create_function IS NOT NULL THEN
       companion_api_functions := ARRAY[
-        'public.companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid)'::regprocedure,
+        companion_api_create_function,
         'public.companion_api_update_companion(uuid,uuid,jsonb)'::regprocedure,
         'public.companion_api_set_initial_provider(uuid,uuid,text,text)'::regprocedure,
         'public.companion_api_set_workspace_access(uuid,uuid,public.companion_share_role)'::regprocedure,
@@ -496,6 +505,25 @@ BEGIN
       END IF;
     END IF;
 
+    -- 0111 separates publication-only Skill updates from dispatch-required revisions.
+    IF pg_catalog.to_regprocedure(
+      'public.companion_runtime_get_skill_update_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)'
+    ) IS NOT NULL THEN
+      companion_runtime_functions := companion_runtime_functions || ARRAY[
+        'public.companion_runtime_get_skill_update_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)'::regprocedure,
+        'public.companion_runtime_commit_skill_update(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer,integer,jsonb,jsonb,text)'::regprocedure,
+        'public.companion_runtime_record_skill_update_error(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer,text,text)'::regprocedure
+      ];
+      companion_api_functions := companion_api_functions || ARRAY[
+        'public.companion_api_require_skill_revision(uuid,uuid)'::regprocedure,
+        'public.companion_api_read_skill_sync(uuid,uuid)'::regprocedure,
+        'public.companion_api_list_skill_sync(uuid)'::regprocedure
+      ];
+      internal_runtime_functions := internal_runtime_functions || ARRAY[
+        'public.companion_runtime_keep_available_skill_revision()'::regprocedure
+      ];
+    END IF;
+
     -- 0099 adds the executor's harvest recorder. It is resolved on its own sentinel so a database
     -- stopped at 0098 still grants a complete, self-consistent surface.
     IF pg_catalog.to_regprocedure(
@@ -539,7 +567,7 @@ BEGIN
       ];
     END IF;
 
-    -- 0113 vends a hash-only capability to the Box-local MCP OAuth gateway.
+    -- 0120 vends a hash-only capability to the Box-local MCP OAuth gateway.
     IF pg_catalog.to_regprocedure(
       'public.companion_runtime_mint_mcp_broker_token(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)'
     ) IS NOT NULL THEN
@@ -551,7 +579,7 @@ BEGIN
         'public.companion_runtime_mint_mcp_broker_token(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)'::regprocedure
       ];
       internal_runtime_functions := internal_runtime_functions || ARRAY[
-        'public.companion_runtime_claim_work_material_v1(text,integer,integer,bigint,integer)'::regprocedure,
+        'public.companion_runtime_claim_work_material_v1(text,integer,integer,bigint,integer,integer)'::regprocedure,
         'public.companion_revoke_inactive_mcp_broker_token()'::regprocedure,
         'public.companion_runtime_cas_mcp_oauth(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,uuid,uuid,uuid,text,text,text,text,text,text,text)'::regprocedure
       ];
@@ -575,6 +603,20 @@ BEGIN
         'public.companion_runtime_repair_legacy_material_work(bigint)'::regprocedure,
         'public.companion_runtime_prepare_queued_turn_material(bigint)'::regprocedure,
         'public.companion_runtime_claim_work_without_material_guard(text,integer,integer,bigint)'::regprocedure
+      ];
+    END IF;
+
+    -- 0114 moves all productive claims behind the delete-resume protocol. The five-argument
+    -- signature remains executable but returns no rows, allowing old runtimes to drain quietly.
+    IF pg_catalog.to_regprocedure(
+      'public.companion_runtime_defer_delete(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)'
+    ) IS NOT NULL THEN
+      companion_runtime_functions := companion_runtime_functions || ARRAY[
+        'public.companion_runtime_claim_work(text,integer,integer,bigint,integer,integer)'::regprocedure,
+        'public.companion_runtime_defer_delete(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)'::regprocedure
+      ];
+      internal_runtime_functions := internal_runtime_functions || ARRAY[
+        'public.companion_runtime_claim_work_without_delete_resume_guard(text,integer,integer,bigint,integer)'::regprocedure
       ];
     END IF;
 
@@ -623,6 +665,20 @@ BEGIN
       ];
       internal_runtime_functions := internal_runtime_functions || ARRAY[
         'public.companion_api_trigger_json(uuid,uuid,uuid,boolean)'::regprocedure
+      ];
+    END IF;
+    -- 0115-0117 add plugin-gated, target-aware trigger overloads plus the on-demand registration
+    -- and plugin trigger-key surfaces. Same API-role placement as the base trigger surface.
+    IF pg_catalog.to_regprocedure(
+      'public.companion_api_create_trigger(uuid,uuid,uuid,text,text,text,jsonb,text,boolean)'
+    ) IS NOT NULL THEN
+      companion_api_functions := companion_api_functions || ARRAY[
+        'public.companion_api_create_trigger(uuid,uuid,uuid,text,text,text,jsonb,text,boolean)'::regprocedure,
+        'public.companion_api_update_trigger(uuid,uuid,uuid,text,text,text,jsonb,boolean)'::regprocedure,
+        'public.companion_api_set_trigger_registration(uuid,uuid,uuid,uuid,text,text,text)'::regprocedure,
+        'public.companion_api_get_trigger_for_registration(uuid,uuid,uuid,text)'::regprocedure,
+        'public.companion_api_set_plugin_trigger_key(uuid,uuid,text,uuid,text,text,text,text,text,text,text)'::regprocedure,
+        'public.companion_api_get_plugin_trigger_key(uuid,uuid,text)'::regprocedure
       ];
     END IF;
     IF pg_catalog.to_regprocedure(

@@ -214,9 +214,9 @@ CREATE POLICY "companion_mcp_broker_tokens_function_owner_rls"
   )));
 --> statement-breakpoint
 
--- Quarantine material-protocol-1 replicas. Already-held leases may settle, but only protocol 2
--- can claim new work after the gateway schema is available.
-ALTER FUNCTION public.companion_runtime_claim_work(text, integer, integer, bigint, integer)
+-- Quarantine material-protocol-1 replicas while preserving the delete-resume protocol introduced
+-- by 0114. Already-held leases may settle, but only material protocol 2 can claim new work.
+ALTER FUNCTION public.companion_runtime_claim_work(text, integer, integer, bigint, integer, integer)
   RENAME TO companion_runtime_claim_work_material_v1;
 --> statement-breakpoint
 
@@ -225,7 +225,8 @@ CREATE FUNCTION public.companion_runtime_claim_work(
   p_limit integer,
   p_lease_seconds integer,
   p_gate_epoch bigint,
-  p_material_protocol integer
+  p_material_protocol integer,
+  p_delete_resume_protocol integer
 )
 RETURNS TABLE(
   org_id uuid, companion_id uuid, claim_token uuid, claim_epoch bigint, gate_epoch bigint,
@@ -249,17 +250,17 @@ AS $$
 BEGIN
   IF p_material_protocol IS DISTINCT FROM 2 THEN RETURN; END IF;
   RETURN QUERY SELECT * FROM public.companion_runtime_claim_work_material_v1(
-    p_executor_id, p_limit, p_lease_seconds, p_gate_epoch, 1
+    p_executor_id, p_limit, p_lease_seconds, p_gate_epoch, 1, p_delete_resume_protocol
   );
 END
 $$;
 --> statement-breakpoint
 
 REVOKE ALL ON FUNCTION public.companion_runtime_claim_work(
-  text, integer, integer, bigint, integer
+  text, integer, integer, bigint, integer, integer
 ) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.companion_runtime_claim_work_material_v1(
-  text, integer, integer, bigint, integer
+  text, integer, integer, bigint, integer, integer
 ) FROM PUBLIC;
 --> statement-breakpoint
 
@@ -291,7 +292,7 @@ BEGIN
   IF cardinality(v_runtime_grantees) = 1 THEN
     SELECT rolname INTO STRICT v_role FROM pg_catalog.pg_roles WHERE oid = v_runtime_grantees[1];
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.companion_runtime_mint_mcp_broker_token(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer) TO %I', v_role);
-    EXECUTE format('GRANT EXECUTE ON FUNCTION public.companion_runtime_claim_work(text,integer,integer,bigint,integer) TO %I', v_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.companion_runtime_claim_work(text,integer,integer,bigint,integer,integer) TO %I', v_role);
     EXECUTE format('REVOKE EXECUTE ON FUNCTION public.companion_runtime_cas_mcp_oauth(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,uuid,uuid,uuid,text,text,text,text,text,text,text) FROM %I', v_role);
   END IF;
 

@@ -819,6 +819,7 @@ async function settlesWithin<T>(promise: Promise<T>, milliseconds: number, label
   }
 }
 
+// oxlint-disable-next-line anti-slop/no-unknown-returns -- legacy pattern predating the incremental anti-slop gate
 async function aclSnapshot(roles: readonly string[]): Promise<unknown> {
   if (!runtimeSql) throw new Error("runtime database is not initialized");
   const tables: unknown[] = [];
@@ -1183,6 +1184,7 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
       "delivered_ordinal", "accepted_delivery_ordinal", "timeout_recovery_ordinal",
       "timeout_restart_ordinal", "timeout_delivery_ordinal", "pi_log_offset",
     ];
+    // oxlint-disable-next-line anti-slop/no-shape-in-symbol-names -- legacy pattern predating the incremental anti-slop gate
     const [shape] = await runtimeSql<Array<{
       legacyTableCount: number;
       legacyFunctionCount: number;
@@ -1229,6 +1231,7 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
           where to_regclass('public.' || evidence.name) is not null
         ) as "retainedLedgerTableCount"
     `;
+    // oxlint-disable-next-line anti-slop/no-shape-in-symbol-names -- legacy pattern predating the incremental anti-slop gate
     expect(shape).toEqual({
       legacyTableCount: 0,
       legacyFunctionCount: 0,
@@ -1260,6 +1263,7 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
         grant execute on functions to ${unexpectedFunctionRole}
     `);
 
+    // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- legacy pattern predating the incremental anti-slop gate
     const before = await aclSnapshot([unexpectedFunctionRole]) as {
       functions: Array<{ signature: string; execute: boolean | null }>;
     };
@@ -1268,6 +1272,7 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
 
     await applySplitRuntimeGrants();
 
+    // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- legacy pattern predating the incremental anti-slop gate
     const after = await aclSnapshot([unexpectedFunctionRole]) as {
       functions: Array<{ signature: string; execute: boolean | null }>;
     };
@@ -1622,7 +1627,9 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
     await applySplitRuntimeGrants();
     expect(await aclSnapshot([apiRole, workerRole, executorRole, "public"])).toEqual(before);
 
+    // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- legacy pattern predating the incremental anti-slop gate
     const split = before as {
+      // oxlint-disable-next-line anti-slop/no-unsafe-dictionary-type -- legacy pattern predating the incremental anti-slop gate
       tables: Array<Record<string, unknown>>;
       functions: Array<{ role: string; signature: string; oid: string | null; execute: boolean | null }>;
       sequences: Array<{ role: string; usage: boolean; select: boolean }>;

@@ -6,7 +6,11 @@ const BOX_ID_PATTERN = /^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/;
 const OPERATION_ID_PATTERN = /^bdop_[a-f0-9]{32}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SNAPSHOT_PATTERN = /^companion-l14-[a-f0-9]{12}$/;
+const MAX_PROVIDER_TTL_SECONDS = 2_592_000;
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
+const RUNTIME_ATTESTATION_DEADLINE_MS = 20_000;
+const RUNTIME_ATTESTATION_POLL_MS = 250;
+const RUNTIME_ATTESTATION_COMMAND_SECONDS = 5;
 
 function jsonBody(buffer) {
   if (buffer.length === 0) return null;
@@ -32,18 +36,56 @@ function boxName(companionId) {
   return `Companion ${companionId} g1`;
 }
 
+function stringValue(value) {
+  if (value === null || value === undefined) return null;
+  try {
+    const candidate = String(value);
+    return candidate === value ? candidate : null;
+  } catch {
+    return null;
+  }
+}
+
+function optionalStringWithin(value, minimum, maximum) {
+  if (value === undefined) return true;
+  const string = stringValue(value);
+  return string !== null && string.length >= minimum && string.length <= maximum;
+}
+
+function validBoxCreateEnvelope(status, body) {
+  const responseStatus = stringValue(body?.status);
+  const box = body?.box;
+  const boxId = stringValue(box?.id);
+  const boxObject = box !== null && box !== undefined && !Array.isArray(box);
+  return status === 202
+    && body?.ok === true
+    && body?.type === "box.created"
+    && responseStatus !== null
+    && responseStatus.length >= 1
+    && responseStatus.length <= 80
+    && Number.isSafeInteger(body?.ttlSeconds)
+    && body.ttlSeconds > 0
+    && body.ttlSeconds <= MAX_PROVIDER_TTL_SECONDS
+    && boxObject
+    && boxId !== null
+    && BOX_ID_PATTERN.test(boxId)
+    && optionalStringWithin(box?.name, 0, Number.MAX_SAFE_INTEGER)
+    && optionalStringWithin(box?.state, 1, 80);
+}
+
 function sanitizedHeaders(headers) {
   const result = {};
   for (const name of ["content-type", "x-ascii-confirm-delete"]) {
-    const value = headers[name];
-    if (typeof value === "string") result[name] = value;
+    const value = stringValue(headers[name]);
+    if (value !== null) result[name] = value;
   }
   return result;
 }
 
 function brokerPrompt(command) {
-  if (typeof command !== "string") return null;
-  const matched = /COMPANION_PI_BROKER_COMMAND='([A-Za-z0-9+/=_-]+)'/.exec(command);
+  const commandValue = stringValue(command);
+  if (commandValue === null) return null;
+  const matched = /COMPANION_PI_BROKER_COMMAND='([A-Za-z0-9+/=_-]+)'/.exec(commandValue);
   if (!matched) return null;
   try {
     const value = JSON.parse(Buffer.from(matched[1], "base64").toString("utf8"));
@@ -96,11 +138,11 @@ companion_attest_broker() {
   test -n "$companion_pi_path"
   test "$(/usr/bin/readlink -f "$companion_pi_bin")" = '${runtimeHashes.piPath}'
   test "$(/usr/bin/basename "$companion_pi_bin")" = pi
-  test "$(/usr/bin/stat -Lc '%u' "$companion_pi_bin")" = 0
+  test "$(/usr/bin/stat -Lc '%u' "$companion_pi_bin")" = '${runtimeHashes.piUid}'
   test "$(/usr/bin/sha256sum "$companion_pi_bin" | /usr/bin/cut -d' ' -f1)" = '${runtimeHashes.pi}'
   companion_pi_mode="$(/usr/bin/stat -Lc '%a' "$companion_pi_bin")"
+  test "$companion_pi_mode" = '${runtimeHashes.piMode}'
   test $((8#$companion_pi_mode & 0022)) -eq 0
-  case "$(/usr/bin/readlink -f "$companion_pi_bin")" in "$HOME"/*) return 1 ;; esac
   companion_pi_child=false
   companion_node_search_safe=false
   IFS=: read -ra companion_path_entries <<< "$companion_pi_path"
@@ -133,6 +175,22 @@ companion_attest_broker() {
   done
   [ "$companion_socket_owned" = true ]
 }
+companion_pi_child_ready=false
+for companion_pi_probe in $(/usr/bin/seq 1 40); do
+  companion_main_pid="$(/usr/bin/systemctl --user show companion-pi-daemon.service -p MainPID --value 2>/dev/null || true)"
+  case "$companion_main_pid" in ''|*[!0-9]*|0) ;; *)
+    companion_pi_bin="$( { /usr/bin/tr '\0' '\n' < "/proc/$companion_main_pid/environ" | /usr/bin/sed -n 's/^COMPANION_PI_BIN=//p'; } 2>/dev/null || true)"
+    for companion_child in $(/usr/bin/cat "/proc/$companion_main_pid/task/$companion_main_pid/children" 2>/dev/null || true); do
+      if /usr/bin/tr '\0' '\n' < "/proc/$companion_child/cmdline" 2>/dev/null | /usr/bin/grep -Fx -- "$companion_pi_bin" >/dev/null \
+        && [ "$(/usr/bin/readlink -f "/proc/$companion_child/exe" 2>/dev/null || true)" = '${runtimeHashes.nodePath}' ]; then
+        companion_pi_child_ready=true
+      fi
+    done
+  esac
+  if [ "$companion_pi_child_ready" = true ]; then break; fi
+  if [ "$companion_pi_probe" -lt 40 ]; then /usr/bin/sleep 0.1; fi
+done
+[ "$companion_pi_child_ready" = true ]
 companion_attest_broker
 companion_invocation="$(/usr/bin/systemctl --user show companion-pi-daemon.service -p InvocationID --value)"
 COMPANION_PI_BROKER_SOCKET="$broker_socket" \
@@ -175,8 +233,9 @@ companion_attest_broker`;
 }
 
 function promptWasAcknowledged(body, prompt) {
-  if (body?.success !== true || typeof body.stdout !== "string") return false;
-  return body.stdout.split(/\r?\n/).some((line) => {
+  const stdout = stringValue(body?.stdout);
+  if (body?.success !== true || stdout === null) return false;
+  return stdout.split(/\r?\n/).some((line) => {
     try {
       const response = JSON.parse(line);
       return response?.type === "response"
@@ -200,6 +259,25 @@ function distribution(samples) {
   return { samples: sorted.length, p50_ms: percentile(0.5), p95_ms: percentile(0.95) };
 }
 
+function selectTrustedParent(snapshots, targetName) {
+  const eligible = [];
+  for (const snapshot of snapshots) {
+    const name = stringValue(snapshot?.name);
+    const createdAt = stringValue(snapshot?.createdAt);
+    if (snapshot?.status !== "ready" || name === null || name === targetName
+      || !SNAPSHOT_PATTERN.test(name) || createdAt === null) continue;
+    const createdAtMs = Date.parse(createdAt);
+    if (!Number.isFinite(createdAtMs)) continue;
+    eligible.push({ snapshot, name, createdAtMs });
+  }
+  eligible.sort((left, right) => {
+    const createdAt = right.createdAtMs - left.createdAtMs;
+    if (createdAt !== 0) return createdAt;
+    return left.name < right.name ? -1 : left.name > right.name ? 1 : 0;
+  });
+  return eligible[0]?.snapshot ?? null;
+}
+
 export class BoxLeaseProxy {
   #apiKey;
   #upstreamBase;
@@ -207,6 +285,8 @@ export class BoxLeaseProxy {
   #server;
   #allowedNames;
   #snapshotName;
+  #parentSnapshotName = null;
+  #parentSnapshotResolved = false;
   #maximumCreates;
   #boxIds = new Set();
   #operationIds = new Set();
@@ -216,26 +296,32 @@ export class BoxLeaseProxy {
   #archives = 0;
   #commands = 0;
   #createsIssued = 0;
+  #createInFlight = null;
+  #createsBlocked = false;
   #evidenceByBox = new Map();
   #assertLeaseOwner;
   #brokerSha256;
   #runtimeHashes = null;
 
   constructor(input) {
-    if (typeof input.apiKey !== "string" || input.apiKey.length < 1
-      || !Array.isArray(input.companionIds) || input.companionIds.length < 2
-      || input.companionIds.some((id) => !UUID_PATTERN.test(id))
-      || !SNAPSHOT_PATTERN.test(input.snapshotName ?? "")
-      || !/^[a-f0-9]{64}$/.test(input.brokerSha256 ?? "")) {
+    const apiKey = stringValue(input?.apiKey);
+    const companionIds = input?.companionIds;
+    const snapshotName = stringValue(input?.snapshotName);
+    const brokerSha256 = stringValue(input?.brokerSha256);
+    if (apiKey === null || apiKey.length < 1
+      || !Array.isArray(companionIds) || companionIds.length < 2
+      || companionIds.some((id) => !UUID_PATTERN.test(id))
+      || snapshotName === null || !SNAPSHOT_PATTERN.test(snapshotName)
+      || brokerSha256 === null || !/^[a-f0-9]{64}$/.test(brokerSha256)) {
       throw new Error("lease proxy configuration is invalid");
     }
-    this.#apiKey = input.apiKey;
+    this.#apiKey = apiKey;
     this.#upstreamBase = (input.upstreamBase || DEFAULT_BOX_API_BASE).replace(/\/+$/, "");
-    this.#allowedNames = new Set(input.companionIds.map(boxName));
-    this.#snapshotName = input.snapshotName;
-    this.#maximumCreates = input.companionIds.length;
+    this.#allowedNames = new Set(companionIds.map(boxName));
+    this.#snapshotName = snapshotName;
+    this.#maximumCreates = companionIds.length;
     this.#assertLeaseOwner = input.assertLeaseOwner ?? (async () => undefined);
-    this.#brokerSha256 = input.brokerSha256;
+    this.#brokerSha256 = brokerSha256;
   }
 
   async start() {
@@ -250,7 +336,7 @@ export class BoxLeaseProxy {
       this.#server.listen(0, "127.0.0.1", resolveStart);
     });
     const address = this.#server.address();
-    if (!address || typeof address === "string") throw new Error("lease proxy did not bind");
+    if (!address || !Object.hasOwn(address, "port")) throw new Error("lease proxy did not bind");
     return {
       baseUrl: `http://127.0.0.1:${address.port}`,
       apiKey: this.#token,
@@ -275,29 +361,51 @@ export class BoxLeaseProxy {
     const url = new URL(request.url || "/", "http://lease-proxy.invalid");
     const body = await requestBody(request);
     const authorization = await this.#authorize(method, url.pathname, body);
+    const createAuthorization = authorization?.createOrdinal === undefined ? null : authorization;
     const forwardedBody = authorization?.providerBody === undefined
       ? body
       : Buffer.from(JSON.stringify(authorization.providerBody));
-    const upstream = await fetch(`${this.#upstreamBase}${url.pathname}${url.search}`, {
+    const requestOptions = {
       method,
       headers: {
         ...sanitizedHeaders(request.headers),
         Authorization: `Bearer ${this.#apiKey}`,
       },
-      ...(forwardedBody.length === 0 ? {} : { body: forwardedBody }),
-    });
-    const raw = Buffer.from(await upstream.arrayBuffer());
-    await this.#assertLeaseOwner();
-    if (raw.includes(Buffer.from(this.#apiKey))) {
-      throw new Error("lease proxy rejected a credential-bearing provider response");
+    };
+    if (forwardedBody.length > 0) requestOptions.body = forwardedBody;
+    let upstream;
+    try {
+      upstream = await fetch(`${this.#upstreamBase}${url.pathname}${url.search}`, requestOptions);
+    } catch (error) {
+      this.#blockCreate(createAuthorization);
+      throw error;
     }
-    const transformed = await this.#observe(
-      method,
-      url.pathname,
-      upstream.status,
-      raw,
-      authorization,
-    );
+    const successful = upstream.status >= 200 && upstream.status < 300;
+    if (createAuthorization && !successful) this.#clearCreateInFlight(createAuthorization);
+    let raw;
+    try {
+      raw = Buffer.from(await upstream.arrayBuffer());
+      await this.#assertLeaseOwner();
+      if (raw.includes(Buffer.from(this.#apiKey))) {
+        throw new Error("lease proxy rejected a credential-bearing provider response");
+      }
+    } catch (error) {
+      if (successful) this.#blockCreate(createAuthorization);
+      throw error;
+    }
+    let transformed;
+    try {
+      transformed = await this.#observe(
+        method,
+        url.pathname,
+        upstream.status,
+        raw,
+        authorization,
+      );
+    } catch (error) {
+      if (successful) this.#blockCreate(createAuthorization);
+      throw error;
+    }
     response.writeHead(upstream.status, { "content-type": "application/json" });
     response.end(transformed);
   }
@@ -306,15 +414,20 @@ export class BoxLeaseProxy {
     const body = jsonBody(rawBody);
     if (path === "/boxes" && method === "GET") return;
     if (path === "/boxes" && method === "POST") {
-      if (this.#createsIssued >= this.#maximumCreates || !body || body.noEnv !== true
+      if (this.#createsBlocked || this.#createInFlight !== null
+        || this.#createsIssued >= this.#maximumCreates || !body || body.noEnv !== true
         || !Number.isSafeInteger(body.ttlSeconds) || body.ttlSeconds < 1 || body.ttlSeconds > 900
         || Object.keys(body).some((key) => !["ttlSeconds", "noEnv", "from"].includes(key))
-        || (body.from !== undefined && body.from !== this.#snapshotName)) {
+        || (this.#createsIssued === 0 && this.#parentSnapshotName === null)
+        || body.from !== (this.#createsIssued === 0
+          ? this.#parentSnapshotName
+          : this.#snapshotName)) {
         throw new Error("lease proxy rejected Box creation");
       }
       const createOrdinal = this.#createsIssued;
-      this.#createsIssued += 1;
-      return { createOrdinal, startedAt: Date.now() };
+      const authorization = { createOrdinal, startedAt: Date.now() };
+      this.#createInFlight = authorization;
+      return authorization;
     }
     if (path === "/named-snapshots" && method === "GET") return;
     if (path === "/named-snapshots" && method === "POST") {
@@ -369,27 +482,29 @@ export class BoxLeaseProxy {
     }
     if (suffix === "commands" && method === "POST") {
       if (!this.#runtimeHashes) throw new Error("lease proxy runtime attestation is unavailable");
-      if (!body || typeof body.command !== "string" || body.command.length > MAX_BODY_BYTES
+      const command = stringValue(body?.command);
+      if (!body || command === null || command.length > MAX_BODY_BYTES
         || !Number.isSafeInteger(body.timeoutSeconds) || body.timeoutSeconds < 1
         || body.timeoutSeconds > 300
         || Object.keys(body).some((key) => !["command", "timeoutSeconds"].includes(key))) {
         throw new Error("lease proxy rejected Box command");
       }
-      const prompt = brokerPrompt(body.command);
-      return {
+      const prompt = brokerPrompt(command);
+      const authorization = {
         boxId: decodeURIComponent(box[1]),
         brokerPrompt: prompt,
-        ...(prompt ? {
-          providerBody: {
-            command: canonicalBrokerPromptCommand(
-              prompt,
-              this.#brokerSha256,
-              this.#runtimeHashes,
-            ),
-            timeoutSeconds: 13,
-          },
-        } : {}),
       };
+      if (prompt) {
+        authorization.providerBody = {
+          command: canonicalBrokerPromptCommand(
+            prompt,
+            this.#brokerSha256,
+            this.#runtimeHashes,
+          ),
+          timeoutSeconds: 18,
+        };
+      }
+      return authorization;
     }
     if (suffix === "files" && method === "PUT") {
       if (!this.#runtimeHashes) throw new Error("lease proxy runtime attestation is unavailable");
@@ -413,6 +528,9 @@ export class BoxLeaseProxy {
     try {
       body = JSON.parse(raw.toString("utf8"));
     } catch {
+      if (path === "/boxes" && method === "POST" && status >= 200 && status < 300) {
+        throw new Error("lease proxy received invalid Box create response");
+      }
       return raw;
     }
     if (path === "/boxes" && method === "GET" && Array.isArray(body.boxes)) {
@@ -422,14 +540,24 @@ export class BoxLeaseProxy {
       return Buffer.from(JSON.stringify(body));
     }
     if (path === "/boxes" && method === "POST" && status >= 200 && status < 300) {
-      const id = body?.box?.id;
-      if (!BOX_ID_PATTERN.test(id ?? "")) throw new Error("lease proxy received invalid Box identity");
+      const id = stringValue(body?.box?.id);
+      if (id !== null && BOX_ID_PATTERN.test(id)) {
+        this.#boxIds.add(id);
+        this.#createdIds.add(id);
+      }
+      if (!validBoxCreateEnvelope(status, body)) {
+        throw new Error("lease proxy received invalid Box create response");
+      }
+      if (this.#createInFlight !== authorization) {
+        throw new Error("lease proxy Box create state is inconsistent");
+      }
       this.#boxIds.add(id);
-      this.#createdIds.add(id);
       this.#evidenceByBox.set(id, {
         createOrdinal: authorization.createOrdinal,
         createStartedAt: authorization.startedAt,
       });
+      this.#createsIssued += 1;
+      this.#createInFlight = null;
     }
     const exactBox = path.match(/^\/boxes\/([^/]+)$/);
     if (exactBox && method === "GET" && status >= 200 && status < 300
@@ -446,8 +574,19 @@ export class BoxLeaseProxy {
         }
       }
     }
-    if (path === "/named-snapshots" && method === "GET" && Array.isArray(body.snapshots)) {
-      body.snapshots = body.snapshots.filter((snapshot) => snapshot?.name === this.#snapshotName);
+    if (path === "/named-snapshots" && method === "GET") {
+      if (!Array.isArray(body?.snapshots)) return raw;
+      if (status === 200 && !this.#parentSnapshotResolved) {
+        const parent = selectTrustedParent(body.snapshots, this.#snapshotName);
+        this.#parentSnapshotName = parent?.name ?? null;
+        this.#parentSnapshotResolved = true;
+      }
+      const target = body.snapshots.find((snapshot) => snapshot?.name === this.#snapshotName);
+      const parent = this.#parentSnapshotName
+        ? body.snapshots.find((snapshot) => snapshot?.name === this.#parentSnapshotName
+          && snapshot?.status === "ready")
+        : null;
+      body.snapshots = [target, parent].filter(Boolean);
       return Buffer.from(JSON.stringify(body));
     }
     if (path === "/named-snapshots" && method === "POST" && status >= 200 && status < 300) {
@@ -481,10 +620,21 @@ export class BoxLeaseProxy {
     return raw;
   }
 
+  #clearCreateInFlight(authorization) {
+    if (authorization && this.#createInFlight === authorization) this.#createInFlight = null;
+  }
+
+  #blockCreate(authorization) {
+    if (!authorization || this.#createInFlight !== authorization) return;
+    this.#createInFlight = null;
+    this.#createsBlocked = true;
+  }
+
   async #captureRuntimeHashes(boxId) {
     const command = `set -euo pipefail
+companion_pi_lookup="$(command -v pi)"
 export PATH=/usr/local/bin:/usr/bin:/bin
-companion_pi_bin="$(/usr/bin/readlink -f "$(command -v pi)")"
+companion_pi_bin="$(/usr/bin/readlink -f "$companion_pi_lookup")"
 companion_node_bin="$(/usr/bin/readlink -f "$(command -v node)")"
 test -n "$companion_pi_bin"
 test -n "$companion_node_bin"
@@ -492,41 +642,76 @@ printf 'pi %s\\n' "$(/usr/bin/sha256sum "$companion_pi_bin" | /usr/bin/cut -d' '
 printf 'node %s\\n' "$(/usr/bin/sha256sum "$companion_node_bin" | /usr/bin/cut -d' ' -f1)"
 printf 'pi_path %s\\n' "$companion_pi_bin"
 printf 'node_path %s\\n' "$companion_node_bin"
+printf 'pi_uid %s\\n' "$(/usr/bin/stat -Lc '%u' "$companion_pi_bin")"
+printf 'pi_mode %s\\n' "$(/usr/bin/stat -Lc '%a' "$companion_pi_bin")"
 printf 'uid %s\\n' "$(/usr/bin/id -u)"`;
-    const response = await fetch(
-      `${this.#upstreamBase}/boxes/${encodeURIComponent(boxId)}/commands`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${this.#apiKey}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ command, timeoutSeconds: 15 }),
-      },
-    );
-    if (!response.ok) throw new Error("lease proxy could not capture runtime attestation");
-    const body = await response.json();
-    const lines = String(body?.stdout ?? "").split(/\r?\n/);
-    const hashes = Object.fromEntries(lines
-      .map((line) => /^(pi|node) ([a-f0-9]{64})$/.exec(line))
-      .filter(Boolean)
-      .map((match) => [match[1], match[2]]));
-    const paths = Object.fromEntries(lines
-      .map((line) => /^(pi_path|node_path) (\/[A-Za-z0-9._/-]{1,500})$/.exec(line))
-      .filter(Boolean)
-      .map((match) => [match[1], match[2]]));
-    const uid = /(?:^|\n)uid ([1-9][0-9]{0,9})(?:\n|$)/.exec(String(body?.stdout ?? ""))?.[1];
-    if (body?.success !== true || !/^[a-f0-9]{64}$/.test(hashes.pi ?? "")
-      || !/^[a-f0-9]{64}$/.test(hashes.node ?? "")
-      || !paths.pi_path || !paths.node_path || !uid) {
-      throw new Error("lease proxy received invalid runtime attestation");
+    const deadline = Date.now() + RUNTIME_ATTESTATION_DEADLINE_MS;
+    for (;;) {
+      await this.#assertLeaseOwner();
+      let body = null;
+      try {
+        const response = await fetch(
+          `${this.#upstreamBase}/boxes/${encodeURIComponent(boxId)}/commands`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${this.#apiKey}`,
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({
+              command,
+              timeoutSeconds: RUNTIME_ATTESTATION_COMMAND_SECONDS,
+            }),
+            signal: AbortSignal.timeout(
+              Math.max(1, Math.min(7_000, deadline - Date.now())),
+            ),
+          },
+        );
+        if (response.ok) body = await response.json().catch(() => null);
+      } catch {
+        body = null;
+      }
+      await this.#assertLeaseOwner();
+      const lines = String(body?.stdout ?? "").split(/\r?\n/);
+      const hashes = Object.fromEntries(lines
+        .map((line) => /^(pi|node) ([a-f0-9]{64})$/.exec(line))
+        .filter(Boolean)
+        .map((match) => [match[1], match[2]]));
+      const paths = Object.fromEntries(lines
+        .map((line) => /^(pi_path|node_path) (\/[A-Za-z0-9._/@+-]{1,500})$/.exec(line))
+        .filter(Boolean)
+        .map((match) => [match[1], match[2]]));
+      const ownership = Object.fromEntries(lines
+        .map((line) => /^(pi_uid|pi_mode) ([0-9]{1,10})$/.exec(line))
+        .filter(Boolean)
+        .map((match) => [match[1], match[2]]));
+      const uid = /(?:^|\n)uid ([1-9][0-9]{0,9})(?:\n|$)/
+        .exec(String(body?.stdout ?? ""))?.[1];
+      const piMode = ownership.pi_mode;
+      const piUid = ownership.pi_uid;
+      const safePiMode = /^[0-7]{3,4}$/.test(piMode ?? "")
+        && (Number.parseInt(piMode, 8) & 0o022) === 0;
+      if (body?.success === true && /^[a-f0-9]{64}$/.test(hashes.pi ?? "")
+        && /^[a-f0-9]{64}$/.test(hashes.node ?? "")
+        && paths.pi_path && paths.node_path && uid && safePiMode
+        && (piUid === "0" || piUid === uid)) {
+        return {
+          ...hashes,
+          piPath: paths.pi_path,
+          nodePath: paths.node_path,
+          piUid,
+          piMode,
+          uid,
+        };
+      }
+      if (body?.success === true) {
+        throw new Error("lease proxy received invalid runtime attestation");
+      }
+      if (Date.now() >= deadline) {
+        throw new Error("lease proxy received invalid runtime attestation");
+      }
+      await new Promise((resolvePause) => setTimeout(resolvePause, RUNTIME_ATTESTATION_POLL_MS));
     }
-    return {
-      ...hashes,
-      piPath: paths.pi_path,
-      nodePath: paths.node_path,
-      uid,
-    };
   }
 
   async prove(input) {

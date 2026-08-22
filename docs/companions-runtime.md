@@ -72,7 +72,8 @@ cleanup ownership until the provider side effect is confirmed.
 
 - runtime generation and canonical `box_id`;
 - observed Box state and Pi daemon state;
-- installed disk-layout version and applied settings/skills revision;
+- installed disk-layout version, applied settings/skills revision, immutable Skill refs, and the
+  proved Skills-tree digest;
 - current Pi invocation id and last successful observation;
 - lifecycle-safe deletion/retirement metadata.
 
@@ -85,6 +86,13 @@ rather than failing the observation.
 
 This projection is not a lease and cannot authorize work. List, thread, ordinary status, and Viewer
 reads consume it without contacting Box.
+
+### Companion icon
+
+`companions` carries four cosmetic smallint indexes (`icon_shape`, `icon_mouth`, `icon_accessory`,
+`icon_color`) into fixed client-side catalogs. They are presentation only: the update path accepts
+them without bumping a settings revision or checkpointing the Box, so an icon save never wakes or
+restarts anything, and they never appear in an operation snapshot or reach Pi.
 
 ### Turn
 
@@ -179,7 +187,7 @@ rechecks the same Pi-invocation binding, freshness, surface, and reserve under t
 before it claims a queued turn, so waiting behind another turn cannot consume the safety margin.
 The 0110 migration makes this a claim-protocol boundary as well as a data invariant. A pre-0110
 runtime may finish work it already holds but its legacy claim signature is quarantined and returns
-no new rows. Migration 0113 advances the five-argument material protocol to version 2, quarantining
+no new rows. Migration 0120 advances the six-argument material protocol to version 2, quarantining
 protocol-1 replicas during the OAuth-gateway rollout. The current claimer takes over expired legacy work and rewinds a start,
 `restart_pi`, settings operation, or implicit settings claim to its staging boundary whenever the
 new staged-expiry ledger is absent. The takeover therefore restages and recycles Pi once instead of
@@ -229,18 +237,22 @@ name and six-hour TTL. It then lists again, chooses the canonical id, and durabl
 A transport loss around the create POST is irreducibly ambiguous under the provider's current
 public contract. It interrupts the operation explicitly and may leave one unnamed Box which
 auto-archives after the provisional TTL; runtime never guesses its id from account-wide list order
-and never creates a second Box automatically. Operators must keep the real-provider canary and
-orphan inventory enabled until the provider offers a create idempotency key or client-supplied name.
+and never creates a second Box automatically. Operators must keep orphan inventory enabled until
+the provider offers a create idempotency key or client-supplied name.
 An exact-name Box discovered after any acknowledged create is always adopted and permanently
 deleted before retirement.
 
 Known-idempotent lifecycle calls retry network failures, `429`, and `5xx` responses up to five times
 with jittered backoff of 1, 2, 5, 10, and 30 seconds. A provider operation id is retained whenever
-the API returns one. A provider-blocked permanent delete is transient (usually an in-flight snapshot
-save on the same Box): runtime keeps polling the retained deletion operation until the bounded
-operation deadline, and only a still-blocked deadline fails the operation — as retryable
-`box_delete_deadline_exceeded`, so an Owner/Editor retry finishes a delete the provider typically completed
-moments later.
+the API returns one. Accepted permanent deletion is not bounded by the ordinary ten-minute lifecycle
+deadline and never replays `DELETE`. At `waiting_deleted`, a claim reauthorizes and performs exactly
+one GET for the retained operation id. `completed` or `404` confirms absence; `pending`, `processing`,
+`blocked`, or an explicitly retryable GET failure uses a fenced SQL CAS to keep the operation
+pending, release the lease, and set `available_at` with durable 5/15/30/60-second backoff. No runtime
+slot sleeps between these observations. Invalid payloads and non-retryable failures keep the usual
+expurgated terminal error. Migration 0114 requeues the newest eligible historical failed delete per
+Companion only when an accepted operation id survives, and quarantines the previous claim signature
+throughout the rolling deploy.
 
 Stop snapshots/archives the Box. A later send queues wake after stop reaches a safe archive
 checkpoint; it does not race Pi start against an in-flight archive. Restart Pi keeps the Box and
@@ -336,11 +348,18 @@ and that command still has five minutes so a budget that stops short of the mark
 The member's next message short-circuits on the marker. Staging writes the bounded control-plane
 files as one versioned bundle whose allowlisted paths, modes, sizes, and SHA-256 digests are checked
 before atomic rename. The bundle is deleted on every command exit, explicitly retried for deletion
-when command submission fails, and its absence is a fail-closed precondition of Box archive. If the Skills revision
-already matches, staging also proves an on-disk tree digest over every selected archive checksum,
-including the independently versioned bundled Companion skill. Only then may it refresh
+when command submission fails, and its absence is a fail-closed precondition of Box archive. If the
+required Skills revision is satisfied, staging proves an on-disk tree digest over the checkpointed
+immutable archive checksums, including the bundled Companion skill. A later publication does not
+invalidate that wake path. Only then may it refresh
 credentials/configuration without transferring or rebuilding the Skills tree; otherwise the baked
 Companion archive is copied locally and only additional Skill bytes cross the provider file API.
+
+Publishing a selected Skill advances an available revision, not the minimum dispatch revision.
+Restart Pi, Stop Box, Full Box restart, and settings apply stop Pi before a credential-free,
+Skills-only atomic stage. Stop then archives; restart paths refresh credentials before starting Pi.
+A safe auto-update failure remains pending and the lifecycle continues with the old tree; first
+install and explicit selection changes remain fail-closed.
 
 Runtime commits each supported event projection and its monotonic cursor in one PostgreSQL
 transaction. A supported `agent_settled` or Pi process-exit observation records the terminal
@@ -398,8 +417,14 @@ the approver's authority after the current turn.
 
 A `companion:trigger:<name>` confirmation with a strict JSON `{summary, proposal}` body projects as
 `request_kind = trigger_proposal`. Pi emits these through the staged `propose_trigger` tool. The
-payload is name, prompt, and provider (`linear`, `github`, or `custom`); a redacted or malformed
-message is counted as unknown. Owner/Editor approval runs `companion_api_answer_trigger_decision`,
+payload is name, prompt, and provider (`linear`, `github`, or `custom`), plus a github-only target
+(`repo`, `events`) when Pi already knows what to watch; a redacted or malformed
+message is counted as unknown. Plugin-backed providers are gated: a `linear` or `github` trigger
+requires the matching plugin attached to the Companion, enforced both by the staged extension —
+which reads the attached plugins out of `config-catalog.json` and fails closed when it is unreadable
+— and fail-closed in `companion_api_create_trigger`/`companion_api_update_trigger`, so an approved
+proposal whose plugin was detached mid-turn still cannot create a trigger. Owner/Editor approval
+runs `companion_api_answer_trigger_decision`,
 which creates the trigger — with a fresh server-side id and secret — under the approver's authority
 after the current turn; the person then copies the webhook URL from the Triggers panel. Pi never
 creates a trigger itself, and a proposed trigger never fires in the turn that proposed it.
@@ -442,7 +467,25 @@ durable in PostgreSQL but lost in that round trip, and every fire would then los
 
 A trigger is the event-driven sibling of a routine: a named prompt that an external webhook fires,
 at most ten per Companion. The provider (`linear`, `github`, or `custom`) is a display label and a
-delivery-id hint, not an auth scheme. The inbound endpoint is
+delivery-id hint, not an auth scheme. A trigger is one of the things a plugin is for, not just an
+MCP server: `linear` and `github` triggers require the matching plugin attached to the Companion
+(an account of that provider named by `selected_mcp_account_ids`), so attaching the Linear plugin is
+what lets Pi propose a wake-on-new-ticket trigger; `custom` needs no plugin. A github trigger also
+carries a target — `repo` plus the webhook `events` to subscribe (`push`, `pull_request`, …, or
+`*`); no other provider accepts a target yet, and Notion never will: it has no outbound webhooks,
+so Companion neither proposes nor registers one.
+
+Registering the webhook at the provider is an on-demand capability, not an approval side effect.
+After a trigger exists, Owner/Editor (including the Companion through its staged authority) may
+call `POST /v1/companions/:id/triggers/:triggerId/registration`, which wires the current URL into
+the provider — for GitHub, creating the repository hook with our URL secret as the HMAC secret and
+storing the remote hook id. Provider rejection is recorded as `registration_status = failed` with a
+sanitized error rather than thrown away; `DELETE …/registration` removes the remote hook and
+returns the row to `manual`. Changing a trigger's target or provider invalidates any registration.
+Linear registration uses a second credential — a Linear API key stored with
+`POST /v1/companion-plugins/trigger-key`, envelope-encrypted and never returned by any read — and
+creates the subscription over Linear's GraphQL API; without that key the endpoint says so plainly.
+The inbound endpoint is
 `POST /v1/hooks/triggers/:triggerId/:secret`, registered before session middleware like the Stripe
 webhook, gated on the Companions flag, with a 1 MB body limit. The secret is a server-generated
 64-hex credential compared with `timingSafeEqual` and follows the share-token precedent: plaintext
@@ -468,6 +511,17 @@ theirs: the thread shows a `Trigger: <name>` header instead of the composed prom
 conversation-list preview is masked the same way, and a message never carries both a routine and a
 trigger origin. Viewer sees trigger rows without the webhook URL; only Owner/Editor may see, copy,
 or rotate it.
+
+## Plugin skills
+
+Each curated plugin ships a product-owned skill — `plugin-github`, `plugin-linear` — staged into
+the Box's skills tree whenever the matching plugin is attached to the Companion, and removed when
+it is detached. The skill documents exactly what this runtime stages for that plugin: the MCP
+tools, GitHub commits as the connected account, and the on-demand trigger-registration capability
+with its provider-specific rules (GitHub targets name a repo and events; Linear registration needs
+the stored API key; Notion has no webhooks). They restage on every wake so a rebuilt tree regains
+them, which makes them a staging artifact rather than workspace content: they are never listed in
+the config catalog and Pi cannot propose attaching or detaching them.
 
 ## Attachments
 
@@ -567,8 +621,9 @@ operator-safe message; Viewer receives a generic unavailable message.
 
 ## Skills, MCP, and provider credentials
 
-Web and mobile-web runtime work stages the currently authorized selected Skills plus the bundled
-Companion skill. Empty selection means no library Skills. Native mobile receives no Skills source.
+Web and mobile-web runtime work uses the checkpointed installed Skill versions plus the bundled
+Companion skill when the required revision is satisfied. Empty selection means no library Skills.
+Native mobile receives no Skills source.
 The control plane never executes package scripts.
 
 Member MCP accounts are selected by id, labeled, envelope-encrypted, and write-only. Runtime decrypts
@@ -679,8 +734,9 @@ slower cadence when stable. There is no SSE and no Box-to-control-plane push age
 
 Desktop remains Owner/Editor-only and never wakes Box. API performs user authorization, then sends a
 short-lived HMAC-authenticated request to a private runtime endpoint. Runtime revalidates access and
-mints the provider desktop URL only when the exact current settings and Skills revisions are already
-staged and every selected personal Skill and MCP account belongs to that actor. A pending restage or
+mints the provider desktop URL only when current settings and the minimum required Skills revision
+are staged and every installed personal Skill and selected MCP account belongs to that actor. A
+publication-only update does not deny desktop; a required restage or
 foreign personal resource denies desktop access, so a warm shared Box cannot bypass creator-only
 privacy. Runtime atomically consumes the signed request id through a narrow `SECURITY DEFINER`
 function; PostgreSQL retains it through the signature window so replay is rejected across replicas
@@ -707,9 +763,9 @@ accounts, Skills, secret rows, organizations, users, billing, and audit history.
 resumable after partial success.
 
 The stacked rollout retained legacy columns solely for deployability and never backfilled them. The
-final migration removes them; its release gate requires seven consecutive green real-provider
-canary days, no open P0/P1 runtime issue, and no resource remaining in the purge report. The
-immutable purge ledger remains owner-readable evidence; its mutating finalizer no longer exists.
+final migration removes them; its release gate requires no open P0/P1 runtime issue and no resource
+remaining in the purge report. The immutable purge ledger remains owner-readable evidence; its
+mutating finalizer no longer exists.
 
 ## Health, observability, and acceptance
 
@@ -729,8 +785,8 @@ Acceptance bounds:
 - inactivity settlement under ten minutes plus one sweep;
 - absolute settlement under two hours plus one sweep.
 
-The deterministic simulator and real-provider canary requirements live in `docs/testing.md`.
-Production cutover, kill-switch, purge, incident, rollback, and canary procedures live in
+The deterministic simulator requirements live in `docs/testing.md`.
+Production cutover, kill-switch, purge, incident, and rollback procedures live in
 `docs/runbooks/companions-runtime.md`.
 
 ### Development-only startup autoresearch
@@ -742,8 +798,12 @@ credentials explicitly shadowed; the controller evaluates their validated commit
 disposable worktrees and treats no agent chat message as benchmark or cleanup evidence. Those
 worktrees run as an unprivileged OS identity with an isolated home and receive a random local proxy
 token rather than the provider credential. The proxy permits
-only the exact deterministic Box/snapshot lease, observes real provider-ready states and correlated
-broker prompt ACKs, and proves deletion directly before promotion. Before accepting an ACK it
+only the exact deterministic Box/snapshot lease, exposes one newest ready layout-14 parent
+read-only for the baker, fails closed without an eligible parent, and requires later Boxes to clone
+the deterministic target. Explicit non-2xx creates may retry with the same source; fetch failures or
+invalid 2xx observations make the create ambiguous and block the lease. It observes real
+provider-ready states and correlated broker prompt ACKs, and proves deletion directly before
+promotion. Before accepting an ACK it
 byte-attests the generated broker, Node and Pi against hashes it captured from the pristine baker
 Box before permitting candidate writes, the live systemd main process, and that process's ownership
 of the broker socket. `gpt-5.6-sol` audits and

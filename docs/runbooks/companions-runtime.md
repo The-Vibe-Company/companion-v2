@@ -1,7 +1,7 @@
 # Companions Runtime v2 operations
 
 This runbook covers the production Runtime v2 boundary: migration and cutover, permanent legacy
-purge, kill switch, incident response, rollback, and the daily real-provider canary. The state
+purge, kill switch, incident response, and rollback. The state
 machine and protocol contract remain authoritative in `docs/companions-runtime.md`; Railway-specific
 configuration lives in `deploy/railway/README.md`.
 
@@ -24,8 +24,8 @@ configuration lives in `deploy/railway/README.md`.
 - Do not put provider payloads, tokens, signed URLs, raw Pi lines, auth files, or decrypted material
   in a command transcript, incident ticket, log search, or database error field.
 
-Record the environment, release commit, operator/change id, database backup id, gate epoch, purge
-report checksum, and canary result for every production change. Do not record secret values.
+Record the environment, release commit, operator/change id, database backup id, gate epoch, and
+purge report checksum for every production change. Do not record secret values.
 
 ## Release and migration
 
@@ -159,10 +159,10 @@ Do not deploy final legacy-removal migrations when any item remains.
    stop, send-as-wake, second reply, and permanent delete. Confirm Viewer and cross-tenant reads made
    no Box call.
 
-The guarded final legacy-removal migration in this release may be deployed only after seven
-consecutive green daily real-provider canaries, no open P0/P1 runtime issue, and an empty purge
-report. An installation missing any prerequisite must remain on its disabled purge-capable release;
-there is no compatibility mode in the final runtime.
+The guarded final legacy-removal migration in this release may be deployed only when there is no
+open P0/P1 runtime issue and the purge report is empty. An installation missing either prerequisite
+must remain on its disabled purge-capable release; there is no compatibility mode in the final
+runtime.
 
 Immediately before that final migration, disable the database gate again with its observed epoch,
 set the three feature-flag consumers false, and wait until every lease is neutral. Migration 0094
@@ -172,8 +172,7 @@ saved purge report. If a historical union database role exists, make it `NOLOGIN
 `DATABASE_RETIRED_RUNTIME_ROLE`; the grants preflight removes its current and default ACLs before
 0094. Deploy the final migration through the one-shot release job, require `Completed`, and only then
 deploy all four processes from that same commit before following the explicit enable procedure
-above. The preceding seven-day canary evidence authorizes this cutover; it does not authorize
-migrating while Runtime v2 is still claiming work.
+above. These prerequisites do not authorize migrating while Runtime v2 is still claiming work.
 
 ## Kill switch
 
@@ -307,58 +306,3 @@ A database restore is disaster recovery, not an application rollback. It can mak
 than external Box side effects. If restoration is unavoidable, leave claims off, inventory every
 generation-qualified Box and delete operation, reconcile ownership manually, and obtain incident
 approval before enabling. Re-enabling the feature flag alone never enables the database gate.
-
-## Daily real-provider canary
-
-Run this outside merge-blocking simulator CI against the production-equivalent Box environment. Use
-a dedicated canary owner/provider connection and a disposable Companion name containing the run id.
-The separate `Companion Runtime Real-Provider Canary` workflow runs daily and on manual dispatch;
-locally, the identical entrypoint is `pnpm canary:companions-runtime`.
-
-Configure these workflow secrets for the dedicated account:
-
-- `COMPANION_CANARY_API_URL`;
-- `COMPANION_CANARY_EMAIL` and `COMPANION_CANARY_PASSWORD`;
-- `COMPANION_CANARY_ORG_ID`;
-- `COMPANION_CANARY_PROVIDER_ID` and `COMPANION_CANARY_MODEL_ID`;
-- `COMPANION_CANARY_IMAGE_URL`, an unauthenticated HTTPS fixture containing a unique uppercase OCR
-  code that is not present in its URL;
-- `COMPANION_CANARY_IMAGE_EXPECTED_TEXT`, that exact 4–64 character OCR code. The prompt never
-  includes it, and the vision phase fails unless the durable assistant reply contains it;
-- `COMPANION_CANARY_RELEASE_ID`, the immutable API/runtime deployment identifier targeted by the
-  canary. Prefer the git commit SHA that Railway deployed: API `/health` and runtime `/healthz`
-  advertise that SHA via platform-injected `RAILWAY_GIT_COMMIT_SHA`. After a merge to `main`, the
-  workflow checkout SHA for that commit is the deployed release, so the canary workflow may omit the
-  secret and use `github.sha`. An explicit secret still overrides when targeting a specific SHA. The
-  canary compares the API `/health` value before login.
-
-Rotate the OCR fixture and expected text whenever the image leaks into a prompt, log, or test
-artifact. The expected value is comparison-only configuration and must never be interpolated into
-the Companion prompt.
-
-The login cookie exists in process memory only. Output is restricted to phase, duration, stable
-code, runtime generation when the API exposes it, target release id, and cleanup status; it never
-prints response bodies, credentials, cookies, image URLs, or signed URLs. Missing or invalid
-configuration emits `not_configured` and exits nonzero, so an unconfigured schedule can never count
-as green.
-
-Every run must:
-
-1. create a Companion and cold-send a correlation string;
-2. receive the correlated durable reply within the cold-start deadline;
-3. stage and read the configured image fixture with a vision-capable model, then return its hidden
-   OCR code (echoing only the prompt correlation marker is a failure);
-4. stop the Box without deleting it;
-5. send again, proving send-only wake and receiving a second correlated reply;
-6. request permanent deletion, wait for its operation to complete, and verify no Box or Companion
-   ownership remains.
-
-Record phase timings, stable error codes, Box generation, target release id, and final cleanup status.
-Never record response bodies that might contain user/provider material. A skipped phase, cleanup
-failure, missing fixture, missing credential, or missing provider secret is `not configured` or
-failed—never green.
-
-Legacy removal eligibility requires seven consecutive green calendar-day runs for the exact target
-environment, an empty purge report, and no open P0/P1 runtime issue. Reset the streak after a failed
-or unconfigured run, a material Box/Pi layout change, or a credential/environment change that makes
-the preceding evidence non-comparable.

@@ -177,6 +177,39 @@ export type CompanionProvidersResponse = z.infer<typeof companionProvidersRespon
 
 export const companionPersonaSchema = z.string().trim().max(280);
 
+/**
+ * Cosmetic Companion icon (THE-382). Four small indexes into fixed client-side catalogs: a blob
+ * shape, a mouth, an accessory, and a color. Purely presentational — never sent to Pi, never part
+ * of an operation snapshot — so changing it must not wake or restart anything.
+ */
+/* oxlint-disable anti-slop/no-shape-in-symbol-names -- Icon catalogs are literally geometric shapes; "shape" is the domain term here. */
+export const COMPANION_ICON_SHAPE_COUNT = 8;
+export const COMPANION_ICON_MOUTH_COUNT = 5;
+export const COMPANION_ICON_ACCESSORY_COUNT = 7;
+export const COMPANION_ICON_COLOR_COUNT = 11;
+
+const companionIconIndex = (max: number) => z.number().int().min(0).max(max - 1);
+
+export const companionIconSchema = z.object({
+  shape: companionIconIndex(COMPANION_ICON_SHAPE_COUNT),
+  mouth: companionIconIndex(COMPANION_ICON_MOUTH_COUNT),
+  accessory: companionIconIndex(COMPANION_ICON_ACCESSORY_COUNT),
+  color: companionIconIndex(COMPANION_ICON_COLOR_COUNT),
+}).strict();
+export type CompanionIcon = z.infer<typeof companionIconSchema>;
+
+export const companionIconPatchSchema = z.object({
+  shape: companionIconIndex(COMPANION_ICON_SHAPE_COUNT).optional(),
+  mouth: companionIconIndex(COMPANION_ICON_MOUTH_COUNT).optional(),
+  accessory: companionIconIndex(COMPANION_ICON_ACCESSORY_COUNT).optional(),
+  color: companionIconIndex(COMPANION_ICON_COLOR_COUNT).optional(),
+}).strict().refine(
+  (icon) => icon.shape !== undefined || icon.mouth !== undefined
+    || icon.accessory !== undefined || icon.color !== undefined,
+  { message: "at least one icon field is required" },
+);
+export type CompanionIconPatch = z.infer<typeof companionIconPatchSchema>;
+
 /** Exact Skills Hub skill ids a Companion may stage onto its Box. Empty = no library skills. */
 export const companionSelectedSkillIdsSchema = z.array(z.string().uuid()).max(100);
 
@@ -213,6 +246,12 @@ export const COMPANION_TRIGGER_PAYLOAD_EXCERPT_MAX_CHARACTERS = 4_096;
 export const COMPANION_TRIGGER_PROVIDERS = ["linear", "github", "custom"] as const;
 export const companionTriggerProviderSchema = z.enum(COMPANION_TRIGGER_PROVIDERS);
 export type CompanionTriggerProvider = z.infer<typeof companionTriggerProviderSchema>;
+
+/**
+ * Trigger providers that are plugin-backed: proposing or creating a trigger with one of these
+ * providers requires the matching MCP plugin attached to the Companion. `custom` needs no plugin.
+ */
+export const COMPANION_PLUGIN_TRIGGER_PROVIDERS = ["linear", "github"] as const;
 
 
 /**
@@ -265,6 +304,11 @@ export const companionSchema = z.object({
   name: z.string(),
   /** One short line describing what this Companion is for; shown under the name in the list. */
   persona: z.string().nullable(),
+  /**
+   * Cosmetic blob icon shown wherever the Companion appears; never interpreted by the runtime.
+   * Optional on reads so pre-THE-382 clients keep parsing; every current writer projects it.
+   */
+  icon: companionIconSchema.optional(),
   /** Null only for legacy rows created before a provider was selected. */
   model_id: companionModelIdSchema.nullable(),
   /**
@@ -463,6 +507,7 @@ export const COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS = [
   "linear",
   "github",
   "notion",
+  "conductor",
 ] as const;
 export const companionConfigProposalConnectProviderSchema = z.enum(
   COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS,
@@ -627,12 +672,57 @@ export const companionTriggerPromptSchema = z.string().trim().min(1).max(
   COMPANION_TRIGGER_PROMPT_MAX_CHARACTERS,
 );
 
+/** Bounded provider-side wiring a trigger may carry. Only GitHub is wired in v1. */
+export const COMPANION_TRIGGER_MAX_EVENTS = 30;
+
+export const companionTriggerTargetSchema = z.object({
+  /** GitHub repository as "owner/repo". Required for github triggers, forbidden elsewhere. */
+  repo: z.string().trim().max(200).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9._-]+$/).optional(),
+  /**
+   * Provider webhook event names; "*" subscribes to every GitHub event. The provider has the final
+   * word: an unknown name fails the registration, never the trigger.
+   */
+  events: z.array(z.string().trim().regex(/^\*$|^[a-z_]{1,64}$/))
+    .min(1)
+    .max(COMPANION_TRIGGER_MAX_EVENTS)
+    .optional(),
+}).strict();
+export type CompanionTriggerTarget = z.infer<typeof companionTriggerTargetSchema>;
+
+/**
+ * Validate a target against its trigger's provider: github needs a repo and at least one event;
+ * every other provider carries no target yet (the URL is pasted into the service by hand).
+ */
+export function parseCompanionTriggerTarget(
+  provider: CompanionTriggerProvider,
+  target: CompanionTriggerTarget | null | undefined,
+): CompanionTriggerTarget | null {
+  const normalized = target ?? null;
+  if (provider === "github") {
+    if (!normalized?.repo || !normalized.events?.length) {
+      throw new Error("a github trigger requires a target repo and at least one event");
+    }
+    return normalized;
+  }
+  if (normalized && (normalized.repo || normalized.events)) {
+    throw new Error(`a ${provider} trigger does not support a target yet`);
+  }
+  return null;
+}
+
 export const companionTriggerSchema = z.object({
   id: z.string().uuid(),
   companion_id: z.string().uuid(),
   name: companionTriggerNameSchema,
   prompt: companionTriggerPromptSchema,
   provider: companionTriggerProviderSchema,
+  /**
+   * Provider-side wiring the Companion may register on demand — for GitHub, the repository and the
+   * webhook events to subscribe. Null means "URL only": the person pastes it into the service.
+   */
+  target: z.lazy(() => companionTriggerTargetSchema).nullable().default(null),
+  /** Whether the provider-side webhook is wired: manual means the URL was pasted by hand. */
+  registration_status: z.enum(["manual", "registered", "failed"]).default("manual"),
   enabled: z.boolean(),
   /** Full URL an external service posts to. Null for Viewers, who never see the secret. */
   webhook_url: z.string().url().nullable(),
@@ -651,6 +741,7 @@ export const companionTriggerDraftSchema = z.object({
   name: companionTriggerNameSchema,
   prompt: companionTriggerPromptSchema,
   provider: companionTriggerProviderSchema,
+  target: z.lazy(() => companionTriggerTargetSchema).nullable().optional(),
   enabled: z.boolean().default(true),
 }).strict();
 export type CompanionTriggerDraft = z.infer<typeof companionTriggerDraftSchema>;
@@ -672,7 +763,23 @@ export const companionTriggerProposalSchema = z.object({
   name: companionTriggerNameSchema,
   prompt: companionTriggerPromptSchema,
   provider: companionTriggerProviderSchema,
+  target: z.lazy(() => companionTriggerTargetSchema).optional(),
 }).strict().superRefine((proposal, context) => {
+  // Approval creates the trigger in one SQL call, so a partial github target would dead-end the
+  // pending decision: require the full target here, before the card is ever shown.
+  if (proposal.provider === "github") {
+    if (!proposal.target?.repo || !proposal.target.events?.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "a github trigger proposal requires a target repo and at least one event",
+      });
+    }
+  } else if (proposal.target) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `a ${proposal.provider} trigger proposal does not support a target yet`,
+    });
+  }
   if (utf8ByteLength(JSON.stringify(proposal)) > COMPANION_CONFIG_PROPOSAL_MAX_BYTES) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
@@ -830,10 +937,11 @@ export const companionAttachmentContentTypeSchema = z.enum(COMPANION_ATTACHMENT_
 export type CompanionAttachmentContentType = z.infer<typeof companionAttachmentContentTypeSchema>;
 
 export function isCompanionAttachmentImage(contentType: string): boolean {
+  // SAFETY: every member of the const MIME tuple is a string; this cast only widens it for includes().
   return (COMPANION_ATTACHMENT_IMAGE_MIME_TYPES as readonly string[]).includes(contentType);
 }
 
-const COMPANION_ATTACHMENT_EXTENSION_TO_MIME: Record<string, CompanionAttachmentContentType> = {
+const COMPANION_ATTACHMENT_EXTENSION_TO_MIME = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
@@ -845,7 +953,7 @@ const COMPANION_ATTACHMENT_EXTENSION_TO_MIME: Record<string, CompanionAttachment
   ".md": "text/markdown",
   ".markdown": "text/markdown",
   ".json": "application/json",
-};
+} satisfies Record<string, CompanionAttachmentContentType>;
 
 /**
  * The type a client claims for one part, used only to refuse an obviously unsupported file before its
@@ -856,12 +964,17 @@ export function declaredCompanionAttachmentContentType(
   file: { type: string; name: string },
 ): CompanionAttachmentContentType | null {
   const declared = file.type.split(";")[0]?.trim().toLowerCase() ?? "";
+  // SAFETY: every member of the const MIME tuple is a string; this cast only widens it for includes().
   if ((COMPANION_ATTACHMENT_MIME_TYPES as readonly string[]).includes(declared)) {
+    // SAFETY: includes() above confirmed `declared` is one of the MIME tuple members.
     return declared as CompanionAttachmentContentType;
   }
   const extension = file.name.toLowerCase().match(/\.[^.]+$/)?.[0];
   if (extension && extension in COMPANION_ATTACHMENT_EXTENSION_TO_MIME) {
-    return COMPANION_ATTACHMENT_EXTENSION_TO_MIME[extension]!;
+    // SAFETY: the `in` check above guarantees extension is one of this table's literal keys.
+    return COMPANION_ATTACHMENT_EXTENSION_TO_MIME[
+      extension as keyof typeof COMPANION_ATTACHMENT_EXTENSION_TO_MIME
+    ]!;
   }
   return null;
 }
@@ -1213,6 +1326,7 @@ export const createCompanionInputSchema = z.object({
   model_id: companionModelIdSchema.optional(),
   selected_skill_ids: companionSelectedSkillIdsSchema.optional(),
   selected_mcp_account_ids: companionSelectedMcpAccountIdsSchema.optional(),
+  icon: companionIconPatchSchema.optional(),
 }).strict();
 export type CreateCompanionInput = z.infer<typeof createCompanionInputSchema>;
 
@@ -1237,6 +1351,7 @@ export const updateCompanionInputSchema = z.object({
   model_id: companionModelIdSchema.optional(),
   selected_skill_ids: companionSelectedSkillIdsSchema.optional(),
   selected_mcp_account_ids: companionSelectedMcpAccountIdsSchema.optional(),
+  icon: companionIconPatchSchema.optional(),
 }).strict().refine(
   (input) =>
     input.name !== undefined
@@ -1244,7 +1359,8 @@ export const updateCompanionInputSchema = z.object({
     || input.provider_id !== undefined
     || input.model_id !== undefined
     || input.selected_skill_ids !== undefined
-    || input.selected_mcp_account_ids !== undefined,
+    || input.selected_mcp_account_ids !== undefined
+    || input.icon !== undefined,
   "At least one Companion setting is required",
 );
 export type UpdateCompanionInput = z.infer<typeof updateCompanionInputSchema>;

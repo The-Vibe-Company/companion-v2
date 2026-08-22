@@ -97,6 +97,18 @@ describe("Skills Hub runtime-role grants", () => {
     expect(sql).toContain(
       "companion_runtime_claim_work(text,integer,integer,bigint,integer)",
     );
+    expect(sql).toContain(
+      "companion_runtime_claim_work(text,integer,integer,bigint,integer,integer)",
+    );
+    expect(sql).toContain(
+      "companion_runtime_defer_delete(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)",
+    );
+    expect(sql).toContain(
+      "'public.companion_runtime_claim_work_without_delete_resume_guard(text,integer,integer,bigint,integer)'::regprocedure",
+    );
+    expect(sql).toContain(
+      "'public.companion_runtime_claim_work_material_v1(text,integer,integer,bigint,integer,integer)'::regprocedure",
+    );
     expect(sql).toContain("pg_catalog.aclexplode(");
     expect(sql).toContain("acl.grantee <> protected_proc.proowner");
     expect(sql).toContain("defaults.defaclobjtype = 'f'");
@@ -119,8 +131,15 @@ describe("Skills Hub runtime-role grants", () => {
       sql.indexOf("companion_api_functions := ARRAY["),
       sql.indexOf("-- A migration owner can carry arbitrary", sql.indexOf("companion_api_functions := ARRAY[")),
     );
-    for (const signature of [
+    expect(sql).toContain("companion_api_create_function regprocedure");
+    expect(sql).toContain(
+      "companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid,smallint,smallint,smallint,smallint)",
+    );
+    expect(sql).toContain(
       "companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid)",
+    );
+    expect(apiBlock).toContain("companion_api_create_function,");
+    for (const signature of [
       "companion_api_update_companion(uuid,uuid,jsonb)",
       "companion_api_set_initial_provider(uuid,uuid,text,text)",
       "companion_api_set_workspace_access(uuid,uuid,public.companion_share_role)",

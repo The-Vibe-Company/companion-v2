@@ -10,6 +10,7 @@ import {
   COMPANION_CONFIG_PROPOSAL_MAX_IDS,
   COMPANION_CONFIG_PROPOSAL_SUMMARY_MAX_CHARACTERS,
   COMPANION_EXEC_TOOL_RUN_TIMEOUT_MS,
+  COMPANION_PLUGIN_TRIGGER_PROVIDERS,
   COMPANION_TOOL_KIND_NAME_TABLE,
   COMPANION_TOOL_RUN_TIMEOUT_MS,
   COMPANION_TRIGGER_PROVIDERS,
@@ -37,6 +38,7 @@ export function parseCompanionDecisionTitle(title: string): {
 } | null {
   const match = COMPANION_DECISION_TITLE_PATTERN.exec(title.trim());
   if (!match) return null;
+  // SAFETY: the regex has exactly one capturing group per alternative, so match[1] is always one of the listed kinds.
   return {
     kind: match[1] as "shell" | "file" | "question" | "config" | "routine" | "trigger",
     name: match[2]!,
@@ -66,6 +68,7 @@ const CONFIG_MAX_IDS = ${COMPANION_CONFIG_PROPOSAL_MAX_IDS};
 const CONFIG_SUMMARY_MAX = ${COMPANION_CONFIG_PROPOSAL_SUMMARY_MAX_CHARACTERS};
 const CONNECT_PROVIDERS = ${JSON.stringify(COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS)} as string[];
 const TRIGGER_PROVIDERS = ${JSON.stringify(COMPANION_TRIGGER_PROVIDERS)} as string[];
+const PLUGIN_TRIGGER_PROVIDERS = ${JSON.stringify(COMPANION_PLUGIN_TRIGGER_PROVIDERS)} as string[];
 const INTERACTIVE_TOOLS = new Set(["ask_user", "propose_config", "propose_routine", "propose_trigger", "request_plugin_connection"]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const CATALOG_PATH = \`$\{process.env.HOME || ""}/.companion/runtime/state/config-catalog.json\`;
@@ -152,16 +155,25 @@ function uniqueUuids(values: string[]): string[] | null {
 
 function readCatalog(): {
   skills?: Array<{ id: string; name?: string; slug?: string }>;
-  plugins?: Array<{ id: string; label?: string; provider?: string }>;
+  plugins?: Array<{ id: string; label?: string; provider?: string; selected?: boolean }>;
 } | null {
   try {
     return JSON.parse(readFileSync(CATALOG_PATH, "utf8")) as {
       skills?: Array<{ id: string; name?: string; slug?: string }>;
-      plugins?: Array<{ id: string; label?: string; provider?: string }>;
+      plugins?: Array<{ id: string; label?: string; provider?: string; selected?: boolean }>;
     };
   } catch {
     return null;
   }
+}
+
+/**
+ * Whether a plugin-backed trigger provider is usable: the config catalog must name at least one
+ * attached plugin of that provider. An unreadable catalog fails closed.
+ */
+function hasAttachedPlugin(provider: string): boolean {
+  if (!PLUGIN_TRIGGER_PROVIDERS.includes(provider)) return true;
+  return readCatalog()?.plugins?.some((plugin) => plugin.provider === provider && plugin.selected === true) ?? false;
 }
 
 function namedIds(
@@ -388,11 +400,13 @@ export default function companionPermissionBroker(pi: ExtensionAPI) {
     name: "propose_trigger",
     label: "Propose trigger",
     description:
-      "Propose a webhook trigger for Owner/Editor approval — a named prompt that runs when an external service posts an event. This only proposes; never claim a trigger is active without approval. The human approves and pastes the webhook URL into the external service.",
+      "Propose a webhook trigger for Owner/Editor approval — a named prompt that runs when an external service posts an event. linear and github triggers require the matching plugin attached to you; custom needs none. This only proposes; never claim a trigger is active without approval. The human approves and pastes the webhook URL into the external service.",
     parameters: Type.Object({
       name: Type.String({ description: "Short unique name, max 80 characters" }),
       prompt: Type.String({ description: "The prompt the Companion will run on each webhook event" }),
       provider: Type.String({ description: "linear, github, or custom" }),
+      repo: Type.Optional(Type.String({ description: "github only: repository as owner/repo the webhook watches" })),
+      events: Type.Optional(Type.Array(Type.String(), { description: "github only: webhook event names (push, pull_request, ...) or a single \"*\"; max 30" })),
       summary: Type.Optional(Type.String({ description: "One-line confirm copy for the human" })),
     }),
     executionMode: "sequential",
@@ -400,10 +414,39 @@ export default function companionPermissionBroker(pi: ExtensionAPI) {
       const name = typeof params.name === "string" ? params.name.trim() : "";
       const prompt = typeof params.prompt === "string" ? params.prompt.trim() : "";
       const provider = typeof params.provider === "string" ? params.provider.trim().toLowerCase() : "";
+      const repo = typeof params.repo === "string" ? params.repo.trim() : "";
+      const events = asStringList(params.events).map((event) => event.trim().toLowerCase()).filter(Boolean);
       const summaryArg = typeof params.summary === "string" ? params.summary.trim() : "";
       if (!TRIGGER_PROVIDERS.includes(provider)) {
         return {
           content: [{ type: "text", text: \`Error: propose_trigger provider must be one of \${TRIGGER_PROVIDERS.join(", ")}\` }],
+          details: { proposal: null, confirmed: null },
+        };
+      }
+      // A github proposal must carry its full target: approval creates the trigger in one SQL call,
+      // so a partial target would dead-end the pending decision.
+      if (provider === "github" && (!repo || events.length === 0)) {
+        return {
+          content: [{ type: "text", text: "Error: propose_trigger github triggers need both a repo (owner/repo) and at least one event" }],
+          details: { proposal: null, confirmed: null },
+        };
+      }
+      if (provider !== "github" && (repo || events.length)) {
+        return {
+          content: [{ type: "text", text: \`Error: \${provider} triggers do not take a repo or events yet\` }],
+          details: { proposal: null, confirmed: null },
+        };
+      }
+      if (events.some((event) => !/^\\*$|^[a-z_]{1,64}$/.test(event)) || events.length > 30) {
+        return {
+          content: [{ type: "text", text: "Error: propose_trigger events must be lowercase webhook event names or \"*\", at most 30" }],
+          details: { proposal: null, confirmed: null },
+        };
+      }
+      const target = provider === "github" ? { repo, events } : undefined;
+      if (!hasAttachedPlugin(provider)) {
+        return {
+          content: [{ type: "text", text: \`Error: \${provider} triggers require the \${provider} plugin attached to you. Propose attaching it with propose_config first; if it is not connected yet, ask with request_plugin_connection.\` }],
           details: { proposal: null, confirmed: null },
         };
       }
@@ -417,7 +460,9 @@ export default function companionPermissionBroker(pi: ExtensionAPI) {
           details: { proposal: null, confirmed: null },
         };
       }
-      const proposal = { kind: "trigger", name, prompt, provider };
+      const proposal = target
+        ? { kind: "trigger", name, prompt, provider, target }
+        : { kind: "trigger", name, prompt, provider };
       if (!ctx.hasUI) {
         return {
           content: [{ type: "text", text: "Error: no permission UI available" }],
@@ -450,9 +495,9 @@ export default function companionPermissionBroker(pi: ExtensionAPI) {
     name: "request_plugin_connection",
     label: "Request plugin connection",
     description:
-      "Ask the human to connect a new Linear, GitHub, or Notion plugin. This only proposes; they finish the connection in the web UI. After it is connected, propose attaching it on a later turn.",
+      "Ask the human to connect a supported plugin (${COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS.join(", ")}). This only proposes; they finish the connection in the web UI. After it is connected, propose attaching it on a later turn.",
     parameters: Type.Object({
-      server_name: Type.String({ description: "linear, github, or notion" }),
+      server_name: Type.String({ description: "One of: ${COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS.join(", ")}" }),
       reason: Type.Optional(Type.String({ description: "Why this plugin is needed" })),
     }),
     executionMode: "sequential",

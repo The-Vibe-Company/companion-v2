@@ -205,9 +205,12 @@ describe("Companions mobile viewport", () => {
     expect(css).not.toContain("companions-thread-scrim");
     // Nothing in this stylesheet may animate a surface across the screen. A keyframe that only
     // moves in place is not that, so the assertion is on what the keyframes do rather than on there
-    // being none.
-    for (const frame of rules.filter((rule) =>
-      rule.at.some((entry) => entry.startsWith("@keyframes")))) {
+    // being none. THE-382's companion-icon gaze is the one exception: the eyes of the blob move
+    // at most 2px inside their own face group, never a surface arriving from a side.
+    const movingFrames = rules.filter((rule) =>
+      rule.at.some((entry) => entry.startsWith("@keyframes")));
+    for (const frame of movingFrames.filter((frame) =>
+      !frame.at.some((entry) => entry.includes("companion-icon")))) {
       expect(frame.declarations).not.toMatch(/translate|left|right|inset|margin/);
     }
     expect(css).not.toContain("translateX(16px)");

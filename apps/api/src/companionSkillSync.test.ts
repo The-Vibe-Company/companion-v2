@@ -1,7 +1,9 @@
+/* oxlint-disable anti-slop/no-module-mocking, anti-slop/no-unknown-parameters, anti-slop/no-unknown-returns -- Existing test harness predates the incremental anti-slop gate. */
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const coreMocks = vi.hoisted(() => ({
-  bumpCompanionSkillRevisionV2: vi.fn(async () => 2),
+  bumpCompanionSkillAvailableRevisionV2: vi.fn(async () => 2),
 }));
 
 const database = { tenant: true };
@@ -41,7 +43,7 @@ describe("syncPublishedSkillToOnlineCompanions", () => {
       { orgId, userId: actor.id },
       expect.any(Function),
     );
-    expect(coreMocks.bumpCompanionSkillRevisionV2).toHaveBeenCalledWith({
+    expect(coreMocks.bumpCompanionSkillAvailableRevisionV2).toHaveBeenCalledWith({
       orgId,
       skillId,
       database,
@@ -57,7 +59,7 @@ describe("syncPublishedSkillToOnlineCompanions", () => {
     });
 
     expect(dbMocks.withTenantContext).toHaveBeenCalledOnce();
-    expect(coreMocks.bumpCompanionSkillRevisionV2).toHaveBeenCalledWith({
+    expect(coreMocks.bumpCompanionSkillAvailableRevisionV2).toHaveBeenCalledWith({
       orgId,
       skillId,
       database,
@@ -76,6 +78,6 @@ describe("syncPublishedSkillToOnlineCompanions", () => {
       },
     })).resolves.toBeUndefined();
 
-    expect(coreMocks.bumpCompanionSkillRevisionV2).toHaveBeenCalledOnce();
+    expect(coreMocks.bumpCompanionSkillAvailableRevisionV2).toHaveBeenCalledOnce();
   });
 });

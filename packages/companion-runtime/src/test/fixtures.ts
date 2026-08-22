@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-conditional-empty-object-spread, anti-slop/no-known-value-widening, anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unknown-returns, anti-slop/require-safety-comment-for-type-assertion -- Existing runtime fixture factory predates the incremental anti-slop gate. */
+
 import type { RuntimeClock } from "../clock";
 import type {
   RuntimeAttachmentStager,
@@ -30,6 +32,7 @@ import type {
   RuntimeSettlementInput,
   RuntimeConfigCatalog,
   RuntimeWorkMaterial,
+  RuntimeSkillUpdateMaterial,
 } from "../types";
 
 export const ORG_ID = "11111111-1111-4111-8111-111111111111";
@@ -279,12 +282,14 @@ export class MemoryRuntimeStore implements RuntimeStore {
   observations: RuntimeObservationInput[] = [];
   projected: RuntimePiProjection[][] = [];
   releases = 0;
+  deferredDeletes = 0;
   disables = 0;
   renewReturnsNull = false;
   renewals = 0;
   duplicateCleanups = new Map<string, DuplicateCleanup>();
   recordedMaterialSnapshots: Array<{ clientSurface: ClientSurface; materialExpiresAt: Date | null }> = [];
   publishedMaterialSnapshots: string[] = [];
+  skillUpdateErrors: Array<{ code: string; message: string }> = [];
 
   constructor(input: {
     authorization: RuntimeAuthorization;
@@ -455,6 +460,34 @@ export class MemoryRuntimeStore implements RuntimeStore {
     return { ...this.material };
   }
 
+  async getSkillUpdateMaterial(): Promise<RuntimeSkillUpdateMaterial | null> {
+    return {
+      targetSkillsRevision: this.authorization.targetSkillsRevision
+        ?? this.authorization.skillsRevision
+        ?? 1,
+      requiredSkillsRevision: this.authorization.skillsRevision ?? 1,
+      selectedSkillIds: this.authorization.skillRefs.map((ref) => ref.skill_id),
+      skillRefs: [...this.authorization.skillRefs],
+      skillMaterial: [...this.material.skillMaterial],
+    };
+  }
+
+  async commitSkillUpdate(
+    _fence: LeaseFence,
+    input: RuntimeSkillUpdateMaterial & { skillsDigest: string },
+  ): Promise<true | null> {
+    this.authorization.appliedSkillsRevision = input.targetSkillsRevision;
+    return true;
+  }
+
+  async recordSkillUpdateError(
+    _fence: LeaseFence,
+    input: { code: string; message: string },
+  ): Promise<true | null> {
+    this.skillUpdateErrors.push(input);
+    return true;
+  }
+
   async getConfigCatalog(): Promise<RuntimeConfigCatalog | null> {
     return this.material.configCatalog;
   }
@@ -611,6 +644,11 @@ export class MemoryRuntimeStore implements RuntimeStore {
     this.releases += 1;
     return true;
   }
+
+  async deferDelete(): Promise<boolean> {
+    this.deferredDeletes += 1;
+    return true;
+  }
 }
 
 export interface FakePorts {
@@ -717,10 +755,17 @@ export function fakePorts(store: MemoryRuntimeStore): FakePorts {
     stageExistingBox: async (input) => ({
       diskLayoutVersion: 14,
       appliedSettingsRevision: input.targetSettingsRevision,
-      appliedSkillsRevision: input.targetSkillsRevision,
+      appliedSkillsRevision: input.preserveInstalledSkills
+        ? input.authorization.appliedSkillsRevision
+        : input.targetSkillsRevision,
       materialExpiresAt: input.clientSurface === "native_mobile"
         ? null
         : new Date("2026-08-16T18:00:00.000Z"),
+    }),
+    stageSkillTree: async (input) => ({
+      appliedSkillsRevision: input.material.targetSkillsRevision,
+      skillsDigest: "a".repeat(64),
+      skillBytesTransferred: 0,
     }),
     refreshLayout: async () => ({ applied: "none" }),
     invalidateLayout: async () => undefined,

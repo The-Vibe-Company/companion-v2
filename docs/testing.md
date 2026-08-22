@@ -48,6 +48,12 @@ simulator; lifecycle commands must never execute against the CI host.
 
 ## Runtime test layers
 
+Skill synchronization coverage distinguishes publication-only available revisions from required
+selection revisions. PostgreSQL tests prove wake and desktop accept `applied >= required` while a
+publication is pending. Simulator and fault-injection tests cover `stop Pi -> update Skills ->
+start/archive`, safe auto-update failure, first install, corrupt digest, historical version refs,
+and takeover around the installed-tree checkpoint.
+
 ### Deterministic Box and Pi simulator
 
 - Fake the Box HTTP contract for create, paginated list, state, resume, stop/archive, permanent
@@ -102,6 +108,10 @@ Run API + worker + runtime + web + migrated PostgreSQL + Box/Pi simulator and pr
 - a vision model reads the checked-in image fixture and a text-only model fails explicitly;
 - stop then send, explicit Pi restart, explicit Full Box restart, and deletion during a queue obey
   precedence;
+- accepted permanent deletion sends `DELETE` exactly once, performs one operation GET per claim,
+  leaves no runtime slot occupied during 5/15/30/60-second PostgreSQL backoff, survives runtime
+  takeover with the same provider operation id, and removes the aggregate once on `completed` or
+  provider `404` without an Owner clicking Retry;
 - missing prompt ACK yields `interrupted`, blocks later turns, and Retry/Cancel each release it by
   their documented path;
 - Viewer, list, thread, and cross-tenant requests produce zero Box calls.
@@ -109,6 +119,11 @@ Run API + worker + runtime + web + migrated PostgreSQL + Box/Pi simulator and pr
 Inject failure before and after create, Box ready, Pi ready, prompt write, ACK, event projection,
 turn settlement, provider stop, and permanent delete. Every scenario must assert final database
 state, external call count, and user-visible outcome.
+
+Real-PostgreSQL deletion coverage must additionally prove the defer-and-release CAS is atomic, a
+stale fence cannot defer, the pre-migration claim signature returns no work, the versioned signature
+does, only the runtime role can invoke the defer function, and migration backfill selects only the
+newest eligible failed delete with a retained provider operation id.
 
 ## Time and health acceptance
 
@@ -120,21 +135,11 @@ state, external call count, and user-visible outcome.
 - Inactivity stall: ten minutes plus one sweep; absolute deadline: two hours plus one sweep.
 - `/healthz` fails when PostgreSQL, the claim loop, or the most recent sweep is unhealthy.
 
-The daily real-provider canary creates a disposable Companion, requires a reply, reads the checked-in
-image fixture, stops it, wakes it by sending, requires a second reply, and permanently deletes it.
-Missing secrets report `not configured`, never success. Keep the canary separate from merge-blocking
-simulator tests; legacy removal requires seven consecutive green days and no remaining purge-owned
-resources.
-
-The nightly performance probe runs ten disposable
-`create → prompt ACK → stop → resume → prompt ACK → delete` cycles. It reports provider-start and
-Box-ready-to-prompt-ACK P50/P95 separately, provider call counts, staging mode, and transferred Skill
-bytes. Deployment requires P95 ready-to-ACK at or below five seconds for unchanged text
-configuration; pull requests require one cleanup-safe cycle without an absolute latency threshold.
-Fault tests cover every boundary around list, create, resume, bundle upload/apply and pre-execution
-cleanup, activation, durable checkpoint, prompt write, and ACK. Regression coverage also proves
-pre-ACK events remain visible, known Box ids are identity-checked without listing, a stale broker is
-recycled after the disk-marker crash gap, and a bundled-skill checksum change defeats tree reuse.
+Deterministic fault tests cover every boundary around list, create, resume, bundle upload/apply,
+pre-execution cleanup, activation, durable checkpoint, prompt write, and ACK. Regression coverage
+also proves pre-ACK events remain visible, known Box ids are identity-checked without listing, a
+stale broker is recycled after the disk-marker crash gap, and a bundled-skill checksum change
+defeats tree reuse.
 
 The development-only startup autoresearch harness is launched explicitly with:
 
@@ -156,8 +161,12 @@ candidate checkout before Box contact. The controller binds results to the exact
 phase, tree, prefix, and cycle count; candidate messages cannot attest benchmark or cleanup output.
 Candidate checkouts run under a separate unprivileged OS identity with an isolated home and receive
 a random loopback proxy token, never the real Box or model credentials.
-The proxy allowlists the exact deterministic Box and snapshot identities, records provider-ready and
-correlated broker prompt-ACK timestamps, rejects reported metrics that outrun that evidence, and
+The proxy allowlists the exact deterministic Box and snapshot identities. Its snapshot list exposes
+the target (when present) plus one newest ready layout-14 parent read-only for the baker; it fails
+closed when no eligible parent exists and requires the baker clone that parent before later Boxes
+clone the target. An explicit non-2xx create response permits a same-source retry; a fetch failure
+or invalid 2xx observation makes the create ambiguous and blocks the lease. It records provider-ready
+and correlated broker prompt-ACK timestamps, rejects reported metrics that outrun that evidence, and
 checks provider `404` directly after cleanup. Before allowing candidate commands or file writes, it
 captures Node and Pi digests directly from the pristine ready baker Box. Its prompt probe requires
 the live systemd main process to run the byte-pinned generated broker with those exact executables
@@ -181,40 +190,6 @@ binding, lease serialization, timeout cleanup, required Box `404`, and resume ch
 contacting Conductor or Box. Secondary distributions include send-to-ACK,
 Pi/socket activation, broker preflight, provider calls, Skill bytes, staging modes, bake duration,
 snapshot size, and Stop/archive latency.
-
-The Box provider lifecycle job uses only the `COMPANION_BOX_E2E_API_KEY` repository secret. It
-creates a five-minute disposable Box, exercises file reads, metadata, hashing, and execution,
-archives and resumes the Box, proves those files remain usable, archives it again, and permanently
-deletes the exact provider resource in `finally`. Cleanup requires the provider's irrevocable
-deletion operation plus an immediate `404` for that Box; physical data removal may finish later in
-the provider's background operation. It runs only on a daily schedule or manual dispatch, never on
-pull requests. The optional `COMPANION_BOX_E2E_IMAGE` repository variable makes it clone a named
-runtime snapshot. If that snapshot has expired or was deleted, both real-provider probes retry once
-with a base Box; without the variable, they use a base Box directly. The archive/resume probe still
-covers the provider restore/syscall path in either base-Box case.
-
-Every commit pushed to an internal pull request also creates a disposable Box from the configured
-runtime image, falling back once to an empty Box when that named snapshot is missing, then stages
-the exact checkout's Pi layout and broker with the dedicated z.ai canary credential. Ambiguous
-create failures are never replayed. The job starts Pi, dispatches a unique first message, requires
-both the correlated assistant marker and `agent_settled`, then requests irrevocable deletion in
-`finally` and confirms the Box is no longer readable. A non-scheduled cold fallback stops after
-that first correlated reply; the scheduled benchmark retains the full archive/resume cycle and its
-five-second SLO, so a persistently unavailable named image remains visible. Only a same-repository
-PR authored and triggered by the repository's `COMPANION_BOX_E2E_TRUSTED_LOGIN` receives the dedicated canary
-credentials; forks and other contributors skip this real-provider job and retain the mandatory
-deterministic simulator gates. Before deletion the probe expunges persisted provider authentication,
-and a failed deletion is retried and reports only the safe disposable Box id needed for operator
-cleanup.
-
-The real Box/Pi delivery test runs for every commit pushed to an internal pull request. After the
-Box is deleted, CI replaces a marked performance block at the very end of the pull request
-description with the tested commit, result, phase timings, total duration, and workflow link. A run
-for an older head SHA never overwrites the report for a newer commit. GitHub does not support an
-`If-Match` precondition on pull-request updates, so the globally serialized reporter re-reads both
-the head SHA and description immediately before writing and retries a concurrent edit from its fresh
-body. Test failures still publish the timings collected before failure and only a stable error code;
-credentials, provider payloads, and raw Pi output are never copied into the description.
 
 ## Frontend gate
 

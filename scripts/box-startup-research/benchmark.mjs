@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
 import { appendFile, mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -77,6 +76,7 @@ const DURATION_PHASES = new Set([
   "resume_stage_skill_transfer",
   "resume_stage_skill_apply",
 ]);
+const FAILURE_PHASES = new Set([...DURATION_PHASES, "create", "first_message", "resume_message"]);
 const PROVIDER_OPERATIONS = new Set([
   "list_boxes",
   "create_box",
@@ -92,7 +92,12 @@ const PROVIDER_OPERATIONS = new Set([
 ]);
 const BOX_ID_PATTERN = /^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/;
 const SNAPSHOT_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
-const CREDENTIAL_SHAPE = /(?:authorization\s*[:=]\s*bearer\s+[A-Za-z0-9._-]{16,}|(?:api[_-]?key|token|secret|password)\s*[:=]\s*["'][^"']{16,})/i;
+const SAFE_CODE_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
+const CREDENTIAL_MATERIAL_PATTERN = /(?:authorization\s*[:=]\s*bearer\s+[A-Za-z0-9._-]{16,}|(?:api[_-]?key|token|secret|password)\s*[:=]\s*["'][^"']{16,})/i;
+// The provider can report a named snapshot as ready before its disk is usable as a creation
+// source. Give that immutable snapshot a bounded propagation window before the first measured
+// cycle; otherwise a benchmark can fail at create even though the bake and cleanup both succeed.
+export const SNAPSHOT_PROPAGATION_DELAY_MS = 60_000;
 
 function option(name) {
   const index = process.argv.indexOf(name);
@@ -105,11 +110,25 @@ function requiredOption(name) {
   return value;
 }
 
+function stringValue(value) {
+  if (value === null || value === undefined) return null;
+  try {
+    const candidate = String(value);
+    return candidate === value ? candidate : null;
+  } catch {
+    return null;
+  }
+}
+
+function recordValue(value) {
+  return value !== null && !Array.isArray(value) && Object(value) === value;
+}
+
 export function evaluatorRuntimeEnvironment(source = process.env) {
   const env = {};
   for (const name of ESSENTIAL_ENVIRONMENT_NAMES) {
-    const value = source[name];
-    if (typeof value === "string" && value.length > 0) env[name] = value;
+    const value = stringValue(source[name]);
+    if (value !== null && value.length > 0) env[name] = value;
   }
   return env;
 }
@@ -127,45 +146,45 @@ export function cleanupEnvironment(source = process.env) {
 }
 
 export function safeEnvironment(source = process.env, options = {}) {
-  const boxKey = options.boxApiKey ?? source.BOX_API_KEY?.trim()
-    ?? source.COMPANION_BOX_API_KEY?.trim();
-  const zaiKey = options.zaiApiKey ?? source.ZAI_API_KEY?.trim()
-    ?? source.COMPANION_BOX_E2E_ZAI_API_KEY?.trim();
+  const boxKey = options.boxApiKey ?? (source.BOX_API_KEY?.trim()
+    || source.COMPANION_BOX_API_KEY?.trim());
+  const zaiKey = options.zaiApiKey ?? (source.ZAI_API_KEY?.trim()
+    || source.COMPANION_BOX_E2E_ZAI_API_KEY?.trim());
   if (!boxKey || !zaiKey) throw new Error("research evaluator credentials are not configured");
-  return {
-    ...evaluatorRuntimeEnvironment(source),
-    ...(typeof options.home === "string" ? {
-      HOME: options.home,
-      XDG_CACHE_HOME: resolve(options.home, ".cache"),
-      XDG_CONFIG_HOME: resolve(options.home, ".config"),
-      XDG_DATA_HOME: resolve(options.home, ".local/share"),
-    } : {}),
-    ...(typeof options.tempDirectory === "string" ? {
-      TMPDIR: options.tempDirectory,
-      TMP: options.tempDirectory,
-      TEMP: options.tempDirectory,
-    } : {}),
-    BOX_API_KEY: "",
-    COMPANION_BOX_API_KEY: boxKey,
-    ZAI_API_KEY: "",
-    COMPANION_BOX_E2E_ZAI_API_KEY: zaiKey,
-    COMPANION_BOX_E2E_PROMPT_ACK_ONLY: "1",
-    ...(typeof options.boxApiBase === "string" ? {
-      COMPANION_BOX_API_BASE: options.boxApiBase,
-    } : {}),
-    ...(typeof options.leaseTokenHash === "string" ? {
-      BOX_STARTUP_RESEARCH_LEASE_TOKEN_HASH: options.leaseTokenHash,
-    } : {}),
-    ...(typeof options.evaluatorChecksum === "string" ? {
-      BOX_STARTUP_RESEARCH_EVALUATOR_CHECKSUM: options.evaluatorChecksum,
-    } : {}),
-    ...(typeof options.logDirectory === "string" ? {
-      BOX_STARTUP_RESEARCH_LOG_DIRECTORY: options.logDirectory,
-    } : {}),
-    ...(typeof options.snapshotName === "string" ? {
-      BOX_STARTUP_RESEARCH_SNAPSHOT_NAME: options.snapshotName,
-    } : {}),
-  };
+  const env = evaluatorRuntimeEnvironment(source);
+  const home = stringValue(options.home);
+  if (home !== null) {
+    env.HOME = home;
+    env.XDG_CACHE_HOME = resolve(home, ".cache");
+    env.XDG_CONFIG_HOME = resolve(home, ".config");
+    env.XDG_DATA_HOME = resolve(home, ".local/share");
+  }
+  const tempDirectory = stringValue(options.tempDirectory);
+  if (tempDirectory !== null) {
+    env.TMPDIR = tempDirectory;
+    env.TMP = tempDirectory;
+    env.TEMP = tempDirectory;
+  }
+  env.BOX_API_KEY = "";
+  env.COMPANION_BOX_API_KEY = boxKey;
+  env.ZAI_API_KEY = "";
+  env.COMPANION_BOX_E2E_ZAI_API_KEY = zaiKey;
+  env.COMPANION_BOX_E2E_PROMPT_ACK_ONLY = "1";
+  const boxApiBase = stringValue(options.boxApiBase);
+  if (boxApiBase !== null) env.COMPANION_BOX_API_BASE = boxApiBase;
+  const leaseTokenHashValue = stringValue(options.leaseTokenHash);
+  if (leaseTokenHashValue !== null) {
+    env.BOX_STARTUP_RESEARCH_LEASE_TOKEN_HASH = leaseTokenHashValue;
+  }
+  const evaluatorChecksumValue = stringValue(options.evaluatorChecksum);
+  if (evaluatorChecksumValue !== null) {
+    env.BOX_STARTUP_RESEARCH_EVALUATOR_CHECKSUM = evaluatorChecksumValue;
+  }
+  const logDirectory = stringValue(options.logDirectory);
+  if (logDirectory !== null) env.BOX_STARTUP_RESEARCH_LOG_DIRECTORY = logDirectory;
+  const snapshotName = stringValue(options.snapshotName);
+  if (snapshotName !== null) env.BOX_STARTUP_RESEARCH_SNAPSHOT_NAME = snapshotName;
+  return env;
 }
 
 async function run(command, args, options = {}) {
@@ -198,7 +217,7 @@ async function run(command, args, options = {}) {
 
 export function assertSafeEvaluatorOutput(value, env = process.env) {
   assertNoCredentialMaterial(value, env);
-  if (CREDENTIAL_SHAPE.test(value)) {
+  if (CREDENTIAL_MATERIAL_PATTERN.test(value)) {
     throw new Error("evaluator output contains credential-shaped material");
   }
 }
@@ -214,11 +233,15 @@ function jsonEvents(contents) {
   return contents.split(/\r?\n/).flatMap((line) => {
     try {
       const value = JSON.parse(line);
-      return value && typeof value === "object" && !Array.isArray(value) ? [value] : [];
+      return recordValue(value) ? [value] : [];
     } catch {
       return [];
     }
   });
+}
+
+function pause(milliseconds) {
+  return new Promise((resolvePause) => setTimeout(resolvePause, milliseconds));
 }
 
 function nonNegativeInteger(value) {
@@ -299,8 +322,9 @@ export function sanitizeCycleEvents(events, resourcePrefixValue) {
       continue;
     }
     if (event.phase === "resource" && event.status === "created") {
-      if (event.resource_kind !== "box" || typeof event.resource_id !== "string"
-        || !BOX_ID_PATTERN.test(event.resource_id) || event.research_tag !== resourcePrefixValue) {
+      const resourceId = stringValue(event.resource_id);
+      if (event.resource_kind !== "box" || resourceId === null
+        || !BOX_ID_PATTERN.test(resourceId) || event.research_tag !== resourcePrefixValue) {
         throw new Error("evaluator created a resource outside the lease");
       }
       resources += 1;
@@ -308,7 +332,7 @@ export function sanitizeCycleEvents(events, resourcePrefixValue) {
         phase: "resource",
         status: "created",
         resource_kind: "box",
-        resource_id: event.resource_id,
+        resource_id: resourceId,
         research_tag: resourcePrefixValue,
       });
       continue;
@@ -328,6 +352,60 @@ export function sanitizeCycleEvents(events, resourcePrefixValue) {
   }
   if (resources !== 1 || cleanups !== 1 || terminals !== 1) {
     throw new Error("evaluator cycle did not prove one leased resource and cleanup");
+  }
+  return safe;
+}
+
+export function sanitizeFailedCycleEvents(events, resourcePrefixValue) {
+  const safe = [];
+  let resources = 0;
+  let cleanups = 0;
+  let terminals = 0;
+  for (const event of events) {
+    if (FAILURE_PHASES.has(event.phase) && event.status === "failed") {
+      const durationMs = nonNegativeInteger(event.duration_ms);
+      const code = stringValue(event.code);
+      if (durationMs === null || code === null || !SAFE_CODE_PATTERN.test(code)) {
+        throw new Error("evaluator returned an invalid failure event");
+      }
+      safe.push({ phase: event.phase, status: "failed", duration_ms: durationMs, code });
+      continue;
+    }
+    if (event.phase === "resource" && event.status === "created") {
+      const resourceId = stringValue(event.resource_id);
+      if (event.resource_kind !== "box" || resourceId === null
+        || !BOX_ID_PATTERN.test(resourceId) || event.research_tag !== resourcePrefixValue) {
+        throw new Error("evaluator created a resource outside the lease");
+      }
+      resources += 1;
+      safe.push({
+        phase: "resource",
+        status: "created",
+        resource_kind: "box",
+        resource_id: resourceId,
+        research_tag: resourcePrefixValue,
+      });
+      continue;
+    }
+    if (event.phase === "cleanup" && event.status === "succeeded") {
+      if (event.research_tag !== resourcePrefixValue) {
+        throw new Error("evaluator cleanup is outside the lease");
+      }
+      cleanups += 1;
+      safe.push({ phase: "cleanup", status: "succeeded", research_tag: resourcePrefixValue });
+      continue;
+    }
+    if (event.phase === "runtime_change_e2e" && event.status === "failed") {
+      const code = stringValue(event.code);
+      if (code === null || !SAFE_CODE_PATTERN.test(code)) {
+        throw new Error("evaluator returned an invalid terminal failure");
+      }
+      terminals += 1;
+      safe.push({ phase: "runtime_change_e2e", status: "failed", code });
+    }
+  }
+  if (resources > 1 || cleanups !== 1 || terminals !== 1) {
+    throw new Error("failed evaluator cycle did not prove bounded cleanup");
   }
   return safe;
 }
@@ -469,6 +547,8 @@ export async function runLeasedBenchmark(raw = {}) {
     }
     await appendStructuredEvents(logPath, [imageEvent]);
 
+    await pause(SNAPSHOT_PROPAGATION_DELAY_MS);
+
     for (let index = 0; index < lease.cycles; index += 1) {
       if (Date.now() >= expiresAt) throw new Error("benchmark lease expired during execution");
       const cycle = await run("pnpm", ["e2e:box-runtime-change"], {
@@ -481,7 +561,15 @@ export async function runLeasedBenchmark(raw = {}) {
         },
         label: `benchmark cycle ${index + 1}`,
       });
-      const events = sanitizeCycleEvents(checkedOutput(cycle, env), lease.resourcePrefix);
+      assertSafeEvaluatorOutput(cycle.stdout, env);
+      assertSafeEvaluatorOutput(cycle.stderr, env);
+      const rawEvents = jsonEvents(cycle.stdout);
+      if (cycle.code !== 0) {
+        const failedEvents = sanitizeFailedCycleEvents(rawEvents, lease.resourcePrefix);
+        await appendStructuredEvents(logPath, failedEvents);
+        throw new Error(`${cycle.label} failed`);
+      }
+      const events = sanitizeCycleEvents(rawEvents, lease.resourcePrefix);
       const contents = `${events.map((event) => JSON.stringify(event)).join("\n")}\n`;
       cycleContents += contents;
       await appendStructuredEvents(logPath, events);
@@ -509,8 +597,8 @@ export async function runLeasedBenchmark(raw = {}) {
     benchmark,
     cleanup: cleanupLedger,
     bakeDurationMs,
-    ...(snapshotSizeBytes === undefined ? {} : { snapshotSizeBytes }),
   };
+  if (snapshotSizeBytes !== undefined) result.snapshotSizeBytes = snapshotSizeBytes;
   process.stdout.write(`${RESULT_SENTINEL}${JSON.stringify(result)}\n`);
   return result;
 }

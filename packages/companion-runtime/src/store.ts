@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-known-value-widening, anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Existing PostgreSQL row decoder predates the incremental anti-slop gate. */
+
 import {
   decodeGateStatusRow,
   decodeRuntimeAuthorizationRow,
@@ -17,6 +19,7 @@ import {
   type RuntimeSettlementInput,
   type RuntimeConfigCatalog,
   type RuntimeWorkMaterial,
+  type RuntimeSkillUpdateMaterial,
 } from "./types";
 import {
   COMPANION_ATTACHMENT_FILENAME_PATTERN,
@@ -48,6 +51,17 @@ export interface RuntimeStore {
     fence: LeaseFence,
     leaseSeconds: typeof RUNTIME_LEASE_SECONDS,
   ): Promise<RuntimeWorkMaterial | null>;
+  getSkillUpdateMaterial(
+    fence: LeaseFence,
+    leaseSeconds: typeof RUNTIME_LEASE_SECONDS,
+  ): Promise<RuntimeSkillUpdateMaterial | null>;
+  commitSkillUpdate(fence: LeaseFence, input: RuntimeSkillUpdateMaterial & {
+    skillsDigest: string;
+  }): Promise<true | null>;
+  recordSkillUpdateError(fence: LeaseFence, input: {
+    code: string;
+    message: string;
+  }): Promise<true | null>;
   getConfigCatalog(
     fence: LeaseFence,
     leaseSeconds: typeof RUNTIME_LEASE_SECONDS,
@@ -104,6 +118,7 @@ export interface RuntimeStore {
     providerOperationId?: string;
   }): Promise<DuplicateCleanup | null>;
   settle(fence: LeaseFence, input: RuntimeSettlementInput): Promise<boolean>;
+  deferDelete(fence: LeaseFence): Promise<boolean>;
   release(fence: LeaseFence): Promise<boolean>;
 }
 
@@ -386,6 +401,37 @@ function decodeMaterial(row: RuntimeSqlRow): RuntimeWorkMaterial {
   };
 }
 
+function decodeSkillUpdateMaterial(row: RuntimeSqlRow): RuntimeSkillUpdateMaterial {
+  const revision = row.target_skills_revision;
+  const requiredRevision = row.required_skills_revision;
+  const selected = row.selected_skill_ids;
+  const refs = objectArray(row, "skill_refs");
+  // SAFETY: Number.isSafeInteger proves both revision values are finite integers before comparison.
+  if (
+    !Number.isSafeInteger(revision)
+    || (revision as number) < 1
+    || !Number.isSafeInteger(requiredRevision)
+    || (requiredRevision as number) < 1
+    || (requiredRevision as number) > (revision as number)
+    || !Array.isArray(selected)
+    || selected.some((id) => typeof id !== "string" || !UUID_PATTERN.test(id))
+  ) throw new RuntimeStoreContractError();
+  const skillRefs = refs.map((ref) => {
+    const skillId = nullableUuidText(ref, "skill_id");
+    const versionId = nullableUuidText(ref, "current_version_id");
+    if (skillId === null || versionId === null) throw new RuntimeStoreContractError();
+    return { skill_id: skillId, current_version_id: versionId };
+  });
+  return {
+    // SAFETY: The checks above establish the revision bounds and UUID-only selected Skill ids.
+    targetSkillsRevision: revision as number,
+    requiredSkillsRevision: requiredRevision as number,
+    selectedSkillIds: selected as string[],
+    skillRefs,
+    skillMaterial: objectArray(row, "skill_material"),
+  };
+}
+
 function decodeConfigCatalog(row: RuntimeSqlRow): RuntimeConfigCatalog {
   const catalog = row.catalog;
   const value = objectValue(catalog);
@@ -638,7 +684,7 @@ export class PostgresRuntimeStore implements RuntimeStore {
       const rows = await this.sql.unsafe<RuntimeSqlRow[]>(`
         SELECT ${CLAIM_COLUMNS}
         FROM public.companion_runtime_claim_work(
-          $1::text, $2::integer, $3::integer, $4::bigint, 2::integer
+          $1::text, $2::integer, $3::integer, $4::bigint, 2::integer, 1::integer
         )
       `, [input.executorId, input.limit, input.leaseSeconds, input.gateEpoch.toString()]);
       return rows.map(decodeRuntimeClaimRow);
@@ -732,6 +778,70 @@ export class PostgresRuntimeStore implements RuntimeStore {
       `, [...fenceParameters(fence), leaseSeconds]);
       if (rows.length === 0) return null;
       return decodeMaterial(one(rows, "work material"));
+    }, true);
+  }
+
+  async getSkillUpdateMaterial(
+    fence: LeaseFence,
+    leaseSeconds: typeof RUNTIME_LEASE_SECONDS,
+  ): Promise<RuntimeSkillUpdateMaterial | null> {
+    return await mapped(async () => {
+      const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
+        SELECT target_skills_revision, required_skills_revision,
+               selected_skill_ids, skill_refs, skill_material
+        FROM public.companion_runtime_get_skill_update_material(
+          $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
+          $6::text, $7::public.companion_runtime_work_kind, $8::uuid, $9::integer
+        )
+      `, [...fenceParameters(fence), leaseSeconds]);
+      if (rows.length === 0) return null;
+      return decodeSkillUpdateMaterial(one(rows, "Skill update material"));
+    }, true);
+  }
+
+  async commitSkillUpdate(
+    fence: LeaseFence,
+    input: RuntimeSkillUpdateMaterial & { skillsDigest: string },
+  ): Promise<true | null> {
+    return await mapped(async () => {
+      const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
+        SELECT public.companion_runtime_commit_skill_update(
+          $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
+          $6::text, $7::public.companion_runtime_work_kind, $8::uuid,
+          ${RUNTIME_LEASE_SECONDS}::integer,
+          $9::integer, $10::jsonb, $11::jsonb, $12::text
+        ) AS committed
+      `, [
+        ...fenceParameters(fence),
+        input.targetSkillsRevision,
+        JSON.stringify(input.selectedSkillIds),
+        JSON.stringify(input.skillRefs),
+        input.skillsDigest,
+      ]);
+      const value = one(rows, "commit Skill update").committed;
+      if (value === null) return null;
+      if (value !== true) throw new RuntimeStoreContractError();
+      return true;
+    }, true);
+  }
+
+  async recordSkillUpdateError(
+    fence: LeaseFence,
+    input: { code: string; message: string },
+  ): Promise<true | null> {
+    return await mapped(async () => {
+      const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
+        SELECT public.companion_runtime_record_skill_update_error(
+          $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
+          $6::text, $7::public.companion_runtime_work_kind, $8::uuid,
+          ${RUNTIME_LEASE_SECONDS}::integer,
+          $9::text, $10::text
+        ) AS recorded
+      `, [...fenceParameters(fence), input.code, input.message]);
+      const value = one(rows, "record Skill update error").recorded;
+      if (value === null) return null;
+      if (value !== true) throw new RuntimeStoreContractError();
+      return true;
     }, true);
   }
 
@@ -1008,6 +1118,18 @@ export class PostgresRuntimeStore implements RuntimeStore {
         ) AS released
       `, fenceParameters(fence));
       return booleanResult(rows, "released");
+    }, true);
+  }
+
+  async deferDelete(fence: LeaseFence): Promise<boolean> {
+    return await mapped(async () => {
+      const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
+        SELECT public.companion_runtime_defer_delete(
+          $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
+          $6::text, $7::public.companion_runtime_work_kind, $8::uuid
+        ) AS deferred
+      `, fenceParameters(fence));
+      return booleanResult(rows, "deferred");
     }, true);
   }
 }

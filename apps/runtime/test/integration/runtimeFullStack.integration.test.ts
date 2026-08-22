@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/require-safety-comment-for-type-assertion -- Existing simulator fixture decoding predates the incremental anti-slop gate. */
+
 /**
  * Product promise:
  * An accepted Companion message is durable independently of the API process, and the dedicated
@@ -97,9 +99,11 @@ interface BoxSimState {
       scenario: string;
     };
   }>;
-  deletions: Array<{ targetId: string; status: string }>;
+  deletions: Array<{ id: string; targetId: string; status: string }>;
   requests: Array<{ surface: string; method: string; path: string }>;
 }
+
+type BoxSimBox = BoxSimState["boxes"][number];
 
 class TerminalWaitError extends Error {}
 
@@ -645,7 +649,8 @@ async function turnDiagnostic(turnId: string): Promise<string> {
     order by attempt_number desc limit 1
   `.catch(() => []);
   const simulator = await simulatorState().catch(() => null);
-  const box = simulator?.boxes[0];
+  const boxId = await durableCompanionBoxId().catch(() => null);
+  const box = simulator && boxId ? boxById(simulator, boxId) : undefined;
   const processState = (processHandle: ManagedProcess | undefined) => ({
     running: Boolean(
       processHandle
@@ -705,6 +710,19 @@ async function boxControl<T>(path: string, init: RequestInit = {}): Promise<T> {
 async function simulatorState(): Promise<BoxSimState> {
   const result = await boxControl<{ state: BoxSimState }>("/state");
   return result.state;
+}
+
+async function durableCompanionBoxId(): Promise<string | null> {
+  const [instance] = await databaseSql!<Array<{ boxId: string | null }>>`
+    select box_id as "boxId"
+    from companion_runtime_instances
+    where org_id = ${orgId}::uuid and companion_id = ${companionId}::uuid
+  `;
+  return instance?.boxId ?? null;
+}
+
+function boxById(state: BoxSimState, boxId: string): BoxSimBox | undefined {
+  return state.boxes.find((candidate) => candidate.id === boxId);
 }
 
 beforeAll(async () => {
@@ -888,7 +906,8 @@ describe("Runtime v2 real-process control plane", () => {
     expect(persisted.thread.entries.some((entry) => entry.role === "assistant")).toBe(true);
 
     const stateAfterCold = await simulatorState();
-    const box = stateAfterCold.boxes[0];
+    const durableBoxId = await durableCompanionBoxId();
+    const box = durableBoxId ? boxById(stateAfterCold, durableBoxId) : undefined;
     if (!box) throw new Error("cold send did not create a Box");
     expect(box.state).toMatch(/ready|idle|running/);
     await boxControl(`/boxes/${box.id}/scenario`, {
@@ -916,7 +935,7 @@ describe("Runtime v2 real-process control plane", () => {
     `;
     if (!decision) throw new Error("ask_user did not project a durable decision");
     const beforeTakeover = await simulatorState();
-    const beforeBroker = beforeTakeover.boxes[0]?.daemon;
+    const beforeBroker = boxById(beforeTakeover, box.id)?.daemon;
     if (!beforeBroker) throw new Error("decision turn lost its broker state");
     const [attemptsBefore] = await databaseSql!<Array<{ count: number; dispatchCount: number }>>`
       select count(*)::int as count, max(dispatch_count)::int as "dispatchCount"
@@ -948,13 +967,13 @@ describe("Runtime v2 real-process control plane", () => {
     expect(attemptsAfter?.count).toBe(1);
     expect(attemptsAfter?.dispatchCount).toBe(1);
     const afterTakeover = await simulatorState();
-    expect(afterTakeover.boxes[0]?.daemon).toMatchObject({
+    const afterTakeoverBroker = boxById(afterTakeover, box.id)?.daemon;
+    expect(afterTakeoverBroker).toMatchObject({
       invocationId: beforeBroker.invocationId,
       activeAttemptId: null,
     });
-    expect(afterTakeover.boxes[0]?.daemon.tailCursor).toBeGreaterThan(beforeBroker.tailCursor);
-    expect(afterTakeover.boxes[0]?.daemon.acknowledgedCursor)
-      .toBe(afterTakeover.boxes[0]?.daemon.tailCursor);
+    expect(afterTakeoverBroker?.tailCursor).toBeGreaterThan(beforeBroker.tailCursor);
+    expect(afterTakeoverBroker?.acknowledgedCursor).toBe(afterTakeoverBroker?.tailCursor);
 
     await boxControl(`/boxes/${box.id}/scenario`, {
       method: "PUT",
@@ -1004,7 +1023,35 @@ describe("Runtime v2 real-process control plane", () => {
     );
     await waitForOperation(stop.operation.id, 30_000);
     await waitFor("Box to archive", async () =>
-      (await simulatorState()).boxes[0]?.state === "archived");
+      boxById(await simulatorState(), box.id)?.state === "archived");
+
+    const [installedBeforePublication] = await databaseSql!<Array<{
+      requiredRevision: number;
+      availableRevision: number;
+      appliedRevision: number;
+      digest: string | null;
+    }>>`
+      select companion.skills_revision as "requiredRevision",
+        companion.skills_available_revision as "availableRevision",
+        instance.applied_skills_revision as "appliedRevision",
+        instance.applied_skills_digest as digest
+      from companions companion
+      join companion_runtime_instances instance
+        on instance.org_id = companion.org_id and instance.companion_id = companion.id
+      where companion.org_id = ${orgId}::uuid and companion.id = ${companionId}::uuid
+    `;
+    expect(installedBeforePublication?.digest).toMatch(/^[0-9a-f]{64}$/);
+    expect(installedBeforePublication?.appliedRevision)
+      .toBe(installedBeforePublication?.availableRevision);
+    await databaseSql!.begin(async (tx) => {
+      await tx`select set_config('app.companion_runtime_protocol', '2', true)`;
+      await tx`
+        update companions
+        set skills_available_revision = skills_available_revision + 1
+        where org_id = ${orgId}::uuid and id = ${companionId}::uuid
+      `;
+    });
+    const publishedRevision = installedBeforePublication!.availableRevision + 1;
 
     const wake = await apiJson<{ turn: { id: string } }>(
       `/v1/companions/${companionId}/messages`,
@@ -1019,9 +1066,32 @@ describe("Runtime v2 real-process control plane", () => {
       202,
     );
     await waitForTurn(wake.turn.id, "succeeded", 30_000);
-    expect((await simulatorState()).boxes[0]?.state).toMatch(/ready|idle|running/);
+    expect(boxById(await simulatorState(), box.id)?.state).toMatch(/ready|idle|running/);
+    const [wakeSnapshot] = await databaseSql!<Array<{
+      targetRevision: number;
+      requiredRevision: number;
+      availableRevision: number;
+      appliedRevision: number;
+    }>>`
+      select operation.target_skills_revision as "targetRevision",
+        companion.skills_revision as "requiredRevision",
+        companion.skills_available_revision as "availableRevision",
+        instance.applied_skills_revision as "appliedRevision"
+      from companion_operations operation
+      join companions companion
+        on companion.org_id = operation.org_id and companion.id = operation.companion_id
+      join companion_runtime_instances instance
+        on instance.org_id = operation.org_id and instance.companion_id = operation.companion_id
+      where operation.source_turn_id = ${wake.turn.id}::uuid and operation.kind = 'start'
+    `;
+    expect(wakeSnapshot).toMatchObject({
+      targetRevision: installedBeforePublication!.appliedRevision,
+      requiredRevision: installedBeforePublication!.requiredRevision,
+      availableRevision: publishedRevision,
+      appliedRevision: installedBeforePublication!.appliedRevision,
+    });
 
-    const beforePiRestart = (await simulatorState()).boxes[0]?.daemon;
+    const beforePiRestart = boxById(await simulatorState(), box.id)?.daemon;
     if (!beforePiRestart?.invocationId) throw new Error("wake did not leave an observable Pi invocation");
     const restartPi = await apiJson<{ operation: { id: string } }>(
       `/v1/companions/${companionId}/runtime/restart`,
@@ -1033,7 +1103,36 @@ describe("Runtime v2 real-process control plane", () => {
       202,
     );
     await waitForOperation(restartPi.operation.id, 30_000);
-    const afterPiRestart = (await simulatorState()).boxes[0];
+    const [restartSnapshot] = await databaseSql!<Array<{
+      targetRevision: number;
+      requiredRevision: number;
+      availableRevision: number;
+      appliedRevision: number;
+      updateErrorCode: string | null;
+      updateErrorMessage: string | null;
+    }>>`
+      select operation.target_skills_revision as "targetRevision",
+        companion.skills_revision as "requiredRevision",
+        companion.skills_available_revision as "availableRevision",
+        instance.applied_skills_revision as "appliedRevision",
+        instance.skills_update_error_code as "updateErrorCode",
+        instance.skills_update_error_message as "updateErrorMessage"
+      from companion_operations operation
+      join companions companion
+        on companion.org_id = operation.org_id and companion.id = operation.companion_id
+      join companion_runtime_instances instance
+        on instance.org_id = operation.org_id and instance.companion_id = operation.companion_id
+      where operation.id = ${restartPi.operation.id}::uuid
+    `;
+    expect(restartSnapshot).toMatchObject({
+      targetRevision: publishedRevision,
+      requiredRevision: installedBeforePublication!.requiredRevision,
+      availableRevision: publishedRevision,
+      appliedRevision: publishedRevision,
+      updateErrorCode: null,
+      updateErrorMessage: null,
+    });
+    const afterPiRestart = boxById(await simulatorState(), box.id);
     expect(afterPiRestart).toMatchObject({
       id: box.id,
       state: expect.stringMatching(/ready|idle|running/),
@@ -1041,6 +1140,10 @@ describe("Runtime v2 real-process control plane", () => {
     });
     expect(afterPiRestart?.daemon.invocationId).not.toBe(beforePiRestart.invocationId);
 
+    await boxControl("/defaults", {
+      method: "PUT",
+      body: JSON.stringify({ deletePolls: 100 }),
+    });
     const deletion = await apiJson<{ operation: { id: string } }>(
       `/v1/companions/${companionId}`,
       {
@@ -1049,6 +1152,44 @@ describe("Runtime v2 real-process control plane", () => {
       },
       202,
     );
+    const acceptedDeletion = await waitFor("accepted Box deletion to be deferred", async () => {
+      const state = await simulatorState();
+      const providerDeletion = state.deletions.find((operation) => operation.targetId === box.id);
+      const deleteRequests = state.requests.filter((request) =>
+        request.surface === "box" && request.method === "DELETE"
+          && request.path === `/boxes/${box.id}`);
+      const polls = state.requests.filter((request) =>
+        request.surface === "box" && request.method === "GET"
+          && request.path.startsWith("/deletion-operations/"));
+      if (!providerDeletion || deleteRequests.length !== 1 || polls.length < 1) return false;
+      const [durable] = await databaseSql!<Array<{
+        status: string;
+        providerOperationId: string | null;
+        leaseToken: string | null;
+      }>>`
+        select operation.status::text, operation.provider_operation_id as "providerOperationId",
+          lease.claim_token::text as "leaseToken"
+        from companion_operations operation
+        join companion_runtime_leases lease
+          on lease.org_id = operation.org_id and lease.companion_id = operation.companion_id
+        where operation.id = ${deletion.operation.id}::uuid
+      `;
+      return durable?.status === "pending"
+          && durable.providerOperationId === providerDeletion.id
+          && durable.leaseToken === null
+        ? providerDeletion
+        : false;
+    }, 30_000);
+
+    // A different runtime takes over the same accepted provider operation. Completion is injected
+    // only after the first runtime has released its slot; no executor is allowed to replay DELETE.
+    await stopProcess(runtimeProcess, "SIGKILL");
+    runtimeProcess = startRuntime(randomUUID());
+    await waitForHttp(`${runtimeBase}/healthz`, runtimeProcess);
+    await boxControl(`/deletion-operations/${acceptedDeletion.id}`, {
+      method: "PUT",
+      body: JSON.stringify({ status: "completed" }),
+    });
     await waitFor("delete settlement audit", async () => {
       const [audit] = await databaseSql!<Array<{ operationId: string | null }>>`
         select metadata ->> 'operation_id' as "operationId"
@@ -1064,7 +1205,7 @@ describe("Runtime v2 real-process control plane", () => {
     }, 30_000);
     await waitFor("permanent Box deletion", async () => {
       const state = await simulatorState();
-      return state.boxes.length === 0
+      return !boxById(state, box.id)
         && state.deletions.some((operation) =>
           operation.targetId === box.id && operation.status === "completed");
     });
@@ -1072,6 +1213,10 @@ describe("Runtime v2 real-process control plane", () => {
       select count(*)::int as count from companions where id = ${companionId}::uuid
     `;
     expect(root?.count).toBe(0);
+    const finalProviderState = await simulatorState();
+    expect(finalProviderState.requests.filter((request) =>
+      request.surface === "box" && request.method === "DELETE"
+        && request.path === `/boxes/${box.id}`)).toHaveLength(1);
     assertProcessAlive(workerProcess);
   }, 180_000);
 });

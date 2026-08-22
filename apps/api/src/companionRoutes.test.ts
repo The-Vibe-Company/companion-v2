@@ -1140,6 +1140,8 @@ describe("Companions Runtime v2 API", () => {
       name: "CI failed on main",
       prompt: "Investigate the failing workflow.",
       provider: "github" as const,
+      target: { repo: "acme/widgets", events: ["workflow_run"] },
+      registration_status: "registered" as const,
       enabled: true,
       webhook_url: `http://127.0.0.1:3000/v1/hooks/triggers/${TRIGGER_ID}/${TRIGGER_SECRET}`,
       last_fired_at: null,
@@ -1169,6 +1171,7 @@ describe("Companions Runtime v2 API", () => {
         name: trigger.name,
         prompt: trigger.prompt,
         provider: trigger.provider,
+        target: trigger.target,
         enabled: true,
       }),
     );

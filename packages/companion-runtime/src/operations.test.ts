@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-runtime-typeof, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Existing runtime fixtures predate the incremental anti-slop gate. */
+
 import { describe, expect, it } from "vitest";
 import { RuntimeEngine } from "./engine";
 import { RuntimeStoreIndeterminateError } from "./store";
@@ -420,7 +422,7 @@ describe("runtime lifecycle operations", () => {
     expect(store.authorization.workCheckpoint).toBe("provider_deleted");
   });
 
-  it("keeps polling while Box reports a blocked deletion and succeeds when it completes", async () => {
+  it("defers a blocked accepted deletion after exactly one provider poll", async () => {
     const claim: OperationRuntimeClaim = {
       ...operationClaim(),
       clientSurface: null,
@@ -442,23 +444,26 @@ describe("runtime lifecycle operations", () => {
       }),
     });
     const ports = fakePorts(store);
-    let polls = 0;
-    ports.box.pollPermanentDeletion = async () => {
-      polls += 1;
-      return polls < 3 ? { status: "blocked" } : { status: "completed" };
+    const polls: string[] = [];
+    ports.box.pollPermanentDeletion = async ({ operationId }) => {
+      polls.push(operationId);
+      return { status: "blocked" };
     };
     const clock = new TestClock();
 
     const result = await new RuntimeEngine(engineDependencies({ store, ports, clock })).execute(claim);
 
-    expect(result.outcome).toBe("succeeded");
-    expect(polls).toBe(3);
-    expect(clock.sleeps).toEqual([1_000, 1_000]);
-    expect(store.authorization.workCheckpoint).toBe("provider_deleted");
-    expect(store.settlements).toEqual([{ terminalStatus: "succeeded" }]);
+    expect(result.outcome).toBe("released");
+    expect(polls).toEqual(["bdop_00000000000000000000000000000001"]);
+    expect(clock.sleeps).toEqual([]);
+    expect(store.authorization.workCheckpoint).toBe("waiting_deleted");
+    expect(store.authorization.providerOperationId)
+      .toBe("bdop_00000000000000000000000000000001");
+    expect(store.deferredDeletes).toBe(1);
+    expect(store.settlements).toEqual([]);
   });
 
-  it("does not treat a still-blocked deletion as a non-retryable failure", async () => {
+  it("defers an accepted deletion even after its former operation deadline", async () => {
     const claim: OperationRuntimeClaim = {
       ...operationClaim(),
       clientSurface: null,
@@ -489,12 +494,9 @@ describe("runtime lifecycle operations", () => {
       clock: new TestClock(),
     })).execute(claim);
 
-    expect(result.outcome).toBe("failed");
-    expect(store.settlements[0]?.error).toMatchObject({
-      code: "box_delete_deadline_exceeded",
-      action: "retry",
-    });
-    expect(store.settlements[0]?.error?.code).not.toBe("box_delete_blocked");
+    expect(result.outcome).toBe("released");
+    expect(store.deferredDeletes).toBe(1);
+    expect(store.settlements).toEqual([]);
   });
 
   it("deletes a duplicate that appears after deterministic Box naming before staging", async () => {
@@ -731,6 +733,89 @@ describe("runtime lifecycle operations", () => {
     }]);
     expect(store.publishedMaterialSnapshots).toEqual([PI_INVOCATION_ID]);
     expect(store.authorization.piInvocationId).toBe(PI_INVOCATION_ID);
+  });
+
+  it("keeps the installed tree and completes Restart Pi when an auto-update fails", async () => {
+    const claim = operationClaim({ operationKind: "restart_pi", targetSkillsRevision: 2 });
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        boxId: BOX_ID,
+        boxState: "ready",
+        piState: "idle",
+        piInvocationId: "old-pi-invocation",
+        appliedSkillsRevision: 1,
+        skillsRevision: 1,
+      }),
+    });
+    store.getSkillUpdateMaterial = async () => ({
+      targetSkillsRevision: 2,
+      requiredSkillsRevision: 1,
+      selectedSkillIds: [],
+      skillRefs: [],
+      skillMaterial: [],
+    });
+    const effects: string[] = [];
+    store.recordSkillUpdateError = async (_fence, error) => {
+      effects.push(`error:${error.code}`);
+      return true;
+    };
+    const ports = fakePorts(store);
+    ports.pi.stopPiDaemon = async () => { effects.push("stop-pi"); };
+    ports.resourceStager.stageSkillTree = async () => {
+      effects.push("update-skills");
+      throw new Error("simulated archive failure");
+    };
+    const originalStage = ports.resourceStager.stageExistingBox;
+    ports.resourceStager.stageExistingBox = async (input) => {
+      effects.push("stage-preserving-skills");
+      expect(input.preserveInstalledSkills).toBe(true);
+      return await originalStage(input);
+    };
+    ports.pi.restartPiDaemon = async () => {
+      effects.push("restart-pi");
+      return { state: "idle", invocationId: PI_INVOCATION_ID };
+    };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(store.authorization.appliedSkillsRevision).toBe(1);
+    expect(effects).toEqual([
+      "stop-pi",
+      "update-skills",
+      "error:skill_auto_update_failed",
+      "stage-preserving-skills",
+      "restart-pi",
+    ]);
+  });
+
+  it("blocks Restart Pi when a required Skill selection cannot be installed", async () => {
+    const claim = operationClaim({ operationKind: "restart_pi", targetSkillsRevision: 2 });
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        boxId: BOX_ID,
+        boxState: "ready",
+        piState: "idle",
+        piInvocationId: "old-pi-invocation",
+        appliedSkillsRevision: 1,
+        skillsRevision: 2,
+      }),
+    });
+    const ports = fakePorts(store);
+    let restarts = 0;
+    ports.resourceStager.stageSkillTree = async () => {
+      throw new Error("simulated archive failure");
+    };
+    ports.pi.restartPiDaemon = async () => {
+      restarts += 1;
+      return { state: "idle", invocationId: PI_INVOCATION_ID };
+    };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("failed");
+    expect(restarts).toBe(0);
+    expect(store.authorization.appliedSkillsRevision).toBe(1);
   });
 
   it("activates staged settings with a new idle Pi invocation before publishing revisions", async () => {
@@ -1099,41 +1184,133 @@ describe("runtime lifecycle operations", () => {
     return { claim, store };
   }
 
-  it("polls through a transient blocked delete until the provider completes", async () => {
+  it.each(["pending", "processing", "blocked"] as const)(
+    "defers provider delete status %s without settling",
+    async (status) => {
+      const { claim, store } = deleteClaimAtWaitingDeleted();
+      const ports = fakePorts(store);
+      const polls: string[] = [];
+      ports.box.pollPermanentDeletion = async ({ operationId }) => {
+        polls.push(operationId);
+        return { status };
+      };
+
+      const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+      expect(result.outcome).toBe("released");
+      expect(polls).toEqual(["delete-op-1"]);
+      expect(store.authorization.providerOperationId).toBe("delete-op-1");
+      expect(store.deferredDeletes).toBe(1);
+      expect(store.settlements).toEqual([]);
+    },
+  );
+
+  it("defers an explicitly retryable provider GET error without settling", async () => {
     const { claim, store } = deleteClaimAtWaitingDeleted();
     const ports = fakePorts(store);
-    const polls: string[] = [];
-    let blockedPolls = 2;
-    ports.box.pollPermanentDeletion = async ({ operationId }) => {
-      polls.push(operationId);
-      if (blockedPolls > 0) {
-        blockedPolls -= 1;
-        return { status: "blocked" };
-      }
-      return { status: "completed" };
+    let polls = 0;
+    ports.box.pollPermanentDeletion = async () => {
+      polls += 1;
+      throw Object.assign(new Error("temporary outage"), { retryable: true, status: 503 });
     };
-    const clock = new TestClock();
 
-    const result = await new RuntimeEngine(engineDependencies({ store, ports, clock }))
-      .execute(claim);
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
 
-    expect(result.outcome).toBe("succeeded");
-    expect(polls).toEqual(["delete-op-1", "delete-op-1", "delete-op-1"]);
-    expect(clock.sleeps).toEqual([1_000, 1_000]);
-    expect(store.authorization.workCheckpoint).toBe("provider_deleted");
+    expect(result.outcome).toBe("released");
+    expect(polls).toBe(1);
+    expect(store.deferredDeletes).toBe(1);
+    expect(store.settlements).toEqual([]);
+  });
+
+  it("lets a new runtime resume the same accepted delete without replaying DELETE", async () => {
+    const { claim, store } = deleteClaimAtWaitingDeleted();
+    const ports = fakePorts(store);
+    const requestedOperations: string[] = [];
+    let polls = 0;
+    ports.box.requestPermanentDeletion = async () => {
+      requestedOperations.push("unexpected-delete");
+      return { outcome: "accepted", operationId: "replacement-operation" };
+    };
+    ports.box.pollPermanentDeletion = async ({ operationId }) => {
+      polls += 1;
+      expect(operationId).toBe("delete-op-1");
+      return { status: polls === 1 ? "processing" : "completed" };
+    };
+
+    const firstRuntime = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+    const takeoverClaim: OperationRuntimeClaim = { ...claim, claimEpoch: claim.claimEpoch + 1n };
+    const secondRuntime = await new RuntimeEngine(engineDependencies({ store, ports }))
+      .execute(takeoverClaim);
+
+    expect(firstRuntime.outcome).toBe("released");
+    expect(secondRuntime.outcome).toBe("succeeded");
+    expect(requestedOperations).toEqual([]);
+    expect(polls).toBe(2);
+    expect(store.authorization.providerOperationId).toBe("delete-op-1");
+    expect(store.deferredDeletes).toBe(1);
     expect(store.settlements).toEqual([{ terminalStatus: "succeeded" }]);
   });
 
-  it("fails a still-blocked delete retryably at the operation deadline", async () => {
+  it("advances a recovered provider-delete checkpoint without replaying DELETE", async () => {
+    const claim: OperationRuntimeClaim = {
+      ...operationClaim(),
+      clientSurface: null,
+      operationKind: "delete",
+      checkpoint: "provider_delete_requested",
+      checkpointSequence: 2n,
+      targetSettingsRevision: null,
+      targetSkillsRevision: null,
+      providerOperationId: "delete-op-recovered",
+    };
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        boxId: BOX_ID,
+        boxState: "ready",
+        piState: "absent",
+        piInvocationId: null,
+        desiredSettingsRevision: null,
+        skillsRevision: null,
+      }),
+    });
+    const ports = fakePorts(store);
+    let deleteRequests = 0;
+    const polls: string[] = [];
+    ports.box.requestPermanentDeletion = async () => {
+      deleteRequests += 1;
+      return { outcome: "accepted", operationId: "unexpected-replacement" };
+    };
+    ports.box.pollPermanentDeletion = async ({ operationId }) => {
+      polls.push(operationId);
+      return { status: "completed" };
+    };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(deleteRequests).toBe(0);
+    expect(polls).toEqual(["delete-op-recovered"]);
+    expect(store.authorization.workCheckpoint).toBe("provider_deleted");
+  });
+
+  it("settles an invalid or non-retryable provider GET as an expurgated failure", async () => {
     const { claim, store } = deleteClaimAtWaitingDeleted();
     const ports = fakePorts(store);
-    ports.box.pollPermanentDeletion = async () => ({ status: "blocked" });
+    ports.box.pollPermanentDeletion = async () => {
+      throw Object.assign(new Error("provider payload contained a secret"), {
+        code: "box_response_invalid",
+        retryable: false,
+      });
+    };
 
     const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
 
     expect(result.outcome).toBe("failed");
-    expect(store.settlements[0]?.error?.code).toBe("box_delete_deadline_exceeded");
-    expect(store.settlements[0]?.error?.action).toBe("retry");
+    expect(store.deferredDeletes).toBe(0);
+    expect(store.settlements).toHaveLength(1);
+    expect(store.settlements[0]?.error).toMatchObject({
+      code: "runtime_execution_failed",
+      message: "Runtime execution failed.",
+    });
   });
 
   it("completes a waiting delete when the provider operation is already gone", async () => {
