@@ -23,14 +23,70 @@
   background: var(--color-canvas);
 }
 
-/* The workspace list uses the same full-height, flat frame as Skills. Settings and Plugins keep
-   their focused canvas layout; only the list opts into this compact resource surface. */
-.companions-main.companions-main--list {
+/* The roster lives in the sidebar, so with no thread open the main pane is a short welcome:
+   creation, the workspace count, and on a phone the way into the drawer. Notices keep the same
+   full-width banner row the list frame used to give them. */
+.companions-main.companions-main--home {
   display: flex;
   flex-direction: column;
   overflow: hidden;
   padding: 0;
   background: var(--color-surface);
+}
+
+.companions-home {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.companions-home__body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 32px 24px;
+  text-align: center;
+}
+
+.companions-home__title {
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: var(--text-xl);
+  font-weight: 600;
+  letter-spacing: var(--tracking-tight);
+}
+
+.companions-home__count {
+  color: var(--color-faint);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-weight: 400;
+}
+
+.companions-home__desc {
+  margin: 0;
+  max-width: 400px;
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+}
+
+.companions-home__actions {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Desktop already shows the roster beside this pane; the drawer opener is a phone affordance. */
+.companions-home__browse {
+  display: none;
 }
 
 .companions-head {
@@ -101,6 +157,13 @@
    viewport and the whole page could be dragged sideways behind it. */
 .companions-new-dialog {
   width: min(520px, 100%);
+}
+
+/* The generator is the dialog's visual header: centered while collapsed, in place of the static
+   head glyph the dialog no longer renders. Expanding it for the catalogs returns to flow. */
+.companions-new-dialog .companions-new-form > .companions-icon-picker:has(.companions-icon-picker__collapsed) {
+  justify-items: center;
+  padding: 4px 0 8px;
 }
 
 .companions-providers-dialog {
@@ -1042,54 +1105,8 @@
   border-bottom: 1px solid var(--color-line);
 }
 
-.companions-list {
-  --companions-list-columns: minmax(180px, 1fr) 104px 88px minmax(112px, auto);
-  background: var(--color-surface);
-}
-
-.companions-list .companions-list__head,
-.companions-row {
-  display: grid;
-  grid-template-columns: var(--companions-list-columns);
-  align-items: center;
-  column-gap: 12px;
-  padding-right: var(--space-5);
-  padding-left: var(--space-5);
-}
-
-.companions-row {
-  min-height: 48px;
-  position: relative;
-  border-bottom: 1px solid color-mix(in oklab, var(--color-line) 55%, transparent);
-  transition: background-color var(--duration-fast) var(--ease-out-quint);
-}
-
-.companions-row:hover {
-  background: var(--color-surface-raised);
-}
-
 .companions-provider-row:last-child {
   border-bottom: 0;
-}
-
-.companions-row__main {
-  min-width: 0;
-  align-self: stretch;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 0;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.companions-row__main:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: -2px;
 }
 
 /* THE-382: the blob is the avatar — a plain image, no ring or plate around it. */
@@ -1312,38 +1329,13 @@
   outline-offset: 2px;
 }
 
-.companions-row__text,
 .companions-provider-row > div:first-child {
   min-width: 0;
   display: grid;
   gap: 1px;
 }
 
-.companions-row__text strong,
-.companions-row__text span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.companions-row__text strong {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  width: fit-content;
-  max-width: 100%;
-}
-
-.companions-row__time {
-  color: var(--color-faint);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
 .companions-provider-row strong,
-.companions-row strong,
 .companions-provider-empty strong {
   color: var(--color-fg);
   font-size: var(--text-sm);
@@ -1351,7 +1343,6 @@
 }
 
 .companions-provider-row span,
-.companions-row span,
 .companions-provider-empty span {
   color: var(--color-muted);
   font-size: var(--text-xs);
@@ -1362,24 +1353,6 @@
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-.companions-row-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 4px;
-}
-
-.companions-unread {
-  position: absolute;
-  right: -1px;
-  top: -1px;
-  width: 8px;
-  height: 8px;
-  border-radius: var(--radius-full);
-  background: var(--color-accent);
-  border: 1px solid var(--color-surface);
 }
 
 .companions-row-menu {
@@ -1435,36 +1408,24 @@
   cursor: default;
 }
 
-.companions-row__main--static {
-  cursor: default;
+/* Delete sits last, separated, and reads as the destructive item it is. */
+.companions-row-menu__panel > .companions-row-menu__danger {
+  margin-top: 4px;
+  position: relative;
+  color: var(--color-danger);
 }
 
-.companions-hidden {
-  display: block;
-}
-
-.companions-hidden__heading {
-  min-height: 32px;
-  margin: 0;
-  padding: 0 var(--space-5);
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.companions-row-menu__panel > .companions-row-menu__danger::before {
+  content: "";
+  position: absolute;
+  top: -2px;
+  left: -4px;
+  right: -4px;
   border-top: 1px solid var(--color-line);
-  border-bottom: 1px solid var(--color-line);
-  background: var(--color-surface);
-  color: var(--color-faint);
-  font-size: var(--text-xs);
-  font-weight: 500;
 }
 
-.companions-hidden__count {
-  font-family: var(--font-mono);
-  font-size: 10px;
-}
-
-.companions-row--hidden {
-  background: var(--color-surface-sunken);
+.companions-row-menu__panel > .companions-row-menu__danger:hover:not(:disabled) {
+  background: var(--color-danger-tint);
 }
 
 .companions-provider-empty {
@@ -1574,17 +1535,6 @@
   background: var(--color-surface-sunken);
   color: var(--color-muted);
   font-size: var(--text-xs);
-}
-
-.companions-role {
-  padding: 2px 7px;
-  border: 1px solid var(--color-line);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface-raised);
-  color: var(--color-muted);
-  font-size: var(--text-xs);
-  font-weight: 500;
-  text-transform: capitalize;
 }
 
 .companions-share-dialog {
@@ -1703,13 +1653,11 @@
   font-size: var(--text-xs);
 }
 
-/* The face in the header is the same one the conversation list carries, so moving between the two
-   surfaces stays one Companion rather than two treatments of it. */
+/* The face in the header is the same one the sidebar roster carries — the plain blob, no tinted
+   circle behind it — so moving between the two surfaces stays one Companion, one treatment. */
 .chat-head .chat-avatar {
   width: 34px;
   height: 34px;
-  border-radius: var(--radius-full);
-  background: var(--color-accent-tint);
   color: var(--color-fg);
   font-size: var(--text-sm);
 }
@@ -2241,59 +2189,20 @@ button.chat-box:focus-visible {
   .companions-main--chat {
     padding: 0;
   }
-
-  /* The dense Companion table sheds Updated first, matching the Skills list's priority order. */
-  .companions-list .companions-list__head,
-  .companions-list .companions-row {
-    grid-template-columns: minmax(160px, 1fr) 104px minmax(88px, auto);
-  }
-
-  .companions-list__head > span:nth-child(3),
-  .companions-row__time {
-    display: none;
-  }
-}
-
-@media (max-width: 700px) {
-  /* Access is secondary metadata; the menu remains as the final reachable control. */
-  .companions-list .companions-list__head,
-  .companions-list .companions-row {
-    grid-template-columns: minmax(150px, 1fr) 96px 32px;
-  }
-
-  .companions-list__head > span:nth-child(4) {
-    visibility: hidden;
-  }
-
-  .companions-row .companions-role {
-    display: none;
-  }
 }
 
 @media (max-width: 820px) {
   .companions-app .companions-main {
     margin-left: var(--mobile-rail-w);
   }
+
+  /* The roster is a drawer here, so the home pane offers the way into it. */
+  .companions-home__browse {
+    display: inline-flex;
+  }
 }
 
 @media (max-width: 560px) {
-  .companions-main--list .sh {
-    height: auto;
-    min-height: var(--topbar-height);
-    flex-wrap: wrap;
-    row-gap: 8px;
-    padding-top: 8px;
-    padding-bottom: 8px;
-  }
-
-  .companions-main--list .sh__spacer {
-    display: none;
-  }
-
-  .companions-main--list .sh .btn-primary {
-    margin-left: auto;
-  }
-
   .companions-main {
     padding: 22px 14px 32px;
   }
@@ -2430,38 +2339,11 @@ button.chat-box:focus-visible {
     flex-wrap: wrap;
   }
 
-  /* Narrow phones keep the identity, readable status, and menu in one stable resource row. */
-  .companions-list .companions-row {
-    min-height: 58px;
-    grid-template-columns: minmax(0, 1fr) auto 44px;
-    grid-template-areas:
-      "main status actions";
-    column-gap: 8px;
-    padding-right: var(--space-3);
-    padding-left: var(--space-3);
-  }
-
-  .companions-list .companions-list__head {
-    display: none;
-  }
-
-  .companions-row__main { grid-area: main; }
-  .companions-row > .companions-state { grid-area: status; }
-
-  .companions-row-actions {
-    grid-area: actions;
-    justify-content: flex-end;
-  }
-
+  /* Menu triggers on narrow phones are thumb targets, wherever the menu is hosted. */
   .companions-row-menu__trigger {
     width: 44px;
     height: 44px;
     padding: 0;
-  }
-
-  .companions-hidden__heading {
-    padding-right: var(--space-3);
-    padding-left: var(--space-3);
   }
 
   .companions-share-workspace {

@@ -98,6 +98,7 @@ function companion(
       generation: 1,
       state: runtimeState,
       daemon_state: runtimeState === "running" ? "running" : "stopped",
+      replying: false,
       box_id: access === "viewer" ? null : "bx_23456789",
       provider_ids: ["anthropic"],
       provider_credential_generation: null,
@@ -385,6 +386,7 @@ describe("CompanionSettings", () => {
       ...failed.runtime,
       state: "error",
       daemon_state: "error",
+      replying: false,
       last_error: "Pi could not stay running.",
     };
     companionApi.getCompanionRuntime.mockResolvedValue(failed);
@@ -512,6 +514,7 @@ describe("CompanionSettings", () => {
       ...failed.runtime,
       state: "error",
       daemon_state: "error",
+      replying: false,
       latest_operation: {
         id: operation.id,
         source_turn_id: null,
@@ -544,6 +547,7 @@ describe("CompanionSettings", () => {
       ...reloaded.runtime,
       state: "error",
       daemon_state: "error",
+      replying: false,
       latest_operation: {
         id: operation.id,
         source_turn_id: null,

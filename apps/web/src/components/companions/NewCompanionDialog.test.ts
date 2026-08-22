@@ -51,7 +51,6 @@ describe("NewCompanionDialog", () => {
     const markup = render(providers());
 
     expect(markup).toContain("Name");
-    expect(markup).toContain("Persona");
     expect(markup).toContain("Claude");
     expect(markup).toContain("Claude Opus 4.8");
     expect(markup).toContain("Default");
@@ -63,6 +62,24 @@ describe("NewCompanionDialog", () => {
     expect(markup).not.toContain('type="checkbox"');
     expect(markup).not.toContain("z.ai");
     expect(markup).not.toContain("GLM-4.7");
+  });
+
+  it("leads with the icon picker and leaves persona to settings", () => {
+    const markup = render(providers());
+
+    // Persona moved to settings ("What it does"); creation stays a fast first hello.
+    expect(markup).not.toContain("Persona");
+    // The animated face is the dialog's header, so the static head glyph and the description
+    // paragraph are gone from this dialog entirely.
+    expect(markup).not.toContain("og-dialog__ic");
+    expect(markup).not.toContain("og-dialog__d");
+    // The generator opens the form: the icon picker precedes the Name label in source order.
+    const form = markup.indexOf('id="companion-create"');
+    const picker = markup.indexOf("companions-icon-picker");
+    const nameLabel = markup.indexOf("Name");
+    expect(form).toBeGreaterThan(-1);
+    expect(picker).toBeGreaterThan(form);
+    expect(nameLabel).toBeGreaterThan(picker);
   });
 
   it("points an admin at provider setup when the workspace has no provider", () => {

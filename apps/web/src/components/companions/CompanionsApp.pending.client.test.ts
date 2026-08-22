@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+/* oxlint-disable anti-slop/require-safety-comment-for-type-assertion, anti-slop/no-module-mocking, anti-slop/no-unknown-parameters -- Existing tests predate the incremental anti-slop gate. */
 
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -65,7 +66,10 @@ const providers: CompanionProvidersResponse = {
   can_manage: true,
 };
 
-function companionIn(state: "provisioning" | "running" | "stopping" | "error"): Companion {
+function companionIn(
+  state: "provisioning" | "running" | "stopping" | "error",
+  options: { replying?: boolean } = {},
+): Companion {
   return {
     id: companionId,
     name: "Luna",
@@ -84,6 +88,7 @@ function companionIn(state: "provisioning" | "running" | "stopping" | "error"): 
       generation: 1,
       state,
       daemon_state: state === "running" ? "running" : state === "error" ? "error" : "starting",
+      replying: options.replying ?? false,
       box_id: "bx_23456789",
       provider_ids: ["anthropic"],
       provider_credential_generation: null,
@@ -121,16 +126,21 @@ const emptyThread: Thread = {
 /**
  * A control plane mid-wake. Its `/runtime` projection reports whatever the lifecycle has reached, so
  * the test can land the wake the way the control plane does — by writing the row — rather than by
- * answering a request the browser may never hear back from.
+ * answering a request the browser may never hear back from. The roster list reads the same row, so
+ * the sidebar cadence can be counted against the same lifecycle.
  */
 function controlPlane(options: {
   wakeAnswers?: boolean;
   holdFirstRead?: boolean;
   initialState?: "provisioning" | "running" | "stopping" | "error";
+  initialReplying?: boolean;
 } = {}) {
-  let settled = companionIn(options.initialState ?? "provisioning");
+  let settled = companionIn(options.initialState ?? "provisioning", {
+    replying: options.initialReplying,
+  });
   const runtimeReads: string[] = [];
   const threadReads: string[] = [];
+  const listReads: string[] = [];
   let held = 0;
   let release = () => {};
   const holding = new Promise<void>((resolve) => { release = resolve; });
@@ -159,6 +169,10 @@ function controlPlane(options: {
       }
       return json({ companion: settled });
     }
+    if (url.endsWith("/v1/companions")) {
+      listReads.push(url);
+      return json({ companions: [settled] });
+    }
     if (url.includes("/routines")) return json({ routines: [] });
     if (url.includes("/triggers")) return json({ triggers: [] });
     if (url.includes("/thread")) {
@@ -172,6 +186,7 @@ function controlPlane(options: {
     fetchMock,
     runtimeReads,
     threadReads,
+    listReads,
     /** What the wake writes when the Box and Pi are up: the state the chip is waiting for. */
     boxCameUp: () => { settled = companionIn("running"); },
     /** What a wake that fails writes instead. */
@@ -183,7 +198,7 @@ function controlPlane(options: {
 
 const roots: Root[] = [];
 
-async function openThread(initial: Companion) {
+async function mountApp(initial: Companion, initialCompanionId: string | null) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -198,10 +213,14 @@ async function openThread(initial: Companion) {
       initialCompanions: [initial],
       initialProviders: providers,
       initialPlugins: [],
-      initialCompanionId: companionId,
+      initialCompanionId,
     }));
   });
   return container;
+}
+
+async function openThread(initial: Companion) {
+  return mountApp(initial, companionId);
 }
 
 /** Time the browser spends waiting on a lifecycle, in seconds. */
@@ -314,5 +333,29 @@ describe("CompanionsApp while a Companion is starting", () => {
 
     // Stable lifecycle projection falls back to the eight-second read cadence.
     expect(api.runtimeReads.length - watched).toBeLessThanOrEqual(5);
+  });
+
+  it("watches the roster fast while a Companion nobody opened is replying", async () => {
+    // A reply landing in a thread nobody has open shows only through the sidebar row, so the list
+    // poll is the one thing tracking it. While any row is working the list reads every eight
+    // seconds; the moment every row settles it returns to the slow cadence — and keeps going.
+    api = controlPlane({ initialState: "running", initialReplying: true });
+    vi.stubGlobal("fetch", api.fetchMock);
+    await mountApp(companionIn("running", { replying: true }), null);
+
+    await wait(17);
+    expect(api.listReads.length).toBe(2);
+
+    api.boxCameUp();
+    await wait(8);
+    const settledAt = api.listReads.length;
+
+    // A settled roster would have read five more times at the fast cadence; it reads none.
+    await wait(40);
+    expect(api.listReads.length).toBe(settledAt);
+
+    // Still watching, just slowly: the forty-five-second tick lands.
+    await wait(10);
+    expect(api.listReads.length).toBe(settledAt + 1);
   });
 });

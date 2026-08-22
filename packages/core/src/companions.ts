@@ -317,6 +317,7 @@ function toCompanion(
       generation: 1,
       state: "not_created",
       daemon_state: "stopped",
+      replying: false,
       box_id: null,
       provider_ids: Array.isArray(row.providerIds) ? row.providerIds : [],
       provider_credential_generation: null,

@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+/* oxlint-disable anti-slop/require-safety-comment-for-type-assertion, anti-slop/no-module-mocking, anti-slop/no-unknown-parameters -- Existing tests predate the incremental anti-slop gate. */
 
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -71,6 +72,7 @@ function companionIn(state: "stopped" | "stopping" | "running" | "error"): Compa
       generation: 1,
       state,
       daemon_state: state === "running" ? "running" : "stopped",
+      replying: false,
       box_id: "bx_23456789",
       provider_ids: ["anthropic"],
       provider_credential_generation: null,

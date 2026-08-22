@@ -36,6 +36,7 @@ function companion(overrides: {
       generation: 1,
       state: overrides.state ?? "stopped",
       daemon_state: "stopped",
+      replying: false,
       box_id: "bx_23456789",
       provider_ids: ["anthropic"],
       provider_credential_generation: null,

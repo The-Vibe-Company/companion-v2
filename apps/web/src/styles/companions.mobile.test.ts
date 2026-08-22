@@ -126,46 +126,36 @@ function declarationsFor(selector: string, at: string[] = []): string[] {
 }
 
 const PHONE = ["@media (max-width: 560px)"];
-const COMPACT = ["@media (max-width: 860px)"];
-const NARROW = ["@media (max-width: 700px)"];
+const DRAWER = ["@media (max-width: 820px)"];
 const COARSE_POINTER = ["@media (pointer: coarse)"];
 
 describe("Companions mobile viewport", () => {
-  it("keeps the Companion list in the same flat full-height frame as Skills", () => {
-    const [declarations] = declarationsFor(".companions-main.companions-main--list");
+  it("keeps the Companions home pane in the same flat full-height frame as Skills", () => {
+    const [declarations] = declarationsFor(".companions-main.companions-main--home");
     expect(declarations).toContain("display: flex;");
     expect(declarations).toContain("overflow: hidden;");
     expect(declarations).toContain("padding: 0;");
     expect(declarations).toContain("background: var(--color-surface);");
   });
 
-  it("lets the shared header wrap before its primary action can be clipped", () => {
-    const header = declarationsFor(".companions-main--list .sh", PHONE)[0];
-    expect(header).toContain("height: auto;");
-    expect(header).toContain("flex-wrap: wrap;");
-    expect(declarationsFor(".companions-main--list .sh__spacer", PHONE)[0])
-      .toContain("display: none;");
-    expect(declarationsFor(".companions-main--list .sh .btn-primary", PHONE)[0])
-      .toContain("margin-left: auto;");
+  it("offers the drawer opener only where the roster is a drawer", () => {
+    // Desktop already shows the roster beside the home pane, so "Browse companions" would be a
+    // dead duplicate there; under 820px the sidebar collapses to a rail and the button is the way in.
+    expect(declarationsFor(".companions-home__browse")[0]).toContain("display: none;");
+    expect(declarationsFor(".companions-home__browse", DRAWER)[0])
+      .toContain("display: inline-flex;");
   });
 
-  it("sheds Updated then Access without losing the row menu", () => {
-    expect(declarationsFor(".companions-list .companions-row", COMPACT)[0])
-      .toContain("grid-template-columns: minmax(160px, 1fr) 104px minmax(88px, auto);");
-    expect(declarationsFor(".companions-row__time", COMPACT)[0]).toContain("display: none;");
-    expect(declarationsFor(".companions-row .companions-role", NARROW)[0]).toContain("display: none;");
+  it("keeps the sole row-action target at 44px wherever the kebab is hosted", () => {
+    // The kebab moved into the sidebar roster with the list, but it is still each row's only action
+    // target, so the thumb size holds in both the coarse-pointer media and the phone-width block.
+    const coarse = declarationsFor(".companions-row-menu__trigger", COARSE_POINTER)[0];
+    expect(coarse).toContain("width: 44px;");
+    expect(coarse).toContain("height: 44px;");
 
-    const phoneRow = declarationsFor(".companions-list .companions-row", PHONE)[0];
-    expect(phoneRow).toContain("grid-template-columns: minmax(0, 1fr) auto 44px;");
-    expect(phoneRow).toContain('"main status actions"');
-    expect(declarationsFor(".companions-list .companions-list__head", PHONE)[0]).toContain("display: none;");
-    expect(declarationsFor(".companions-row-menu__trigger", PHONE)[0]).toContain("width: 44px;");
-  });
-
-  it("keeps the sole row-action target touch-sized on coarse-pointer tablets", () => {
-    const trigger = declarationsFor(".companions-row-menu__trigger", COARSE_POINTER)[0];
-    expect(trigger).toContain("width: 44px;");
-    expect(trigger).toContain("height: 44px;");
+    const phone = declarationsFor(".companions-row-menu__trigger", PHONE)[0];
+    expect(phone).toContain("width: 44px;");
+    expect(phone).toContain("height: 44px;");
   });
 
   it("keeps every interactive thread-header control touch-sized on coarse pointers", () => {

@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+/* oxlint-disable anti-slop/require-safety-comment-for-type-assertion, anti-slop/no-module-mocking -- Existing tests predate the incremental anti-slop gate. */
 
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -7,6 +8,7 @@ import type {
   CompanionProvidersResponse,
   CompanionThread as Thread,
 } from "@companion/contracts";
+import { COMPANION_OPERATION_IDEMPOTENCY_HEADER } from "@companion/contracts/companion-runtime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   COMPANION_PROVIDER_SETTINGS_CACHE_TTL_MS,
@@ -119,6 +121,7 @@ function companion(overrides: Partial<Companion> = {}): Companion {
       generation: 1,
       state: "stopped",
       daemon_state: "stopped",
+      replying: false,
       box_id: null,
       provider_ids: ["anthropic"],
       provider_credential_generation: null,
@@ -500,10 +503,16 @@ describe("CompanionsApp conversation list", () => {
     expect(row(container).querySelector(".cmprow__unread")).toBeNull();
   });
 
-  it("keeps the shared search toolbar visible for empty and no-match states", async () => {
+  it("welcomes an empty workspace and points a full one at the sidebar roster", async () => {
     const empty = await render([]);
-    expect(empty.querySelector<HTMLInputElement>('input[aria-label="Search companions"]')).not.toBeNull();
-    expect(empty.querySelector(".empty__title")?.textContent).toBe("No Companions yet");
+    expect(empty.querySelector(".companions-main--home")).not.toBeNull();
+    expect(empty.querySelector(".companions-home__title")?.textContent).toContain("Companions");
+    expect(empty.querySelector(".companions-home__count")?.textContent).toBe("0");
+    expect(empty.querySelector(".companions-home__desc")?.textContent)
+      .toBe("Create a Companion with a name and a connected model provider.");
+    // Nothing to browse to yet: creation is the only action a member without Companions has.
+    expect(empty.querySelector(".companions-home__browse")).toBeNull();
+    expect(empty.querySelector(".cmpnav__empty")?.textContent).toBe("No Companions yet");
 
     act(() => roots.pop()?.unmount());
     empty.remove();
@@ -516,11 +525,17 @@ describe("CompanionsApp conversation list", () => {
         hidden: true,
       }),
     ]);
-    const search = container.querySelector<HTMLInputElement>('input[aria-label="Search companions"]')!;
-    await act(async () => setControlled(search, "missing"));
 
-    expect(container.querySelector(".empty__title")?.textContent).toBe("No Companions match");
-    expect(container.querySelector(".companions-hidden")).toBeNull();
+    // The count is the whole roster, hidden rows included; the copy hands over to the sidebar.
+    expect(container.querySelector(".companions-home__count")?.textContent).toBe("2");
+    expect(container.querySelector(".companions-home__desc")?.textContent)
+      .toBe("Pick a Companion in the sidebar to open its thread.");
+    const create = [...container.querySelectorAll("button")]
+      .find((button) => button.classList.contains("btn-primary")
+        && button.textContent?.includes("New companion")) as HTMLButtonElement;
+    expect(create.disabled).toBe(false);
+    expect(create.title).toBe("New companion");
+    expect(container.querySelector(".companions-home__browse")?.textContent).toBe("Browse companions");
   });
 
   it("opens the single row menu from the keyboard without opening the chat", async () => {
@@ -541,6 +556,7 @@ describe("CompanionsApp conversation list", () => {
     expect(menu?.textContent).toContain("Mark as unread");
     expect(menu?.textContent).toContain("Duplicate");
     expect(menu?.textContent).toContain("Hide");
+    expect(menu?.querySelector(".companions-row-menu__danger")?.textContent).toBe("Delete");
     expect(document.activeElement?.textContent).toBe("Settings");
     expect(container.textContent).not.toContain("Chat with Luna");
 
@@ -564,6 +580,20 @@ describe("CompanionsApp conversation list", () => {
     expect(menu?.textContent).toContain("Hide");
     expect(menu?.textContent).not.toContain("Share");
     expect(menu?.textContent).not.toContain("Duplicate");
+    expect(menu?.textContent).not.toContain("Delete");
+  });
+
+  it("keeps Delete out of an Editor's row menu", async () => {
+    const container = await render([companion({ access: "editor", owner_id: "user-2" })]);
+    const trigger = container.querySelector<HTMLButtonElement>('[aria-label="Actions for Luna"]')!;
+
+    await act(async () => trigger.click());
+
+    const menu = document.body.querySelector<HTMLElement>('[role="menu"][aria-label="Actions for Luna"]');
+    expect(menu?.textContent).toContain("Settings");
+    expect(menu?.textContent).toContain("Hide");
+    expect(menu?.textContent).not.toContain("Delete");
+    expect(menu?.querySelector(".companions-row-menu__danger")).toBeNull();
   });
 
   it("opens the last menu action with ArrowUp", async () => {
@@ -576,7 +606,8 @@ describe("CompanionsApp conversation list", () => {
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
     });
 
-    expect(document.activeElement?.textContent).toBe("Hide");
+    // Delete sits last on an owner's row, past Hide, so ArrowUp reaches destruction directly.
+    expect(document.activeElement?.textContent).toBe("Delete");
   });
 
   it("moves Tab from the portal menu to the next row instead of losing focus", async () => {
@@ -594,7 +625,9 @@ describe("CompanionsApp conversation list", () => {
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
     });
 
-    expect(document.activeElement?.getAttribute("aria-label")).toContain("Open Nova");
+    // The next focusable past Luna's trigger is Nova's main row button in the sidebar roster.
+    expect(document.activeElement?.classList.contains("cmprow__main")).toBe(true);
+    expect(document.activeElement?.textContent).toContain("Nova");
     expect(document.body.querySelector('[role="menu"]')).toBeNull();
   });
 
@@ -615,11 +648,15 @@ describe("CompanionsApp conversation list", () => {
       companionId,
       { pinned: true },
     );
-    expect(container.querySelector(".companions-row--pinned")).not.toBeNull();
     expect(document.activeElement).toBe(trigger);
+
+    // The server result landed on the row: its menu now offers the reverse action.
+    await act(async () => trigger.click());
+    expect([...document.body.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+      .some((item) => item.textContent === "Unpin")).toBe(true);
   });
 
-  it("moves focus to search after hiding removes the active row", async () => {
+  it("moves focus to the sidebar create button after hiding removes the active row", async () => {
     let resolveHide!: (value: Companion) => void;
     companionsApi.updateCompanionMemberState.mockReturnValue(new Promise((resolve) => {
       resolveHide = resolve;
@@ -643,10 +680,13 @@ describe("CompanionsApp conversation list", () => {
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
     });
 
-    expect(document.activeElement).toBe(
-      container.querySelector<HTMLInputElement>('input[aria-label="Search companions"]'),
-    );
-    expect(container.querySelector(".companions-hidden")?.textContent).toContain("Luna");
+    // The hidden row left the roster and its collapsed disclosure does not take focus, so
+    // focus falls back to the create button rather than dropping to the document body.
+    expect(document.activeElement).toBe(container.querySelector(".cmpnav__add"));
+    expect(container.querySelector(".cmprow")).toBeNull();
+    const disclosure = container.querySelector(".cmpnav__hiddenhead");
+    expect(disclosure?.textContent).toContain("Hidden");
+    expect(disclosure?.getAttribute("aria-expanded")).toBe("false");
   });
 
   it("duplicates from the row menu and renders the returned Companion", async () => {
@@ -662,32 +702,151 @@ describe("CompanionsApp conversation list", () => {
     expect(container.textContent).toContain("Luna copy");
   });
 
-  it("keeps hidden Companions in the same row grammar with a focused restore menu", async () => {
+  it("keeps hidden Companions behind the collapsed disclosure until Unhide restores the row with focus", async () => {
+    const stashedId = "22222222-2222-4222-8222-222222222222";
+    companionsApi.updateCompanionMemberState.mockResolvedValue(
+      companion({ id: stashedId, name: "Stashed", hidden: false }),
+    );
     const container = await render([
       companion({ name: "Visible" }),
-      companion({
-        id: "22222222-2222-4222-8222-222222222222",
-        name: "Stashed",
-        hidden: true,
-      }),
+      companion({ id: stashedId, name: "Stashed", hidden: true }),
     ]);
-    const trigger = container.querySelector<HTMLButtonElement>('[aria-label="Actions for Stashed"]')!;
 
+    // Collapsed on mount: a hidden row is out of the roster, kebab and all, until asked for.
+    expect(container.querySelector('[aria-label="Actions for Stashed"]')).toBeNull();
+    const disclosure = container.querySelector<HTMLButtonElement>(".cmpnav__hiddenhead")!;
+    expect(disclosure.getAttribute("aria-expanded")).toBe("false");
+    expect(disclosure.textContent).toContain("Hidden");
+    expect(disclosure.textContent).toContain("1");
+
+    await act(async () => disclosure.click());
+    expect(disclosure.getAttribute("aria-expanded")).toBe("true");
+    expect(container.querySelector(".cmprow--hidden")?.textContent).toContain("Stashed");
+
+    const trigger = container.querySelector<HTMLButtonElement>('[aria-label="Actions for Stashed"]')!;
     await act(async () => trigger.click());
 
     const menu = document.body.querySelector<HTMLElement>('[role="menu"][aria-label="Actions for Stashed"]');
     expect(menu?.textContent).toContain("Settings");
     expect(menu?.textContent).toContain("Unhide");
-    expect(menu?.textContent).not.toContain("Hide");
+    expect(menu?.textContent).not.toContain("Pin");
+    expect(menu?.querySelector(".companions-row-menu__danger")?.textContent).toBe("Delete");
+
+    const unhide = [...document.body.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+      .find((item) => item.textContent === "Unhide")!;
+    await act(async () => {
+      unhide.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    });
+
+    // The row is back in the roster, the disclosure is gone with its last tenant, and focus
+    // followed the row it was acting on.
+    expect(container.querySelector(".cmpnav__hidden")).toBeNull();
+    const restored = [...container.querySelectorAll<HTMLButtonElement>(".cmprow__main")]
+      .find((main) => main.textContent?.includes("Stashed"))!;
+    expect(document.activeElement).toBe(restored);
   });
 
   it("opens the chat from the primary row button", async () => {
     const container = await render([companion()]);
-    const main = container.querySelector<HTMLButtonElement>(".companions-row__main")!;
+    const main = container.querySelector<HTMLButtonElement>(".cmprow__main")!;
 
     await act(async () => main.click());
 
     expect(container.querySelector('[aria-label="Back to Companions"]')).not.toBeNull();
+  });
+
+  it("confirms kebab Delete and keeps one idempotency id across a failed attempt's retry", async () => {
+    const requests: { url: string; method: string | undefined; headers: Record<string, string> }[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({
+        url: String(input),
+        method: init?.method,
+        headers: { ...(init?.headers as Record<string, string>) },
+      });
+      // The runtime turns the first attempt away; the retry is accepted as durable intent.
+      if (requests.length === 1) {
+        return new Response(JSON.stringify({ message: "Runtime unavailable." }), {
+          status: 503,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ operation: { id: "op-1" } }), {
+        status: 202,
+        headers: { "content-type": "application/json" },
+      });
+    }));
+    const container = await render([companion()]);
+    const trigger = container.querySelector<HTMLButtonElement>('[aria-label="Actions for Luna"]')!;
+
+    const confirmDelete = async () => {
+      await act(async () => trigger.click());
+      await act(async () => {
+        [...document.body.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+          .find((item) => item.textContent === "Delete")!.click();
+      });
+      const dialog = container.querySelector(".companions-delete-dialog") as HTMLElement;
+      expect(dialog.textContent).toContain("Delete Luna?");
+      expect(dialog.textContent).toContain("permanently deleted after runtime confirmation");
+      await act(async () => {
+        [...dialog.querySelectorAll("button")]
+          .find((button) => button.textContent === "Delete Companion")!.click();
+        await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      });
+    };
+
+    await confirmDelete();
+
+    // The failed attempt surfaces where the member is, and the dialog does not linger.
+    expect(container.querySelector(".companions-delete-dialog")).toBeNull();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("Runtime unavailable.");
+
+    await confirmDelete();
+
+    expect(container.querySelector(".companions-delete-dialog")).toBeNull();
+    expect(requests).toHaveLength(2);
+    for (const request of requests) {
+      expect(request.url).toBe(`/v1/companions/${companionId}`);
+      expect(request.method).toBe("DELETE");
+    }
+    // One operation however many confirms it takes: the retry replays the very same request id.
+    const requestId = requests[0]!.headers[COMPANION_OPERATION_IDEMPOTENCY_HEADER];
+    expect(requestId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    expect(requests[1]!.headers[COMPANION_OPERATION_IDEMPOTENCY_HEADER]).toBe(requestId);
+  });
+
+  it("projects Stopping on the row once a delete is accepted, before the list drops it", async () => {
+    companionsApi.getCompanionRuntime.mockResolvedValue(companion({
+      runtime: { ...companion().runtime, state: "stopping" },
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      new Response(JSON.stringify({ operation: { id: "op-1" } }), {
+        status: 202,
+        headers: { "content-type": "application/json" },
+      })));
+    const container = await render([companion()]);
+    const trigger = container.querySelector<HTMLButtonElement>('[aria-label="Actions for Luna"]')!;
+
+    await act(async () => trigger.click());
+    await act(async () => {
+      [...document.body.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+        .find((item) => item.textContent === "Delete")!.click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll("button")]
+        .find((button) => button.textContent === "Delete Companion")!.click();
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    });
+
+    // The 202 enqueued durable intent; the one runtime refresh reprojects the row so it never
+    // sits there looking Asleep while the runtime tears its Box down.
+    expect(container.querySelector(".companions-delete-dialog")).toBeNull();
+    expect(companionsApi.getCompanionRuntime).toHaveBeenCalledWith("org-1", companionId);
+    expect(row(container).querySelector(".cmprow__statusword")?.textContent).toContain("Stopping");
+    expect(row(container).querySelector(".cmprow__main")?.getAttribute("title")).toBe("Luna — Stopping");
   });
 
   it("clears the mark on the thread it opens, including one reached by a deep link", async () => {
@@ -833,9 +992,10 @@ describe("CompanionsApp conversation list", () => {
     expect(container.querySelector("[data-slot='chat-new-separator']")).toBeNull();
 
     const nextRow = [...container.querySelectorAll(".cmprow")]
-      .find((row) => row.querySelector(".cmprow__name")?.textContent === "Nova") as HTMLButtonElement;
+      .find((row) => row.querySelector(".cmprow__name")?.textContent === "Nova")
+      ?.querySelector<HTMLButtonElement>(".cmprow__main");
     await act(async () => {
-      nextRow.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      nextRow!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
     expect(container.querySelector("[data-slot='chat-new-separator']")).not.toBeNull();

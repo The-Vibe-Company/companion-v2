@@ -28,6 +28,7 @@ const companion: Companion = {
     generation: 1,
     state: "not_created",
     daemon_state: "unknown",
+    replying: false,
     box_id: null,
     provider_ids: ["anthropic"],
     provider_credential_generation: null,
@@ -120,6 +121,19 @@ describe("Runtime v2 Companion projection", () => {
         error: null,
       },
     });
+  });
+
+  it("projects the ACKed replying fact and defaults it to false", () => {
+    const replying = projectCompanionRuntimeV2(companion, runtime({
+      box_id: "bx_23456789",
+      box_state: "running",
+      pi_state: "running",
+      is_replying: true,
+    }));
+    expect(replying.runtime.replying).toBe(true);
+
+    const idle = projectCompanionRuntimeV2(companion, runtime({ is_replying: false }));
+    expect(idle.runtime.replying).toBe(false);
   });
 
   it("projects a ready Box and idle Pi as online with its applied skill revision", () => {

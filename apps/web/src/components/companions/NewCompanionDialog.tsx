@@ -18,9 +18,10 @@ import {
 } from "./CompanionIconPicker";
 
 /**
- * Creation asks for name, persona, provider/model, which Skills Hub packages this Companion may
+ * Creation asks for an icon, name, provider/model, which Skills Hub packages this Companion may
  * use, and which already-connected MCP plugins it may stage onto its Box. Skills Hub API access is
- * unconditional, so there is nothing to choose about it here.
+ * unconditional, so there is nothing to choose about it here. Persona is settings-only ("What it
+ * does"): the dialog stays a fast first hello, not a briefing.
  */
 export function NewCompanionDialog({
   orgId,
@@ -36,7 +37,6 @@ export function NewCompanionDialog({
   onClose: () => void;
 }) {
   const [name, setName] = useState("");
-  const [persona, setPersona] = useState("");
   const initialProviderId = providers.connections.some(
     (connection) => connection.provider_id === providers.default_provider_id,
   )
@@ -66,7 +66,6 @@ export function NewCompanionDialog({
     try {
       onCreated(await createCompanion(orgId, {
         name: name.trim(),
-        persona: persona.trim() || undefined,
         provider_id: providerId,
         model_id: modelId,
         selected_skill_ids: selectedSkillIds,
@@ -81,9 +80,7 @@ export function NewCompanionDialog({
 
   return (
     <Dialog
-      icon="bot"
       title="New companion"
-      desc="A name, one line about what it does, the provider and model it runs on, then the skills and plugins it may use."
       onClose={onClose}
       closeDisabled={busy}
       className="og-dialog companions-new-dialog"
@@ -110,6 +107,9 @@ export function NewCompanionDialog({
     >
       {error && <div className="companions-error" role="alert">{error}</div>}
       <form id="companion-create" className="companions-new-form" onSubmit={submit}>
+        {/* The generator leads: the animated face is the dialog's header, in place of a static
+            glyph, and every field below it is about the bot it previews. */}
+        <CompanionIconPicker value={icon} onChange={setIcon} />
         <label>
           Name
           <input
@@ -121,20 +121,6 @@ export function NewCompanionDialog({
             placeholder="Luna"
           />
         </label>
-        <label>
-          Persona
-          <input
-            maxLength={280}
-            value={persona}
-            onChange={(event) => setPersona(event.target.value)}
-            placeholder="Content marketing assistant"
-            aria-describedby="companion-persona-hint"
-          />
-        </label>
-        <p className="companions-new-form__hint" id="companion-persona-hint">
-          One line, shown under the name in the list.
-        </p>
-        <CompanionIconPicker value={icon} onChange={setIcon} />
         {connected ? (
           <CompanionProviderModelPicker
             providers={providers}

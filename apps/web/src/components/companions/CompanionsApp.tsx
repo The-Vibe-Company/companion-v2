@@ -3,15 +3,11 @@
 import {
   useCallback,
   useEffect,
-  useId,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
-  type CSSProperties,
-  type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
-import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import type {
   Companion,
@@ -39,6 +35,7 @@ import {
 } from "@/lib/companionProviderSettingsCache";
 import {
   cancelCompanionTurn,
+  deleteCompanion,
   duplicateCompanion,
   getCompanionRuntime,
   getCompanionThread,
@@ -53,23 +50,16 @@ import {
   updateCompanionMemberState,
 } from "@/lib/companions";
 import { Icon } from "../Icon";
-import {
-  ResourceListColumns,
-  ResourceListEmpty,
-  ResourceListFrame,
-  ResourceListHeader,
-  ResourceListToolbar,
-} from "../ResourceList";
-import { RelativeTime } from "./RelativeTime";
+import { Dialog } from "../org/primitives";
 import { CompanionProvidersDialog } from "./CompanionProvidersDialog";
 import { CompanionPlugins } from "./CompanionPlugins";
 import { CompanionSettings } from "./CompanionSettings";
-import { CompanionIcon } from "./CompanionIcon";
 import type { CompanionContextSkill } from "./CompanionContext";
 import { CompanionThread } from "./CompanionThread";
 import { NewCompanionDialog } from "./NewCompanionDialog";
 import { ShareCompanionDialog } from "./ShareCompanionDialog";
 import { companionStatus } from "./status";
+import { replyExpected } from "./transcript";
 import { Onboarding } from "../org/Onboarding";
 import { useOrgActions } from "../org/useOrgActions";
 import { Sidebar } from "../skills/Sidebar";
@@ -89,6 +79,12 @@ const PENDING_POLL_MS = 3_000;
  * wakes a Box for any Companion — including the ones nobody has opened.
  */
 const LIST_POLL_MS = 45_000;
+/**
+ * The list cadence while any Companion in it is working — replying, transitioning, or carrying a
+ * pending operation — so sidebar avatars and a requested delete track what is happening without a
+ * thread open. Still the same PostgreSQL read model; the faster cadence never touches Box either.
+ */
+const LIST_ACTIVE_POLL_MS = 8_000;
 /**
  * Where a failing open-thread poll backs off to. The surface keeps trying through transient
  * control-plane failures, but not at the fast cadence, which against a dead proxy would be thirty
@@ -241,220 +237,6 @@ function threadUrl(companionId: string | null): void {
   window.history.replaceState(null, "", `${url.pathname}${url.search}`);
 }
 
-function CompanionActionsMenu({
-  companion,
-  busy,
-  personalWorkspace,
-  hidden = false,
-  onSettings,
-  onShare,
-  onMemberState,
-  onDuplicate,
-}: {
-  companion: Companion;
-  busy: boolean;
-  personalWorkspace: boolean;
-  hidden?: boolean;
-  onSettings: () => void;
-  onShare: () => void;
-  onMemberState: (patch: { pinned?: boolean; hidden?: boolean; unread?: boolean }) => Promise<void>;
-  onDuplicate: () => Promise<void>;
-}) {
-  const menuId = useId();
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const openFocusRef = useRef<"first" | "last">("first");
-  const [open, setOpen] = useState(false);
-  const [position, setPosition] = useState<CSSProperties>({ left: -9999, top: -9999 });
-
-  const positionMenu = useCallback(() => {
-    const trigger = triggerRef.current;
-    const menu = menuRef.current;
-    if (!trigger || !menu) return;
-    const anchor = trigger.getBoundingClientRect();
-    const box = menu.getBoundingClientRect();
-    const viewportPadding = 8;
-    const gap = 4;
-    let top = anchor.bottom + gap;
-    if (top + box.height > window.innerHeight - viewportPadding) {
-      top = Math.max(viewportPadding, anchor.top - box.height - gap);
-    }
-    const maxLeft = Math.max(viewportPadding, window.innerWidth - viewportPadding - box.width);
-    const left = Math.min(
-      Math.max(viewportPadding, anchor.right - box.width),
-      maxLeft,
-    );
-    setPosition({ left, top });
-  }, []);
-
-  const close = useCallback((returnFocus = false) => {
-    setOpen(false);
-    if (returnFocus) window.requestAnimationFrame(() => triggerRef.current?.focus());
-  }, []);
-
-  useLayoutEffect(() => {
-    if (!open) return;
-    positionMenu();
-    window.requestAnimationFrame(() => {
-      const items = menuRef.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)');
-      const item = openFocusRef.current === "last" ? items?.item((items?.length ?? 1) - 1) : items?.item(0);
-      item?.focus();
-    });
-  }, [open, positionMenu]);
-
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (event: PointerEvent) => {
-      // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- invariant checked by the surrounding validation
-      const target = event.target as Node;
-      if (triggerRef.current?.contains(target) || menuRef.current?.contains(target)) return;
-      close();
-    };
-    const onEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      close(true);
-    };
-    document.addEventListener("pointerdown", onPointerDown);
-    document.addEventListener("keydown", onEscape);
-    window.addEventListener("resize", positionMenu);
-    window.addEventListener("scroll", positionMenu, true);
-    return () => {
-      document.removeEventListener("pointerdown", onPointerDown);
-      document.removeEventListener("keydown", onEscape);
-      window.removeEventListener("resize", positionMenu);
-      window.removeEventListener("scroll", positionMenu, true);
-    };
-  }, [close, open, positionMenu]);
-
-  const onMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];
-    // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- invariant checked by the surrounding validation
-    const current = items.indexOf(document.activeElement as HTMLButtonElement);
-    let next = current;
-    if (event.key === "ArrowDown") next = current < items.length - 1 ? current + 1 : 0;
-    else if (event.key === "ArrowUp") next = current > 0 ? current - 1 : items.length - 1;
-    else if (event.key === "Home") next = 0;
-    else if (event.key === "End") next = items.length - 1;
-    else if (event.key === "Tab") {
-      event.preventDefault();
-      close();
-      window.requestAnimationFrame(() => {
-        const trigger = triggerRef.current;
-        if (!trigger) return;
-        const focusable = [...document.querySelectorAll<HTMLElement>(
-          'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
-        )].filter((item) => !menuRef.current?.contains(item));
-        const triggerIndex = focusable.indexOf(trigger);
-        const destination = focusable[triggerIndex + (event.shiftKey ? -1 : 1)];
-        (destination ?? trigger).focus();
-      });
-      return;
-    } else return;
-    event.preventDefault();
-    items[next]?.focus();
-  };
-
-  const run = (action: () => void | Promise<void>, returnFocus = false) => {
-    close(returnFocus);
-    void action();
-  };
-
-  return (
-    <span className="companions-row-menu">
-      <button
-        ref={triggerRef}
-        type="button"
-        className="cds-btn cds-btn--ghost cds-btn--sm companions-row-menu__trigger"
-        aria-label={`Actions for ${companion.name}`}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-controls={open ? menuId : undefined}
-        onClick={() => {
-          openFocusRef.current = "first";
-          setOpen((current) => !current);
-        }}
-        onKeyDown={(event) => {
-          if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-          event.preventDefault();
-          openFocusRef.current = event.key === "ArrowUp" ? "last" : "first";
-          setOpen(true);
-        }}
-      >
-        <Icon name="more-horizontal" size={15} />
-      </button>
-      {open && hasDocument
-        ? createPortal(
-            <div
-              ref={menuRef}
-              id={menuId}
-              className="companions-row-menu__panel"
-              role="menu"
-              aria-label={`Actions for ${companion.name}`}
-              style={position}
-              onKeyDown={onMenuKeyDown}
-            >
-              <button type="button" role="menuitem" onClick={() => run(onSettings)}>
-                Settings
-              </button>
-              {hidden ? (
-                <button
-                  type="button"
-                  role="menuitem"
-                  disabled={busy}
-                  onClick={() => run(() => onMemberState({ hidden: false }), true)}
-                >
-                  Unhide
-                </button>
-              ) : (
-                <>
-                  {companion.access === "owner" && !personalWorkspace ? (
-                    <button type="button" role="menuitem" onClick={() => run(onShare)}>
-                      Share
-                    </button>
-                  ) : null}
-                  <button
-                    type="button"
-                    role="menuitem"
-                    disabled={busy}
-                    onClick={() => run(
-                      () => onMemberState({ pinned: !companion.pinned }),
-                      true,
-                    )}
-                  >
-                    {companion.pinned ? "Unpin" : "Pin"}
-                  </button>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    disabled={busy || companion.unread}
-                    onClick={() => run(() => onMemberState({ unread: true }), true)}
-                  >
-                    Mark as unread
-                  </button>
-                  {companion.access === "owner" ? (
-                    <button type="button" role="menuitem" disabled={busy} onClick={() => run(onDuplicate, true)}>
-                      Duplicate
-                    </button>
-                  ) : null}
-                  <button
-                    type="button"
-                    role="menuitem"
-                    disabled={busy}
-                    onClick={() => run(() => onMemberState({ hidden: true }), true)}
-                  >
-                    Hide
-                  </button>
-                </>
-              )}
-            </div>,
-            document.body,
-          )
-        : null}
-    </span>
-  );
-}
-
 export function CompanionsApp({
   orgs,
   currentOrg,
@@ -499,13 +281,15 @@ export function CompanionsApp({
     initialProviders ?? initialProviderCacheRef.current?.providers ?? null,
   );
   const [providersError, setProvidersError] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
   const [creating, setCreating] = useState(false);
   const [managingProviders, setManagingProviders] = useState(false);
   const [pluginsOpen, setPluginsOpen] = useState(initialPluginsOpen && !initialCompanionId);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sharing, setSharing] = useState<Companion | null>(null);
+  /** The Companion whose kebab Delete is waiting on the confirm dialog. */
+  const [deletingCompanion, setDeletingCompanion] = useState<Companion | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
   const [settingsId, setSettingsId] = useState<string | null>(
     () => initialCompanions.some((item) => item.id === initialSettingsCompanionId)
       ? initialSettingsCompanionId ?? null
@@ -585,8 +369,12 @@ export function CompanionsApp({
   /** The current PostgreSQL thread read; duplicate poll ticks skip it, but sends never wait on it. */
   const threadReadRef = useRef<{ companionId: string; requestId: number } | null>(null);
   const rowRefs = useRef(new Map<string, HTMLButtonElement>());
-  const searchRef = useRef<HTMLInputElement>(null);
   const movedFocusRef = useRef<string | null>(null);
+  /**
+   * One request id per Companion, minted on the first confirm and kept across retries, so however
+   * many times the delete is asked for the control plane sees exactly one operation.
+   */
+  const deleteRequestIds = useRef(new Map<string, string>());
   const noop = () => {};
 
   useLayoutEffect(() => {
@@ -595,7 +383,9 @@ export function CompanionsApp({
     movedFocusRef.current = null;
     const row = rowRefs.current.get(companionId);
     if (row?.isConnected) row.focus();
-    else searchRef.current?.focus();
+    // A hidden row leaves the roster (its Hidden disclosure starts collapsed), so focus falls to
+    // the sidebar's create affordance rather than dropping to the document body.
+    else document.querySelector<HTMLButtonElement>(".side .cmpnav__add")?.focus();
   }, [companions]);
 
   const opened = useMemo(
@@ -656,8 +446,14 @@ export function CompanionsApp({
       return {
         id: companion.id,
         name: companion.name,
+        icon: companion.icon,
         status: status.label,
         tone: status.tone,
+        // The Pi-ACKed replying fact drives the avatar's thinking animation. The open thread's own
+        // fast poll is the freshest carrier of it; every other row reads the roster projection.
+        replying: companion.id === openedId && thread?.companion_id === openedId
+          ? replyExpected(thread)
+          : companion.runtime.replying,
         // A routine's or trigger's prompt is hidden everywhere it could be mistaken for something
         // a member typed, so the list names the origin exactly as the thread header does.
         preview: companion.last_message?.routine_name
@@ -669,23 +465,12 @@ export function CompanionsApp({
         // The reader's own watermark, from the control plane. The thread on screen is being read
         // right now, so it is never the one with a dot on it.
         unread: companion.id !== openedId && companion.unread,
+        access: companion.access,
+        pinned: companion.pinned,
+        hidden: companion.hidden,
       };
     }),
-    [companions, openedId],
-  );
-
-  const visible = useMemo(() => {
-    const needle = query.trim().toLocaleLowerCase("en-US");
-    const active = companions.filter((companion) => !companion.hidden);
-    if (!needle) return active;
-    return active.filter((companion) =>
-      companion.name.toLocaleLowerCase("en-US").includes(needle)
-      || (companion.persona ?? "").toLocaleLowerCase("en-US").includes(needle));
-  }, [companions, query]);
-
-  const hiddenCompanions = useMemo(
-    () => companions.filter((companion) => companion.hidden),
-    [companions],
+    [companions, openedId, thread],
   );
 
   /**
@@ -780,6 +565,32 @@ export function CompanionsApp({
     window.requestAnimationFrame(() => {
       (wasOpen ? rowRefs.current.get(wasOpen) : null)?.focus();
     });
+  };
+
+  /**
+   * The confirmed kebab Delete. The DELETE is a 202 that enqueues durable intent — the row projects
+   * Stopping immediately and drops once the runtime confirms and the control plane stops returning
+   * it; the fast list cadence tracks that. `CompanionSettings` keeps its own delete flow, which
+   * additionally owns the deletion poll for the page that stays on the deleted Companion.
+   */
+  const confirmDelete = async () => {
+    const companion = deletingCompanion;
+    if (!companion) return;
+    const requestId = deleteRequestIds.current.get(companion.id) ?? crypto.randomUUID();
+    deleteRequestIds.current.set(companion.id, requestId);
+    setDeleteBusy(true);
+    setError(null);
+    try {
+      await deleteCompanion(currentOrg.id, companion.id, requestId);
+      setDeletingCompanion(null);
+      if (openedIdRef.current === companion.id) closeThread();
+      void refreshCompanion(companion.id);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "This Companion could not be deleted.");
+      setDeletingCompanion(null);
+    } finally {
+      setDeleteBusy(false);
+    }
   };
 
   const openPlugins = () => {
@@ -930,6 +741,18 @@ export function CompanionsApp({
   }, [openedId, thread]);
 
   /**
+   * Whether any Companion in the list is mid-work: replying, in a lifecycle transition, or carrying
+   * a pending operation such as a requested delete. While one is, the list polls at the fast
+   * cadence so its avatar and status track the work; a settled roster returns to the slow one.
+   */
+  const listWorkPending = companions.some((companion) =>
+    companion.runtime.replying
+    || companion.runtime.state === "provisioning"
+    || companion.runtime.state === "stopping"
+    || (companion.runtime.latest_operation !== null
+      && ["pending", "running"].includes(companion.runtime.latest_operation.status)));
+
+  /**
    * The conversation list re-reads every thread's last line on a slow cadence. It is the
    * control-plane read model — the same list the page was rendered from — so it never contacts a Box
    * and never wakes one, whatever state the Companions in it are in.
@@ -953,9 +776,9 @@ export function CompanionsApp({
         }))
         // A list that could not be re-read keeps the rows it has; nothing on screen is wrong yet.
         .catch(() => {});
-    }, LIST_POLL_MS);
+    }, listWorkPending ? LIST_ACTIVE_POLL_MS : LIST_POLL_MS);
     return () => clearInterval(timer);
-  }, [currentOrg.id]);
+  }, [currentOrg.id, listWorkPending]);
 
   useEffect(() => {
     if (!openedId) return;
@@ -1281,7 +1104,7 @@ export function CompanionsApp({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [mobileSidebarOpen]);
 
-  const dialogOpen = sharing !== null || creating || managingProviders;
+  const dialogOpen = sharing !== null || creating || managingProviders || deletingCompanion !== null;
 
   useEffect(() => {
     if (!dialogOpen) return;
@@ -1333,6 +1156,35 @@ export function CompanionsApp({
         companionsEnabled
         mode="companions"
         companions={sidebarCompanions}
+        onCreateCompanion={() => {
+          if (providers) setCreating(true);
+        }}
+        createCompanionDisabled={!providers}
+        companionMenu={{
+          personalWorkspace: currentOrg.kind === "personal",
+          busy,
+          onSettings: (companionId) => router.push(`/companions/${companionId}/settings`),
+          onShare: (companionId) => {
+            const companion = companions.find((item) => item.id === companionId);
+            if (companion) setSharing(companion);
+          },
+          onMemberState: async (companionId, patch) => {
+            const companion = companions.find((item) => item.id === companionId);
+            if (companion) await applyMemberState(companion, patch);
+          },
+          onDuplicate: async (companionId) => {
+            const companion = companions.find((item) => item.id === companionId);
+            if (companion) await onDuplicate(companion);
+          },
+          onDelete: (companionId) => {
+            const companion = companions.find((item) => item.id === companionId);
+            if (companion && companion.access === "owner") setDeletingCompanion(companion);
+          },
+        }}
+        companionRowRef={(companionId, node) => {
+          if (node) rowRefs.current.set(companionId, node);
+          else rowRefs.current.delete(companionId);
+        }}
         onOpenPlugins={openPlugins}
         pluginsActive={pluginsOpen}
         onOpenProviders={providers && canManageProviders ? () => setManagingProviders(true) : undefined}
@@ -1365,7 +1217,7 @@ export function CompanionsApp({
       <main
         className={"companions-main"
           + (opened ? " companions-main--chat" : "")
-          + (!opened && !settingsCompanion && !pluginsOpen ? " companions-main--list" : "")}
+          + (!opened && !settingsCompanion && !pluginsOpen ? " companions-main--home" : "")}
         aria-hidden={mobileSidebarOpen || dialogOpen || undefined}
         inert={mobileSidebarOpen || dialogOpen ? true : undefined}
       >
@@ -1491,26 +1343,7 @@ export function CompanionsApp({
             onBack={closePlugins}
           />
         ) : (
-          <>
-            <ResourceListHeader
-              title="Companions"
-              count={companions.length}
-              headingLevel={1}
-              action={(
-                <button
-                  type="button"
-                  className="btn-primary"
-                  disabled={!providers}
-                  onClick={() => {
-                    if (providers) setCreating(true);
-                  }}
-                  title={providers ? "New companion" : "Provider settings are loading"}
-                >
-                  <Icon name="plus" size={14} /> New companion
-                </button>
-              )}
-            />
-
+          <div className="companions-home">
             {error ? <div className="companions-error companions-error--list" role="alert">{error}</div> : null}
             {!providers && !providersError ? (
               <div className="companions-list-notice" role="status">
@@ -1525,143 +1358,42 @@ export function CompanionsApp({
                 </button>
               </div>
             ) : null}
-
-            <ResourceListToolbar
-              value={query}
-              onChange={setQuery}
-              placeholder="Search companions"
-              ariaLabel="Search companions"
-              inputRef={searchRef}
-            />
-
-            <ResourceListFrame className="companions-list">
-              <ResourceListColumns className="companions-list__head">
-                <span>Companion</span>
-                <span>Status</span>
-                <span>Updated</span>
-                <span>Access</span>
-              </ResourceListColumns>
-
-              {visible.map((companion) => {
-                const status = companionStatus(companion.runtime.state);
-                return (
-                  <div
-                    className={`companions-row${companion.pinned ? " companions-row--pinned" : ""}`}
-                    key={companion.id}
+            <div className="companions-home__body">
+              <h1 className="companions-home__title">
+                Companions
+                <span className="companions-home__count tnum">{companions.length}</span>
+              </h1>
+              <p className="companions-home__desc">
+                {companions.length === 0
+                  ? "Create a Companion with a name and a connected model provider."
+                  : "Pick a Companion in the sidebar to open its thread."}
+              </p>
+              <div className="companions-home__actions">
+                <button
+                  type="button"
+                  className="btn-primary"
+                  disabled={!providers}
+                  onClick={() => {
+                    if (providers) setCreating(true);
+                  }}
+                  title={providers ? "New companion" : "Provider settings are loading"}
+                >
+                  <Icon name="plus" size={14} /> New companion
+                </button>
+                {companions.length > 0 && (
+                  // Only rendered by CSS under the mobile breakpoint, where the roster lives in a
+                  // drawer this opens; on a desktop the sidebar is already beside this pane.
+                  <button
+                    type="button"
+                    className="cds-btn cds-btn--secondary cds-btn--md companions-home__browse"
+                    onClick={() => setMobileSidebarOpen(true)}
                   >
-                    <button
-                      type="button"
-                      className="companions-row__main"
-                      aria-label={`Open ${companion.name}. ${status.label}. ${companion.access} access${companion.unread ? ". Unread" : ""}.`}
-                      ref={(node) => {
-                        if (node) rowRefs.current.set(companion.id, node);
-                        else rowRefs.current.delete(companion.id);
-                      }}
-                      onClick={() => openCompanion(companion)}
-                    >
-                      <span className="companions-avatar" aria-hidden="true">
-                        <CompanionIcon icon={companion.icon} size={24} />
-                        {companion.unread ? <i className="companions-unread" /> : null}
-                      </span>
-                      <span className="companions-row__text">
-                        <strong>
-                          {companion.pinned ? <Icon name="pin" size={12} /> : null}
-                          {companion.name}
-                        </strong>
-                        <span>
-                          {companion.persona
-                            ?? providerName(companion.runtime.provider_ids[0] ?? "No provider")}
-                        </span>
-                      </span>
-                    </button>
-                    <span
-                      className={`companions-state companions-state--${status.tone}`}
-                      title={companion.runtime.last_error ?? undefined}
-                    >
-                      <i aria-hidden="true" />
-                      {status.label}
-                    </span>
-                    <RelativeTime className="companions-row__time" iso={companion.updated_at} />
-                    <span className="companions-row-actions">
-                      <span className="companions-role">{companion.access}</span>
-                      <CompanionActionsMenu
-                        companion={companion}
-                        busy={busy}
-                        personalWorkspace={currentOrg.kind === "personal"}
-                        onSettings={() => router.push(`/companions/${companion.id}/settings`)}
-                        onShare={() => setSharing(companion)}
-                        onMemberState={(patch) => applyMemberState(companion, patch)}
-                        onDuplicate={() => onDuplicate(companion)}
-                      />
-                    </span>
-                  </div>
-                );
-              })}
-
-              {visible.length === 0 ? (
-                <ResourceListEmpty
-                  icon={companions.length === 0 ? "bot" : "search-x"}
-                  title={companions.length === 0
-                    ? "No Companions yet"
-                    : query.trim()
-                      ? "No Companions match"
-                      : "No visible Companions"}
-                  description={companions.length === 0
-                    ? "Create a Companion with a name, one line of persona, and a connected model provider."
-                    : query.trim()
-                      ? "No Companions match your search. Clear the search to see the workspace in full."
-                      : "Your Companions are hidden from the active list. Use the Hidden section below to restore one."}
-                />
-              ) : null}
-
-              {hiddenCompanions.length > 0 && !query.trim() ? (
-                <section className="companions-hidden" aria-labelledby="companions-hidden-title">
-                  <h3 className="companions-hidden__heading" id="companions-hidden-title">
-                    <Icon name="eye-off" size={14} />
-                    <span>Hidden</span>
-                    <span className="companions-hidden__count tnum">{hiddenCompanions.length}</span>
-                  </h3>
-                  {hiddenCompanions.map((companion) => {
-                    const status = companionStatus(companion.runtime.state);
-                    return (
-                      <div className="companions-row companions-row--hidden" key={companion.id}>
-                        <div className="companions-row__main companions-row__main--static">
-                          <span className="companions-avatar" aria-hidden="true">
-                            <CompanionIcon icon={companion.icon} size={24} />
-                          </span>
-                          <span className="companions-row__text">
-                            <strong>{companion.name}</strong>
-                            <span>{companion.persona ?? "Hidden from your list"}</span>
-                          </span>
-                        </div>
-                        <span
-                          className={`companions-state companions-state--${status.tone}`}
-                          title={companion.runtime.last_error ?? undefined}
-                        >
-                          <i aria-hidden="true" />
-                          {status.label}
-                        </span>
-                        <RelativeTime className="companions-row__time" iso={companion.updated_at} />
-                        <span className="companions-row-actions">
-                          <span className="companions-role">{companion.access}</span>
-                          <CompanionActionsMenu
-                            companion={companion}
-                            busy={busy}
-                            hidden
-                            personalWorkspace={currentOrg.kind === "personal"}
-                            onSettings={() => router.push(`/companions/${companion.id}/settings`)}
-                            onShare={() => setSharing(companion)}
-                            onMemberState={(patch) => applyMemberState(companion, patch)}
-                            onDuplicate={() => onDuplicate(companion)}
-                          />
-                        </span>
-                      </div>
-                    );
-                  })}
-                </section>
-              ) : null}
-            </ResourceListFrame>
-          </>
+                    Browse companions
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
         )}
       </main>
 
@@ -1694,6 +1426,46 @@ export function CompanionsApp({
           onClose={() => setSharing(null)}
         />
       )}
+
+      {deletingCompanion && (
+        <Dialog
+          icon="trash-2"
+          iconDanger
+          title={`Delete ${deletingCompanion.name}?`}
+          desc="Its Box, thread, and Companion record will be permanently deleted after runtime confirmation. This cannot be undone."
+          onClose={() => setDeletingCompanion(null)}
+          closeDisabled={deleteBusy}
+          className="og-dialog companions-delete-dialog"
+          foot={(
+            <>
+              <button
+                type="button"
+                className="cds-btn cds-btn--secondary cds-btn--md"
+                disabled={deleteBusy}
+                onClick={() => setDeletingCompanion(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="cds-btn cds-btn--danger cds-btn--md"
+                disabled={deleteBusy}
+                onClick={() => void confirmDelete()}
+              >
+                {deleteBusy ? "Deleting..." : "Delete Companion"}
+              </button>
+            </>
+          )}
+        />
+      )}
+
+      {/* Kebab actions can now fail while a thread, settings, or Plugins hold the main pane, where
+          the home pane's inline alert is not on screen; the toast is the same answer, elsewhere. */}
+      {error && (opened || settingsCompanion || pluginsOpen) ? (
+        <div className="og-toast" role="alert" onClick={() => setError(null)}>
+          {error}
+        </div>
+      ) : null}
 
       {orgActions.onboarding && (
         <Onboarding

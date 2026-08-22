@@ -28,10 +28,10 @@ export function Dialog({
   closeDisabled = false,
   className = "og-dialog",
 }: {
-  icon: string | ReactNode;
+  icon?: string | ReactNode;
   iconDanger?: boolean;
   title: string;
-  desc: string;
+  desc?: string;
   children?: ReactNode;
   foot?: ReactNode;
   onClose: () => void;
@@ -84,14 +84,17 @@ export function Dialog({
 
   return (
     <div className="og-scrim" onMouseDown={(e) => { if (!closeDisabled && e.target === e.currentTarget) onClose(); }}>
-      <div className={className} role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={descriptionId} ref={dialogRef} tabIndex={-1}>
+      <div className={className} role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={desc === undefined ? undefined : descriptionId} ref={dialogRef} tabIndex={-1}>
         <div className="og-dialog__head">
-          <span className={"og-dialog__ic" + (iconDanger ? " og-dialog__ic--danger" : "")}>
-            {typeof icon === "string" ? <Icon name={icon} size={17} /> : icon}
-          </span>
+          {icon !== undefined && (
+            <span className={"og-dialog__ic" + (iconDanger ? " og-dialog__ic--danger" : "")}>
+              {/* oxlint-disable-next-line anti-slop/no-runtime-typeof -- legacy pattern predating the incremental anti-slop gate */}
+              {typeof icon === "string" ? <Icon name={icon} size={17} /> : icon}
+            </span>
+          )}
           <div style={{ flex: 1 }}>
             <h3 className="og-dialog__t" id={titleId}>{title}</h3>
-            <p className="og-dialog__d" id={descriptionId}>{desc}</p>
+            {desc !== undefined && <p className="og-dialog__d" id={descriptionId}>{desc}</p>}
           </div>
           <button className="iconbtn og-dialog__x" onClick={onClose} aria-label="Close" disabled={closeDisabled}>
             <Icon name="x" size={15} />

@@ -81,6 +81,7 @@ function companion(overrides: Partial<Companion> = {}): Companion {
       generation: 1,
       state: "running",
       daemon_state: "running",
+      replying: false,
       box_id: "bx_23456789",
       provider_ids: ["anthropic"],
       provider_credential_generation: null,
@@ -362,7 +363,17 @@ describe("CompanionThread", () => {
     const running = render({ thread: waiting });
 
     expect(running).toContain("Luna is working on this turn.");
-    expect(running).toContain("Luna is replying...");
+    // The sentence a reader gets is unchanged; the name merely moved into its own emphasized span,
+    // so the durable ACK fact is read as text rather than as one literal text node.
+    expect(text(running)).toContain("Luna is replying...");
+    // The trailer itself is the thinking blob, not a spinner: same slot, animated bot beside it.
+    expect(running).toMatch(
+      /data-slot="companion-replying"[^>]*><svg class="companion-icon companion-icon--thinking" width="16"/,
+    );
+    // The header avatar animates on exactly the same durable signal as the trailer.
+    expect(running).toMatch(
+      /chat-avatar" aria-hidden="true"><svg class="companion-icon companion-icon--thinking"/,
+    );
 
     const starting = render({
       companion: companion({
@@ -373,6 +384,10 @@ describe("CompanionThread", () => {
 
     expect(text(starting)).toContain("Starting");
     expect(starting).toContain("Luna is starting this turn.");
+    // Without a Pi-ACKed attempt the header avatar sits idle instead of pretending to think.
+    expect(starting).toMatch(
+      /chat-avatar" aria-hidden="true"><svg class="companion-icon companion-icon--idle"/,
+    );
   });
 
   it("keeps a Viewer's footer read-only even while messages are waiting on a wake", () => {
@@ -425,6 +440,7 @@ describe("CompanionThread", () => {
           ...companion().runtime,
           state: "error",
           daemon_state: "error",
+          replying: false,
           last_error: "Box runtime is not configured; set COMPANION_BOX_API_KEY",
         },
       }),
@@ -446,6 +462,7 @@ describe("CompanionThread", () => {
           ...companion().runtime,
           state: "error",
           daemon_state: "error",
+          replying: false,
           box_id: null,
           last_error: "This Companion is unavailable right now.",
         },

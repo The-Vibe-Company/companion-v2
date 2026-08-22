@@ -346,6 +346,12 @@ export const companionSchema = z.object({
     generation: z.number().int().positive(),
     state: companionRuntimeStateSchema,
     daemon_state: companionDaemonStateSchema,
+    /**
+     * The Pi-acknowledged replying fact from this Companion's active turn, so a roster surface can
+     * animate without a thread read. False in every other state — `queued`, `starting`, and
+     * `dispatching` never count as replying.
+     */
+    replying: z.boolean().default(false),
     box_id: z.string().nullable(),
     provider_ids: z.array(z.string()),
     provider_credential_generation: z.string().uuid().nullable(),

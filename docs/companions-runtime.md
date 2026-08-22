@@ -436,7 +436,9 @@ A running attempt has two bounds:
 The two-second sweep settles either deadline no later than one additional sweep. Settlement is
 visible and expurgated. “Companion is replying…” is true only after positive prompt ACK and before
 `needs_input` or a terminal state; queued, starting, dispatching, interrupted, cancelled, or settled
-turns never show it.
+turns never show it. The companion read model (`GET /v1/companions`, `GET /v1/companions/:id`)
+carries the same ACK-gated fact as `runtime.replying`, so roster surfaces can animate a working
+Companion from PostgreSQL alone without a thread read.
 
 ## Companion routines
 
