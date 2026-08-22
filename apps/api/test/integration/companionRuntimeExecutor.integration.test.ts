@@ -4198,8 +4198,8 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         `,
       })).resolves.toEqual([{ authorized: false }]);
 
-      let releaseSelectionLock = () => undefined;
-      let markSelectionLocked = () => undefined;
+      let releaseSelectionLock: () => void = () => undefined;
+      let markSelectionLocked: () => void = () => undefined;
       const selectionLocked = new Promise<void>((resolve) => { markSelectionLocked = resolve; });
       const holdSelectionLock = new Promise<void>((resolve) => { releaseSelectionLock = resolve; });
       const holder = asApi({
