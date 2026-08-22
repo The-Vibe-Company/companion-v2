@@ -2,10 +2,12 @@
 
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent, type Ref } from "react";
 import Link from "next/link";
-import type { LabelColor, LabelIcon } from "@companion/contracts";
+import type { Companion, CompanionAccess, LabelColor, LabelIcon } from "@companion/contracts";
 import { LABEL_COLORS, LABEL_ICONS, labelDisplayNameToPath } from "@companion/contracts";
 import { Icon } from "../Icon";
 import { UserAvatar } from "../UserAvatar";
+import { CompanionActionsMenu } from "../companions/CompanionActionsMenu";
+import { CompanionIcon } from "../companions/CompanionIcon";
 import { RelativeTime } from "../companions/RelativeTime";
 import { OrgSwitcher } from "../org/OrgSwitcher";
 import type { OrgVM } from "@/lib/types";
@@ -23,15 +25,24 @@ export type SidebarMode = "skills" | "companions";
 export type SidebarCompanion = {
   id: string;
   name: string;
+  /** The blob avatar indexes, rendered by `CompanionIcon` on every surface. */
+  icon: Companion["icon"];
   /** Short status word already paired with the dot colour, never colour alone. */
   status: string;
   tone: "ok" | "warn" | "danger" | "unknown";
+  /** Pi-ACKed replying only — the avatar thinks exactly when the thread would say "is replying…". */
+  replying: boolean;
   /** One line of the newest thing said on this thread; null when nobody has written in it. */
   preview: string | null;
   /** When that line was written, so the row can say how long ago. */
   previewAt: string | null;
   /** Someone else has written since this reader last opened the thread. */
   unread: boolean;
+  /** What the actions menu may offer this reader for this Companion. */
+  access: CompanionAccess;
+  pinned: boolean;
+  /** Hidden rows live in the collapsed Hidden disclosure, not the main roster. */
+  hidden: boolean;
 };
 
 /** The signed-in reader, for the footer row that names whose workspace this is. */
@@ -124,6 +135,7 @@ function LabelMenu({
   }, [row.path]);
   useEffect(() => {
     const onDown = (e: MouseEvent) => {
+      // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- legacy pattern predating the incremental anti-slop gate
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) onClose();
     };
     const onKey = (e: KeyboardEvent) => {
@@ -134,6 +146,7 @@ function LabelMenu({
       if ((e.key === "ArrowDown" || e.key === "ArrowUp") && menuRef.current?.contains(document.activeElement)) {
         const items = [...menuRef.current.querySelectorAll<HTMLElement>('[role="menuitem"]:not([disabled])')];
         if (items.length === 0) return;
+        // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- legacy pattern predating the incremental anti-slop gate
         const current = items.indexOf(document.activeElement as HTMLElement);
         const delta = e.key === "ArrowDown" ? 1 : -1;
         items[(current + delta + items.length) % items.length]?.focus();
@@ -414,6 +427,7 @@ function LabelTreeRows({
             data-skill-drop-kind={canManage ? "label" : undefined}
             data-skill-drop-lib={canManage ? lib : undefined}
             data-skill-drop-path={canManage ? row.path : undefined}
+            // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- legacy pattern predating the incremental anti-slop gate
             style={{
               paddingLeft: 8 + row.depth * 14,
               "--lbl-insert-left": `${28 + (reorderAfter && afterTarget ? afterTarget.depth : row.depth) * 14}px`,
@@ -456,6 +470,7 @@ function LabelTreeRows({
                 title="Folder options"
                 onClick={(e) => {
                   e.stopPropagation();
+                  // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- legacy pattern predating the incremental anti-slop gate
                   const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
                   onOpenMenu(row, { x: r.left, y: r.bottom + 4 }, e.currentTarget);
                 }}
@@ -512,6 +527,10 @@ export function Sidebar({
   companions = [],
   activeCompanionId = null,
   onSelectCompanion = () => {},
+  onCreateCompanion,
+  createCompanionDisabled = false,
+  companionMenu,
+  companionRowRef,
   onOpenPlugins,
   pluginsActive = false,
   onOpenProviders,
@@ -571,6 +590,28 @@ export function Sidebar({
   companions?: SidebarCompanion[];
   activeCompanionId?: string | null;
   onSelectCompanion?: (companionId: string) => void;
+  /** Companions mode only: opens the New companion dialog from the roster's `+` button. */
+  onCreateCompanion?: () => void;
+  /** True while provider settings are still loading and creation cannot start yet. */
+  createCompanionDisabled?: boolean;
+  /**
+   * Companions mode only: presence renders the per-row "…" actions menu. Gated on its own prop —
+   * not `navigationOnly`, which only mutes Skills label mutation.
+   */
+  companionMenu?: {
+    personalWorkspace: boolean;
+    busy: boolean;
+    onSettings: (companionId: string) => void;
+    onShare: (companionId: string) => void;
+    onMemberState: (
+      companionId: string,
+      patch: { pinned?: boolean; hidden?: boolean; unread?: boolean },
+    ) => Promise<void>;
+    onDuplicate: (companionId: string) => Promise<void>;
+    onDelete: (companionId: string) => void;
+  };
+  /** Registers each row's main button so the host can restore focus after hide/unhide. */
+  companionRowRef?: (companionId: string, node: HTMLButtonElement | null) => void;
   /** Companions mode only: the Plugins surface, reachable without leaving an open thread. */
   onOpenPlugins?: () => void;
   pluginsActive?: boolean;
@@ -606,6 +647,9 @@ export function Sidebar({
   const newFolderInputRef = useRef<HTMLInputElement>(null);
   const [mineOpen, setMineOpen] = useState(true);
   const [orgOpen, setOrgOpen] = useState(true);
+  // Hidden Companions stay out of the roster until asked for, mirroring the retired main-list
+  // section. Collapsed on every mount: a hidden row is a put-away thing, not a resting place.
+  const [hiddenCompanionsOpen, setHiddenCompanionsOpen] = useState(false);
 
   const warmSettings = () => onWarmSettings();
   const runAndClose = (action: () => void) => {
@@ -692,6 +736,84 @@ export function Sidebar({
     queueMicrotask(() => trigger?.focus());
   };
 
+  const hiddenSidebarCompanions = companions.filter((companion) => companion.hidden);
+
+  /**
+   * One conversation row. A `<div>` wrapper with a separate main button and kebab, the `.lblrow`
+   * precedent — the row cannot stay one `<button>` once it hosts the actions trigger.
+   */
+  const companionRow = (companion: SidebarCompanion, hidden: boolean) => {
+    const active = companion.id === activeCompanionId;
+    return (
+      <div
+        key={companion.id}
+        className={"cmprow" + (active ? " cmprow--active" : "") + (hidden ? " cmprow--hidden" : "")}
+      >
+        <button
+          type="button"
+          className="cmprow__main"
+          aria-current={active ? "page" : undefined}
+          // No `aria-label`: it would override the row's own content, and the content is
+          // the announcement — the name, when the thread last spoke, what it said, and the
+          // status and unread words below. A label here silently hid all four.
+          onClick={() => runAndClose(() => onSelectCompanion(companion.id))}
+          title={`${companion.name} — ${companion.status}`}
+          ref={companionRowRef ? (node) => companionRowRef(companion.id, node) : undefined}
+        >
+          <span className="cmprow__avatar" aria-hidden="true">
+            {/* The blob is the avatar — a plain face, no ring or plate — and it thinks exactly
+                while a Pi-ACKed attempt is replying, never for queued or starting work. */}
+            <CompanionIcon
+              icon={companion.icon}
+              size={30}
+              state={companion.replying ? "thinking" : "idle"}
+            />
+            {/* Presence sits on the face it belongs to, the way a conversation list reads.
+                It is never the only carrier: the word rides in the row's accessible name
+                and, below, as text a screen reader reaches. */}
+            <i className={`cmprow__dot cmprow__dot--${companion.tone}`} />
+          </span>
+          <span className="cmprow__body">
+            <span className="cmprow__line">
+              <span className="cmprow__name">{companion.name}</span>
+              {companion.previewAt && (
+                <RelativeTime className="cmprow__time" iso={companion.previewAt} />
+              )}
+            </span>
+            <span className="cmprow__preview">
+              {companion.preview ?? "No messages yet"}
+            </span>
+          </span>
+          {/* Outside the body so the collapsed rail, which drops the text, still shows
+              that something is waiting. */}
+          {companion.unread && <i className="cmprow__unread" aria-hidden="true" />}
+          <span className="cmprow__statusword sr-only">
+            {companion.unread ? `${companion.status}, Unread` : companion.status}
+          </span>
+        </button>
+        {companionMenu && (
+          <CompanionActionsMenu
+            companion={{
+              id: companion.id,
+              name: companion.name,
+              access: companion.access,
+              pinned: companion.pinned,
+              unread: companion.unread,
+            }}
+            busy={companionMenu.busy}
+            personalWorkspace={companionMenu.personalWorkspace}
+            hidden={hidden}
+            onSettings={() => runAndClose(() => companionMenu.onSettings(companion.id))}
+            onShare={() => runAndClose(() => companionMenu.onShare(companion.id))}
+            onMemberState={(patch) => companionMenu.onMemberState(companion.id, patch)}
+            onDuplicate={() => companionMenu.onDuplicate(companion.id)}
+            onDelete={() => runAndClose(() => companionMenu.onDelete(companion.id))}
+          />
+        )}
+      </div>
+    );
+  };
+
   return (
     <aside ref={asideRef} className={"side" + (mobileOpen ? " side--mobile-open" : "") + (skillDropMode ? " side--skill-drop" : "")}>
       <div className="side__brand">
@@ -748,50 +870,48 @@ export function Sidebar({
       <nav className="side__nav" aria-label="Primary">
         {companionsMode ? (
           <div className="cmpnav">
+            {onCreateCompanion && (
+              <div className="cmpnav__head">
+                <span className="cmpnav__title">Companions</span>
+                <button
+                  type="button"
+                  className="cmpnav__add"
+                  onClick={() => runAndClose(onCreateCompanion)}
+                  disabled={createCompanionDisabled}
+                  aria-label="New companion"
+                  title={createCompanionDisabled
+                    ? "Provider settings are still loading"
+                    : "New companion"}
+                >
+                  <Icon name="plus" size={15} />
+                </button>
+              </div>
+            )}
             {companions.length === 0 ? (
               <p className="cmpnav__empty">No Companions yet</p>
             ) : (
-              companions.map((companion) => {
-                const active = companion.id === activeCompanionId;
-                return (
-                  <button
-                    key={companion.id}
-                    type="button"
-                    className={"cmprow" + (active ? " cmprow--active" : "")}
-                    aria-current={active ? "page" : undefined}
-                    // No `aria-label`: it would override the row's own content, and the content is
-                    // the announcement — the name, when the thread last spoke, what it said, and the
-                    // status and unread words below. A label here silently hid all four.
-                    onClick={() => runAndClose(() => onSelectCompanion(companion.id))}
-                    title={`${companion.name} — ${companion.status}`}
-                  >
-                    <span className="cmprow__avatar" aria-hidden="true">
-                      {companion.name.trim().slice(0, 1).toLocaleUpperCase("en-US") || "C"}
-                      {/* Presence sits on the face it belongs to, the way a conversation list reads.
-                          It is never the only carrier: the word rides in the row's accessible name
-                          and, below, as text a screen reader reaches. */}
-                      <i className={`cmprow__dot cmprow__dot--${companion.tone}`} />
-                    </span>
-                    <span className="cmprow__body">
-                      <span className="cmprow__line">
-                        <span className="cmprow__name">{companion.name}</span>
-                        {companion.previewAt && (
-                          <RelativeTime className="cmprow__time" iso={companion.previewAt} />
-                        )}
+              <>
+                {companions.filter((companion) => !companion.hidden).map((companion) =>
+                  companionRow(companion, false))}
+                {hiddenSidebarCompanions.length > 0 && (
+                  <div className="cmpnav__hidden">
+                    <button
+                      type="button"
+                      className="cmpnav__hiddenhead"
+                      aria-expanded={hiddenCompanionsOpen}
+                      onClick={() => setHiddenCompanionsOpen((current) => !current)}
+                    >
+                      <Icon name={hiddenCompanionsOpen ? "chevron-down" : "chevron-right"} size={13} />
+                      <span>Hidden</span>
+                      <span className="cmpnav__hiddencount tnum">
+                        {hiddenSidebarCompanions.length}
                       </span>
-                      <span className="cmprow__preview">
-                        {companion.preview ?? "No messages yet"}
-                      </span>
-                    </span>
-                    {/* Outside the body so the collapsed rail, which drops the text, still shows
-                        that something is waiting. */}
-                    {companion.unread && <i className="cmprow__unread" aria-hidden="true" />}
-                    <span className="cmprow__statusword sr-only">
-                      {companion.unread ? `${companion.status}, Unread` : companion.status}
-                    </span>
-                  </button>
-                );
-              })
+                    </button>
+                    {hiddenCompanionsOpen && hiddenSidebarCompanions.map((companion) =>
+                      companionRow(companion, true))}
+                  </div>
+                )}
+              </>
             )}
           </div>
         ) : (

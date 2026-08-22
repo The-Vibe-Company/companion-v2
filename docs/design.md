@@ -323,7 +323,9 @@ and pileup fires are skipped without enqueuing.
 
 The web retains polling: three seconds while activity is present, slower when settled. There is no
 SSE or Box push agent. “Companion is replying…” derives only from an acknowledged, non-terminal
-attempt. Viewer/list/thread/status reads remain PostgreSQL-only.
+attempt; the companion read model carries the same ACK-gated fact as `runtime.replying`, so roster
+surfaces animate a working Companion without a thread read. Viewer/list/thread/status reads remain
+PostgreSQL-only.
 
 Each Companion carries a cosmetic blob icon — four smallint indexes (`icon_shape`, `icon_mouth`,
 `icon_accessory`, `icon_color`) into fixed client-side catalogs rendered as inline SVG. Create and

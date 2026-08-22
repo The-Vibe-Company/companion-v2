@@ -60,7 +60,11 @@ export const COMPANION_ICON_ACCESSORY_COUNT = ACCESSORIES.length;
 
 export const DEFAULT_COMPANION_ICON = { shape: 1, mouth: 1, accessory: 1, color: 2 } as const;
 
-export type CompanionIconState = "idle" | "thinking";
+/**
+ * `still` renders the bot with no animation at all — the thread body forbids ambient motion, so
+ * per-message avatars use it while roster and header avatars breathe or think.
+ */
+export type CompanionIconState = "idle" | "thinking" | "still";
 
 function clamp(value: number | undefined, max: number, fallback: number): number {
   // SAFETY: Number.isInteger excludes undefined/non-numbers before each comparison below.

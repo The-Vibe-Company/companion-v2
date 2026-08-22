@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+/* oxlint-disable anti-slop/require-safety-comment-for-type-assertion, anti-slop/no-module-mocking, anti-slop/no-unknown-parameters -- Existing tests predate the incremental anti-slop gate. */
 
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -80,6 +81,7 @@ const asleep: Companion = {
     generation: 1,
     state: "stopped",
     daemon_state: "stopped",
+    replying: false,
     box_id: null,
     provider_ids: ["anthropic"],
     provider_credential_generation: null,

@@ -153,6 +153,24 @@ function PassageLead({ message }: { message: TranscriptMessage | undefined }) {
 }
 
 /**
+ * The assistant's lead carries the Companion's face beside its name. The face is `still` on
+ * purpose: the transcript body has no ambient motion, and the thinking animation belongs to the
+ * trailer below the last message, which shares this lead's geometry so the working bot reads as
+ * the next passage forming.
+ */
+function AssistantPassageLead({ message }: { message: TranscriptMessage | undefined }) {
+  const { companionIcon } = useChrome();
+  if (!message?.lead || !message.author) return null;
+  return (
+    <p className="text-muted-foreground mb-1 flex items-center gap-2 text-xs">
+      <CompanionIcon icon={companionIcon} size={16} state="still" />
+      <span className="text-foreground font-medium">{message.author}</span>
+      <SentAt iso={message.createdAt} />
+    </p>
+  );
+}
+
+/**
  * One day separator. The key is already the day this message belongs to — the stored one on the
  * server, the reader's own once the client has a clock — and is read back at midday UTC so the round
  * trip cannot shift it. Only the label gets friendlier after mount.
@@ -223,7 +241,7 @@ function AssistantFrame({ children }: { children: ReactNode }) {
   return (
     <>
       <Separators message={message} />
-      <PassageLead message={message} />
+      <AssistantPassageLead message={message} />
       {children}
       {/* Files come after the words that introduced them, which is the order they happened in. */}
       {message && <AttachmentList attachments={attachmentsOf(message)} />}
@@ -776,10 +794,14 @@ function Trailer() {
   return (
     <p
       data-slot="companion-replying"
-      className="text-muted-foreground flex items-center gap-2 text-sm"
+      className="text-muted-foreground flex items-center gap-2 text-xs"
     >
-      <CompanionIcon icon={companionIcon} size={20} state="thinking" />
-      <span>{companionName} is replying...</span>
+      {/* Same geometry as the assistant lead above, so the thinking face sits exactly where the
+          reply's own face will land when it arrives. */}
+      <CompanionIcon icon={companionIcon} size={16} state="thinking" />
+      <span>
+        <span className="text-foreground font-medium">{companionName}</span> is replying...
+      </span>
     </p>
   );
 }

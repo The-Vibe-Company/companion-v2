@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+/* oxlint-disable anti-slop/require-safety-comment-for-type-assertion, anti-slop/no-module-mocking, anti-slop/no-unknown-parameters, anti-slop/no-known-value-widening, anti-slop/no-unsafe-dictionary-type -- Existing tests predate the incremental anti-slop gate. */
 
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -88,6 +89,7 @@ function companion(overrides: Partial<Companion> = {}): Companion {
       generation: 1,
       state: "running",
       daemon_state: "running",
+      replying: false,
       box_id: "bx_23456789",
       provider_ids: ["anthropic"],
       provider_credential_generation: null,
@@ -617,7 +619,7 @@ describe("CompanionsApp context panel", () => {
 
     // The sidebar moves between threads without closing the panel, so the panel has to follow the
     // Companion rather than keep the screen it was already showing.
-    const row = [...container.querySelectorAll(".cmprow")]
+    const row = [...container.querySelectorAll("aside .cmprow button.cmprow__main")]
       .find((button) => button.querySelector(".cmprow__name")?.textContent === "Nova") as HTMLButtonElement;
     await act(async () => {
       row.dispatchEvent(new MouseEvent("click", { bubbles: true }));

@@ -1,3 +1,4 @@
+/* oxlint-disable anti-slop/no-module-mocking -- Existing tests predate the incremental anti-slop gate. */
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { Companion, CompanionProvidersResponse } from "@companion/contracts";
@@ -61,6 +62,7 @@ function companion(overrides: Partial<Companion> = {}): Companion {
       generation: 1,
       state: "running",
       daemon_state: "running",
+      replying: false,
       box_id: "bx_23456789",
       provider_ids: ["anthropic"],
       provider_credential_generation: null,
@@ -87,6 +89,7 @@ function render(
   initialCompanionId?: string | null,
   initialPluginsOpen = false,
   initialSettingsCompanionId?: string | null,
+  initialProviders: CompanionProvidersResponse | null = providers,
 ) {
   return renderToStaticMarkup(React.createElement(CompanionsApp, {
     orgs: [org],
@@ -95,7 +98,7 @@ function render(
     navigation,
     skills: [],
     initialCompanions: companions,
-    initialProviders: providers,
+    initialProviders,
     initialPlugins: [{
       id: "44444444-4444-4444-8444-444444444444",
       provider: "linear",
@@ -113,7 +116,7 @@ function render(
 }
 
 describe("CompanionsApp", () => {
-  it("lists workspace Companions with persona, status, and access", () => {
+  it("lists workspace Companions in the sidebar roster with a blob avatar and status", () => {
     const markup = render([
       companion(),
       companion({
@@ -128,21 +131,39 @@ describe("CompanionsApp", () => {
       }),
     ]);
 
-    expect(markup).toContain("Content marketing assistant");
-    expect(markup).toContain("Developer assistant");
-    expect(markup).toContain("Online");
-    expect(markup).toContain("Asleep");
+    expect(markup).toContain(">Luna<");
+    expect(markup).toContain(">Milo<");
+    // The avatar is the blob icon, idle while nothing is replying, with the presence dot on it.
+    expect(markup).toContain('class="companion-icon companion-icon--idle"');
+    expect(markup).toContain("cmprow__dot--ok");
+    // Status rides in the row's accessible name and as a screen-reader word, never colour alone.
+    expect(markup).toContain('title="Luna — Online"');
+    expect(markup).toContain('title="Milo — Asleep"');
+    expect(markup).toContain('class="cmprow__statusword sr-only">Online<');
+    expect(markup).toContain('class="cmprow__statusword sr-only">Asleep<');
     expect(markup).toContain("New companion");
-    expect(markup).toContain("Search companions");
-    expect(markup).toContain('class="companions-main companions-main--list"');
-    expect(markup).toContain('class="chead companions-list__head"');
+    // Persona and access were list columns; the roster row carries neither.
+    expect(markup).not.toContain("Content marketing assistant");
+    expect(markup).not.toContain("Developer assistant");
+    expect(markup).not.toContain("Search companions");
     // Secondary actions stay out of the row until its single menu opens.
     expect(markup.match(/aria-label="Actions for/g)).toHaveLength(2);
     expect(markup).not.toContain(">Share<");
     expect(markup).not.toContain(">Settings<");
   });
 
-  it("keeps hidden Companions out of the main list and offers unhide", () => {
+  it("animates the roster blob only for a Pi-acknowledged reply", () => {
+    const markup = render([
+      companion({
+        runtime: { ...companion().runtime, replying: true },
+      }),
+    ]);
+
+    expect(markup).toContain('class="companion-icon companion-icon--thinking"');
+    expect(markup).not.toContain("companion-icon--idle");
+  });
+
+  it("keeps hidden Companions out of the roster behind a collapsed Hidden disclosure", () => {
     const markup = render([
       companion({ name: "Visible" }),
       companion({
@@ -152,33 +173,54 @@ describe("CompanionsApp", () => {
       }),
     ]);
     expect(markup).toContain("Visible");
-    expect(markup).toContain("Hidden");
-    expect(markup).toContain("Stashed");
-    expect(markup).toContain('aria-label="Actions for Stashed"');
+    // Hidden rows live behind the disclosure, collapsed by default, so the name stays off screen
+    // until a member expands it — where the row's menu offers unhide.
+    expect(markup).toContain(">Hidden<");
+    expect(markup).toContain('class="cmpnav__hiddenhead" aria-expanded="false"');
+    expect(markup).not.toContain("Stashed");
+    expect(markup.match(/aria-label="Actions for/g)).toHaveLength(1);
   });
 
-  it("carries the recorded reason next to an Error status in the list", () => {
+  it("carries the Error status on the roster row's name and screen-reader word", () => {
     const markup = render([
       companion({
         runtime: {
           ...companion().runtime,
           state: "error",
           daemon_state: "error",
+          replying: false,
           last_error: "Box runtime is not configured; set COMPANION_BOX_API_KEY",
         },
       }),
     ]);
 
-    expect(markup).toContain("Error");
-    expect(markup).toContain('title="Box runtime is not configured; set COMPANION_BOX_API_KEY"');
+    expect(markup).toContain('title="Luna — Error"');
+    expect(markup).toContain('class="cmprow__statusword sr-only">Error<');
+    expect(markup).toContain("cmprow__dot--danger");
+    // The recorded reason lived on the retired list chip; the roster row does not surface it.
+    expect(markup).not.toContain("COMPANION_BOX_API_KEY");
   });
 
-  it("offers creation from the empty state instead of a dead list", () => {
+  it("offers creation from the empty welcome pane instead of a dead list", () => {
     const markup = render([]);
 
     expect(markup).toContain("No Companions yet");
+    expect(markup).toContain("Create a Companion with a name and a connected model provider.");
+    expect(markup).toContain('class="btn-primary"');
     expect(markup).toContain("New companion");
-    expect(markup).toContain("Search companions");
+    expect(markup).toContain('class="cmpnav__add" aria-label="New companion"');
+    // Browsing exists only once there is something to browse; search left with the list.
+    expect(markup).not.toContain("Browse companions");
+    expect(markup).not.toContain("Search companions");
+  });
+
+  it("keeps creation gated while provider settings are still loading", () => {
+    const markup = render([], null, false, null, null);
+
+    expect(markup).toContain("Loading provider settings…");
+    expect(markup).toContain('class="btn-primary" disabled=""');
+    expect(markup).toContain('title="Provider settings are loading"');
+    expect(markup).toContain('title="Provider settings are still loading"');
   });
 
   it("keeps the sidebar in Companions mode with the Skills switch available", () => {
@@ -189,18 +231,19 @@ describe("CompanionsApp", () => {
     expect(markup).not.toContain("My Skills");
   });
 
-  it("opens the chat thread for a deep-linked Companion instead of the list", () => {
+  it("opens the chat thread for a deep-linked Companion instead of the welcome pane", () => {
     const markup = render([companion()], "11111111-1111-4111-8111-111111111111");
 
     expect(markup).toContain("Chat with Luna");
     expect(markup).toContain("Back to Companions");
-    expect(markup).not.toContain("Search companions");
+    expect(markup).not.toContain("companions-main--home");
   });
 
-  it("falls back to the list when the deep-linked Companion is not visible", () => {
+  it("falls back to the welcome pane when the deep-linked Companion is not visible", () => {
     const markup = render([companion()], "33333333-3333-4333-8333-333333333333");
 
-    expect(markup).toContain("Search companions");
+    expect(markup).toContain('class="companions-main companions-main--home"');
+    expect(markup).toContain("Pick a Companion in the sidebar to open its thread.");
     expect(markup).not.toContain("Chat with Luna");
   });
 
@@ -220,7 +263,7 @@ describe("CompanionsApp", () => {
     expect(chat).not.toContain("Add MCP");
   });
 
-  it("renders settings as a separate surface for a runner and keeps them out of the list", () => {
+  it("renders settings as a separate surface for a runner and keeps them off the welcome pane", () => {
     const settings = render([companion()], null, false, companion().id);
 
     expect(settings).toContain("Companion settings");
@@ -228,7 +271,7 @@ describe("CompanionsApp", () => {
     expect(settings).toContain("1. Provider");
     expect(settings).toContain("2. Model");
     expect(settings).toContain("Delete Companion");
-    expect(settings).not.toContain("Search companions");
+    expect(settings).not.toContain("companions-main--home");
     expect(settings).not.toContain("Chat with Luna");
   });
 });

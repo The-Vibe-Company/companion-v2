@@ -477,6 +477,17 @@ export function CompanionSettings({
         )}
 
         <form className="companions-settings__form" onSubmit={submit}>
+          {/* The face leads the form, exactly where the creation dialog put it. */}
+          {canEdit && (
+            <CompanionIconPicker
+              value={icon}
+              onChange={(next) => {
+                setIcon(next);
+                setSaved(false);
+              }}
+            />
+          )}
+
           <label>
             Name
             <input
@@ -510,18 +521,6 @@ export function CompanionSettings({
           <p className="companions-settings__hint" id="companion-instructions-hint">
             Applied after the active turn settles and before the next turn starts.
           </p>
-
-          {canEdit && (
-            <>
-              <CompanionIconPicker
-                value={icon}
-                onChange={(next) => {
-                  setIcon(next);
-                  setSaved(false);
-                }}
-              />
-            </>
-          )}
 
           <CompanionProviderModelPicker
             providers={providers}

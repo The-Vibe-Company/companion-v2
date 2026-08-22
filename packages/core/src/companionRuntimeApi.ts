@@ -207,6 +207,7 @@ export function projectCompanionRuntimeV2(
       generation: positiveInteger(row.generation),
       state: projectedRuntimeState(row, latestOperation),
       daemon_state: projectedDaemonState(row),
+      replying: row.is_replying === true,
       box_id: row.access_role === "viewer" ? null : row.box_id,
       disk_layout_version: integer(row.disk_layout_version),
       desktop_available: row.access_role !== "viewer" && row.box_id !== null && runnableBox,

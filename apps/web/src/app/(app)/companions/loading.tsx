@@ -35,21 +35,12 @@ export default function CompanionsLoading() {
         </div>
       </aside>
 
-      <main className="companions-main">
-        <header className="companions-head">
-          <span className="skel skel--brandname" />
-          <span className="skel skel--button" />
-        </header>
-        <div className="companions-content">
-          <div className="companions-list">
-            {[0, 1, 2, 3].map((row) => (
-              <div className="companions-row skel__row" key={row}>
-                <span className="skel skel--wide" />
-                <span className="skel skel--pill" />
-                <span className="skel skel--updated" />
-                <span className="skel skel--role" />
-              </div>
-            ))}
+      <main className="companions-main companions-main--home">
+        <div className="companions-home">
+          <div className="companions-home__body">
+            <span className="skel skel--brandname" />
+            <span className="skel skel--navlabel" />
+            <span className="skel skel--button" />
           </div>
         </div>
         <p className="sr-only" role="status">Loading workspace…</p>
