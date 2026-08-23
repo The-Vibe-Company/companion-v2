@@ -760,6 +760,16 @@ The following always read PostgreSQL only:
 The web polls every three seconds while a turn or lifecycle operation is active and returns to a
 slower cadence when stable. There is no SSE and no Box-to-control-plane push agent.
 
+### Native mobile app
+
+The standalone Expo client in `apps/mobile` reuses the existing Better Auth cookie session: it
+captures the login `set-cookie` value, resolves the current organization through `whoami`, and sends
+the cookie plus `x-companion-org` on each REST request. Its v1 surface is deliberately chat-only:
+list, create, durable send/poll, `ask_user` decisions, and explicit interrupted-turn Retry/Cancel.
+Sends use `client_surface: native_mobile`, so runtime stages no library Skills, Skills Hub token,
+member MCP accounts, or config catalog for them. Provider connection, Plugins, Skills, routines,
+triggers, attachments, sharing, and Companion settings remain web surfaces.
+
 Desktop remains Owner/Editor-only and never wakes Box. API performs user authorization, then sends a
 short-lived HMAC-authenticated request to a private runtime endpoint. Runtime revalidates access and
 mints the provider desktop URL only when current settings and the minimum required Skills revision
