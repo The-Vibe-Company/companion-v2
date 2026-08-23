@@ -7,6 +7,12 @@
     "start": "expo start",
     "android": "expo run:android",
     "ios": "expo run:ios",
+    "dev:setup": "bash scripts/dev-conductor.sh setup",
+    "dev:metro": "bash scripts/dev-conductor.sh metro",
+    "dev:ios": "bash scripts/dev-conductor.sh ios",
+    "dev:android": "bash scripts/dev-conductor.sh android",
+    "dev:ports": "bash scripts/dev-conductor.sh ports",
+    "mcp:setup": "bash scripts/setup-xcodebuildmcp.sh",
     "lint": "expo lint",
     "typecheck": "tsc --noEmit"
   },
