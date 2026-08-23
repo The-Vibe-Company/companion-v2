@@ -15,12 +15,15 @@
     "dev:ports": "bash scripts/dev-conductor.sh ports",
     "mcp:setup": "bash scripts/setup-xcodebuildmcp.sh",
     "eas": "bash scripts/eas.sh",
+    "test": "vitest run src",
     "test:release": "node --test scripts/testflight.test.mjs",
     "lint": "expo lint",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@better-auth/expo": "1.6.23",
     "@expo/vector-icons": "^15.0.2",
+    "better-auth": "1.6.23",
     "clsx": "^2.1.1",
     "expo": "~57.0.15",
     "expo-constants": "~57.0.13",
@@ -29,10 +32,12 @@
     "expo-font": "~57.0.1",
     "expo-image": "~57.0.3",
     "expo-linking": "~57.0.7",
+    "expo-network": "~57.0.1",
     "expo-router": "~57.0.15",
     "expo-secure-store": "~57.0.1",
     "expo-splash-screen": "~57.0.7",
     "expo-updates": "~57.0.16",
+    "expo-web-browser": "~57.0.2",
     "heroui-native": "^1.0.8",
     "react": "19.2.3",
     "react-native": "0.86.2",
@@ -53,6 +58,7 @@
     "eas-cli": "22.2.0",
     "eslint": "^9",
     "eslint-config-expo": "~57.0.1",
-    "typescript": "~6.0.3"
+    "typescript": "~6.0.3",
+    "vitest": "3.2.7"
   }
 }

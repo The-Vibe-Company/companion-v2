@@ -1,34 +1,28 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { configureApi, login, logout, whoami } from "./api";
+import { authClient, clearGoogleAuthSession } from "./auth-client";
+import { exchangeGoogleSession, type SignInResult } from "./google-sign-in";
 import { secureStorage } from "./secure-storage";
+import {
+  clearSessionAuthorities,
+  isRevokedSessionStatus,
+  onboardSession,
+  parseStoredSession,
+  sessionFromIdentity,
+} from "./session-state";
 import type { Session } from "./types";
 import { ApiError } from "./types";
 
 const sessionKey = "companion.native.session";
 
-type ParsedJsonValue = null | boolean | number | string | ParsedJsonObject | ParsedJsonValue[];
-type ParsedJsonObject = { readonly [key: string]: ParsedJsonValue | undefined };
-
-function isParsedJsonObject(value: ParsedJsonValue | undefined): value is ParsedJsonObject {
-  // SAFETY: JSON.parse produces only JSON objects, arrays, and primitives; the tag and array checks
-  // establish the object shape before any persisted-session fields are read.
-  return value !== null
-    && !Array.isArray(value)
-    && Object.prototype.toString.call(value) === "[object Object]";
-}
-
-function parsedString(value: ParsedJsonValue | undefined): string | null {
-  // SAFETY: JSON.parse cannot produce boxed strings or custom toString tags at this boundary.
-  return Object.prototype.toString.call(value) === "[object String]" ? String(value) : null;
-}
-
-type SignInResult = { error: string | null; reason: "credentials" | "network" | null };
 type SessionContextValue = {
   session: Session | null | undefined;
   bootstrapError: string | null;
   retryBootstrap(): void;
   signIn(email: string, password: string): Promise<SignInResult>;
+  signInWithGoogle(): Promise<SignInResult>;
+  finishOnboarding(orgId: string): Promise<void>;
   signOut(): Promise<void>;
 };
 
@@ -39,22 +33,39 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
   const [restoreAttempt, setRestoreAttempt] = useState(0);
   const restoreGeneration = useRef(0);
+  const sessionRef = useRef<Session | null | undefined>(undefined);
+
+  const publishSession = useCallback((next: Session | null | undefined) => {
+    sessionRef.current = next;
+    setSession(next);
+  }, []);
 
   const clearSession = useCallback(async () => {
     restoreGeneration.current += 1;
     configureApi(null);
-    setSession(null);
+    publishSession(null);
     setBootstrapError(null);
-    // A failed cleanup must not strand the in-memory session state or leave the app on the splash.
-    await secureStorage.removeItem(sessionKey).catch(() => undefined);
-  }, []);
+    // Both stores hold bearer authority after Google sign-in. Cleanup remains best effort so a
+    // locked keychain or offline sign-out cannot strand the UI on the splash screen.
+    await clearSessionAuthorities(
+      () => secureStorage.removeItem(sessionKey),
+      clearGoogleAuthSession,
+    );
+  }, [publishSession]);
+
+  const persistSession = useCallback(async (next: Session) => {
+    await secureStorage.setItem(sessionKey, JSON.stringify(next));
+    configureApi(next, () => void clearSession());
+    setBootstrapError(null);
+    publishSession(next);
+  }, [clearSession, publishSession]);
 
   useEffect(() => {
     let cancelled = false;
     const generation = restoreGeneration.current;
     const current = () => !cancelled && restoreGeneration.current === generation;
     void (async () => {
-      setSession(undefined);
+      publishSession(undefined);
       setBootstrapError(null);
 
       let stored: string | null;
@@ -65,102 +76,64 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         // Keep the value recoverable instead of treating an unreadable store as a signed-out user.
         if (!current()) return;
         configureApi(null);
-        if (current()) {
-          setSession(null);
-          setBootstrapError("Secure storage is temporarily unavailable. Try again to restore your session.");
-        }
+        publishSession(null);
+        setBootstrapError("Secure storage is temporarily unavailable. Try again to restore your session.");
         return;
       }
       if (stored === null) {
-        if (current()) setSession(null);
+        if (current()) publishSession(null);
         return;
       }
 
       let restored: Session;
       try {
         // SAFETY: This app is the sole writer of the SecureStore value under this private key.
-        // SAFETY: The JSON parser output is immediately checked as a ParsedJsonValue before any
-        // persisted-session field is consumed.
-        const parsed = JSON.parse(stored);
-        const candidate = isParsedJsonObject(parsed) ? parsed : null;
-        const cookie = parsedString(candidate?.cookie);
-        const orgIdValue = candidate?.orgId;
-        const orgId = orgIdValue === null ? null : parsedString(orgIdValue);
-        const user = isParsedJsonObject(candidate?.user) ? candidate.user : null;
-        const userId = parsedString(user?.id);
-        const email = parsedString(user?.email);
-        if (
-          cookie === null
-          || cookie.length === 0
-          || (orgIdValue !== null && orgId === null)
-          || user === null
-          || userId === null
-          || userId.length === 0
-          || email === null
-          || email.length === 0
-        ) throw new Error("malformed stored session");
-        restored = {
-          cookie,
-          orgId,
-          user: { id: userId, email },
-        };
+        restored = parseStoredSession(stored);
       } catch {
         // A parse/schema failure is the one local condition that proves the persisted state is
         // unusable. Cleanup is best effort because SecureStore may still be unavailable.
         if (!current()) return;
         await secureStorage.removeItem(sessionKey).catch(() => undefined);
         configureApi(null);
-        if (current()) setSession(null);
+        publishSession(null);
         return;
       }
 
       // Let the app recover with the last known-good cookie while whoami is offline or retryable.
       if (!current()) return;
       configureApi(restored, () => void clearSession());
-      setSession(restored);
+      publishSession(restored);
 
       try {
         const me = await whoami();
         if (!current()) return;
-        const next: Session = {
-          cookie: restored.cookie,
-          orgId: me.org?.org_id ?? null,
-          user: { id: me.userId, email: me.email },
-        };
+        const next = sessionFromIdentity(restored.cookie, me);
         configureApi(next, () => void clearSession());
-        setSession(next);
+        publishSession(next);
         // Keep a valid in-memory session even if a rolling-session write is temporarily unavailable.
         await secureStorage.setItem(sessionKey, JSON.stringify(next)).catch(() => undefined);
       } catch (cause) {
         if (!current()) return;
-        if (cause instanceof ApiError && cause.status === 401) {
+        if (cause instanceof ApiError && isRevokedSessionStatus(cause.status)) {
           // Only an authoritative auth failure invalidates the persisted cookie.
           await clearSession();
           return;
         }
         // Network errors and authenticated 5xx responses are retryable; retain the restored state.
         configureApi(restored, () => void clearSession());
-        setSession(restored);
+        publishSession(restored);
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [clearSession, restoreAttempt]);
+  }, [clearSession, publishSession, restoreAttempt]);
 
   const signIn = useCallback(async (email: string, password: string): Promise<SignInResult> => {
     configureApi(null);
     try {
       const { cookie, me } = await login(email.trim(), password);
-      const next: Session = {
-        cookie,
-        orgId: me.org?.org_id ?? null,
-        user: { id: me.userId, email: me.email },
-      };
-      await secureStorage.setItem(sessionKey, JSON.stringify(next));
-      configureApi(next, () => void clearSession());
-      setBootstrapError(null);
-      setSession(next);
+      await persistSession(sessionFromIdentity(cookie, me));
       return { error: null, reason: null };
     } catch (cause) {
       const network = cause instanceof ApiError && cause.status === 0;
@@ -171,7 +144,57 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         reason: network ? "network" : "credentials",
       };
     }
-  }, [clearSession]);
+  }, [persistSession]);
+
+  const signInWithGoogle = useCallback(async (): Promise<SignInResult> => {
+    configureApi(null);
+    const outcome = await exchangeGoogleSession({
+      clear: clearGoogleAuthSession,
+      start: async () => {
+        const result = await authClient.signIn.social({
+          provider: "google",
+          callbackURL: "/",
+          newUserCallbackURL: "/",
+          errorCallbackURL: "/",
+        });
+        return { ok: !result.error };
+      },
+      getCookie: authClient.getCookie,
+      identify: async (cookie) => {
+        configureApi({
+          cookie,
+          orgId: null,
+          needsOnboarding: true,
+          user: { id: "pending", email: "pending", name: null },
+        });
+        return whoami();
+      },
+    });
+    if (!outcome.session) {
+      configureApi(null);
+      return outcome;
+    }
+    try {
+      await persistSession(outcome.session);
+      return { error: null, reason: null };
+    } catch {
+      configureApi(null);
+      await clearGoogleAuthSession();
+      return {
+        error: "The Google session could not be saved securely. Please try again.",
+        reason: "google",
+      };
+    }
+  }, [persistSession]);
+
+  const finishOnboarding = useCallback(async (orgId: string) => {
+    const current = sessionRef.current;
+    if (!current) throw new Error("A signed-in session is required to finish onboarding.");
+    const next = onboardSession(current, orgId);
+    configureApi(next, () => void clearSession());
+    publishSession(next);
+    await secureStorage.setItem(sessionKey, JSON.stringify(next)).catch(() => undefined);
+  }, [clearSession, publishSession]);
 
   const signOut = useCallback(async () => {
     await logout().catch(() => undefined);
@@ -183,11 +206,21 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setRestoreAttempt((value) => value + 1);
   }, []);
 
-  const value = useMemo(() => ({ session, bootstrapError, retryBootstrap, signIn, signOut }), [
+  const value = useMemo(() => ({
     session,
     bootstrapError,
     retryBootstrap,
     signIn,
+    signInWithGoogle,
+    finishOnboarding,
+    signOut,
+  }), [
+    session,
+    bootstrapError,
+    retryBootstrap,
+    signIn,
+    signInWithGoogle,
+    finishOnboarding,
     signOut,
   ]);
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;

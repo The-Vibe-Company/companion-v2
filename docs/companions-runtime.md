@@ -762,10 +762,13 @@ slower cadence when stable. There is no SSE and no Box-to-control-plane push age
 
 ### Native mobile app
 
-The standalone Expo client in `apps/mobile` reuses the existing Better Auth cookie session: it
-captures the login `set-cookie` value, resolves the current organization through `whoami`, and sends
-the cookie plus `x-companion-org` on each REST request. Its v1 surface is deliberately chat-only:
-list, create, durable send/poll, `ask_user` decisions, and explicit interrupted-turn Retry/Cancel.
+The standalone Expo client in `apps/mobile` reuses the existing Better Auth cookie session. Email
+login captures `set-cookie`; Google login uses Better Auth's Expo authorization proxy and the system
+browser, then adopts the returned cookie into the same chunked secure session. A new Google account
+completes an essential native onboarding by joining a domain-matched organization or creating a
+named workspace. The client resolves the current organization through `whoami` and sends the cookie
+plus `x-companion-org` on each REST request. Its v1 surface is deliberately chat-only: list, create,
+durable send/poll, `ask_user` decisions, and explicit interrupted-turn Retry/Cancel.
 Sends use `client_surface: native_mobile`, so runtime stages no library Skills, Skills Hub token,
 member MCP accounts, or config catalog for them. Provider connection, Plugins, Skills, routines,
 triggers, attachments, sharing, and Companion settings remain web surfaces.

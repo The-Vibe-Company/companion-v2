@@ -9,7 +9,7 @@
       "android"
     ],
     "orientation": "portrait",
-    "scheme": "companion",
+    "scheme": "dev.companion.mobile",
     "userInterfaceStyle": "automatic",
     "icon": "./assets/icon.png",
     "runtimeVersion": {
@@ -42,7 +42,8 @@
           "imageWidth": 180
         }
       ],
-      "expo-secure-store"
+      "expo-secure-store",
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true,

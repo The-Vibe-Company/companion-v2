@@ -41,8 +41,10 @@ describe("TestFlight delivery", () => {
     assert.equal(app.android.package, "dev.companion.mobile");
     const config = fs.readFileSync(path.join(mobile, "app.config.ts"), "utf8");
     assert.match(config, /process\.env\.APP_VARIANT/);
-    assert.match(config, /development: \{ suffix: "\.dev" \}/);
-    assert.match(config, /production: \{ suffix: "" \}/);
+    assert.match(config, /development: \{ suffix: "\.dev", scheme: "dev\.companion\.mobile\.dev" \}/);
+    assert.match(config, /production: \{ suffix: "", scheme: "dev\.companion\.mobile" \}/);
+    assert.equal(app.scheme, "dev.companion.mobile");
+    assert.ok(app.plugins.includes("expo-web-browser"));
   });
 
   it("has deterministic production build and submit profiles", () => {
