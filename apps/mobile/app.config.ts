@@ -1,8 +1,8 @@
 import type { ConfigContext, ExpoConfig } from "expo/config";
 
 const variants = {
-  development: { suffix: ".dev" },
-  production: { suffix: "" },
+  development: { suffix: ".dev", scheme: "dev.companion.mobile.dev" },
+  production: { suffix: "", scheme: "dev.companion.mobile" },
 } as const;
 
 type AppVariant = keyof typeof variants;
@@ -22,11 +22,12 @@ function withSuffix(value: string | undefined, suffix: string): string {
 }
 
 export default ({ config }: ConfigContext): ExpoConfig => {
-  const { suffix } = variants[activeVariant()];
+  const { scheme, suffix } = variants[activeVariant()];
   return {
     ...config,
     name: config.name ?? "Companion",
     slug: config.slug ?? "companion",
+    scheme,
     ios: { ...config.ios, bundleIdentifier: withSuffix(config.ios?.bundleIdentifier, suffix) },
     android: { ...config.android, package: withSuffix(config.android?.package, suffix) },
   };

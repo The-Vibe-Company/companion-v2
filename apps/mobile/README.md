@@ -61,15 +61,31 @@ bind. A physical device needs an explicitly externally bound API (for example,
 Auth trusts the mobile `Origin`; the stock Conductor launcher binds the API to `127.0.0.1`, so use a
 separately configured API launch for this path. The app uses the existing Better Auth cookie
 session, stores it in chunked SecureStore values, and sends the server-resolved `x-companion-org`
-header on every workspace request. Account signup, provider connection, Plugins, Skills, routines,
+header on every workspace request. Email signup, provider connection, Plugins, Skills, routines,
 triggers, attachments, and sharing remain web workflows in this version.
+
+### Google sign-in
+
+Google sign-in uses the system browser through Better Auth's Expo integration. It reuses the
+server's `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`; no iOS or Android Google client id is
+required. Register the same server callback used by the web app in Google Cloud:
+
+```text
+${BETTER_AUTH_URL}/auth/callback/google
+```
+
+The production app returns through `dev.companion.mobile://`; local development builds use
+`dev.companion.mobile.dev://` so both variants can be installed together. Adding or changing these
+native modules or schemes requires rebuilding the development client rather than restarting Metro
+alone. A new Google user can join a domain-matched organization or create a named workspace in the
+native app. Invitations, branding, and domain auto-join remain web configuration.
 
 Static verification is available without a simulator:
 
 ```bash
 pnpm typecheck
 pnpm lint
-pnpm exec expo export --platform ios
+pnpm exec expo export --platform all
 npx -y expo-doctor@latest
 ```
 

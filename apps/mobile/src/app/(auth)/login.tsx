@@ -2,21 +2,22 @@ import { Ionicons } from "@expo/vector-icons";
 import { useState } from "react";
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, View } from "react-native";
 
-import { Button, Field } from "@/components/ui";
+import { Button, Field, GoogleMark } from "@/components/ui";
 import { CompanionIcon, defaultCompanionIcon } from "@/components/companions/companion-icon";
 import { useSession } from "@/lib/session";
 
 export default function LoginScreen() {
-  const { signIn } = useSession();
+  const { signIn, signInWithGoogle } = useSession();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [visible, setVisible] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [emailBusy, setEmailBusy] = useState(false);
+  const [googleBusy, setGoogleBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const submit = async () => {
-    if (!email.trim() || !password || busy) return;
-    setBusy(true);
+    if (!email.trim() || !password || emailBusy || googleBusy) return;
+    setEmailBusy(true);
     setError(null);
     const result = await signIn(email, password);
     if (result.error) {
@@ -26,7 +27,16 @@ export default function LoginScreen() {
         setVisible(false);
       }
     }
-    setBusy(false);
+    setEmailBusy(false);
+  };
+
+  const submitGoogle = async () => {
+    if (emailBusy || googleBusy) return;
+    setGoogleBusy(true);
+    setError(null);
+    const result = await signInWithGoogle();
+    if (result.error) setError(result.error);
+    setGoogleBusy(false);
   };
 
   return (
@@ -44,6 +54,20 @@ export default function LoginScreen() {
         </View>
 
         <View className="gap-4 rounded-md border border-border bg-surface p-5">
+          <Button
+            tone="secondary"
+            loading={googleBusy}
+            disabled={emailBusy}
+            prefix={<GoogleMark />}
+            onPress={() => void submitGoogle()}
+          >
+            Continue with Google
+          </Button>
+          <View className="flex-row items-center gap-3" accessibilityElementsHidden>
+            <View className="h-px flex-1 bg-separator" />
+            <Text className="text-xs text-muted">or</Text>
+            <View className="h-px flex-1 bg-separator" />
+          </View>
           <Field
             label="Email"
             value={email}
@@ -53,6 +77,7 @@ export default function LoginScreen() {
             autoComplete="email"
             keyboardType="email-address"
             required
+            disabled={googleBusy}
           />
           <Field
             label="Password"
@@ -63,7 +88,7 @@ export default function LoginScreen() {
             autoComplete="current-password"
             secureTextEntry={!visible}
             required
-            error={error}
+            disabled={googleBusy}
             suffix={(
               <Pressable
                 onPress={() => setVisible((value) => !value)}
@@ -75,13 +100,20 @@ export default function LoginScreen() {
               </Pressable>
             )}
           />
-          <Button loading={busy} disabled={!email.trim() || !password} onPress={() => void submit()}>
+          {error ? (
+            <Text accessibilityRole="alert" className="text-sm leading-5 text-danger">{error}</Text>
+          ) : null}
+          <Button
+            loading={emailBusy}
+            disabled={!email.trim() || !password || googleBusy}
+            onPress={() => void submit()}
+          >
             Sign in
           </Button>
         </View>
 
         <Text className="text-center text-xs leading-5 text-muted">
-          Need an account? Sign up in the Companion web app, then return here.
+          New here? Continue with Google, or create an email account in the Companion web app.
         </Text>
       </ScrollView>
     </KeyboardAvoidingView>

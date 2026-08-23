@@ -5,6 +5,7 @@ import { useSession } from "@/lib/session";
 export default function AppLayout() {
   const { session } = useSession();
   if (!session) return <Redirect href="/(auth)/login" />;
+  if (session.needsOnboarding) return <Redirect href="/(auth)/onboarding" />;
   return (
     <Stack screenOptions={{ headerShown: false }}>
       <Stack.Screen name="index" />

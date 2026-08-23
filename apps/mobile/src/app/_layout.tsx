@@ -11,6 +11,7 @@ import { Uniwind } from "uniwind";
 
 import { Button } from "@/components/ui";
 import { SessionProvider, useSession } from "@/lib/session";
+import { sessionRedirect, type SessionLocation } from "@/lib/session-state";
 
 void SplashScreen.preventAutoHideAsync();
 
@@ -23,9 +24,18 @@ function SessionRouter() {
     if (session === undefined && !bootstrapError) return;
     void SplashScreen.hideAsync();
     if (bootstrapError) return;
+    if (session === undefined) return;
     const inApp = segments[0] === "(app)";
-    if (session && !inApp) router.replace("/(app)");
-    if (!session && inApp) router.replace("/(auth)/login");
+    const inOnboarding = segments.join("/") === "(auth)/onboarding";
+    const location: SessionLocation = inApp
+      ? "app"
+      : inOnboarding
+        ? "onboarding"
+        : segments.join("/") === "(auth)/login"
+          ? "login"
+          : "other";
+    const redirect = sessionRedirect(session, location);
+    if (redirect) router.replace(redirect);
   }, [bootstrapError, router, segments, session]);
 
   if (bootstrapError) {

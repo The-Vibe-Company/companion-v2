@@ -149,12 +149,29 @@ export type WhoAmI = {
   name?: string | null;
   role?: string | null;
   org?: { org_id?: string; name?: string; slug?: string } | null;
+  onboarded: boolean;
+  needsOnboarding: boolean;
 };
 
 export type Session = {
   cookie: string;
   orgId: string | null;
-  user: { id: string; email: string };
+  needsOnboarding: boolean;
+  user: { id: string; email: string; name: string | null };
+};
+
+export type OnboardingMatchedOrg = {
+  id: string;
+  name: string;
+  domain: string;
+  member_count: number;
+};
+
+export type OnboardingContext = {
+  email: string;
+  domain: string | null;
+  is_personal: boolean;
+  matched_orgs: OnboardingMatchedOrg[];
 };
 
 export type CreateCompanionInput = {

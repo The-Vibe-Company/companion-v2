@@ -4,13 +4,14 @@ import type {
   CompanionThread,
   CompanionTurn,
   CreateCompanionInput,
+  OnboardingContext,
   ProvidersResponse,
   Session,
   WhoAmI,
 } from "./types";
 import { ApiError } from "./types";
 
-const apiUrl = (process.env.EXPO_PUBLIC_API_URL ?? "http://127.0.0.1:3001").replace(/\/$/, "");
+export const apiUrl = (process.env.EXPO_PUBLIC_API_URL ?? "http://127.0.0.1:3001").replace(/\/$/, "");
 
 let activeSession: Session | null = null;
 let unauthorized: (() => void) | null = null;
@@ -22,6 +23,7 @@ type ApiErrorPayload = {
 };
 
 type ParsedApiError = { code: string | null; message: string };
+type RequestOptions = { invalidateSessionOnUnauthorized?: boolean };
 
 export function configureApi(session: Session | null, onUnauthorized?: () => void): void {
   activeSession = session;
@@ -35,7 +37,11 @@ function messageFromPayload(payload: ApiErrorPayload, fallback: string): ParsedA
   };
 }
 
-async function requestResponse(path: string, init: RequestInit = {}): Promise<Response> {
+async function requestResponse(
+  path: string,
+  init: RequestInit = {},
+  options: RequestOptions = {},
+): Promise<Response> {
   const method = (init.method ?? "GET").toUpperCase();
   const headers = new Headers(init.headers);
   if (init.body && !(init.body instanceof FormData)) headers.set("content-type", "application/json");
@@ -57,14 +63,14 @@ async function requestResponse(path: string, init: RequestInit = {}): Promise<Re
     // SAFETY: Error bodies are used only for optional display strings; missing fields fall back.
     const payload = await response.json().catch(() => ({})) as ApiErrorPayload;
     const error = messageFromPayload(payload, `Request failed with status ${response.status}.`);
-    if (response.status === 401) unauthorized?.();
+    if (response.status === 401 && options.invalidateSessionOnUnauthorized !== false) unauthorized?.();
     throw new ApiError(response.status, error.code, error.message);
   }
   return response;
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await requestResponse(path, init);
+async function request<T>(path: string, init?: RequestInit, options?: RequestOptions): Promise<T> {
+  const response = await requestResponse(path, init, options);
   return response.json();
 }
 
@@ -75,7 +81,12 @@ export async function login(email: string, password: string): Promise<{ cookie: 
   });
   const cookie = response.headers.get("set-cookie");
   if (!cookie) throw new ApiError(500, "missing_session", "The auth server did not return a session.");
-  activeSession = { cookie, orgId: null, user: { id: "", email } };
+  activeSession = {
+    cookie,
+    orgId: null,
+    needsOnboarding: false,
+    user: { id: "", email, name: null },
+  };
   const me = await whoami();
   return { cookie, me };
 }
@@ -86,6 +97,40 @@ export function logout(): Promise<void> {
 
 export function whoami(): Promise<WhoAmI> {
   return request<WhoAmI>("/v1/auth/whoami");
+}
+
+export async function getOnboardingContext(): Promise<OnboardingContext> {
+  try {
+    return await request<OnboardingContext>(
+      "/v1/onboarding/context",
+      undefined,
+      { invalidateSessionOnUnauthorized: false },
+    );
+  } catch (cause) {
+    if (cause instanceof ApiError && cause.status === 401) {
+      // The onboarding route historically maps dependency failures to 401. Confirm the bearer with
+      // whoami before allowing the global unauthorized callback to delete a recoverable session.
+      await whoami().catch(() => undefined);
+    }
+    throw cause;
+  }
+}
+
+export function joinOnboardingOrg(orgId: string): Promise<{ orgId: string }> {
+  return request<{ orgId: string }>("/v1/onboarding/join", {
+    method: "POST",
+    body: JSON.stringify({ orgId }),
+  });
+}
+
+export function createOnboardingOrg(name: string): Promise<{ orgId: string }> {
+  return request<{ orgId: string }>("/v1/onboarding/create", {
+    method: "POST",
+    body: JSON.stringify({
+      org: { name, autoJoin: false },
+      invites: [],
+    }),
+  });
 }
 
 export async function listCompanions(): Promise<Companion[]> {

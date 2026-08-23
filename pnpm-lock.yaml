@@ -412,6 +412,9 @@ importers:
       '@better-auth/drizzle-adapter':
         specifier: ^1.6.23
         version: 1.6.23(@better-auth/core@1.6.23(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.1)(@opentelemetry/api@1.9.1)(better-call@1.3.7(zod@4.4.3))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0))(@better-auth/utils@0.4.2)(drizzle-orm@0.45.2(@opentelemetry/api@1.9.1)(gel@2.2.0)(kysely@0.29.2)(postgres@3.4.9))
+      '@better-auth/expo':
+        specifier: 1.6.23
+        version: 1.6.23(@better-auth/core@1.6.23(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.1)(@opentelemetry/api@1.9.1)(better-call@1.3.7(zod@4.4.3))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0))(better-auth@1.6.23(@opentelemetry/api@1.9.1)(drizzle-kit@0.31.10)(drizzle-orm@0.45.2(@opentelemetry/api@1.9.1)(gel@2.2.0)(kysely@0.29.2)(postgres@3.4.9))(next@15.5.21(@opentelemetry/api@1.9.1)(@playwright/test@1.61.1)(@types/node@22.19.20)(react-dom@19.0.0(react@19.0.0))(react@19.0.0))(react-dom@19.0.0(react@19.0.0))(react@19.0.0)(vitest@3.2.7(@types/debug@4.1.13)(@types/node@22.19.20)(happy-dom@20.10.6)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.50.0)(tsx@4.22.4)(yaml@2.9.0)))
       '@companion/contracts':
         specifier: workspace:*
         version: link:../contracts
@@ -1060,6 +1063,25 @@ packages:
       drizzle-orm: ^0.45.2
     peerDependenciesMeta:
       drizzle-orm:
+        optional: true
+
+  '@better-auth/expo@1.6.23':
+    resolution: {integrity: sha512-qTn3+ePau4xyGRvDLWsHNcMDzegP5Di6nJVLyI58LIoCoxVOH6MVVKZv+c3pNnzbgdOeVdfuunpzZyefP8ac2A==}
+    peerDependencies:
+      '@better-auth/core': ^1.6.23
+      better-auth: ^1.6.23
+      expo-constants: '>=17.0.0'
+      expo-linking: '>=7.0.0'
+      expo-network: '>=8.0.7'
+      expo-web-browser: '>=14.0.0'
+    peerDependenciesMeta:
+      expo-constants:
+        optional: true
+      expo-linking:
+        optional: true
+      expo-network:
+        optional: true
+      expo-web-browser:
         optional: true
 
   '@better-auth/kysely-adapter@1.6.23':
@@ -4731,6 +4753,7 @@ packages:
   eslint@9.39.4:
     resolution: {integrity: sha512-XoMjdBOwe/esVgEvLmNsD3IRHkm7fbKIUGvrleloJXUZgDHig2IPWNniv+GwjyJXzuNqVjlr5+4yVUZjycJwfQ==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
+    deprecated: This version is no longer supported. Please see https://eslint.org/version-support for other options.
     hasBin: true
     peerDependencies:
       jiti: '*'
@@ -7436,6 +7459,14 @@ snapshots:
       '@better-auth/utils': 0.4.2
     optionalDependencies:
       drizzle-orm: 0.45.2(@opentelemetry/api@1.9.1)(gel@2.2.0)(kysely@0.29.2)(postgres@3.4.9)
+
+  '@better-auth/expo@1.6.23(@better-auth/core@1.6.23(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.1)(@opentelemetry/api@1.9.1)(better-call@1.3.7(zod@4.4.3))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0))(better-auth@1.6.23(@opentelemetry/api@1.9.1)(drizzle-kit@0.31.10)(drizzle-orm@0.45.2(@opentelemetry/api@1.9.1)(gel@2.2.0)(kysely@0.29.2)(postgres@3.4.9))(next@15.5.21(@opentelemetry/api@1.9.1)(@playwright/test@1.61.1)(@types/node@22.19.20)(react-dom@19.0.0(react@19.0.0))(react@19.0.0))(react-dom@19.0.0(react@19.0.0))(react@19.0.0)(vitest@3.2.7(@types/debug@4.1.13)(@types/node@22.19.20)(happy-dom@20.10.6)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.50.0)(tsx@4.22.4)(yaml@2.9.0)))':
+    dependencies:
+      '@better-auth/core': 1.6.23(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.1)(@opentelemetry/api@1.9.1)(better-call@1.3.7(zod@4.4.3))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0)
+      '@better-fetch/fetch': 1.3.1
+      better-auth: 1.6.23(@opentelemetry/api@1.9.1)(drizzle-kit@0.31.10)(drizzle-orm@0.45.2(@opentelemetry/api@1.9.1)(gel@2.2.0)(kysely@0.29.2)(postgres@3.4.9))(next@15.5.21(@opentelemetry/api@1.9.1)(@playwright/test@1.61.1)(@types/node@22.19.20)(react-dom@19.0.0(react@19.0.0))(react@19.0.0))(react-dom@19.0.0(react@19.0.0))(react@19.0.0)(vitest@3.2.7(@types/debug@4.1.13)(@types/node@22.19.20)(happy-dom@20.10.6)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.50.0)(tsx@4.22.4)(yaml@2.9.0))
+      better-call: 1.3.7(zod@4.4.3)
+      zod: 4.4.3
 
   '@better-auth/kysely-adapter@1.6.23(@better-auth/core@1.6.23(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.1)(@opentelemetry/api@1.9.1)(better-call@1.3.7(zod@4.4.3))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0))(@better-auth/utils@0.4.2)(kysely@0.29.2)':
     dependencies:

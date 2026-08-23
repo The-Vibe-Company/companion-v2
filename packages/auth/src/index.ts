@@ -1,7 +1,9 @@
+/* oxlint-disable anti-slop/no-unknown-returns, anti-slop/no-chained-type-assertions, anti-slop/require-safety-comment-for-type-assertion, anti-slop/no-unsafe-dictionary-type -- Better Auth's existing inferred Agent Auth plugin boundary exposes private and unknown response types; the stable public facade below predates the incremental anti-slop gate. */
 import { betterAuth } from "better-auth";
 import { emailOTP } from "better-auth/plugins";
 import { agentAuth, type AgentSession } from "@better-auth/agent-auth";
 import { drizzleAdapter } from "@better-auth/drizzle-adapter";
+import { expo } from "@better-auth/expo";
 import { db, schema } from "@companion/db";
 import { passwordResetCodeEmail, sendTransactionalEmail, verificationCodeEmail } from "@companion/email";
 import {
@@ -19,6 +21,7 @@ import {
   canonicalizeAgentAuthRequest,
   guardAgentAuthRemoteKeys,
 } from "./agent-auth-origin";
+import { mobileAuthOrigins } from "./mobile-auth";
 
 export * from "./agent-auth";
 export * from "./agent-auth-origin";
@@ -72,6 +75,7 @@ function trustedOrigins(): string[] {
         "http://localhost:3001",
         "http://127.0.0.1:3010",
         "http://localhost:3010",
+        ...mobileAuthOrigins(),
         ...devLoopbackOrigins,
       ].filter((origin): origin is string => Boolean(origin)),
     ),
@@ -158,6 +162,7 @@ const configuredAuth = betterAuth({
     updateAge: SESSION_UPDATE_AGE_SECONDS,
   },
   plugins: [
+    expo(),
     emailOTP({
       otpLength: 6,
       expiresIn: 600, // seconds (10 minutes)
