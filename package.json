@@ -40,6 +40,8 @@
     "mobile:android": "pnpm --dir apps/mobile --ignore-workspace run dev:android",
     "mobile:ports": "pnpm --dir apps/mobile --ignore-workspace run dev:ports",
     "mobile:mcp:setup": "pnpm --dir apps/mobile --ignore-workspace run mcp:setup",
+    "mobile:eas": "pnpm --dir apps/mobile --ignore-workspace run eas",
+    "mobile:release:test": "pnpm --dir apps/mobile --ignore-workspace run test:release",
     "lint": "pnpm lint:anti-slop && turbo run lint",
     "lint:anti-slop": "node scripts/lint-anti-slop.mjs",
     "typecheck": "turbo run typecheck",

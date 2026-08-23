@@ -2,29 +2,58 @@
   "expo": {
     "name": "Companion",
     "slug": "companion",
+    "owner": "the-vibe-company",
     "version": "1.0.0",
-    "platforms": ["ios", "android"],
+    "platforms": [
+      "ios",
+      "android"
+    ],
     "orientation": "portrait",
     "scheme": "companion",
     "userInterfaceStyle": "automatic",
+    "icon": "./assets/icon.png",
     "runtimeVersion": {
       "policy": "fingerprint"
     },
     "ios": {
-      "bundleIdentifier": "dev.companion.mobile"
+      "bundleIdentifier": "dev.companion.mobile",
+      "icon": "./assets/icon.png",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "package": "dev.companion.mobile",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#f7f7f8"
+      },
       "predictiveBackGestureEnabled": false
     },
     "plugins": [
       "expo-router",
-      ["expo-splash-screen", { "backgroundColor": "#f7f7f8" }],
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#f7f7f8",
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 180
+        }
+      ],
       "expo-secure-store"
     ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "55fafc78-8787-433d-91aa-ee7b15b3d3d4"
+      }
+    },
+    "updates": {
+      "url": "https://u.expo.dev/55fafc78-8787-433d-91aa-ee7b15b3d3d4"
     }
   }
 }
