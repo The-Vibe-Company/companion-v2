@@ -70,5 +70,20 @@ Static verification is available without a simulator:
 pnpm typecheck
 pnpm lint
 pnpm exec expo export --platform ios
-pnpm exec expo-doctor
+npx -y expo-doctor@latest
 ```
+
+## EAS and TestFlight
+
+All EAS commands must go through the production wrapper from the repository root:
+
+```bash
+pnpm mobile:eas build:list --platform ios
+pnpm mobile:eas workflow:run .eas/workflows/testflight.yml
+```
+
+The wrapper forces `APP_VARIANT=production` and uses the exact EAS CLI version pinned in the mobile
+lockfile; running EAS directly would evaluate the default development variant and its `.dev`
+application identifier. See
+[`docs/DEPLOYER-MOBILE-TESTFLIGHT.md`](../../docs/DEPLOYER-MOBILE-TESTFLIGHT.md) for initial setup,
+credentials, delivery, and rollback.
