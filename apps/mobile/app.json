@@ -19,6 +19,8 @@
       "bundleIdentifier": "dev.companion.mobile",
       "icon": "./assets/icon.png",
       "infoPlist": {
+        "CFBundleDisplayName": "Companion (623507)",
+        "CFBundleName": "Companion623507",
         "ITSAppUsesNonExemptEncryption": false
       }
     },

@@ -36,6 +36,8 @@ describe("TestFlight delivery", () => {
 
   it("keeps production identifiers in app.json and derives the local .dev variant", () => {
     assert.equal(app.ios.bundleIdentifier, "dev.companion.mobile");
+    assert.equal(app.ios.infoPlist.CFBundleDisplayName, "Companion (623507)");
+    assert.equal(app.ios.infoPlist.CFBundleName, "Companion623507");
     assert.equal(app.android.package, "dev.companion.mobile");
     const config = fs.readFileSync(path.join(mobile, "app.config.ts"), "utf8");
     assert.match(config, /process\.env\.APP_VARIANT/);
