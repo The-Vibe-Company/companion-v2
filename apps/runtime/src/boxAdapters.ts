@@ -1,10 +1,10 @@
+/* oxlint-disable anti-slop/no-conditional-empty-object-spread, anti-slop/no-known-value-widening, anti-slop/no-unknown-parameters -- Optional lifecycle inputs are conditionally spread; cleanup callbacks receive unknown thrown values by design. */
 import {
   observedBoxStateFromProvider,
   BoxRuntimeAdapterError,
   type BoxRuntimeLifecycleClient,
   type CompanionBoxRuntimeV2,
   type BoxState,
-  type CompanionRuntimeImageInitialResolution,
 } from "@companion/box-runtime";
 import type {
   BrokerWriteOutcome,
@@ -14,14 +14,21 @@ import type {
   RuntimeProcessLog,
 } from "@companion/companion-runtime";
 
-/** How long a Box create may wait for the baker's first snapshot resolution before cloning nothing. */
-export const RUNTIME_IMAGE_WAIT_MS = 10_000;
+/** How long a Box create waits on the registry's published build before a cold install. */
+export const RUNTIME_IMAGE_WAIT_MS = 60_000;
 
-/** The baker as seen by Box creation: a bounded look at whether a clone source exists yet. */
+/** The durable image registry as seen by Box creation. Status is published in PostgreSQL. */
 export interface RuntimeImageSource {
   expectedName(): string;
   cloneName(): string | null;
-  initialResolution(): Promise<CompanionRuntimeImageInitialResolution>;
+  /**
+   * Resolves with the registry's published outcome for this digest: `ready` (clone
+   * expectedName), `failed`, or `pending` past the bound (cold install remains possible).
+   */
+  waitForResolution(
+    boundMs: number,
+    signal: AbortSignal,
+  ): Promise<"ready" | "failed" | "pending">;
 }
 
 export interface RuntimeBoxAdapterOptions {
@@ -55,27 +62,20 @@ export function createRuntimeBoxControl(options: RuntimeBoxAdapterOptions): Runt
       const image = options.runtimeImage;
       let from = image?.cloneName() ?? undefined;
       let imageWaitMs = 0;
-      let fallbackReason: "baker_pending" | "no_snapshot" | "unknown_snapshot_fallback" | undefined;
+      let fallbackReason:
+        | "image_build_pending" | "image_build_failed" | "no_snapshot"
+        | "unknown_snapshot_fallback" | undefined;
       if (image && from === undefined) {
-        // The baker resolves its first snapshot lookup within seconds; beyond this bound a cold
-        // install is cheaper than an unbounded wait, and the provider deadline still has ≥20s.
+        // Wait on the registry's published build state instead of racing in-process baker
+        // memory; the bound keeps a broken build from consuming the operation deadline.
         const waitStartedAt = now();
-        const resolution = await Promise.race([
-          image.initialResolution().then((value) => ({ kind: "resolved" as const, value })),
-          abortableWait(RUNTIME_IMAGE_WAIT_MS, input.signal).then(() => ({ kind: "timeout" as const })),
-        ]);
+        const resolution = await image.waitForResolution(RUNTIME_IMAGE_WAIT_MS, input.signal);
         imageWaitMs = now() - waitStartedAt;
-        if (resolution.kind === "timeout") {
-          fallbackReason = "baker_pending";
-        } else if (resolution.value.outcome === "none") {
-          fallbackReason = "no_snapshot";
+        if (resolution === "ready") {
+          from = image.expectedName();
+        } else {
+          fallbackReason = resolution === "failed" ? "image_build_failed" : "image_build_pending";
         }
-        // The baker settles its first resolution before its own ready-name assignment lands, so
-        // the resolved name is itself valid clone evidence when cloneName() has not caught up.
-        from = image.cloneName()
-          ?? (resolution.kind === "resolved" && resolution.value.outcome !== "none"
-            ? resolution.value.name
-            : undefined);
       }
       const create = (fromImage?: string) =>
         options.lifecycle.createGenerationBoxAfterObservedAbsence({
@@ -310,21 +310,6 @@ function cursorNumber(value: bigint): number {
 function isUnknownSnapshot(error: unknown): boolean {
   if (!(error instanceof BoxRuntimeAdapterError)) return false;
   return error.providerCode === "unknown_snapshot" || error.stableCode === "box_not_found";
-}
-
-function abortableWait(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(signal.reason instanceof Error ? signal.reason : new Error("aborted"));
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-    if (signal.aborted) onAbort();
-  });
 }
 
 const DEFAULT_PROVIDER_DEADLINE_MS = 30_000;

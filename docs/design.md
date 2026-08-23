@@ -93,6 +93,8 @@ Runtime state is explicit and durable:
   plus checkpoints. Multiple operations may wait; one may run per Companion.
 - `companion_runtime_leases` owns the claim token, attempt epoch, executor id, and expiry used to
   fence every checkpoint and settlement.
+- `companion_images` owns provider-wide content-addressed image intent, published build status,
+  bounded retry state, and the epoch-fenced single-builder lease used only by `apps/runtime`.
 - `companion_message_attachments` owns the files one transcript entry carries: `user_upload` for what
   a member sent, `pi_output` for an image Pi handed back, plus the content-addressed storage key,
   resolved content type, size, digest, sanitized filename, and position. Deleting a row journals its
@@ -391,28 +393,3 @@ worker, and runtime use separate database credentials and least-privilege grants
 must start the same four-process topology with the deterministic Box/Pi simulator where applicable.
 The as-built operational sequence, including the owner-only gate transition and rollback boundary,
 is documented in `docs/runbooks/companions-runtime.md`.
-
-## Internal Box startup research
-
-Box/Pi startup experiments are development tooling, not a Companion product surface. The
-operator-launched `pnpm research:box-startup -- --overnight` command uses Conductor Cloud to create
-isolated Luna candidate workspaces, then evaluates each validated commit from a controller-owned
-disposable checkout under one serialized real-provider lease. A clean Sol workspace integrates only
-measured compatible gains. Candidate workspaces have provider credentials explicitly shadowed. The
-evaluator checkout runs under a separate unprivileged OS identity and receives only a short-lived
-local proxy capability scoped to the campaign's exact Box and snapshot identities; the controller
-retains the real provider credential and independently
-proves provider readiness, byte-attested broker prompt acceptance, and resource absence. The proxy
-exposes one newest ready layout-14 parent read-only for the baker, fails closed without an eligible
-parent, and requires later Boxes to clone the deterministic target. Explicit non-2xx creates may retry
-with the same source; fetch failures or invalid 2xx observations make the create ambiguous and block
-the lease. It never runs from API, worker, web, or the
-hosted Companion runtime, and adds no product orchestration feature.
-
-The research evaluator and existing tests are immutable to candidate workspaces. Candidates may
-challenge lifecycle ordering, including moving credential-free, revision-bound Skill preparation
-to the Stop/archive path. Creation must remain correct without a preceding Stop, a sleeping
-settings/Skill change must invalidate prepared state, and credentials must be expunged before every
-snapshot. Disposable images are salted by the candidate Git tree and every Box/snapshot is deleted
-and provider-absence proven before another lease is granted. A failed proof keeps the lease durably
-blocked for controller-owned recovery on resume.

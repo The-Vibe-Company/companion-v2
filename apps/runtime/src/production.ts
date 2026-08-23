@@ -1,7 +1,6 @@
 import {
   AsciiBoxCompanionRuntime,
   AsciiBoxMaintenanceClient,
-  createCompanionRuntimeImageBaker,
   type AsciiBoxMaintenanceClientOptions,
   type BoxProviderCallTiming,
   type BoxRuntimeLifecycleClient,
@@ -9,6 +8,7 @@ import {
   type CompanionRuntimeSkill,
 } from "@companion/box-runtime";
 import {
+  CompanionImageRegistry,
   createRuntimeKernel,
   createJsonRuntimeProcessLog,
   describeThrownError,
@@ -37,6 +37,7 @@ import {
   PostgresRuntimeDesktopAuthorizer,
   PostgresRuntimeDesktopReplayGuard,
 } from "./desktop";
+import { createImageBuildWorker } from "./imageBuildWorker";
 import {
   createRuntimeMaterialPipeline,
   loadBundledCompanionRuntimeSkill,
@@ -198,72 +199,30 @@ export async function buildProductionRuntimeService(
       boxEnv,
       runtimeTiming,
     );
-    const bakerAbortController = new AbortController();
-    bakerAbort = bakerAbortController;
-    const baker = createCompanionRuntimeImageBaker({
+    const imageAbortController = new AbortController();
+    bakerAbort = imageAbortController;
+    const imageRegistry = new CompanionImageRegistry(database.sql);
+    const imageWorker = createImageBuildWorker({
+      registry: imageRegistry,
       identity: freshRuntime().layoutIdentity(),
       lifecycle,
-      runtime: {
-        existingBoxStatus: (input) => freshRuntime().existingBoxStatus(input),
-        refreshPiLayout: (input) => freshRuntime().refreshPiLayout(input),
-        refreshTtl: (input) => freshRuntime().refreshTtl(input),
-        prepareRuntimeImage: (input) => freshRuntime().prepareRuntimeImage(input),
-      },
+      runtime: () => freshRuntime(),
       bundledSkill,
-      onAttemptError: (error) => {
-        log.warn({
-          ts: new Date().toISOString(),
-          event: "companion_runtime_image_baker_failed",
-          error: describeThrownError(error),
-        });
-      },
-      onCleanupError: (error, cleanup) => {
-        log.warn({
-          ts: new Date().toISOString(),
-          event: cleanup === "baker_box_delete"
-            ? "companion_runtime_baker_box_delete_failed"
-            : "companion_runtime_baker_cleanup_failed",
-          error: describeThrownError(error),
-        });
-      },
-      onEvent: (event) => {
-        if (event.kind === "resolved") {
-          log.info({
-            ts: new Date().toISOString(),
-            event: "companion_runtime_image_baker_resolved",
-            outcome: event.outcome,
-            image: event.image,
-            durationMs: event.durationMs,
-          });
-        } else if (event.kind === "bake_started") {
-          log.info({
-            ts: new Date().toISOString(),
-            event: "companion_runtime_image_baker_bake_started",
-            expectedImage: event.expectedImage,
-            parentImage: event.parentImage,
-          });
-        } else if (event.kind === "bake_completed") {
-          log.info({
-            ts: new Date().toISOString(),
-            event: "companion_runtime_image_baker_bake_completed",
-            image: event.image,
-            ready: event.ready,
-            durationMs: event.durationMs,
-          });
-        } else {
-          log.info({
-            ts: new Date().toISOString(),
-            event: "companion_runtime_image_baker_snapshot_pruned",
-            image: event.name,
-          });
-        }
-      },
+      executorId: config.executorId,
+      log,
     });
-    void baker.ensure(bakerAbortController.signal).catch((error) => {
-      if (bakerAbortController.signal.aborted) return;
+    void imageWorker.requestCurrentImage().catch((error) => {
       log.warn({
         ts: new Date().toISOString(),
-        event: "companion_runtime_image_baker_failed",
+        event: "runtime.image_build_request_failed",
+        error: describeThrownError(error),
+      });
+    });
+    void imageWorker.run(imageAbortController.signal).catch((error) => {
+      if (imageAbortController.signal.aborted) return;
+      log.warn({
+        ts: new Date().toISOString(),
+        event: "runtime.image_build_worker_failed",
         error: describeThrownError(error),
       });
     });
@@ -294,11 +253,7 @@ export async function buildProductionRuntimeService(
     const adapters = {
       lifecycle,
       runtime: freshRuntime,
-      runtimeImage: {
-        expectedName: () => baker.identity.imageName,
-        cloneName: () => baker.cloneName(),
-        initialResolution: () => baker.initialResolution(),
-      },
+      runtimeImage: imageWorker.source(),
       log,
     };
     const kernel = factories.createKernel({

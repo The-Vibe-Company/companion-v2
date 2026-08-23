@@ -1,3 +1,4 @@
+/* oxlint-disable anti-slop/no-conditional-empty-object-spread -- Optional kernel dependencies are conditionally spread at this composition boundary. */
 import { randomUUID } from "node:crypto";
 import { systemRuntimeClock, type RuntimeClock } from "./clock";
 import { RuntimeEngine } from "./engine";
@@ -102,6 +103,7 @@ export * from "./errors";
 export * from "./executionControl";
 export * from "./handler";
 export * from "./health";
+export * from "./imageRegistry";
 export * from "./leaseSession";
 export * from "./logging";
 export * from "./operations";

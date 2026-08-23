@@ -533,7 +533,8 @@ describe("Companion runtime executor PostgreSQL surface", () => {
             'companion_turn_attempts', 'companion_operations', 'companion_decision_deliveries',
             'companion_runtime_leases', 'companion_runtime_duplicate_cleanups',
             'companion_runtime_event_projections', 'companion_runtime_desktop_requests',
-            'companion_message_attachments', 'companion_routines', 'companion_mcp_broker_tokens'
+            'companion_message_attachments', 'companion_routines', 'companion_mcp_broker_tokens',
+            'companion_images'
           ]) protected(table_name)
           where has_table_privilege(${runtimeRole}, 'public.' || protected.table_name, 'SELECT')
         ) as "privateTableReads",
@@ -552,7 +553,16 @@ describe("Companion runtime executor PostgreSQL surface", () => {
             'public.companion_runtime_consume_desktop_request(text,bigint,integer)',
             'public.companion_runtime_project_event_batch(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,bigint,text,jsonb,bigint,timestamp with time zone,integer,integer,integer)',
             'public.companion_runtime_record_attempt_outputs(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,jsonb,timestamp with time zone)',
-            'public.companion_runtime_defer_delete(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)'
+            'public.companion_runtime_defer_delete(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)',
+            'public.companion_runtime_image_request(text,text)',
+            'public.companion_runtime_image_get(text)',
+            'public.companion_runtime_image_claim(text,text,text)',
+            'public.companion_runtime_image_mark_building_box(text,bigint,text)',
+            'public.companion_runtime_image_clear_building_box(text,bigint,text)',
+            'public.companion_runtime_image_mark_delete_intent(text,bigint,text)',
+            'public.companion_runtime_image_mark_delete_operation(text,bigint,text,text)',
+            'public.companion_runtime_image_record_ready(text,bigint,text,text)',
+            'public.companion_runtime_image_record_failure(text,bigint,text,text)'
           ]) protected(signature)
           where has_function_privilege(${runtimeRole}, protected.signature, 'EXECUTE')
         ) as "callableFunctions",
@@ -560,7 +570,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           ${runtimeRole}, 'public.companion_runtime_guard_duplicate_cleanup()', 'EXECUTE'
         ) as "helperCallable"
     `;
-    expect(acl).toEqual({ privateTableReads: 0, callableFunctions: 14, helperCallable: false });
+    expect(acl).toEqual({ privateTableReads: 0, callableFunctions: 23, helperCallable: false });
     await expect(asRuntime((tx) => tx`select * from companion_turn_attempts`))
       .rejects.toThrow(/permission denied/i);
 
@@ -569,6 +579,15 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       "public.companion_runtime_publish_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text)",
       "public.companion_runtime_claim_work(text,integer,integer,bigint,integer,integer)",
       "public.companion_runtime_defer_delete(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)",
+      "public.companion_runtime_image_request(text,text)",
+      "public.companion_runtime_image_get(text)",
+      "public.companion_runtime_image_claim(text,text,text)",
+      "public.companion_runtime_image_mark_building_box(text,bigint,text)",
+      "public.companion_runtime_image_clear_building_box(text,bigint,text)",
+      "public.companion_runtime_image_mark_delete_intent(text,bigint,text)",
+      "public.companion_runtime_image_mark_delete_operation(text,bigint,text,text)",
+      "public.companion_runtime_image_record_ready(text,bigint,text,text)",
+      "public.companion_runtime_image_record_failure(text,bigint,text,text)",
     ];
     const runtimeOnlyAcl = await sql<Array<{
       signature: string;
@@ -688,6 +707,247 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     `;
     expect(workerRoutineAcl).toHaveLength(workerRoutineSignatures.length);
     expect(workerRoutineAcl.every((entry) => entry.worker && !entry.api && !entry.runtime)).toBe(true);
+  });
+
+  it("serializes image builds, fences outcomes, applies backoff, and re-arms exhausted failures", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const database = sql;
+    const digest = `image-registry-${suffix}`;
+    const imageName = `companion-l14-${suffix.slice(0, 12)}`;
+    const otherDigest = `other-image-registry-${suffix}`;
+    const otherImageName = `companion-l14-other${suffix.slice(0, 7)}`;
+
+    try {
+      await asRuntime((tx) => tx`
+        select * from public.companion_runtime_image_request(${otherDigest}, ${otherImageName})
+      `);
+      const requested = await asRuntime((tx) => tx<Array<{
+        status: string;
+        attemptCount: number;
+      }>>`
+        select status::text as status, attempt_count as "attemptCount"
+        from public.companion_runtime_image_request(${digest}, ${imageName})
+      `);
+      expect(requested).toEqual([{ status: "requested", attemptCount: 0 }]);
+
+      const concurrentClaims = await Promise.all([
+        asRuntime((tx) => tx<Array<{ claimEpoch: string; attemptCount: number }>>`
+          select image_claim_epoch::text as "claimEpoch",
+            image_attempt_count as "attemptCount"
+          from public.companion_runtime_image_claim(
+            'image-builder-a', ${digest}, ${imageName}
+          )
+        `),
+        asRuntime((tx) => tx<Array<{ claimEpoch: string; attemptCount: number }>>`
+          select image_claim_epoch::text as "claimEpoch",
+            image_attempt_count as "attemptCount"
+          from public.companion_runtime_image_claim(
+            'image-builder-b', ${digest}, ${imageName}
+          )
+        `),
+      ]);
+      const firstClaim = concurrentClaims.find((claim) => claim.length === 1)?.[0];
+      expect(concurrentClaims.map((claim) => claim.length).sort()).toEqual([0, 1]);
+      expect(firstClaim).toEqual({ claimEpoch: "1", attemptCount: 1 });
+      const [unrelated] = await database<Array<{ status: string; attemptCount: number }>>`
+        select status::text as status, attempt_count as "attemptCount"
+        from companion_images where digest = ${otherDigest}
+      `;
+      expect(unrelated).toEqual({ status: "requested", attemptCount: 0 });
+
+      const staleMark = await asRuntime((tx) => tx<Array<{ marked: boolean }>>`
+        select public.companion_runtime_image_mark_building_box(
+          ${digest}, 0, 'bx_stale'
+        ) as marked
+      `);
+      expect(staleMark).toEqual([{ marked: false }]);
+      const marked = await asRuntime((tx) => tx<Array<{ marked: boolean }>>`
+        select public.companion_runtime_image_mark_building_box(
+          ${digest}, ${firstClaim?.claimEpoch ?? "0"}::bigint, 'bx_baker01'
+        ) as marked
+      `);
+      expect(marked).toEqual([{ marked: true }]);
+
+      const staleOutcome = await asRuntime((tx) => tx<Array<{ outcome: string }>>`
+        select public.companion_runtime_image_record_failure(
+          ${digest}, 0, 'image_build_failed', 'stale writer'
+        ) as outcome
+      `);
+      expect(staleOutcome).toEqual([{ outcome: "lease_lost" }]);
+      const failedAttempt = await asRuntime((tx) => tx<Array<{ outcome: string }>>`
+        select public.companion_runtime_image_record_failure(
+          ${digest}, ${firstClaim?.claimEpoch ?? "0"}::bigint,
+          'image_build_failed', 'provider unavailable'
+        ) as outcome
+      `);
+      expect(failedAttempt).toEqual([{ outcome: "requested" }]);
+
+      const [retryState] = await database<Array<{
+        status: string;
+        attemptCount: number;
+        backoffSeconds: number;
+        buildBoxId: string | null;
+        buildDeleteIntentRecorded: boolean;
+        buildDeleteOperationId: string | null;
+      }>>`
+        select status::text as status, attempt_count as "attemptCount",
+          extract(epoch from (next_attempt_at - updated_at))::int as "backoffSeconds",
+          build_box_id as "buildBoxId",
+          build_delete_intent_at is not null as "buildDeleteIntentRecorded",
+          build_delete_operation_id as "buildDeleteOperationId"
+        from companion_images where digest = ${digest}
+      `;
+      expect(retryState).toEqual({
+        status: "requested",
+        attemptCount: 1,
+        backoffSeconds: 30,
+        buildBoxId: "bx_baker01",
+        buildDeleteIntentRecorded: false,
+        buildDeleteOperationId: null,
+      });
+      const earlyRetry = await asRuntime((tx) => tx<Array<{ attemptCount: number }>>`
+        select image_attempt_count as "attemptCount"
+        from public.companion_runtime_image_claim(
+          'image-builder-too-early', ${digest}, ${imageName}
+        )
+      `);
+      expect(earlyRetry).toEqual([]);
+
+      await database`
+        update companion_images set next_attempt_at = now() - interval '1 second'
+        where digest = ${digest}
+      `;
+      const [cleanupClaim] = await asRuntime((tx) => tx<Array<{
+        claimEpoch: string;
+        attemptCount: number;
+        buildBoxId: string | null;
+        buildDeleteIntentRecorded: boolean;
+        buildDeleteOperationId: string | null;
+        recoveryOnly: boolean;
+      }>>`
+        select image_claim_epoch::text as "claimEpoch",
+          image_attempt_count as "attemptCount",
+          image_build_box_id as "buildBoxId",
+          image_build_delete_intent_recorded as "buildDeleteIntentRecorded",
+          image_build_delete_operation_id as "buildDeleteOperationId",
+          image_recovery_only as "recoveryOnly"
+        from public.companion_runtime_image_claim(
+          'image-builder-cleanup', ${digest}, ${imageName}
+        )
+      `);
+      expect(cleanupClaim).toEqual({
+        claimEpoch: "2",
+        attemptCount: 2,
+        buildBoxId: "bx_baker01",
+        buildDeleteIntentRecorded: false,
+        buildDeleteOperationId: null,
+        recoveryOnly: false,
+      });
+      const staleClear = await asRuntime((tx) => tx<Array<{ cleared: boolean }>>`
+        select public.companion_runtime_image_clear_building_box(
+          ${digest}, 1, 'bx_baker01'
+        ) as cleared
+      `);
+      expect(staleClear).toEqual([{ cleared: false }]);
+      const deletionIntentMarked = await asRuntime((tx) => tx<Array<{ marked: boolean }>>`
+        select public.companion_runtime_image_mark_delete_intent(
+          ${digest}, ${cleanupClaim?.claimEpoch ?? "0"}::bigint, 'bx_baker01'
+        ) as marked
+      `);
+      expect(deletionIntentMarked).toEqual([{ marked: true }]);
+      const deletionMarked = await asRuntime((tx) => tx<Array<{ marked: boolean }>>`
+        select public.companion_runtime_image_mark_delete_operation(
+          ${digest}, ${cleanupClaim?.claimEpoch ?? "0"}::bigint, 'bx_baker01',
+          'bdop_00000000000000000000000000000001'
+        ) as marked
+      `);
+      expect(deletionMarked).toEqual([{ marked: true }]);
+      const cleared = await asRuntime((tx) => tx<Array<{ cleared: boolean }>>`
+        select public.companion_runtime_image_clear_building_box(
+          ${digest}, ${cleanupClaim?.claimEpoch ?? "0"}::bigint, 'bx_baker01'
+        ) as cleared
+      `);
+      expect(cleared).toEqual([{ cleared: true }]);
+      await asRuntime((tx) => tx`
+        select public.companion_runtime_image_record_failure(
+          ${digest}, ${cleanupClaim?.claimEpoch ?? "0"}::bigint,
+          'image_build_failed', 'second failure'
+        )
+      `);
+
+      await database`
+        update companion_images
+        set status = 'building', attempt_count = 4, build_box_id = 'bx_terminal01',
+          build_delete_intent_at = now(),
+          build_delete_operation_id = 'bdop_00000000000000000000000000000002',
+          claim_actor_id = 'crashed-builder', claim_epoch = 9,
+          claimed_at = now() - interval '31 minutes',
+          lease_expires_at = now() - interval '1 minute'
+        where digest = ${digest}
+      `;
+      const [terminalRecovery] = await asRuntime((tx) => tx<Array<{
+        claimEpoch: string;
+        attemptCount: number;
+        buildBoxId: string | null;
+        buildDeleteIntentRecorded: boolean;
+        buildDeleteOperationId: string | null;
+        recoveryOnly: boolean;
+      }>>`
+        select image_claim_epoch::text as "claimEpoch",
+          image_attempt_count as "attemptCount",
+          image_build_box_id as "buildBoxId",
+          image_build_delete_intent_recorded as "buildDeleteIntentRecorded",
+          image_build_delete_operation_id as "buildDeleteOperationId",
+          image_recovery_only as "recoveryOnly"
+        from public.companion_runtime_image_claim(
+          'image-builder-terminal-recovery', ${digest}, ${imageName}
+        )
+      `);
+      expect(terminalRecovery).toEqual({
+        claimEpoch: "10",
+        attemptCount: 4,
+        buildBoxId: "bx_terminal01",
+        buildDeleteIntentRecorded: true,
+        buildDeleteOperationId: "bdop_00000000000000000000000000000002",
+        recoveryOnly: true,
+      });
+      await asRuntime((tx) => tx`
+        select public.companion_runtime_image_clear_building_box(
+          ${digest}, ${terminalRecovery?.claimEpoch ?? "0"}::bigint, 'bx_terminal01'
+        )
+      `);
+      await asRuntime((tx) => tx`
+        select public.companion_runtime_image_record_failure(
+          ${digest}, ${terminalRecovery?.claimEpoch ?? "0"}::bigint,
+          'image_build_interrupted', 'terminal recovery settled'
+        )
+      `);
+
+      await database`
+        update companion_images set updated_at = now() - interval '11 minutes'
+        where digest = ${digest}
+      `;
+      const rearmed = await asRuntime((tx) => tx<Array<{
+        status: string;
+        attemptCount: number;
+        errorCode: string | null;
+      }>>`
+        select status::text as status, attempt_count as "attemptCount",
+          last_error_code as "errorCode"
+        from public.companion_runtime_image_request(${digest}, ${imageName})
+      `);
+      expect(rearmed).toEqual([{ status: "requested", attemptCount: 0, errorCode: null }]);
+
+      const reclaimed = await asRuntime((tx) => tx<Array<{ attemptCount: number }>>`
+        select image_attempt_count as "attemptCount"
+        from public.companion_runtime_image_claim(
+          'image-builder-c', ${digest}, ${imageName}
+        )
+      `);
+      expect(reclaimed).toEqual([{ attemptCount: 1 }]);
+    } finally {
+      await database`delete from companion_images where digest in (${digest}, ${otherDigest})`;
+    }
   });
 
   it("fires a due Companion routine once and skips missed or piled-up instants", async () => {

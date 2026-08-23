@@ -327,20 +327,42 @@ instead. That marker is split into two layers:
 
 The image identity extends the full disk-layout marker with the immutable bundled Companion-skill
 checksum and boot-profile revision; those image-only inputs never force an in-place tenant relayout.
+`companion_images` is the provider-wide, content-addressed registry for those snapshots. It
+separates requested state from the builder's observed `requested | building | ready | failed`
+status. Only runtime may call its nine narrow `SECURITY DEFINER` functions; no process role has
+table privileges. Each registry worker claims only its configured digest and image name with an
+epoch-fenced 30-minute lease, runs one bounded bake attempt, records the baker Box before layout
+work, and publishes readiness or a stable bounded failure. The Box pointer is cleared only after
+provider deletion succeeds under that fence. Irreversible-delete intent is persisted before the
+provider call; once `DELETE` is accepted, its provider operation id is persisted before polling.
+A blocked cleanup stays durable and takeover resumes the same operation without issuing another
+`DELETE`. If the accepted response or operation checkpoint is lost, takeover uses read-only Box
+absence reconciliation and the bounded baker TTL instead of replaying the write. Takeover reconciles
+those retained pointers before any new bake, including cleanup-only settlement of an expired fourth
+attempt. Retry backoff is 30, 60, 120,
+then 300 seconds with four attempts; an exhausted failure remains visible for ten minutes before a
+new request starts a fresh cycle.
+
 Runtime bakes the current image marker into a throwaway baker Box (never a tenant Companion), then
 creates new generation Boxes with `from` that snapshot so the first send skips the five-minute
 package install. The baker Box is created with the five-minute unnamed-orphan TTL, then patched to
-thirty minutes so layout and snapshot can finish; a failed or in-flight bake is retried until the
-named snapshot is ready. Before publishing, it writes a `.boxignore` that excludes only regenerable
-logs, transient staging archives, credentials, attachments, and outbox data; embeds the static
-Companion-skill archive; archives and resumes the baker Box; warms Node/Pi; and requires a stable
-`.ascii/playbook.json`. A failed warmup never publishes the candidate, retains the parent, and is
-retried. While that bake is in flight, new generation Boxes clone the previous
-ready companion snapshot when one exists, then overlay on first staging. If the snapshot is missing,
-create falls back to an empty Box and installs in place. Running Companions keep their disk: health (every 30 seconds while idle) and the next warm
+one hour so layout and snapshot can finish; each attempt has a strict 20-minute process budget.
+Before publishing, it writes a `.boxignore` that excludes only regenerable logs, transient staging
+archives, credentials, attachments, and outbox data; embeds the static Companion-skill archive;
+archives and resumes the baker Box; warms Node/Pi; and requires a stable `.ascii/playbook.json`. A
+failed warmup or non-ready snapshot never publishes the candidate. Creation reads the registry for
+up to three seconds: `ready` clones the exact expected snapshot, while `building`, `requested`, or
+`failed` takes the explicit logged cold-install path and leaves the builder running for later
+Companions. An unknown snapshot response retries creation once without `from` and records that
+fallback. Running Companions keep their disk: health (every 30 seconds while idle) and the next warm
 send apply overlay or base in place and recycle **Pi only**. If that recycle fails, runtime writes
 the package-base marker so the next health or send retries the overlay instead of treating the disk
 as current. Full Box restart remains an explicit Owner/Editor action.
+
+Phase 1 retains every registry-backed provider snapshot: pruning a snapshot while its row remains
+`ready` would make PostgreSQL publish a clone source that no longer exists. Registry-aware provider
+garbage collection is follow-up work; until it ships, a provider snapshot-limit response is a
+visible bake failure and creation safely uses the logged cold-install path.
 
 A Box whose full marker already matches exits the layout script in milliseconds. The same-base
 overlay path rewrites the broker without `pi install`. Only a pin change reruns the package set,
@@ -794,52 +816,6 @@ Acceptance bounds:
 The deterministic simulator requirements live in `docs/testing.md`.
 Production cutover, kill-switch, purge, incident, and rollback procedures live in
 `docs/runbooks/companions-runtime.md`.
-
-### Development-only startup autoresearch
-
-The repository includes an operator-invoked Conductor Cloud research harness. Four waves of three
-isolated `gpt-5.6-luna` workspaces may change runtime implementation details, while one controller
-holds a single real-provider benchmark lease at a time. Luna and Sol workspaces have provider
-credentials explicitly shadowed; the controller evaluates their validated commits in verified,
-disposable worktrees and treats no agent chat message as benchmark or cleanup evidence. Those
-worktrees run as an unprivileged OS identity with an isolated home and receive a random local proxy
-token rather than the provider credential. The proxy permits
-only the exact deterministic Box/snapshot lease, exposes one newest ready layout-14 parent
-read-only for the baker, fails closed without an eligible parent, and requires later Boxes to clone
-the deterministic target. Explicit non-2xx creates may retry with the same source; fetch failures or
-invalid 2xx observations make the create ambiguous and block the lease. It observes real
-provider-ready states and correlated broker prompt ACKs, and proves deletion directly before
-promotion. Before accepting an ACK it
-byte-attests the generated broker, Node and Pi against hashes it captured from the pristine baker
-Box before permitting candidate writes, the live systemd main process, and that process's ownership
-of the broker socket. `gpt-5.6-sol` audits and
-integrates the finalists in a clean workspace. This harness is not reachable from Companion runtime
-claims and is not multi-Companion orchestration.
-
-The attestation boundary requires the provider command identity to be non-root so candidate commands
-cannot replace the absolute system verifiers or the captured runtime executables. The proxy proves
-that identity before permitting candidate commands or file writes and fails the campaign closed if a
-provider image ever exposes a root command boundary.
-
-Candidate snapshots include a development-only Git-tree salt in their image identity without
-changing the disk layout marker. The harness bakes, exercises, and deletes that image within the
-lease. It derives deterministic disposable Companion identities so controller-owned compensating
-cleanup can find every Box after a timeout. Credentials remain in the controller and its
-compensating cleanup process and are never copied into agent workspaces, candidate worktrees,
-prompts, result records, branches, or logs. Prompt-ACK-only evaluation stages a non-secret
-placeholder model key because response generation is outside the startup SLO; raw candidate output
-is rejected before any structured event is persisted. A kernel-held advisory lock prevents two
-controller processes from resuming the same campaign concurrently and is released automatically if
-its controller process dies.
-
-The evaluator checksum is pinned for the campaign. Measurements split provider readiness, staging,
-Pi/socket activation, broker preflight, prompt ACK, Skill bytes, snapshot size, and Stop/archive so
-moving immutable preparation off wake remains visible instead of being mistaken for removed work.
-
-Research may move immutable, credential-free work from Start/Resume to Stop when that reduces the
-next wake. Such a result is valid only when Stop remains bounded, credential removal precedes
-snapshot publication, cold creation still works, and settings or Skills changed during sleep force
-the ordinary authorized restage.
 
 ## Explicit exclusions
 

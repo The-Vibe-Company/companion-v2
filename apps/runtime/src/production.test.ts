@@ -1,3 +1,4 @@
+/* oxlint-disable anti-slop/require-safety-comment-for-type-assertion, anti-slop/no-chained-type-assertions -- Composition fixtures are hand-written fakes matching the used factory surfaces exactly. */
 import { describe, expect, it, vi } from "vitest";
 import type {
   AsciiBoxMaintenanceClientOptions,
@@ -102,6 +103,21 @@ describe("production runtime composition", () => {
     const masterKey = Buffer.alloc(32, 17);
     const hmacKey = Buffer.alloc(32, 23);
     const db = database();
+    // The image registry reads the published build state on every Box create; a ready row
+    // proves the clone path without a live provider.
+    (db.sql.unsafe as ReturnType<typeof vi.fn>).mockImplementation(async (query: string) => {
+      if (query.includes("companion_runtime_image_claim")) return [];
+      return [{
+        digest: "14:base:overlay=overlay:skill=none:boot=1",
+        image_name: "companion-l14-aaaaaaaaaaaa",
+        status: "ready",
+        parent_image_name: null,
+        build_box_id: null,
+        attempt_count: 1,
+        last_error_code: null,
+        last_error_message: null,
+      }];
+    });
     const store = {} as RuntimeStore;
     let kernelInput: CreateRuntimeKernelInput | undefined;
     let configuredMasterKey: Buffer | undefined;
@@ -122,6 +138,7 @@ describe("production runtime composition", () => {
         overlayMarker: "overlay",
         baseMarker: "14:base",
         fullMarker: "14:base:overlay=overlay",
+        imageMarker: "14:base:overlay=overlay:skill=none:boot=1",
         imageName: "companion-l14-aaaaaaaaaaaa",
       }),
     } as unknown as CompanionBoxRuntimeV2));

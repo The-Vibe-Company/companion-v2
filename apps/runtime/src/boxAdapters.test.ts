@@ -1,3 +1,4 @@
+/* oxlint-disable anti-slop/require-safety-comment-for-type-assertion, anti-slop/no-chained-type-assertions, anti-slop/no-unsafe-dictionary-type, anti-slop/no-known-value-widening -- Lifecycle fixtures are hand-written fakes matching the used client surface exactly. */
 import { describe, expect, it, vi } from "vitest";
 import { BoxRuntimeAdapterError, type BoxRuntimeLifecycleClient, type CompanionBoxRuntimeV2 } from "@companion/box-runtime";
 import type { RuntimeProcessLog } from "@companion/companion-runtime";
@@ -16,7 +17,7 @@ function runtimeImage(overrides: Partial<RuntimeImageSource> = {}): RuntimeImage
   return {
     expectedName: () => "companion-l14-aaaaaaaaaaaa",
     cloneName: () => null,
-    initialResolution: async () => ({ outcome: "none" }),
+    waitForResolution: async () => "failed",
     ...overrides,
   };
 }
@@ -175,7 +176,7 @@ describe("runtime Box/Pi port adapters", () => {
     }));
   });
 
-  it("waits for the baker's initial resolution within a bound, then creates without from", async () => {
+  it("waits on the published build past the bound, then creates without from", async () => {
     vi.useFakeTimers();
     try {
       const createOrRecoverGenerationBox = vi.fn(async () => ({
@@ -188,7 +189,10 @@ describe("runtime Box/Pi port adapters", () => {
         lifecycle: lifecycle({ createOrRecoverGenerationBox }),
         runtime: () => boxRuntime(),
         runtimeImage: runtimeImage({
-          initialResolution: () => new Promise(() => {}),
+          waitForResolution: (boundMs) =>
+            new Promise((resolve) => {
+              setTimeout(() => resolve("pending" as const), boundMs);
+            }),
         }),
         log: captured.log,
         now: () => Date.now(),
@@ -215,7 +219,7 @@ describe("runtime Box/Pi port adapters", () => {
         generation: 4,
         expectedImage: "companion-l14-aaaaaaaaaaaa",
         fromImage: null,
-        fallbackReason: "baker_pending",
+        fallbackReason: "image_build_pending",
         imageWaitMs: RUNTIME_IMAGE_WAIT_MS,
         outcome: "created",
       })]);
@@ -224,7 +228,7 @@ describe("runtime Box/Pi port adapters", () => {
     }
   });
 
-  it("never sleeps when the baker already resolved to no snapshot", async () => {
+  it("skips the wait entirely when the registry already reports a failed build", async () => {
     const createOrRecoverGenerationBox = vi.fn(async () => ({
       outcome: "created" as const,
       boxId: "bx_23456789",
@@ -254,27 +258,23 @@ describe("runtime Box/Pi port adapters", () => {
     expect(captured.records).toEqual([expect.objectContaining({
       event: "runtime.box.create",
       fromImage: null,
-      fallbackReason: "no_snapshot",
+      fallbackReason: "image_build_failed",
       imageWaitMs: 0,
     })]);
   });
 
-  it("clones the parent image the baker resolved mid-race", async () => {
+  it("clones the expected image once the registry publishes readiness", async () => {
     const createOrRecoverGenerationBox = vi.fn(async () => ({
       outcome: "created" as const,
       boxId: "bx_23456789",
       name: "canonical",
     }));
-    let clone: string | null = null;
     const control = createRuntimeBoxControl({
       lifecycle: lifecycle({ createOrRecoverGenerationBox }),
       runtime: () => boxRuntime(),
       runtimeImage: runtimeImage({
-        cloneName: () => clone,
-        initialResolution: async () => {
-          clone = "companion-l13-bbbbbbbbbbbb";
-          return { outcome: "parent", name: "companion-l13-bbbbbbbbbbbb" };
-        },
+        cloneName: () => null,
+        waitForResolution: async () => "ready",
       }),
       now: () => deadlineAt.getTime() - 10_000,
     });
@@ -288,17 +288,22 @@ describe("runtime Box/Pi port adapters", () => {
     })).resolves.toMatchObject({ outcome: "created", boxId: "bx_23456789" });
 
     expect(createOrRecoverGenerationBox).toHaveBeenCalledWith(expect.objectContaining({
-      from: "companion-l13-bbbbbbbbbbbb",
+      from: "companion-l14-aaaaaaaaaaaa",
     }));
   });
 
-  it("propagates abort while waiting on the baker's initial resolution", async () => {
+  it("propagates abort while waiting on the published build state", async () => {
     const controller = new AbortController();
     const control = createRuntimeBoxControl({
       lifecycle: lifecycle(),
       runtime: () => boxRuntime(),
       runtimeImage: runtimeImage({
-        initialResolution: () => new Promise(() => {}),
+        waitForResolution: (_boundMs, waitSignal) =>
+          new Promise((_resolve, reject) => {
+            waitSignal.addEventListener("abort", () => {
+              reject(waitSignal.reason instanceof Error ? waitSignal.reason : new Error("aborted"));
+            });
+          }),
       }),
       now: () => deadlineAt.getTime() - 10_000,
     });
