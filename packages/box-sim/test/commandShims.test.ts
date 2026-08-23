@@ -37,6 +37,12 @@ describe("semantic Box command shims", () => {
       ['mkdir -p "$HOME/.companion/bin"', "mkdir-pi-bin"],
       ['bash "$HOME/.companion/bin/ensure-pi-layout.sh"', "install-layout"],
       ['recorded="$(cat "$HOME/.companion/runtime/state/pi-layout.version" 2>/dev/null || true)"\nif [ "$recorded" = \'14:pins:overlay=abc\' ] \\\n  && [ -x "$HOME/.companion/bin/companion-pi-broker.mjs" ]; then\n  printf \'%s\\n\' companion-layout-unchanged\nfi', "probe-layout"],
+      [
+        'test -s "$HOME/.companion/bin/companion-pi-broker.mjs"\n'
+          + 'playbook="$HOME/.ascii/playbook.json"\n'
+          + "printf '%s\\n' 'companion-runtime-playbook-ready'",
+        "warm-runtime-image",
+      ],
       ['mkdir -p "$HOME/.companion/pi/extensions"', "mkdir-extensions"],
       [
         'root="$HOME/.companion/runtime"; printf companion-provider-auth-present',
@@ -93,6 +99,32 @@ describe("semantic Box command shims", () => {
     )).resolves.toMatchObject({ success: true });
     expect(machine.persistentFiles.has(path)).toBe(false);
     expect(machine.persistentFiles.has(sidecar)).toBe(false);
+  });
+
+  it("warms a staged runtime image only when its required files exist", async () => {
+    const machine = createBoxSimCommandMachine({ boxId: "bx_23456789", scenario: "normal" });
+    const command = 'test -s "$HOME/.companion/bin/companion-pi-broker.mjs"\n'
+      + 'test -s "$HOME/.companion/runtime/image/companion-checksum.tar.gz.b64"\n'
+      + 'playbook="$HOME/.ascii/playbook.json"\n'
+      + "printf '%s\\n' 'companion-runtime-playbook-ready'";
+
+    await expect(executeBoxCommand(machine, command)).resolves.toMatchObject({
+      success: false,
+    });
+    putBoxFile(machine, ".companion/bin/companion-pi-broker.mjs", Buffer.from("broker"));
+    putBoxFile(
+      machine,
+      ".companion/runtime/image/companion-checksum.tar.gz.b64",
+      Buffer.from("archive"),
+    );
+    await expect(executeBoxCommand(machine, command)).resolves.toMatchObject({
+      success: false,
+    });
+    putBoxFile(machine, ".ascii/playbook.json", Buffer.from('{"boot":"ready"}\n'));
+    await expect(executeBoxCommand(machine, command)).resolves.toMatchObject({
+      success: true,
+      stdout: "companion-runtime-playbook-ready\n",
+    });
   });
 
   it.each([

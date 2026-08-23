@@ -25,6 +25,7 @@ simulator; lifecycle commands must never execute against the CI host.
 | The API persists runtime intent but never contacts Box/Pi | Lost work after `202`, request-held lifecycle, or duplicate executor | HTTP + provider spy + PostgreSQL | Construct the Box adapter in an API route |
 | Only one attempt runs per Companion while later turns stay ordered | Concurrent prompts or queue reordering | Runtime unit + PostgreSQL + simulator | Remove running-attempt uniqueness or queue ordering |
 | Runtime lease epoch fences stale writers | A dead replica checkpoints or settles after takeover | Two runtime replicas + PostgreSQL | Remove epoch from checkpoint/settle predicate |
+| Runtime images have one durable builder and never publish an unready snapshot | Concurrent or stale builders publish conflicting state, retry too early, or exhaust permanently | Runtime unit + PostgreSQL + simulator | Remove the image claim fence or treat a non-ready bake as ready |
 | Ambiguous prompt dispatch is never auto-replayed | Duplicate external side effects after missing ACK | Broker + runtime + fault injection | Drop ACK after prompt write and permit retry |
 | Every active turn reaches a bounded visible state | Forever-replying turn after Pi/provider failure | Runtime + simulator + browser | Suppress `agent_settled` or correlated activity |
 | Viewer and ordinary reads never contact or wake Box | Read causes spend, secret access, or lifecycle mutation | HTTP + browser + provider spy | Instantiate Box before the runner guard |
@@ -86,6 +87,13 @@ and takeover around the installed-tree checkpoint.
   cross-tenant ids, revoked actors, and no-admin-override personal data.
 - Use two real connections to race claim, renew, checkpoint, settlement, lease expiry/takeover, and
   stale epochs.
+- Race image-build claims, prove a worker cannot claim another digest/name, reject stale image
+  outcomes and cleanup fences, prove epochs never repeat after settlement, verify
+  30/60/120/300-second backoff and the four-attempt cap, and
+  prove an expired fourth attempt is cleanup-only while a terminal failure re-arms only after its
+  cooldown. Provider-delete failure must retain `build_box_id` for takeover reconciliation.
+  An accepted image-builder deletion persists its provider operation id, treats `blocked` as
+  incomplete, and resumes polling without a second `DELETE`.
 - Cover multiple pending operations but one running operation, one active attempt, ordered turns,
   idempotent `client_message_id`, unique `retry_id`, configuration revision ordering, and kill-switch
   claims.
@@ -139,57 +147,8 @@ Deterministic fault tests cover every boundary around list, create, resume, bund
 pre-execution cleanup, activation, durable checkpoint, prompt write, and ACK. Regression coverage
 also proves pre-ACK events remain visible, known Box ids are identity-checked without listing, a
 stale broker is recycled after the disk-marker crash gap, and a bundled-skill checksum change
-defeats tree reuse.
-
-The development-only startup autoresearch harness is launched explicitly with:
-
-```bash
-pnpm research:box-startup -- --overnight
-```
-
-It requires a clean checkout exactly at `origin/main`, Conductor CLI authentication, and Box/z.ai
-research credentials in `BOX_API_KEY` and `ZAI_API_KEY` (the existing E2E variable names are also
-accepted). The 72-cycle maximum is six baseline cycles, 36 quick candidate cycles, 20 finalist
-cycles, and ten Sol-integration cycles. Three Luna workspaces explore concurrently, but provider
-concurrency is one. A lease is not released until Box `404` and named-snapshot absence prove cleanup;
-timeout recovery derives all disposable identities from run/candidate/phase/cycle and the controller
-cleans them directly before the campaign can continue. Failed proof persists `blocked-cleanup` and
-the active lease, so `--resume` retries cleanup before any provider work.
-
-The evaluator checksum is fixed at campaign creation and rechecked in every controller-owned
-candidate checkout before Box contact. The controller binds results to the exact run, candidate,
-phase, tree, prefix, and cycle count; candidate messages cannot attest benchmark or cleanup output.
-Candidate checkouts run under a separate unprivileged OS identity with an isolated home and receive
-a random loopback proxy token, never the real Box or model credentials.
-The proxy allowlists the exact deterministic Box and snapshot identities. Its snapshot list exposes
-the target (when present) plus one newest ready layout-14 parent read-only for the baker; it fails
-closed when no eligible parent exists and requires the baker clone that parent before later Boxes
-clone the target. An explicit non-2xx create response permits a same-source retry; a fetch failure
-or invalid 2xx observation makes the create ambiguous and blocks the lease. It records provider-ready
-and correlated broker prompt-ACK timestamps, rejects reported metrics that outrun that evidence, and
-checks provider `404` directly after cleanup. Before allowing candidate commands or file writes, it
-captures Node and Pi digests directly from the pristine ready baker Box. Its prompt probe requires
-the live systemd main process to run the byte-pinned generated broker with those exact executables
-and to own the exact Unix socket before and after the ACK. The captured command UID must be non-root;
-the proxy rejects the campaign before candidate writes if that trust assumption changes. A pipe-bound kernel advisory lock rejects a concurrent
-controller for the same run and releases automatically when a crashed controller closes its pipe.
-Campaign state, Conductor links, the lease journal, cleanup proofs, and
-deduplicated metrics JSONL live under `.context/autoresearch/box-startup/<run-id>/`;
-`--resume <run-id>` reconciles exact workspace names and deterministic message ids rather than creating a
-second experiment. A bake Box receives its own deterministic generation identity, so crash cleanup
-can find both the snapshot and the otherwise-temporary baker.
-
-The quick score is the worse creation/resume median ready-to-ACK. Promotion requires at least a
-one-second or ten-percent gain, bounded per-leg/provider regressions, unchanged protected tests, and
-complete cleanup. Final promotion uses nearest-rank P95 and requires both creation and resume at or
-below five seconds. Stop/archive latency is recorded separately so experiments may deliberately
-move safe deterministic work out of wake, but it must remain within the lifecycle deadline. Unit
-tests use a fake Conductor client and cover idempotent messages, workspace reconciliation, invalid
-responses, contract rejection, path/secret policy, credential shadowing, controller-owned result
-binding, lease serialization, timeout cleanup, required Box `404`, and resume checkpoints without
-contacting Conductor or Box. Secondary distributions include send-to-ACK,
-Pi/socket activation, broker preflight, provider calls, Skill bytes, staging modes, bake duration,
-snapshot size, and Stop/archive latency.
+defeats tree reuse. Runtime-image warmup succeeds only when resume has produced a non-empty
+provider `.ascii/playbook.json`; broker and bundled-Skill files alone are insufficient.
 
 ## Frontend gate
 

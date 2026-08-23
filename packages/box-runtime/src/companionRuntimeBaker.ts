@@ -1,3 +1,4 @@
+/* oxlint-disable anti-slop/no-unknown-parameters, anti-slop/no-conditional-empty-object-spread -- Cleanup callbacks receive unknown thrown values by design; optional bake inputs are conditionally spread. */
 import { BoxRuntimeAdapterError, type BoxRuntimeLifecycleClient } from "./boxMaintenanceClient";
 import type { CompanionBoxRuntimeV2 } from "./boxCompanionRuntime";
 import type { CompanionRuntimeSkill } from "./companionPiInjection";
@@ -8,45 +9,23 @@ import {
 
 // Create stays at the unnamed-orphan bound. The bake itself is longer: ready wait, layout, snapshot.
 const BAKER_CREATE_TTL_SECONDS = 300;
-const BAKER_WORK_TTL_SECONDS = 1_800;
+const BAKER_WORK_TTL_SECONDS = 3_600;
 const READY_POLL_INTERVAL_MS = 1_000;
 const SNAPSHOT_POLL_INTERVAL_MS = 2_000;
-const BAKE_RETRY_INTERVAL_MS = 30_000;
-const BOX_READY_TIMEOUT_MS = 180_000;
+// Real providers take several minutes to move a fresh clone through provisioning to ready;
+// the bake holds a durable registry lease, so waiting here is safe and cheaper than failing.
+const BOX_READY_TIMEOUT_MS = 900_000;
 const SNAPSHOT_READY_TIMEOUT_MS = 600_000;
-const READY_STATES = new Set(["ready", "idle", "running"]);
+// `provisioned` is a bootable disk: staging installs layout over SSH, so a bake may proceed
+// without waiting for the provider's own boot handshake to reach its terminal ready state.
+const READY_STATES = new Set(["ready", "idle", "running", "provisioned"]);
 
-export type CompanionRuntimeImageInitialResolution =
-  | { outcome: "ready"; name: string }
-  | { outcome: "parent"; name: string }
-  | { outcome: "none" };
-
-export type CompanionRuntimeImageBakerEvent =
-  | {
-    kind: "resolved";
-    outcome: "ready" | "parent" | "none";
-    image: string | null;
-    durationMs: number;
-  }
-  | { kind: "bake_started"; expectedImage: string; parentImage: string | null }
-  | { kind: "bake_completed"; image: string; ready: boolean; durationMs: number }
-  | { kind: "snapshot_pruned"; name: string };
-
-export interface CompanionRuntimeImageBaker {
-  readonly identity: CompanionPiLayoutIdentity;
-  readyName(): string | null;
-  /** Current image if baked, otherwise the previous companion snapshot a new Box can clone. */
-  cloneName(): string | null;
-  /**
-   * Once-settled result of the first resolution attempt: a ready image, a cloneable parent, or
-   * nothing available (also after a failed first attempt or an early abort). It settles before any
-   * bake work, so awaiting it never blocks on a bake.
-   */
-  initialResolution(): Promise<CompanionRuntimeImageInitialResolution>;
-  ensure(signal: AbortSignal): Promise<{ name: string; ready: boolean; baked: boolean }>;
-}
-
-export function createCompanionRuntimeImageBaker(input: {
+/**
+ * One bake attempt: resolve an existing ready snapshot, otherwise bake (clone parent → layout →
+ * skill warmup → save). Never retries; the caller owns retry policy. This is the unit the
+ * registry-driven builder executes under its lease.
+ */
+export async function bakeCompanionRuntimeImageOnce(input: {
   identity: CompanionPiLayoutIdentity;
   lifecycle: BoxRuntimeLifecycleClient;
   runtime: Pick<
@@ -56,85 +35,31 @@ export function createCompanionRuntimeImageBaker(input: {
   bundledSkill?: CompanionRuntimeSkill;
   now?: () => number;
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
-  onAttemptError?: (error: unknown) => void;
-  /** Cleanup failure never fails a successful bake; the next run retries. This is how it is seen. */
-  onCleanupError?: (error: unknown, cleanup: "baker_box_delete" | "snapshot_prune") => void;
-  onEvent?: (event: CompanionRuntimeImageBakerEvent) => void;
-}): CompanionRuntimeImageBaker {
-  if (input.bundledSkill && !input.runtime.prepareRuntimeImage) {
-    throw new TypeError("The runtime image warmup adapter is required for a bundled Skill.");
-  }
-  const now = input.now ?? Date.now;
-  const sleep = input.sleep ?? defaultSleep;
-  let readyName: string | null = null;
-  let parentName: string | null = null;
-  let inflight: Promise<{ name: string; ready: boolean; baked: boolean }> | null = null;
-  const startedAt = now();
-  let settleInitial: ((resolution: CompanionRuntimeImageInitialResolution) => void) | null = null;
-  const initial = new Promise<CompanionRuntimeImageInitialResolution>((resolve) => {
-    settleInitial = resolve;
-  });
-  const resolved = (resolution: CompanionRuntimeImageInitialResolution): void => {
-    const settle = settleInitial;
-    if (!settle) return;
-    settleInitial = null;
-    input.onEvent?.({
-      kind: "resolved",
-      outcome: resolution.outcome,
-      image: resolution.outcome === "none" ? null : resolution.name,
-      durationMs: Math.max(0, now() - startedAt),
-    });
-    settle(resolution);
-  };
-
-  const baker: CompanionRuntimeImageBaker = {
+  signal: AbortSignal;
+  /** Persists the provider Box identity immediately after create, before layout side effects. */
+  onBoxCreated?: (input: { boxId: string; parentImageName: string | null }) => Promise<void>;
+  /** Persists irreversible-delete intent before the provider DELETE can be attempted. */
+  onBoxDeletionIntentRecorded?: (input: { boxId: string }) => Promise<void>;
+  /** Persists the accepted irreversible deletion before polling it. */
+  onBoxDeletionRequested?: (input: { boxId: string; operationId: string }) => Promise<void>;
+  /** Confirms durable cleanup ownership after the provider Box is gone. */
+  onBoxDeleted?: (input: { boxId: string }) => Promise<void>;
+  onCleanupError?: (error: unknown, cleanup: "baker_box_delete") => void;
+}): Promise<{ name: string; ready: boolean; parentImageName: string | null }> {
+  return await ensureImage({
     identity: input.identity,
-    readyName: () => readyName,
-    cloneName: () => readyName ?? parentName,
-    initialResolution: () => initial,
-    async ensure(signal) {
-      const pending = inflight ??= (async () => {
-        try {
-          while (true) {
-            signal.throwIfAborted();
-            try {
-              const result = await ensureImage({
-                identity: input.identity,
-                lifecycle: input.lifecycle,
-                runtime: input.runtime,
-                ...(input.bundledSkill ? { bundledSkill: input.bundledSkill } : {}),
-                now,
-                sleep,
-                signal,
-                onParent: (name) => {
-                  parentName = name;
-                },
-                onResolved: resolved,
-                onCleanupError: input.onCleanupError,
-                ...(input.onEvent ? { onEvent: input.onEvent } : {}),
-              });
-              if (result.ready) {
-                readyName = result.name;
-                return result;
-              }
-              input.onAttemptError?.(new Error("The companion runtime image was not ready after a bake attempt."));
-            } catch (error) {
-              // The first resolution is sticky: a racing Box create must not wait for a retry loop.
-              resolved({ outcome: "none" });
-              if (signal.aborted) throw error;
-              input.onAttemptError?.(error);
-            }
-            await sleep(BAKE_RETRY_INTERVAL_MS, signal);
-          }
-        } finally {
-          resolved({ outcome: "none" });
-          inflight = null;
-        }
-      })();
-      return await pending;
-    },
-  };
-  return baker;
+    lifecycle: input.lifecycle,
+    runtime: input.runtime,
+    ...(input.bundledSkill ? { bundledSkill: input.bundledSkill } : {}),
+    now: input.now ?? Date.now,
+    sleep: input.sleep ?? defaultSleep,
+    signal: input.signal,
+    onBoxCreated: input.onBoxCreated,
+    onBoxDeletionIntentRecorded: input.onBoxDeletionIntentRecorded,
+    onBoxDeletionRequested: input.onBoxDeletionRequested,
+    onBoxDeleted: input.onBoxDeleted,
+    onCleanupError: input.onCleanupError,
+  });
 }
 
 async function ensureImage(input: {
@@ -146,45 +71,33 @@ async function ensureImage(input: {
   now: () => number;
   sleep: (ms: number, signal: AbortSignal) => Promise<void>;
   signal: AbortSignal;
-  onParent?: (name: string) => void;
-  onResolved?: (resolution: CompanionRuntimeImageInitialResolution) => void;
-  onCleanupError?: (error: unknown, cleanup: "baker_box_delete" | "snapshot_prune") => void;
-  onEvent?: (event: CompanionRuntimeImageBakerEvent) => void;
-}): Promise<{ name: string; ready: boolean; baked: boolean }> {
+  onBoxCreated?: (input: { boxId: string; parentImageName: string | null }) => Promise<void>;
+  onBoxDeletionIntentRecorded?: (input: { boxId: string }) => Promise<void>;
+  onBoxDeletionRequested?: (input: { boxId: string; operationId: string }) => Promise<void>;
+  onBoxDeleted?: (input: { boxId: string }) => Promise<void>;
+  onCleanupError?: (error: unknown, cleanup: "baker_box_delete") => void;
+}): Promise<{ name: string; ready: boolean; baked: boolean; parentImageName: string | null }> {
   const current = await input.lifecycle.getNamedSnapshot({
     name: input.identity.imageName,
     signal: input.signal,
     deadlineAt: input.now() + 30_000,
   });
   if (current?.status === "ready") {
-    input.onResolved?.({ outcome: "ready", name: input.identity.imageName });
-    return { name: input.identity.imageName, ready: true, baked: false };
+    return { name: input.identity.imageName, ready: true, baked: false, parentImageName: null };
   }
   if (current?.status === "saving") {
-    const parent = await selectParentSnapshot(input);
-    if (parent) input.onParent?.(parent);
-    // Resolve before waiting on the in-flight save: a racing create must never wait on a bake.
-    input.onResolved?.(parent ? { outcome: "parent", name: parent } : { outcome: "none" });
     const settled = await waitNamedSnapshot(input, input.identity.imageName);
     if (settled?.status === "ready") {
-      return { name: input.identity.imageName, ready: true, baked: false };
+      return { name: input.identity.imageName, ready: true, baked: false, parentImageName: null };
     }
   }
 
   const parent = await selectParentSnapshot(input);
-  if (parent) input.onParent?.(parent);
-  input.onResolved?.(parent ? { outcome: "parent", name: parent } : { outcome: "none" });
-  input.onEvent?.({
-    kind: "bake_started",
-    expectedImage: input.identity.imageName,
-    parentImage: parent ?? null,
-  });
-  const bakeStartedAt = input.now();
-  await pruneStaleImages({ ...input, keep: parent ? [parent] : [] });
   let boxId: string | null = null;
   try {
     const created = await createBakerBox(input, parent);
     boxId = created.boxId;
+    await input.onBoxCreated?.({ boxId, parentImageName: created.parentImageName });
     await input.runtime.refreshTtl({
       boxId,
       ttlSeconds: BAKER_WORK_TTL_SECONDS,
@@ -214,32 +127,102 @@ async function ensureImage(input: {
     }
     const saved = await waitNamedSnapshot(input, input.identity.imageName);
     if (saved?.status !== "ready") {
-      input.onEvent?.({
-        kind: "bake_completed",
-        image: input.identity.imageName,
+      return {
+        name: input.identity.imageName,
         ready: false,
-        durationMs: Math.max(0, input.now() - bakeStartedAt),
-      });
-      return { name: input.identity.imageName, ready: false, baked: false };
+        baked: false,
+        parentImageName: created.parentImageName,
+      };
     }
-    await pruneStaleImages({ ...input, keep: parent ? [parent] : [] });
-    input.onEvent?.({
-      kind: "bake_completed",
-      image: input.identity.imageName,
+    return {
+      name: input.identity.imageName,
       ready: true,
-      durationMs: Math.max(0, input.now() - bakeStartedAt),
-    });
-    return { name: input.identity.imageName, ready: true, baked: true };
+      baked: true,
+      parentImageName: created.parentImageName,
+    };
   } finally {
     if (boxId) {
-      await input.lifecycle.deletePermanentlyAndWait({
-        boxId,
+      const cleanupBoxId = boxId;
+      const cleanupController = new AbortController();
+      const cleanupTimer = setTimeout(() => {
+        cleanupController.abort(new Error("The runtime image baker cleanup exceeded its budget."));
+      }, 120_000);
+      await deleteCompanionRuntimeBakerBox({
+        lifecycle: input.lifecycle,
+        boxId: cleanupBoxId,
         deadlineAt: input.now() + 120_000,
-        signal: input.signal,
+        signal: cleanupController.signal,
+        onDeletionIntentRecorded: input.onBoxDeletionIntentRecorded,
+        onDeletionRequested: input.onBoxDeletionRequested,
+      }).then(async () => {
+        await input.onBoxDeleted?.({ boxId: cleanupBoxId });
       }).catch((error: unknown) => {
         input.onCleanupError?.(error, "baker_box_delete");
+        throw error;
+      }).finally(() => {
+        clearTimeout(cleanupTimer);
       });
     }
+  }
+}
+
+/**
+ * Delete a baker Box without replaying a possibly accepted DELETE. Callers first persist intent,
+ * then persist the returned operation before this helper polls. Takeover with intent but no
+ * operation performs read-only absence reconciliation; it never guesses whether DELETE ran.
+ */
+export async function deleteCompanionRuntimeBakerBox(input: {
+  lifecycle: BoxRuntimeLifecycleClient;
+  boxId: string;
+  deletionIntentRecorded?: boolean;
+  operationId?: string | null;
+  deadlineAt: number;
+  signal: AbortSignal;
+  onDeletionIntentRecorded?: (input: { boxId: string }) => Promise<void>;
+  onDeletionRequested?: (input: { boxId: string; operationId: string }) => Promise<void>;
+}): Promise<void> {
+  let operationId = input.operationId ?? null;
+  if (!operationId) {
+    if (input.deletionIntentRecorded) {
+      const boxes = await input.lifecycle.listAllBoxes({
+        deadlineAt: input.deadlineAt,
+        signal: input.signal,
+      });
+      if (!boxes.some((box) => box.id === input.boxId)) return;
+      throw new BoxRuntimeAdapterError({
+        stableCode: "box_deletion_deadline_exceeded",
+        message: "The runtime image baker Box deletion has an ambiguous accepted outcome",
+        status: 504,
+        providerCode: "delete_blocked",
+        retryable: true,
+        outcomeUnknown: true,
+      });
+    }
+    await input.onDeletionIntentRecorded?.({ boxId: input.boxId });
+    const requested = await input.lifecycle.requestPermanentDeletion({
+      boxId: input.boxId,
+      deadlineAt: input.deadlineAt,
+      signal: input.signal,
+    });
+    if (requested.outcome === "absent") return;
+    operationId = requested.operation.id;
+    await input.onDeletionRequested?.({ boxId: input.boxId, operationId });
+  }
+  const terminal = await input.lifecycle.deletePermanentlyAndWait({
+    boxId: input.boxId,
+    operationId,
+    deadlineAt: input.deadlineAt,
+    signal: input.signal,
+  });
+  if (terminal.outcome === "blocked") {
+    throw new BoxRuntimeAdapterError({
+      stableCode: "box_deletion_deadline_exceeded",
+      message: "The runtime image baker Box deletion remains blocked",
+      status: 504,
+      providerCode: "delete_blocked",
+      retryable: true,
+      outcomeUnknown: false,
+    });
   }
 }
 
@@ -312,53 +295,25 @@ async function createBakerBox(
     now: () => number;
   },
   parent: string | undefined,
-): Promise<{ boxId: string }> {
+): Promise<{ boxId: string; parentImageName: string | null }> {
   try {
-    return await input.lifecycle.createEphemeralBox({
+    const created = await input.lifecycle.createEphemeralBox({
       ttlSeconds: BAKER_CREATE_TTL_SECONDS,
       noEnv: true,
       deadlineAt: input.now() + 30_000,
       signal: input.signal,
       ...(parent ? { from: parent } : {}),
     });
+    return { ...created, parentImageName: parent ?? null };
   } catch (error) {
     if (!parent || !isUnknownSnapshot(error)) throw error;
-    return await input.lifecycle.createEphemeralBox({
+    const created = await input.lifecycle.createEphemeralBox({
       ttlSeconds: BAKER_CREATE_TTL_SECONDS,
       noEnv: true,
       deadlineAt: input.now() + 30_000,
       signal: input.signal,
     });
-  }
-}
-
-async function pruneStaleImages(input: {
-  identity: CompanionPiLayoutIdentity;
-  lifecycle: BoxRuntimeLifecycleClient;
-  signal: AbortSignal;
-  now: () => number;
-  keep?: readonly string[];
-  onCleanupError?: (error: unknown, cleanup: "baker_box_delete" | "snapshot_prune") => void;
-  onEvent?: (event: CompanionRuntimeImageBakerEvent) => void;
-}): Promise<void> {
-  const keep = new Set([input.identity.imageName, ...(input.keep ?? [])]);
-  const snapshots = await input.lifecycle.listNamedSnapshots({
-    signal: input.signal,
-    deadlineAt: input.now() + 30_000,
-  });
-  const stale = snapshots.filter((snapshot) =>
-    isCompanionRuntimeImageName(snapshot.name) && !keep.has(snapshot.name));
-  for (const snapshot of stale) {
-    try {
-      await input.lifecycle.deleteNamedSnapshot({
-        name: snapshot.name,
-        signal: input.signal,
-        deadlineAt: input.now() + 30_000,
-      });
-      input.onEvent?.({ kind: "snapshot_pruned", name: snapshot.name });
-    } catch (error) {
-      input.onCleanupError?.(error, "snapshot_prune");
-    }
+    return { ...created, parentImageName: null };
   }
 }
 

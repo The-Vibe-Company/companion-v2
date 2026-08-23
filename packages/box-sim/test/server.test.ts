@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-conditional-empty-object-spread, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Existing simulator HTTP fixtures predate the incremental anti-slop gate. */
+
 import { afterEach, describe, expect, it } from "vitest";
 import { AsciiBoxMaintenanceClient } from "@companion/box-runtime";
 
@@ -216,10 +218,15 @@ describe("Box simulator HTTP server", () => {
     const first = await (await provider(handle, `/boxes/${created.box.id}`)).json() as {
       box: { state: string };
     };
+    const provisionedWrite = await provider(handle, `/boxes/${created.box.id}/files`, {
+      method: "PUT",
+      body: JSON.stringify({ path: ".companion/provisioned.txt", content: "bootable\n" }),
+    });
     const second = await (await provider(handle, `/boxes/${created.box.id}`)).json() as {
       box: { state: string; setupStatus: string };
     };
     expect(first.box.state).toBe("provisioned");
+    expect(provisionedWrite.status).toBe(200);
     expect(second.box).toMatchObject({ state: "ready", setupStatus: "done" });
 
     const patched = await provider(handle, `/boxes/${created.box.id}`, {
@@ -266,6 +273,9 @@ describe("Box simulator HTTP server", () => {
     expect(await resumed.json()).toMatchObject({ type: "box.resuming", box: { state: "provisioning" } });
     expect(await (await provider(handle, `/boxes/${created.box.id}`)).json())
       .toMatchObject({ box: { state: "ready", ttlSeconds: 600 } });
+    expect(handle.simulator.commandMachine(created.box.id).persistentFiles.get(
+      ".ascii/playbook.json",
+    )?.toString()).toContain('"boot":"resumed"');
   });
 
   it("keeps secret values out of the control snapshot", async () => {

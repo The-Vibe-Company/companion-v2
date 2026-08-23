@@ -855,6 +855,20 @@
       "when": 1790269600000,
       "tag": "0121_companion_mcp_selection_lock",
       "breakpoints": true
+    },
+    {
+      "idx": 122,
+      "version": "7",
+      "when": 1790356000000,
+      "tag": "0122_companion_image_registry",
+      "breakpoints": true
+    },
+    {
+      "idx": 123,
+      "version": "7",
+      "when": 1790442400000,
+      "tag": "0123_companion_image_registry_access",
+      "breakpoints": true
     }
   ]
 }

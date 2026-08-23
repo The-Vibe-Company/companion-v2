@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-known-value-widening, anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type -- Existing simulator boundary parsing predates the incremental anti-slop gate. */
+
 import {
   appendPiEvent,
   appendPiFault,
@@ -66,7 +68,9 @@ const NAMED_SNAPSHOT_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const NAMED_SNAPSHOT_LIMIT = 10;
 const BOX_ID_ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz";
 const BOX_ID_SEED = "23456789";
-const RUNNABLE_STATES = new Set<BoxSimBoxState>(["ready", "running", "idle"]);
+// ascii.dev exposes `provisioned` once the disk is bootable and accepts file/command work before
+// its later readiness observation. The runtime image builder intentionally starts staging there.
+const RUNNABLE_STATES = new Set<BoxSimBoxState>(["provisioned", "ready", "running", "idle"]);
 const BOX_STATES = new Set<BoxSimBoxState>([
   "init",
   "provisioning",
@@ -483,6 +487,13 @@ export class BoxSimulator {
     if (input.ttlSeconds !== undefined) {
       record.box.ttlSeconds = validatePositiveInteger(input.ttlSeconds, "ttlSeconds");
     }
+    // ascii.dev writes its boot playbook during resume. Runtime-image warmup must observe this
+    // provider-owned artifact before a snapshot is eligible for publication.
+    putBoxFile(
+      record.machine,
+      ".ascii/playbook.json",
+      Buffer.from('{"provider":"box-sim","boot":"resumed"}\n'),
+    );
     record.pendingStates = observedReadyStates(this.#defaults.resumePolls, "archived");
     return publicBox(record);
   }

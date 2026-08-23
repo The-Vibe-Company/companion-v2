@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Companion v2 — self-hostable Skills Hub for organizations and coding agents.",
+  "description": "Companion v2 \u2014 self-hostable Skills Hub for organizations and coding agents.",
   "license": "MIT",
   "packageManager": "pnpm@9.12.0",
   "engines": {
@@ -46,8 +46,6 @@
     "verify:change": "node scripts/verify-change.mjs",
     "browser:smoke": "bash scripts/agent-browser-smoke.sh",
     "e2e:box-runtime-change": "pnpm --filter @companion/api exec tsx \"$PWD/scripts/box-runtime-change-e2e.ts\"",
-    "research:box-startup": "node scripts/box-startup-research/controller.mjs",
-    "research:box-startup:benchmark": "node scripts/box-startup-research/benchmark.mjs",
     "smoke:api": "bash scripts/ci-api-smoke.sh",
     "smoke:rsc": "bash scripts/ci-rsc-smoke.sh",
     "cli": "pnpm --filter @companion/cli exec companion",

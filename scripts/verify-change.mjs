@@ -17,13 +17,6 @@ const HYGIENE_TESTS = [
   "scripts/ci-gate.test.mjs",
   "scripts/lint-anti-slop.test.mjs",
   "scripts/verify-change.test.mjs",
-  "scripts/box-startup-research/contracts.test.mjs",
-  "scripts/box-startup-research/benchmark.test.mjs",
-  "scripts/box-startup-research/cleanup.test.mjs",
-  "scripts/box-startup-research/conductor-client.test.mjs",
-  "scripts/box-startup-research/policy.test.mjs",
-  "scripts/box-startup-research/provider-proxy.test.mjs",
-  "scripts/box-startup-research/controller.test.mjs",
 ];
 
 function splitNullTerminated(output) {

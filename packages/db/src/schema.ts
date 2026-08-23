@@ -44,6 +44,9 @@ export const companionRuntimeRetirementStateEnum = pgEnum("companion_runtime_ret
 export const companionClientSurfaceEnum = pgEnum("companion_client_surface", [
   "web", "mobile_web", "native_mobile",
 ]);
+export const companionImageStatusEnum = pgEnum("companion_image_status", [
+  "requested", "building", "ready", "failed",
+]);
 export const companionTurnStatusEnum = pgEnum("companion_turn_status", [
   "queued", "starting", "dispatching", "running", "needs_input",
   "succeeded", "failed", "interrupted", "cancelled",
@@ -739,6 +742,53 @@ function companionTurnCompositeKeyColumns(): [AnyPgColumn, AnyPgColumn, AnyPgCol
 }
 
 /** Identifier-only one-Companion/one-Box/one-Pi Runtime v2 projection. */
+export const companionImages = pgTable(
+  "companion_images",
+  {
+    /** Full layout identity marker hash (see companionPiLayoutIdentity). */
+    digest: text("digest").primaryKey(),
+    /** ascii.dev named snapshot the bake publishes. */
+    imageName: text("image_name").notNull().unique(),
+    status: companionImageStatusEnum("status").notNull().default("requested"),
+    parentImageName: text("parent_image_name"),
+    buildBoxId: text("build_box_id"),
+    buildDeleteIntentAt: timestamp("build_delete_intent_at", { withTimezone: true }),
+    buildDeleteOperationId: text("build_delete_operation_id"),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    lastErrorCode: text("last_error_code"),
+    lastErrorMessage: text("last_error_message"),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    claimEpoch: bigint("claim_epoch", { mode: "number" }).notNull().default(0),
+    claimActorId: text("claim_actor_id"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
+    requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+    buildingAt: timestamp("building_at", { withTimezone: true }),
+    readyAt: timestamp("ready_at", { withTimezone: true }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    statusCheck: check(
+      "companion_images_status_check",
+      sql`(${t.status} = 'ready') = (${t.readyAt} is not null)`,
+    ),
+    errorCheck: check(
+      "companion_images_error_check",
+      sql`((${t.lastErrorCode} is null) = (${t.lastErrorMessage} is null))
+          and (${t.status} <> 'failed' or ${t.lastErrorCode} is not null)
+          and (${t.status} <> 'ready' or ${t.lastErrorCode} is null)`,
+    ),
+    claimCheck: check(
+      "companion_images_claim_check",
+      sql`(${t.status} = 'building') = (${t.claimActorId} is not null) and ${t.claimEpoch} >= 0`,
+    ),
+    buildableIdx: index("companion_images_buildable_idx")
+      .on(t.nextAttemptAt, t.digest)
+      .where(sql`${t.status} in ('requested','failed')`),
+  }),
+);
+
 export const companionRuntimeInstances = pgTable(
   "companion_runtime_instances",
   {

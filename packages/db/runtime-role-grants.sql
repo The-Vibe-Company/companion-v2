@@ -49,10 +49,25 @@ DECLARE
   detected_legacy_union_roles text[] := ARRAY[]::text[];
   protected_column record;
   protected_table regclass;
+  image_registry_function text;
   protected_sequence regclass;
   protected_type regtype;
   companion_api_create_function regprocedure;
   active_roles text[] := ARRAY[api_role, worker_role, companion_runtime_role];
+  runtime_image_registry_tables text[] := ARRAY[
+    'companion_images'
+  ];
+  runtime_image_registry_functions text[] := ARRAY[
+    'public.companion_runtime_image_request(text,text)',
+    'public.companion_runtime_image_get(text)',
+    'public.companion_runtime_image_claim(text,text,text)',
+    'public.companion_runtime_image_mark_building_box(text,bigint,text)',
+    'public.companion_runtime_image_clear_building_box(text,bigint,text)',
+    'public.companion_runtime_image_mark_delete_intent(text,bigint,text)',
+    'public.companion_runtime_image_mark_delete_operation(text,bigint,text,text)',
+    'public.companion_runtime_image_record_ready(text,bigint,text,text)',
+    'public.companion_runtime_image_record_failure(text,bigint,text,text)'
+  ];
   private_runtime_table_names text[] := ARRAY[
     'companion_runtime_control',
     'companion_runtime_instances',
@@ -1115,6 +1130,22 @@ BEGIN
       'GRANT EXECUTE ON FUNCTION %s TO %I',
       protected_function,
       worker_role
+    );
+  END LOOP;
+
+  -- The image registry is runtime-owned infrastructure reached only through its SECURITY DEFINER
+  -- functions (0123). No process role receives any direct table privilege, keeping the dedicated
+  -- role verifier's "no public relation privileges" invariant intact.
+  FOREACH image_registry_function IN ARRAY runtime_image_registry_functions
+  LOOP
+    CONTINUE WHEN to_regprocedure(image_registry_function) IS NULL;
+    EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC', image_registry_function);
+    EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM %I', image_registry_function, api_role);
+    EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM %I', image_registry_function, worker_role);
+    EXECUTE format(
+      'GRANT EXECUTE ON FUNCTION %s TO %I',
+      image_registry_function,
+      companion_runtime_role
     );
   END LOOP;
 

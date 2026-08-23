@@ -60,6 +60,7 @@ export type BoxSimCommandKind =
   | "mkdir-pi-bin"
   | "install-layout"
   | "probe-layout"
+  | "warm-runtime-image"
   | "apply-control-bundle"
   | "mkdir-extensions"
   | "clear-skill-archives"
@@ -440,6 +441,11 @@ export function classifyBoxCommand(command: string): BoxSimCommandKind {
     && command.includes("companion-layout-unchanged")
     && command.includes("companion-pi-broker.mjs")
   ) return "probe-layout";
+  if (
+    command.includes("companion-runtime-playbook-ready")
+    && command.includes(".ascii/playbook.json")
+    && command.includes("companion-pi-broker.mjs")
+  ) return "warm-runtime-image";
   if (command.trim() === 'mkdir -p "$HOME/.companion/pi/extensions"') return "mkdir-extensions";
   return "unsupported";
 }
@@ -489,7 +495,7 @@ function probedLayout(machine: BoxSimCommandMachine, command: string): BoxSimCom
 
 function clearStagedSkillArchives(machine: BoxSimCommandMachine): void {
   const prefix = ".companion/runtime/state/skill-archives/";
-  for (const path of [...machine.persistentFiles.keys()]) {
+  for (const path of machine.persistentFiles.keys()) {
     if (path.startsWith(prefix)) machine.persistentFiles.delete(path);
   }
 }
@@ -1055,6 +1061,26 @@ export async function executeBoxCommand(
       return installedLayout(machine);
     case "probe-layout":
       return probedLayout(machine, command);
+    case "warm-runtime-image": {
+      const brokerReady = machine.persistentFiles.has(".companion/bin/companion-pi-broker.mjs");
+      const playbookReady = (
+        machine.persistentFiles.get(".ascii/playbook.json")?.toString("utf8").trim().length ?? 0
+      ) > 0;
+      let bundledSkillReady = false;
+      for (const path of machine.persistentFiles.keys()) {
+        if (
+          path.startsWith(".companion/runtime/image/companion-")
+          && path.endsWith(".tar.gz.b64")
+        ) {
+          bundledSkillReady = true;
+          break;
+        }
+      }
+      if (!brokerReady || !bundledSkillReady || !playbookReady) {
+        return failed("simulated runtime image prerequisites are missing");
+      }
+      return ok("companion-runtime-playbook-ready\n");
+    }
     case "apply-control-bundle":
       return appliedControlBundle(machine);
     case "mkdir-extensions":
