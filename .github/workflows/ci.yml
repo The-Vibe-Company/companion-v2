@@ -43,6 +43,7 @@ jobs:
       containers: ${{ steps.scope.outputs.containers }}
       dependencies: ${{ steps.scope.outputs.dependencies }}
       skill: ${{ steps.scope.outputs.skill }}
+      ios: ${{ steps.scope.outputs.ios }}
       full: ${{ steps.scope.outputs.full }}
     steps:
       - name: Checkout
@@ -75,7 +76,7 @@ jobs:
           fetch-depth: 0
 
       - name: Test CI scope classifier and local verifier
-        run: node --test scripts/agent-browser-box-center.test.mjs scripts/companions-env-defaults.test.mjs scripts/railway-config.test.mjs scripts/ci-scope.test.mjs scripts/ci-playwright-policy.test.mjs scripts/ci-gate.test.mjs scripts/ios-devx.test.mjs scripts/lint-anti-slop.test.mjs scripts/verify-change.test.mjs
+        run: node --test scripts/agent-browser-box-center.test.mjs scripts/companions-env-defaults.test.mjs scripts/railway-config.test.mjs scripts/ci-scope.test.mjs scripts/ci-playwright-policy.test.mjs scripts/ci-gate.test.mjs scripts/ios-devx.test.mjs scripts/ios-e2e-fixture.test.mjs scripts/lint-anti-slop.test.mjs scripts/verify-change.test.mjs
 
       - name: Validate GitHub Actions workflows
         run: >-
@@ -164,6 +165,55 @@ jobs:
       # runner can prove the private transport still satisfies its own contract.
       - name: Test bundled Companion skill guards
         run: bash scripts/run-skill-guards.sh
+
+  ios-quality:
+    name: iOS Quality
+    runs-on: macos-15
+    needs: scope
+    if: needs.scope.outputs.ios == 'true'
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Install XcodeBuildMCP
+        run: npm install --global xcodebuildmcp@2.7.0
+
+      - name: Select an available simulator
+        id: simulator
+        run: |
+          xcodebuildmcp simulator list --output json > "$RUNNER_TEMP/simulators.json"
+          simulator_id="$(python3 - <<'PY'
+          import json
+          import os
+
+          with open(os.path.join(os.environ["RUNNER_TEMP"], "simulators.json"), encoding="utf-8") as source:
+              simulators = json.load(source).get("data", {}).get("simulators", [])
+          selected = next((item for item in simulators if item.get("isAvailable", True)), None)
+          if not selected:
+              raise SystemExit("No available iOS simulator")
+          print(selected["simulatorId"])
+          PY
+          )"
+          echo "id=$simulator_id" >> "$GITHUB_OUTPUT"
+
+      - name: Test CompanionKit
+        run: xcodebuildmcp swift-package test --package-path apps/ios/CompanionKit
+
+      - name: Build the simulator application
+        run: >-
+          xcodebuildmcp simulator build
+          --workspace-path apps/ios/Companion.xcworkspace
+          --scheme Companion
+          --configuration Debug
+          --simulator-id "${{ steps.simulator.outputs.id }}"
+          --derived-data-path "$RUNNER_TEMP/companion-derived-data"
+          --extra-args CODE_SIGNING_ALLOWED=NO
 
   quality:
     name: Quality Node 22
@@ -676,6 +726,7 @@ jobs:
       - scope
       - hygiene
       - skill-guards-macos
+      - ios-quality
       - quality
       - application-build
       - database-integration

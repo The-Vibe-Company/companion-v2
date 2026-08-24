@@ -11,6 +11,7 @@ const scopeOutputs = {
   containers: "false",
   dependencies: "false",
   skill: "false",
+  ios: "false",
 };
 
 function jobs(overrides = {}, outputs = scopeOutputs) {
@@ -18,6 +19,7 @@ function jobs(overrides = {}, outputs = scopeOutputs) {
     scope: { result: "success", outputs },
     hygiene: { result: "success" },
     "skill-guards-macos": { result: "skipped" },
+    "ios-quality": { result: "skipped" },
     quality: { result: "skipped" },
     "application-build": { result: "skipped" },
     "database-integration": { result: "skipped" },
@@ -58,6 +60,17 @@ test("requires the macOS skill guards whenever the skill scope is on", () => {
   ]);
   assert.deepEqual(
     rejectedJobs(jobs({ "skill-guards-macos": { result: "success" } }, outputs), "pull_request"),
+    [],
+  );
+});
+
+test("requires iOS quality whenever native or shared-contract scope is on", () => {
+  const outputs = { ...scopeOutputs, ios: "true" };
+  assert.deepEqual(rejectedJobs(jobs({}, outputs), "pull_request"), [
+    "ios-quality=skipped (required success)",
+  ]);
+  assert.deepEqual(
+    rejectedJobs(jobs({ "ios-quality": { result: "success" } }, outputs), "pull_request"),
     [],
   );
 });
