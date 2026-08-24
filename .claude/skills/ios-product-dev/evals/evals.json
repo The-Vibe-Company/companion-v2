@@ -1,0 +1,25 @@
+{
+  "skill_name": "ios-product-dev",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Add a native iOS Companion thread feature that shows a durable interruption with Retry and Cancel. Keep the browser/API contract shared, support Owner/Editor/Viewer roles, and verify it in the simulator.",
+      "expected_output": "A product-owner workflow that reads local iOS and product guidance, keeps transport/session logic in CompanionKit, models the durable turn states and role differences, coordinates visual decisions with design-frontend-dev, uses SwiftUI and accessibility conventions, and verifies affected tests plus simulator/UI behavior through xcodebuildmcp-cli."
+    },
+    {
+      "id": 2,
+      "prompt": "Can you make this iOS screen feel more premium and more like Apple?",
+      "expected_output": "A focused native-product response that asks for or inspects the current surface, routes visual direction to design-frontend-dev, uses native iOS 26 system Liquid Glass only for navigation or interactive controls, keeps content readable on system materials, and checks accessibility and reduced-transparency behavior."
+    },
+    {
+      "id": 3,
+      "prompt": "The iOS app is showing a replying animation while a Viewer opens a thread, and the Box status moves backward after a slow poll. Fix the edge cases without adding a wake button or a mobile-only endpoint.",
+      "expected_output": "A state-and-parity fix that derives replying only from an acknowledged active attempt, prevents stale responses from regressing newer state, keeps Viewer reads PostgreSQL/control-plane only, preserves the shared /v1 contract, and verifies cancellation, polling, accessibility, and simulator behavior."
+    },
+    {
+      "id": 4,
+      "prompt": "Review this React dashboard for color contrast and card hierarchy. Do not touch the iOS app.",
+      "expected_output": "A routing response that identifies design-frontend-dev as the owner, does not claim native iOS implementation work, and keeps the request read-only unless the user asks for changes."
+    }
+  ]
+}

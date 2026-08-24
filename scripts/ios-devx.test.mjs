@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { selectLatestIOSSimulator } from "./select-ios-simulator.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -49,7 +50,7 @@ test("Debug and Release keep distinct native identities and API contracts", () =
   assert.match(shared, /^MARKETING_VERSION = 2\.0\.0$/m);
   assert.match(shared, /^DEVELOPMENT_TEAM = K28B69CWQ7$/m);
   assert.match(shared, /^SWIFT_VERSION = 6\.0$/m);
-  assert.match(shared, /^IPHONEOS_DEPLOYMENT_TARGET = 17\.0$/m);
+  assert.match(shared, /^IPHONEOS_DEPLOYMENT_TARGET = 26\.0$/m);
   assert.match(debug, /^PRODUCT_BUNDLE_IDENTIFIER = dev\.companion\.mobile\.dev$/m);
   assert.match(debug, /^COMPANION_URL_SCHEME = dev\.companion\.mobile\.dev$/m);
   assert.match(debug, /127\.0\.0\.1:3001/);
@@ -112,6 +113,29 @@ test("the Expo client and its repository-local skills are gone", () => {
   }
 });
 
+test("Agents and Claude share the durable native iOS skill surface", () => {
+  const packages = {
+    "ios-product-dev": ["SKILL.md", "SOURCE.md", "companion.json", "evals/evals.json"],
+    "swiftui-expert-dev": ["SKILL.md", "SOURCE.md", "companion.json", "evals/evals.json"],
+    "xcodebuildmcp-cli": ["SKILL.md", "SOURCE.md", "LICENSE", "companion.json", "evals/evals.json"],
+  };
+
+  for (const [skill, files] of Object.entries(packages)) {
+    for (const file of files) {
+      const agentsPath = `.agents/skills/${skill}/${file}`;
+      const claudePath = `.claude/skills/${skill}/${file}`;
+      assert.equal(existsSync(resolve(ROOT, agentsPath)), true, agentsPath);
+      assert.equal(existsSync(resolve(ROOT, claudePath)), true, claudePath);
+      assert.equal(read(agentsPath), read(claudePath), `${skill}/${file} must stay mirrored`);
+    }
+    const manifest = JSON.parse(read(`.agents/skills/${skill}/companion.json`));
+    const evals = JSON.parse(read(`.agents/skills/${skill}/evals/evals.json`));
+    assert.equal(manifest.name, skill);
+    assert.equal(evals.skill_name, skill);
+    assert.equal(evals.evals.length, 4);
+  }
+});
+
 test("the iOS launcher derives the API port from Conductor and uses XcodeBuildMCP", () => {
   const launcher = read("apps/ios/scripts/dev-conductor.sh");
   assert.match(launcher, /API_PORT="\$\(\(BASE_PORT \+ 1\)\)"/);
@@ -128,8 +152,10 @@ test("CI builds iOS without secrets and isolates the live provider workflow", ()
   const e2e = read(".github/workflows/ios-e2e.yml");
 
   assert.match(ci, /^  ios-quality:$/m);
+  assert.match(ci, /^    runs-on: macos-26$/m);
   assert.match(ci, /xcodebuildmcp swift-package test --package-path apps\/ios\/CompanionKit/);
   assert.match(ci, /xcodebuildmcp simulator build/);
+  assert.match(ci, /node scripts\/select-ios-simulator\.mjs/);
   assert.match(e2e, /^  workflow_dispatch:$/m);
   assert.match(e2e, /^  schedule:$/m);
   assert.doesNotMatch(e2e, /^  pull_request:/m);
@@ -137,4 +163,23 @@ test("CI builds iOS without secrets and isolates the live provider workflow", ()
   assert.match(e2e, /COMPANION_BOX_API_KEY: \$\{\{ secrets\.COMPANION_BOX_E2E_API_KEY \}\}/);
   assert.match(e2e, /node scripts\/ios-e2e-fixture\.mjs prepare/);
   assert.match(e2e, /node scripts\/ios-e2e-fixture\.mjs cleanup/);
+});
+
+test("the CI simulator selector ignores other Apple platforms and chooses the latest iOS", () => {
+  const selected = selectLatestIOSSimulator({
+    data: {
+      simulators: [
+        { simulatorId: "vision", runtime: "visionOS 26.0", isAvailable: true },
+        { simulatorId: "ios-older", runtime: "iOS 25.4", isAvailable: true },
+        { simulatorId: "ios-unavailable", runtime: "iOS 27.0", isAvailable: false },
+        { simulatorId: "ios-latest", runtime: "iOS 26.5", isAvailable: true },
+      ],
+    },
+  });
+
+  assert.equal(selected.simulatorId, "ios-latest");
+  assert.throws(
+    () => selectLatestIOSSimulator({ data: { simulators: [{ simulatorId: "vision", runtime: "visionOS 26.0" }] } }),
+    /No available iOS simulator/,
+  );
 });

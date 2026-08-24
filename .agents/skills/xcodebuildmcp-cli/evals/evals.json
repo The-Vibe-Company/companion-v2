@@ -1,0 +1,25 @@
+{
+  "skill_name": "xcodebuildmcp-cli",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Run the affected CompanionKit tests, build the native iOS app for a simulator, launch it, and inspect the changed chat screen. Use the repository's required deterministic tool.",
+      "expected_output": "A help-first XcodeBuildMCP workflow that verifies CLI/tools/session defaults, uses the smallest relevant package and simulator workflows, avoids raw xcodebuild/xcrun/simctl, inspects actual UI/accessibility state, and reports target, destination, artifacts, failures, and unverified paths."
+    },
+    {
+      "id": 2,
+      "prompt": "Can you quickly run the iOS app in the simulator and take a screenshot of the new screen?",
+      "expected_output": "The skill activates for this casual build/run request, checks the current CLI interface and session defaults first, prefers build-and-run, captures the requested screenshot and relevant UI evidence, and reports the actual result without unnecessary workflow steps."
+    },
+    {
+      "id": 3,
+      "prompt": "The XcodeBuildMCP binary is missing and the simulator destination from a previous task no longer exists. Get the checks green, but do not install anything or use raw xcodebuild.",
+      "expected_output": "A fail-closed response that reports the missing CLI and destination, provides official installation or simulator-selection options without executing them, re-discovers available destinations only through the allowed CLI when possible, and does not fabricate a pass or use raw Apple tools."
+    },
+    {
+      "id": 4,
+      "prompt": "Refactor the SwiftUI navigation and state model for the chat screen. Do not run builds or simulator commands yet.",
+      "expected_output": "A routing response that sends implementation work to swiftui-expert-dev or ios-product-dev, does not invoke the build tool, and explains that this skill owns verification rather than SwiftUI design or architecture."
+    }
+  ]
+}
