@@ -190,6 +190,7 @@ export function classifyFiles(files, { forceFull = false } = {}) {
         "packages/core/",
         "packages/companion-runtime/",
         "scripts/ios-",
+        "scripts/app-store-connect-build.mjs",
         "scripts/select-ios-simulator.mjs",
       ]));
 

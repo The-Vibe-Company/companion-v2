@@ -6,6 +6,10 @@ logic belong in `CompanionKit`; the app target owns SwiftUI presentation and pla
 
 - Use `xcodebuildmcp` for discovery, builds, simulator launches, tests, screenshots, and UI
   inspection. Check command help and session defaults before the first build action.
+- TestFlight delivery is the narrow exception: XcodeBuildMCP does not expose archive or export
+  operations, so `.github/workflows/ios-testflight.yml` may use Apple's `xcodebuild archive` and
+  `xcodebuild -exportArchive` only for signed App Store distribution. Keep every ordinary build,
+  test, launch, simulator, and inspection path on XcodeBuildMCP.
 - For non-trivial native work, use the repo-local `ios-product-dev` owner skill, route SwiftUI
   mechanics through `swiftui-expert-dev`, visual direction through `design-frontend-dev`, and all
   Apple build or simulator work through `xcodebuildmcp-cli`. The same packages are mirrored for
@@ -16,6 +20,9 @@ logic belong in `CompanionKit`; the app target owns SwiftUI presentation and pla
   `dev.companion.mobile` and pin its API URL to `https://api.thecompanion.sh`.
 - Preserve `CFBundleDisplayName` as `Companion (623507)`, `CFBundleName` as `Companion623507`, team
   `K28B69CWQ7`, and App Store Connect record `6804447784`.
+- Preserve automatic TestFlight delivery for every successful `main` CI revision. The
+  `ios-testflight` GitHub environment stays restricted to `main`; credentials remain environment
+  secrets and must never be printed, copied into artifacts, or made available to pull requests.
 - The iOS app uses the same `/v1` API and full product contract as every other first-party client.
   Do not invent mobile-only endpoints, send a client-surface discriminator, or treat Skills,
   Plugins, MCP, attachments, routines, triggers, sharing, or settings as presentation-specific

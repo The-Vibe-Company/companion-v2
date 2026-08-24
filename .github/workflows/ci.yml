@@ -76,7 +76,7 @@ jobs:
           fetch-depth: 0
 
       - name: Test CI scope classifier and local verifier
-        run: node --test scripts/agent-browser-box-center.test.mjs scripts/companions-env-defaults.test.mjs scripts/railway-config.test.mjs scripts/ci-scope.test.mjs scripts/ci-playwright-policy.test.mjs scripts/ci-gate.test.mjs scripts/ios-devx.test.mjs scripts/ios-e2e-fixture.test.mjs scripts/lint-anti-slop.test.mjs scripts/verify-change.test.mjs
+        run: node --test scripts/agent-browser-box-center.test.mjs scripts/app-store-connect-build.test.mjs scripts/companions-env-defaults.test.mjs scripts/railway-config.test.mjs scripts/ci-scope.test.mjs scripts/ci-playwright-policy.test.mjs scripts/ci-gate.test.mjs scripts/ios-devx.test.mjs scripts/ios-e2e-fixture.test.mjs scripts/lint-anti-slop.test.mjs scripts/verify-change.test.mjs
 
       - name: Validate GitHub Actions workflows
         run: >-
@@ -636,7 +636,10 @@ jobs:
     name: Compatibility Node 20
     runs-on: ubuntu-latest
     needs: scope
-    if: github.event_name == 'push' || github.event_name == 'schedule'
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'schedule' ||
+      needs.scope.outputs.full == 'true'
     timeout-minutes: 20
     env:
       COMPANION_API_URL: http://127.0.0.1:13301

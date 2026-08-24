@@ -1,0 +1,220 @@
+name: iOS TestFlight
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-testflight
+  cancel-in-progress: false
+
+jobs:
+  select-release:
+    name: Select iOS release
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.release.outputs.sha }}
+    steps:
+      - name: Checkout the verified revision
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'refs/heads/main' || github.event.workflow_run.head_sha }}
+          fetch-depth: 1
+
+      - name: Select the release revision
+        id: release
+        run: |
+          set -euo pipefail
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  upload-testflight:
+    name: Upload iOS to TestFlight
+    needs: select-release
+    runs-on: macos-26
+    environment:
+      name: ios-testflight
+      url: https://appstoreconnect.apple.com/apps/6804447784/testflight/ios
+    timeout-minutes: 45
+    env:
+      APP_STORE_APP_ID: "6804447784"
+      APPLE_TEAM_ID: K28B69CWQ7
+      BUNDLE_ID: dev.companion.mobile
+      TARGET_SHA: ${{ needs.select-release.outputs.sha }}
+    steps:
+      - name: Checkout the verified revision
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.select-release.outputs.sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Prepare App Store Connect authentication
+        id: metadata
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          key_directory="$RUNNER_TEMP/private_keys"
+          key_path="$key_directory/AuthKey_${ASC_KEY_ID}.p8"
+          mkdir -p "$key_directory"
+          if [[ "$ASC_KEY_P8" == *"BEGIN PRIVATE KEY"* ]]; then
+            printf '%s' "$ASC_KEY_P8" > "$key_path"
+          else
+            printf '%s' "$ASC_KEY_P8" | base64 --decode > "$key_path"
+          fi
+          chmod 600 "$key_path"
+          build_number="$(node scripts/app-store-connect-build.mjs number --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT")"
+          echo "build-number=$build_number" >> "$GITHUB_OUTPUT"
+          echo "key-path=$key_path" >> "$GITHUB_OUTPUT"
+
+      - name: Check for an existing upload
+        id: existing
+        env:
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_KEY_PATH: ${{ steps.metadata.outputs.key-path }}
+        run: >-
+          node scripts/app-store-connect-build.mjs exists
+          --app-id "$APP_STORE_APP_ID"
+          --run-id "$GITHUB_RUN_ID"
+          --run-attempt "$GITHUB_RUN_ATTEMPT"
+          --github-output "$GITHUB_OUTPUT"
+
+      - name: Install the signing identity
+        if: steps.existing.outputs.exists != 'true'
+        id: signing
+        env:
+          BUILD_NUMBER: ${{ steps.metadata.outputs.build-number }}
+          IOS_DISTRIBUTION_P12: ${{ secrets.IOS_DISTRIBUTION_P12 }}
+          IOS_DISTRIBUTION_P12_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_P12_PASSWORD }}
+          IOS_PROVISIONING_PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE }}
+        run: |
+          set -euo pipefail
+          certificate_path="$RUNNER_TEMP/distribution.p12"
+          profile_path="$RUNNER_TEMP/distribution.mobileprovision"
+          profile_plist="$RUNNER_TEMP/distribution.plist"
+          keychain_path="$RUNNER_TEMP/testflight-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          echo "keychain-path=$keychain_path" >> "$GITHUB_OUTPUT"
+          printf '%s' "$IOS_DISTRIBUTION_P12" | base64 --decode > "$certificate_path"
+          printf '%s' "$IOS_PROVISIONING_PROFILE" | base64 --decode > "$profile_path"
+          chmod 600 "$certificate_path" "$profile_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" -P "$IOS_DISTRIBUTION_P12_PASSWORD" -x -T /usr/bin/codesign -t cert -f pkcs12 -k "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+          security cms -D -i "$profile_path" > "$profile_plist"
+          profile_uuid="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$profile_plist")"
+          profile_name="$(/usr/libexec/PlistBuddy -c 'Print :Name' "$profile_plist")"
+          profile_team="$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' "$profile_plist")"
+          application_identifier="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$profile_plist")"
+          if [[ "$profile_team" != "$APPLE_TEAM_ID" || "$application_identifier" != "$APPLE_TEAM_ID.$BUNDLE_ID" ]]; then
+            echo "The provisioning profile does not match the Companion App Store identity." >&2
+            exit 1
+          fi
+          profiles_directory="$HOME/Library/MobileDevice/Provisioning Profiles"
+          installed_profile="$profiles_directory/$profile_uuid.mobileprovision"
+          echo "profile-name=$profile_name" >> "$GITHUB_OUTPUT"
+          echo "installed-profile=$installed_profile" >> "$GITHUB_OUTPUT"
+          mkdir -p "$profiles_directory"
+          cp "$profile_path" "$installed_profile"
+          export_plist="$RUNNER_TEMP/ExportOptions.plist"
+          echo "export-plist=$export_plist" >> "$GITHUB_OUTPUT"
+          plutil -create xml1 "$export_plist"
+          /usr/libexec/PlistBuddy -c 'Add :method string app-store-connect' "$export_plist"
+          /usr/libexec/PlistBuddy -c 'Add :destination string upload' "$export_plist"
+          /usr/libexec/PlistBuddy -c 'Add :manageAppVersionAndBuildNumber bool false' "$export_plist"
+          /usr/libexec/PlistBuddy -c 'Add :signingStyle string manual' "$export_plist"
+          /usr/libexec/PlistBuddy -c 'Add :signingCertificate string Apple Distribution' "$export_plist"
+          /usr/libexec/PlistBuddy -c "Add :teamID string $APPLE_TEAM_ID" "$export_plist"
+          /usr/libexec/PlistBuddy -c 'Add :provisioningProfiles dict' "$export_plist"
+          /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:$BUNDLE_ID string $profile_name" "$export_plist"
+
+      - name: Archive the Release application
+        if: steps.existing.outputs.exists != 'true'
+        env:
+          BUILD_NUMBER: ${{ steps.metadata.outputs.build-number }}
+          KEYCHAIN_PATH: ${{ steps.signing.outputs.keychain-path }}
+          PROFILE_NAME: ${{ steps.signing.outputs.profile-name }}
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -workspace apps/ios/Companion.xcworkspace \
+            -scheme Companion \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/Companion.xcarchive" \
+            archive \
+            CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY='Apple Distribution' \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
+            OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN_PATH"
+
+      - name: Upload the archive to App Store Connect
+        if: steps.existing.outputs.exists != 'true'
+        env:
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_KEY_PATH: ${{ steps.metadata.outputs.key-path }}
+          EXPORT_PLIST: ${{ steps.signing.outputs.export-plist }}
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -exportArchive \
+            -archivePath "$RUNNER_TEMP/Companion.xcarchive" \
+            -exportPath "$RUNNER_TEMP/TestFlight" \
+            -exportOptionsPlist "$EXPORT_PLIST" \
+            -authenticationKeyPath "$ASC_KEY_PATH" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+
+      - name: Record the TestFlight delivery
+        if: success()
+        env:
+          BUILD_NUMBER: ${{ steps.metadata.outputs.build-number }}
+          ALREADY_EXISTS: ${{ steps.existing.outputs.exists }}
+        run: |
+          {
+            echo "### Companion iOS TestFlight"
+            echo
+            echo "- Commit: \`$TARGET_SHA\`"
+            echo "- Build: \`$BUILD_NUMBER\`"
+            if [[ "$ALREADY_EXISTS" == "true" ]]; then
+              echo "- Result: already present in App Store Connect"
+            else
+              echo "- Result: upload accepted by App Store Connect"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove signing material
+        if: always()
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          KEYCHAIN_PATH: ${{ steps.signing.outputs.keychain-path }}
+          INSTALLED_PROFILE: ${{ steps.signing.outputs.installed-profile }}
+        run: |
+          if [[ -n "$INSTALLED_PROFILE" ]]; then rm -f "$INSTALLED_PROFILE"; fi
+          if [[ -n "$KEYCHAIN_PATH" ]]; then security delete-keychain "$KEYCHAIN_PATH" || true; fi
+          rm -f \
+            "$RUNNER_TEMP/distribution.p12" \
+            "$RUNNER_TEMP/distribution.mobileprovision" \
+            "$RUNNER_TEMP/distribution.plist" \
+            "$RUNNER_TEMP/private_keys/AuthKey_${ASC_KEY_ID}.p8"

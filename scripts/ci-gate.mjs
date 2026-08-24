@@ -10,6 +10,7 @@ const SCOPE_OUTPUTS = [
   "dependencies",
   "skill",
   "ios",
+  "full",
 ];
 
 function isTrue(value) {
@@ -40,7 +41,7 @@ export function rejectedJobs(jobs, eventName) {
     "railway-containers": isTrue(outputs.containers),
     browser: isTrue(outputs.browser),
     "dependency-audit": isTrue(outputs.dependencies),
-    "compatibility-node20": eventName === "push" || eventName === "schedule",
+    "compatibility-node20": eventName === "push" || eventName === "schedule" || isTrue(outputs.full),
     coverage: eventName === "schedule",
   };
 

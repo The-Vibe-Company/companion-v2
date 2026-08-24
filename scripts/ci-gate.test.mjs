@@ -12,6 +12,7 @@ const scopeOutputs = {
   dependencies: "false",
   skill: "false",
   ios: "false",
+  full: "false",
 };
 
 function jobs(overrides = {}, outputs = scopeOutputs) {
@@ -81,6 +82,30 @@ test("requires Node 20 on main pushes and Node 20 plus coverage weekly", () => {
     "compatibility-node20=skipped (required success)",
     "coverage=skipped (required success)",
   ]);
+});
+
+test("requires Node 20 on full pull requests so main cannot reveal compatibility failures", () => {
+  const outputs = { ...scopeOutputs, full: "true" };
+  assert.deepEqual(rejectedJobs(jobs({}, outputs), "pull_request"), [
+    "compatibility-node20=skipped (required success)",
+  ]);
+  assert.deepEqual(
+    rejectedJobs(jobs({ "compatibility-node20": { result: "success" } }, outputs), "pull_request"),
+    [],
+  );
+});
+
+test("requires Node 20 on full merge-queue and manual runs", () => {
+  const outputs = { ...scopeOutputs, full: "true" };
+  for (const event of ["merge_group", "workflow_dispatch"]) {
+    assert.deepEqual(rejectedJobs(jobs({}, outputs), event), [
+      "compatibility-node20=skipped (required success)",
+    ]);
+    assert.deepEqual(
+      rejectedJobs(jobs({ "compatibility-node20": { result: "success" } }, outputs), event),
+      [],
+    );
+  }
 });
 
 test("rejects failed, cancelled, and missing jobs even when scope disables them", () => {

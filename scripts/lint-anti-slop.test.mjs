@@ -86,8 +86,16 @@ test("passes changed paths to Oxlint as an argument array without a shell", (con
   assert.equal(status, 7);
   assert.deepEqual(calls, [
     {
-      command: "pnpm",
-      args: ["exec", "oxlint", "--config", "oxlint.config.ts", "--", "src/with space.ts"],
+      command: process.execPath,
+      args: [
+        "--import",
+        "tsx",
+        "node_modules/oxlint/bin/oxlint",
+        "--config",
+        "oxlint.config.ts",
+        "--",
+        "src/with space.ts",
+      ],
       options: { cwd: directory, stdio: "inherit", shell: false },
     },
   ]);

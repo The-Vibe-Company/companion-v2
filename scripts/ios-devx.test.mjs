@@ -150,6 +150,7 @@ test("the iOS launcher derives the API port from Conductor and uses XcodeBuildMC
 test("CI builds iOS without secrets and isolates the live provider workflow", () => {
   const ci = read(".github/workflows/ci.yml");
   const e2e = read(".github/workflows/ios-e2e.yml");
+  const testflight = read(".github/workflows/ios-testflight.yml");
 
   assert.match(ci, /^  ios-quality:$/m);
   assert.match(ci, /^    runs-on: macos-26$/m);
@@ -163,6 +164,26 @@ test("CI builds iOS without secrets and isolates the live provider workflow", ()
   assert.match(e2e, /COMPANION_BOX_API_KEY: \$\{\{ secrets\.COMPANION_BOX_E2E_API_KEY \}\}/);
   assert.match(e2e, /node scripts\/ios-e2e-fixture\.mjs prepare/);
   assert.match(e2e, /node scripts\/ios-e2e-fixture\.mjs cleanup/);
+  assert.match(testflight, /^  workflow_run:$/m);
+  assert.match(testflight, /^    workflows: \[CI\]$/m);
+  assert.match(testflight, /github\.event\.workflow_run\.conclusion == 'success'/);
+  assert.match(testflight, /'refs\/heads\/main'/);
+  assert.doesNotMatch(testflight, /git diff --quiet|steps\.release\.outputs\.upload/);
+  assert.match(testflight, /^  cancel-in-progress: false$/m);
+  assert.match(testflight, /^      name: ios-testflight$/m);
+  assert.match(testflight, /^    runs-on: macos-26$/m);
+  assert.match(testflight, /ref: \$\{\{ needs\.select-release\.outputs\.sha \}\}/);
+  assert.match(testflight, /ASC_KEY_P8: \$\{\{ secrets\.ASC_KEY_P8 \}\}/);
+  assert.match(testflight, /IOS_DISTRIBUTION_P12: \$\{\{ secrets\.IOS_DISTRIBUTION_P12 \}\}/);
+  assert.match(testflight, /IOS_PROVISIONING_PROFILE: \$\{\{ secrets\.IOS_PROVISIONING_PROFILE \}\}/);
+  assert.match(testflight, /node scripts\/app-store-connect-build\.mjs exists/);
+  assert.match(testflight, /--run-id "\$GITHUB_RUN_ID"/);
+  assert.match(testflight, /--run-attempt "\$GITHUB_RUN_ATTEMPT"/);
+  assert.doesNotMatch(testflight, /security import[^\n]+ -A(?: |$)/);
+  assert.match(testflight, /security import[^\n]+ -x -T \/usr\/bin\/codesign/);
+  assert.match(testflight, /xcodebuild \\\s+-workspace apps\/ios\/Companion\.xcworkspace/);
+  assert.match(testflight, /xcodebuild \\\s+-exportArchive/);
+  assert.doesNotMatch(testflight, /\bxcrun\b|\baltool\b|\bfastlane\b/);
 });
 
 test("the CI simulator selector ignores other Apple platforms and chooses the latest iOS", () => {

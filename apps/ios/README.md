@@ -49,3 +49,18 @@ Release builds ignore launch arguments and environment variables and always use
 The Debug-only `-glass-chat-demo`, `-glass-management-demo`, and
 `-glass-management-demo-plugins` launch arguments open interactive Liquid Glass showcases without
 requiring a server or account. They are excluded from Release behavior.
+
+## TestFlight delivery
+
+After the repository CI succeeds for a push to `main`, `.github/workflows/ios-testflight.yml`
+uploads a signed Release archive for the exact verified commit. Delivering every successful `main`
+revision avoids missing native changes in a batched push. The workflow uses the `ios-testflight`
+GitHub environment, which is restricted to `main`, and serializes uploads so two builds cannot
+publish concurrently. A manual dispatch is available for an intentional rebuild from `main`.
+
+Build numbers use GitHub's globally unique workflow run ID plus its retry attempt. Before archiving,
+the workflow asks App Store Connect whether an accepted build from the same run already exists.
+Failed or invalid uploads can therefore receive a fresh number on rerun without duplicating a build
+that is valid or still processing. XcodeBuildMCP remains the boundary for normal builds and tests;
+the delivery workflow uses Apple's `xcodebuild archive` and `xcodebuild -exportArchive` because
+XcodeBuildMCP does not provide archive or App Store export operations.
