@@ -62,6 +62,10 @@ GitHub Actions run. The workflow uses the protected `ios-testflight` environment
 signing certificate and profile are installed only in a temporary CI keychain and removed after the
 job.
 
+If the matching `main` CI fails, no TestFlight delivery is created. A later successful CI run for
+an unrelated change does not retroactively release the earlier iOS commit; land the CI fix with an
+iOS-path follow-up so the approved push is explicitly eligible for a new upload.
+
 For an authorized local release, provide the same App Store Connect credentials without copying the
 private key into the repository:
 
