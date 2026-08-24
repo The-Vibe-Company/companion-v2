@@ -59,6 +59,31 @@ test("Debug and Release keep distinct native identities and API contracts", () =
   assert.match(plist, /<string>Companion \(623507\)<\/string>/);
   assert.match(plist, /<string>Companion623507<\/string>/);
   assert.match(plist, /<key>ITSAppUsesNonExemptEncryption<\/key>\s*<false\/>/);
+  assert.match(plist, /<key>UIUserInterfaceStyle<\/key>\s*<string>Light<\/string>/);
+});
+
+test("the iOS app packages the approved light appearance and provider marks", () => {
+  const companionMark = read(
+    "apps/ios/Companion/Support/Assets.xcassets/CompanionMark.imageset/companion-mark.svg",
+  );
+  const googleMark = read(
+    "apps/ios/Companion/Support/Assets.xcassets/GoogleMark.imageset/google-mark.svg",
+  );
+  const appIcon = readFileSync(
+    resolve(ROOT, "apps/ios/Companion/Support/Assets.xcassets/AppIcon.appiconset/AppIcon.png"),
+  );
+
+  assert.match(companionMark, /<svg[^>]+viewBox="0 0 1024 1024"/);
+  for (const color of ["#D9622B", "#E9A23B", "#F2C14B"]) {
+    assert.match(companionMark, new RegExp(color));
+  }
+  for (const color of ["#4285F4", "#34A853", "#FBBC05", "#EA4335"]) {
+    assert.match(googleMark, new RegExp(color));
+  }
+  assert.equal(appIcon.subarray(1, 4).toString("ascii"), "PNG");
+  assert.equal(appIcon.readUInt32BE(16), 1024);
+  assert.equal(appIcon.readUInt32BE(20), 1024);
+  assert.equal(appIcon[25], 2, "App Store icon must be RGB without alpha");
 });
 
 test("the project is synchronized, shared, and backed by CompanionKit", () => {

@@ -1,9 +1,9 @@
 # Déployer Companion iOS sur TestFlight
 
-L’application mobile est en cours de migration vers SwiftUI natif dans `apps/ios`. Le client Expo,
-EAS Build et EAS Update ont été retirés au début de la migration. Jusqu’à la livraison du jalon
-TestFlight natif, ce dépôt contient un squelette iOS vérifiable mais aucun pipeline de livraison
-mobile utilisable.
+L’application mobile est en cours de migration vers SwiftUI dans `apps/ios`. Le client Expo,
+EAS Build et EAS Update ont été retirés au début de la migration. Le client actuel sait restaurer
+une session, s’authentifier par e-mail ou Google, afficher les Companions et utiliser leur fil de
+discussion avec l’API `/v1` partagée. Le pipeline de livraison TestFlight reste à construire.
 
 Les builds TestFlight Expo déjà installés restent utilisables chez les testeurs, mais ils ne
 reçoivent plus de mise à jour. Il n’existe plus de mécanisme OTA ni de voie de secours EAS.
@@ -36,6 +36,11 @@ validés :
 - `.github/workflows/ios-testflight.yml`, qui exécute cette commande sur macOS et utilise les
   secrets `ASC_KEY_ID`, `ASC_ISSUER_ID` et `ASC_KEY_P8`.
 
+Avant la première livraison, configurer également `GOOGLE_CLIENT_ID` et `GOOGLE_CLIENT_SECRET` sur
+l’API publique. Vérifier dans la console Google que l’URL de rappel Better Auth de production est
+autorisée, puis réaliser une connexion Google complète depuis un build Release. Les tests mockés
+valident le contrat de redirection côté client, mais ne valident pas la configuration du fournisseur.
+
 Le futur numéro de build sera produit avec `date -u +%Y%m%d%H%M`, puis fourni à Xcode par
 `CURRENT_PROJECT_VERSION`. Cette valeur est monotone à la minute et ne dépend d’aucun état EAS.
 
@@ -49,6 +54,11 @@ xcodebuildmcp simulator build \
   --simulator-name "<simulateur disponible>" \
   --extra-args CODE_SIGNING_ALLOWED=NO
 ```
+
+Pour le smoke test authentifié, fournir les variables `COMPANION_IOS_E2E_API_URL`,
+`COMPANION_IOS_E2E_EMAIL` et `COMPANION_IOS_E2E_PASSWORD` au test `CompanionKit`. Ce test doit rester
+un contrôle manuel ou de livraison disposant de secrets : il se connecte réellement, envoie un
+message au Companion de test Z.ai et attend une nouvelle réponse corrélée.
 
 La procédure d’archive, d’upload et de gestion des testeurs sera complétée avec le jalon TestFlight
 natif. Les testeurs restent gérés dans App Store Connect.
