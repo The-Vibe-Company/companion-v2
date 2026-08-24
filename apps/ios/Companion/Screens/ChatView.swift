@@ -3,7 +3,9 @@ import CompanionKit
 
 struct ChatView: View {
     @Environment(SessionStore.self) private var sessionStore
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let companion: CompanionSummary
+    @State private var currentCompanion: CompanionSummary
     @State private var thread: CompanionThread?
     @State private var draft = ""
     @State private var loading = true
@@ -12,59 +14,76 @@ struct ChatView: View {
     @State private var pendingMessages: [PendingMessage] = []
     @State private var reloadGeneration = 0
 
+    init(companion: CompanionSummary) {
+        self.companion = companion
+        _currentCompanion = State(initialValue: companion)
+    }
+
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 14) {
-                    if loading && thread == nil {
-                        ProgressView("Loading conversation…").padding(.top, 80)
-                    } else if let error, thread == nil {
-                        ContentUnavailableView {
-                            Label("Conversation unavailable", systemImage: "exclamationmark.bubble")
-                        } description: {
-                            Text(error)
-                        } actions: {
-                            Button("Try again") { Task { await reload() } }
+        CompanionBackdrop {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 16) {
+                        if currentCompanion.runtime.replying {
+                            replyingBanner
                         }
-                        .padding(.top, 60)
-                    } else if thread?.entries.isEmpty != false && pendingMessages.isEmpty {
-                        ContentUnavailableView(
-                            "Start the conversation",
-                            systemImage: "bubble.left.and.bubble.right",
-                            description: Text("Send the first message to wake \(companion.name).")
-                        )
-                        .padding(.top, 60)
+
+                        if loading && thread == nil {
+                            ProgressView("Loading conversation…")
+                                .padding(.top, 80)
+                        } else if let error, thread == nil {
+                            unavailableState(error)
+                        } else if thread?.entries.isEmpty != false && pendingMessages.isEmpty {
+                            emptyState
+                        } else {
+                            ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
+                                if startsNewDay(entry, after: index > 0 ? entries[index - 1] : nil) {
+                                    dayMarker(for: transcriptDate(entry.createdAt) ?? .now)
+                                }
+                                MessageEntryView(
+                                    entry: entry,
+                                    own: entry.role == "user" && entry.authorID == thread?.viewerID,
+                                    companion: currentCompanion
+                                )
+                                .id(entry.id)
+                            }
+
+                            if !pendingMessages.isEmpty, pendingStartsNewDay {
+                                dayMarker(for: .now)
+                            }
+
+                            ForEach(pendingMessages) { pending in
+                                PendingMessageView(
+                                    message: pending,
+                                    retry: { retry(pending.id) },
+                                    dismiss: { dismiss(pending.id) }
+                                )
+                                .id("pending-\(pending.id)")
+                            }
+                        }
+
+                        Color.clear.frame(height: 1).id("bottom")
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 16)
+                    .padding(.bottom, 22)
+                }
+                .scrollDismissesKeyboard(.interactively)
+                .scrollIndicators(.hidden)
+                .safeAreaInset(edge: .bottom) { composer }
+                .onChange(of: (thread?.entries.count ?? 0) + pendingMessages.count) {
+                    if reduceMotion {
+                        proxy.scrollTo("bottom", anchor: .bottom)
                     } else {
-                        ForEach(thread?.entries ?? []) { entry in
-                            MessageEntryView(
-                                entry: entry,
-                                own: entry.role == "user" && entry.authorID == thread?.viewerID
-                            )
-                            .id(entry.id)
-                        }
-                        ForEach(pendingMessages) { pending in
-                            PendingMessageView(
-                                message: pending,
-                                retry: { retry(pending.id) },
-                                dismiss: { dismiss(pending.id) }
-                            )
-                            .id("pending-\(pending.id)")
+                        withAnimation(.easeOut(duration: 0.18)) {
+                            proxy.scrollTo("bottom", anchor: .bottom)
                         }
                     }
-                    Color.clear.frame(height: 1).id("bottom")
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 18)
-            }
-            .scrollDismissesKeyboard(.interactively)
-            .background(Color.companionCanvas)
-            .safeAreaInset(edge: .bottom) { composer }
-            .onChange(of: (thread?.entries.count ?? 0) + pendingMessages.count) {
-                withAnimation(.easeOut(duration: 0.18)) { proxy.scrollTo("bottom", anchor: .bottom) }
             }
         }
-        .navigationTitle(companion.name)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar { headerToolbar }
         .task(id: companion.id) {
             await reload()
             while !Task.isCancelled {
@@ -74,40 +93,156 @@ struct ChatView: View {
         }
     }
 
+    @ToolbarContentBuilder
+    private var headerToolbar: some ToolbarContent {
+        ToolbarItem(placement: .principal) {
+            HStack(spacing: 9) {
+                CompanionAvatar(
+                    name: currentCompanion.name,
+                    icon: currentCompanion.icon,
+                    size: 32,
+                    isReplying: currentCompanion.runtime.replying
+                )
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(currentCompanion.name)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color.companionInk)
+                        .lineLimit(1)
+                    Text(statusLabel)
+                        .font(.caption2)
+                        .foregroundStyle(Color.companionMuted)
+                }
+            }
+            .accessibilityElement(children: .combine)
+        }
+
+        ToolbarItem(placement: .topBarTrailing) {
+            CompanionStatusBadge(runtime: currentCompanion.runtime, compact: true)
+        }
+    }
+
+    private var replyingBanner: some View {
+        HStack(spacing: 10) {
+            ProgressView()
+                .controlSize(.small)
+                .tint(Color.companionAccent)
+            Text("\(currentCompanion.name) is replying…")
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(Color.companionInk.opacity(0.76))
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .companionGlass(radius: 18)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func dayMarker(for date: Date) -> some View {
+        Text(dayLabel(for: date))
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(Color.companionMuted)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(.thinMaterial, in: Capsule())
+            .accessibilityAddTraits(.isHeader)
+    }
+
+    private func unavailableState(_ message: String) -> some View {
+        ContentUnavailableView {
+            Label("Conversation unavailable", systemImage: "exclamationmark.bubble")
+        } description: {
+            Text(message)
+        } actions: {
+            Button("Try again") { Task { await reload() } }
+                .buttonStyle(.glassProminent)
+        }
+        .padding(.top, 60)
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 18) {
+            CompanionAvatar(name: currentCompanion.name, icon: currentCompanion.icon, size: 76)
+            VStack(spacing: 6) {
+                Text("Start the conversation")
+                    .font(.title3.weight(.semibold))
+                Text("Send the first message to wake \(currentCompanion.name).")
+                    .font(.subheadline)
+                    .foregroundStyle(Color.companionMuted)
+                    .multilineTextAlignment(.center)
+            }
+        }
+        .padding(28)
+        .companionGlass(radius: 28)
+        .padding(.top, 56)
+    }
+
+    @ViewBuilder
     private var composer: some View {
-        VStack(spacing: 6) {
+        VStack(spacing: 8) {
             if let error, thread != nil {
                 Text(error)
                     .font(.caption)
                     .foregroundStyle(Color.companionDanger)
+                    .padding(.horizontal, 12)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            HStack(alignment: .bottom, spacing: 10) {
-                TextField("Message \(companion.name)", text: $draft, axis: .vertical)
-                    .lineLimit(1...5)
-                    .padding(.horizontal, 13)
-                    .padding(.vertical, 11)
-                    .background(Color.companionSurfaceRaised)
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    .accessibilityIdentifier("chat.composer")
-                Button(action: send) {
-                    Group {
-                        if sending { ProgressView().controlSize(.small) }
-                        else { Image(systemName: "arrow.up") }
+
+            if thread?.canSend == false {
+                Label("This conversation is read-only", systemImage: "eye")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Color.companionMuted)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .companionGlass(radius: 20)
+            } else {
+                GlassEffectContainer(spacing: 12) {
+                    HStack(alignment: .bottom, spacing: 10) {
+                        TextField("Message \(currentCompanion.name)", text: $draft, axis: .vertical)
+                            .lineLimit(1...5)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 13)
+                            .companionGlass(radius: 23, interactive: true)
+                            .accessibilityIdentifier("chat.composer")
+
+                        Button(action: send) {
+                            Group {
+                                if sending {
+                                    ProgressView().controlSize(.small)
+                                } else {
+                                    Image(systemName: "arrow.up")
+                                }
+                            }
+                            .font(.system(size: 17, weight: .bold))
+                            .frame(width: 46, height: 46)
+                        }
+                        .buttonStyle(.glassProminent)
+                        .buttonBorderShape(.circle)
+                        .tint(Color.companionAccent)
+                        .disabled(sendDisabled)
+                        .accessibilityLabel("Send message")
+                        .accessibilityIdentifier("chat.send")
                     }
-                    .font(.system(size: 16, weight: .bold))
-                    .frame(width: 42, height: 42)
                 }
-                .buttonStyle(.borderedProminent)
-                .buttonBorderShape(.circle)
-                .disabled(sending || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || thread?.canSend == false)
-                .accessibilityIdentifier("chat.send")
             }
         }
         .padding(.horizontal, 12)
-        .padding(.top, 9)
+        .padding(.top, 8)
         .padding(.bottom, 6)
-        .background(.bar)
+    }
+
+    private var sendDisabled: Bool {
+        sending || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || thread?.canSend == false
+    }
+
+    private var statusLabel: String {
+        if currentCompanion.runtime.replying { return "Replying" }
+        switch currentCompanion.runtime.state {
+        case .running: return "Online"
+        case .provisioning: return "Starting"
+        case .error: return "Needs attention"
+        case .notCreated, .stopped, .stopping: return "Asleep"
+        case .unknown: return "Unknown"
+        }
     }
 
     private func reload(silently: Bool = false) async {
@@ -127,7 +262,42 @@ struct ChatView: View {
             guard generation == reloadGeneration else { return }
             self.error = "The conversation could not be refreshed."
         }
+
+        if let refreshed = try? await sessionStore.listCompanions().first(where: { $0.id == companion.id }) {
+            guard generation == reloadGeneration else { return }
+            currentCompanion = refreshed
+        }
         if generation == reloadGeneration { loading = false }
+    }
+
+    private var entries: [TranscriptEntry] {
+        thread?.entries ?? []
+    }
+
+    private var pendingStartsNewDay: Bool {
+        guard let last = entries.last, let date = transcriptDate(last.createdAt) else { return true }
+        return !Calendar.autoupdatingCurrent.isDateInToday(date)
+    }
+
+    private func startsNewDay(_ entry: TranscriptEntry, after previous: TranscriptEntry?) -> Bool {
+        guard let previous else { return true }
+        guard let date = transcriptDate(entry.createdAt),
+              let previousDate = transcriptDate(previous.createdAt) else { return true }
+        return !Calendar.autoupdatingCurrent.isDate(date, inSameDayAs: previousDate)
+    }
+
+    private func dayLabel(for date: Date) -> String {
+        let calendar = Calendar.autoupdatingCurrent
+        if calendar.isDateInToday(date) { return "Today" }
+        if calendar.isDateInYesterday(date) { return "Yesterday" }
+        if calendar.component(.year, from: date) == calendar.component(.year, from: .now) {
+            return date.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day())
+        }
+        return date.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day().year())
+    }
+
+    private func transcriptDate(_ value: String) -> Date? {
+        parseCompanionTimestamp(value)
     }
 
     private func send() {
@@ -178,42 +348,110 @@ struct ChatView: View {
     }
 }
 
+struct ChatMessageBubble: View {
+    enum Kind: Equatable {
+        case mine
+        case assistant
+        case member
+    }
+
+    let content: String
+    let kind: Kind
+    var authorName: String?
+    var timestamp: String?
+    var queued = false
+    var companionName = "Companion"
+    var icon: CompanionSummary.Icon?
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 9) {
+            if kind == .mine { Spacer(minLength: 54) }
+
+            if kind == .assistant {
+                CompanionAvatar(name: companionName, icon: icon, size: 30)
+                    .accessibilityHidden(true)
+            }
+
+            bubble
+
+            if kind != .mine { Spacer(minLength: 36) }
+        }
+        .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder
+    private var bubble: some View {
+        let contentView = VStack(alignment: .leading, spacing: 6) {
+            if kind != .mine, let authorName {
+                Text(authorName)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.companionMuted)
+            }
+
+            Text(content)
+                .font(.body)
+                .foregroundStyle(Color.companionInk)
+                .textSelection(.enabled)
+
+            if queued || timestamp != nil {
+                HStack(spacing: 6) {
+                    if queued {
+                        Text("Queued")
+                    }
+                    if let timestamp {
+                        Text(timestamp)
+                    }
+                }
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(Color.companionMuted)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .frame(maxWidth: 340, alignment: .leading)
+
+        if kind == .mine {
+            contentView
+                .companionGlass(radius: 18, tint: Color.companionAccent.opacity(0.10))
+        } else {
+            contentView
+                .companionMaterial(radius: 18)
+        }
+    }
+}
+
 private struct MessageEntryView: View {
     let entry: TranscriptEntry
     let own: Bool
+    let companion: CompanionSummary
 
     var body: some View {
-        HStack {
-            if own { Spacer(minLength: 48) }
-            VStack(alignment: .leading, spacing: 5) {
-                if !own {
-                    Text(entry.authorName ?? (entry.role == "user" ? "Workspace member" : "Companion"))
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(Color.companionMuted)
-                }
-                Text(entry.content)
-                    .font(.body)
-                    .textSelection(.enabled)
-                if entry.queued {
-                    Text("Queued")
-                        .font(.caption2)
-                        .foregroundStyle(Color.companionMuted)
-                }
-            }
-            .padding(entry.role == "user" ? 12 : 0)
-            .background(messageBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .frame(maxWidth: entry.role == "user" ? 340 : .infinity, alignment: .leading)
-            if !own { Spacer(minLength: 28) }
-        }
-        .frame(maxWidth: .infinity)
+        ChatMessageBubble(
+            content: entry.content,
+            kind: kind,
+            authorName: own ? nil : entry.authorName ?? (entry.role == "user" ? "Workspace member" : companion.name),
+            timestamp: timeLabel,
+            queued: entry.queued,
+            companionName: companion.name,
+            icon: companion.icon
+        )
     }
 
-    private var messageBackground: Color {
-        if own { return Color.companionAccent.opacity(0.18) }
-        if entry.role == "user" { return Color.companionSurface }
-        return Color.clear
+    private var kind: ChatMessageBubble.Kind {
+        if own { return .mine }
+        return entry.role == "user" ? .member : .assistant
     }
+
+    private var timeLabel: String? {
+        guard let date = parseCompanionTimestamp(entry.createdAt) else { return nil }
+        return date.formatted(date: .omitted, time: .shortened)
+    }
+}
+
+private func parseCompanionTimestamp(_ value: String) -> Date? {
+    (try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(value))
+        ?? (try? Date.ISO8601FormatStyle().parse(value))
 }
 
 private struct PendingMessage: Identifiable, Equatable {
@@ -228,33 +466,29 @@ private struct PendingMessageView: View {
     let dismiss: () -> Void
 
     var body: some View {
-        HStack {
-            Spacer(minLength: 48)
-            VStack(alignment: .leading, spacing: 7) {
-                Text(message.content)
-                    .font(.body)
-                    .textSelection(.enabled)
-                if message.failed {
+        VStack(alignment: .trailing, spacing: 8) {
+            ChatMessageBubble(
+                content: message.content,
+                kind: .mine,
+                timestamp: message.failed ? "Not delivered" : "Sending…"
+            )
+
+            if message.failed {
+                VStack(alignment: .trailing, spacing: 6) {
                     Text("Delivery could not be confirmed. Retrying reuses the same request.")
                         .font(.caption2)
                         .foregroundStyle(Color.companionDanger)
-                    HStack(spacing: 12) {
-                        Button("Retry", action: retry)
+                    HStack(spacing: 8) {
                         Button("Dismiss", action: dismiss)
-                            .foregroundStyle(Color.companionMuted)
+                            .buttonStyle(.glass)
+                        Button("Retry", action: retry)
+                            .buttonStyle(.glassProminent)
+                            .tint(Color.companionAccent)
                     }
-                    .font(.caption.weight(.semibold))
-                } else {
-                    Text("Sending…")
-                        .font(.caption2)
-                        .foregroundStyle(Color.companionMuted)
+                    .controlSize(.small)
                 }
+                .padding(.trailing, 4)
             }
-            .padding(12)
-            .background(Color.companionAccent.opacity(0.18))
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .frame(maxWidth: 340, alignment: .leading)
         }
-        .frame(maxWidth: .infinity)
     }
 }

@@ -36,9 +36,14 @@ final class GoogleSignInCoordinator: NSObject, ASWebAuthenticationPresentationCo
 
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        return scenes.flatMap(\.windows).first(where: { $0.isKeyWindow })
-            ?? scenes.first?.windows.first
-            ?? ASPresentationAnchor()
+        if let window = scenes.flatMap(\.windows).first(where: { $0.isKeyWindow })
+            ?? scenes.first?.windows.first {
+            return window
+        }
+        guard let scene = scenes.first else {
+            preconditionFailure("Google sign-in requires an active window scene")
+        }
+        return ASPresentationAnchor(windowScene: scene)
     }
 }
 

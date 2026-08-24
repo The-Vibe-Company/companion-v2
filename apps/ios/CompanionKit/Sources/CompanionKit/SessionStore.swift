@@ -154,6 +154,157 @@ public final class SessionStore {
         }
     }
 
+    public func createCompanion(_ input: CreateCompanionInput) async throws -> CompanionSummary {
+        do {
+            let companion = try await client.createCompanion(input)
+            await persistRollingAuthority()
+            return companion
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func listCompanionProviders() async throws -> CompanionProvidersResponse {
+        do {
+            let providers = try await client.listCompanionProviders()
+            await persistRollingAuthority()
+            return providers
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func saveCompanionProvider(
+        providerID: String,
+        credential: String
+    ) async throws -> CompanionProviderConnection {
+        do {
+            let connection = try await client.saveCompanionProvider(
+                providerID: providerID,
+                credential: credential
+            )
+            await persistRollingAuthority()
+            return connection
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func setDefaultCompanionProvider(providerID: String) async throws {
+        do {
+            try await client.setDefaultCompanionProvider(providerID: providerID)
+            await persistRollingAuthority()
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func deleteCompanionProvider(providerID: String) async throws {
+        do {
+            try await client.deleteCompanionProvider(providerID: providerID)
+            await persistRollingAuthority()
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func startCompanionProviderOAuth(
+        providerID: String
+    ) async throws -> CompanionProviderOAuthStart {
+        do {
+            let flow = try await client.startCompanionProviderOAuth(providerID: providerID)
+            await persistRollingAuthority()
+            return flow
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func completeCompanionProviderOAuth(
+        authorizationCode: String
+    ) async throws -> CompanionProviderConnection {
+        do {
+            let connection = try await client.completeCompanionProviderOAuth(
+                authorizationCode: authorizationCode
+            )
+            await persistRollingAuthority()
+            return connection
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func pollCompanionProviderOAuth() async throws -> CompanionProviderOAuthPoll {
+        do {
+            let result = try await client.pollCompanionProviderOAuth()
+            await persistRollingAuthority()
+            return result
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func cancelCompanionProviderOAuth() async {
+        await client.cancelCompanionProviderOAuth()
+    }
+
+    public func listCompanionPlugins() async throws -> [CompanionPluginAccount] {
+        do {
+            let plugins = try await client.listCompanionPlugins()
+            await persistRollingAuthority()
+            return plugins
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func saveCompanionPlugin(
+        _ input: SaveCompanionPluginInput
+    ) async throws -> CompanionPluginAccount {
+        do {
+            let plugin = try await client.saveCompanionPlugin(input)
+            await persistRollingAuthority()
+            return plugin
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func companionPluginOAuthRequest(
+        serverName: String,
+        label: String
+    ) async throws -> URLRequest {
+        do {
+            return try await client.companionPluginOAuthRequest(
+                serverName: serverName,
+                label: label
+            )
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func deleteCompanionPlugin(accountID: String) async throws {
+        do {
+            try await client.deleteCompanionPlugin(accountID: accountID)
+            await persistRollingAuthority()
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
     public func thread(companionID: String) async throws -> CompanionThread {
         do {
             let thread = try await client.thread(companionID: companionID)

@@ -1,0 +1,25 @@
+{
+  "skill_name": "swiftui-expert-dev",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Refactor the Companion chat screen so polling and send state survive navigation, cancellation does not publish stale results, and the UI remains testable. Keep API/session logic in CompanionKit.",
+      "expected_output": "A focused SwiftUI implementation plan or patch that uses stable model ownership, value-driven navigation, structured cancellable tasks, actor/main-actor boundaries, stable IDs, injected effects, and accessibility-aware states, while preserving the shared API contract and handing build verification to xcodebuildmcp-cli."
+    },
+    {
+      "id": 2,
+      "prompt": "My SwiftUI list redraws too much when one Companion changes. What should I inspect first?",
+      "expected_output": "A concise diagnostic that checks state ownership, unstable identity, broad observation, expensive body work, and unnecessary type erasure before proposing measured changes; it does not invent a new design system or run unrelated build steps."
+    },
+    {
+      "id": 3,
+      "prompt": "A slow poll finishes after a newer response, the user enabled Reduce Motion, and Dynamic Type clips the retry action. Fix the SwiftUI edge cases without changing the endpoint.",
+      "expected_output": "An implementation focused on version/resource guards, cancellation and stale-result suppression, explicit reduced-motion behavior, Dynamic Type-safe layout, accessible labels/identifiers, and tests with injected effects."
+    },
+    {
+      "id": 4,
+      "prompt": "Choose the accent palette and decide whether the iOS product should use a sidebar or tabs.",
+      "expected_output": "A routing response that sends visual/product direction to design-frontend-dev and ios-product-dev, explains that SwiftUI expert is not the owner of the design register, and avoids prescribing a build or API change."
+    }
+  ]
+}

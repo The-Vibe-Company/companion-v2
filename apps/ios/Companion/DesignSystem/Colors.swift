@@ -1,12 +1,18 @@
 import SwiftUI
 
 extension Color {
-    static let companionCanvas = Color(red: 0.961, green: 0.969, blue: 0.980)
-    static let companionMuted = Color(red: 0.42, green: 0.44, blue: 0.49)
-    static let companionAccent = Color(red: 0.929, green: 0.725, blue: 0)
-    static let companionSurface = Color(red: 0.995, green: 0.996, blue: 0.999)
-    static let companionSurfaceRaised = Color(red: 0.929, green: 0.941, blue: 0.961)
-    static let companionBorder = Color(red: 0.855, green: 0.875, blue: 0.906)
-    static let companionDanger = Color(red: 0.72, green: 0.14, blue: 0.17)
-    static let companionAccentForeground = Color(red: 0.24, green: 0.21, blue: 0.10)
+    static let companionCanvas = Color(red: 0.955, green: 0.965, blue: 0.985)
+    static let companionInk = Color(red: 0.055, green: 0.065, blue: 0.095)
+    static let companionMuted = Color(red: 0.35, green: 0.37, blue: 0.43)
+    static let companionAccent = Color(red: 0.91, green: 0.16, blue: 0.25)
+    static let companionAccentWarm = Color(red: 0.98, green: 0.47, blue: 0.11)
+    static let companionAccentGold = Color(red: 1.00, green: 0.72, blue: 0.10)
+    static let companionSurface = Color.white.opacity(0.72)
+    static let companionSurfaceRaised = Color.white.opacity(0.56)
+    static let companionBorder = Color.white.opacity(0.78)
+    static let companionDivider = Color.black.opacity(0.08)
+    static let companionDanger = Color(red: 0.76, green: 0.08, blue: 0.16)
+    static let companionSuccess = Color(red: 0.08, green: 0.56, blue: 0.31)
+    static let companionWarning = Color(red: 0.84, green: 0.45, blue: 0.03)
+    static let companionAccentForeground = Color.white
 }

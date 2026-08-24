@@ -286,7 +286,13 @@ Companion is flat and hairline-driven. Use 1px borders and subtle surface change
 
 Use shadows only for floating layers such as drawers, dropdowns, and dialogs. Shadow tokens are `xs`, `sm`, `md`, and `lg`; they should be soft and restrained; never use glow. Scrims are flat tinted overlays with no blur.
 
-No glassmorphism. No backdrop blur. No translucent panels pretending to be glass. No gradient depth. No bokeh, grain, decorative textures, or atmospheric image backgrounds in product UI.
+Web product surfaces do not use glassmorphism, backdrop blur, translucent panels pretending to be
+glass, gradient depth, bokeh, grain, decorative textures, or atmospheric image backgrounds. The
+native iOS 26 client is the deliberate exception: use Apple's system Liquid Glass for navigation
+and interactive controls, system materials for content surfaces, and a restrained brand-colour
+backdrop so those materials remain visible. Do not imitate Liquid Glass with custom shaders,
+overlays, or third-party components. Reduce Transparency must fall back to the opaque canvas, and
+message text must keep normal content contrast.
 
 Motion is sparse and functional. Use `duration-fast` (120ms), `duration-base` (180ms), or `duration-slow` (240ms) with
 `ease-out-quint` transitions. Allowed motion: drawer slide-in/out, scrim fade, hover color changes, selection color
@@ -462,7 +468,7 @@ Don't:
 
 - Do not create marketing hero dashboards.
 - Do not use big-number vanity metric cards.
-- Do not use gradients, gradient text, glassmorphism, backdrop blur, glow, bokeh, or decorative texture.
+- Do not use gradients, gradient text, glassmorphism, backdrop blur, glow, bokeh, or decorative texture outside the native iOS 26 Liquid Glass exception above.
 - Do not use emoji in product UI.
 - Do not use em dashes in UI copy.
 - Do not use web fonts.

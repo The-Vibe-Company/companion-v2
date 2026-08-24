@@ -763,16 +763,20 @@ slower cadence when stable. There is no SSE and no Box-to-control-plane push age
 
 ### iOS app
 
-The SwiftUI client is being rebuilt in `apps/ios` for iOS 17 and later; Android is not supported.
-The initial skeleton does not yet ship authentication or product workflows, but its target is full
-feature parity over the existing `/v1` API rather than a separate or reduced mobile API. It reuses
+The SwiftUI client in `apps/ios` targets iOS 26 and later; Android is not supported. It is a full
+first-party client over the existing `/v1` API rather than a separate or reduced mobile API. It reuses
 the existing Better Auth cookie session: email login captures `set-cookie`, while Google login uses
 Better Auth's authorization proxy and the system browser before adopting the returned cookie into
 Keychain-backed session state. A new Google account completes onboarding by joining a
 domain-matched organization or creating a named workspace. The app resolves the current
 organization through `whoami` and sends the cookie plus `x-companion-org` on each REST request.
-Skills, Plugins, MCP connections, files, routines, triggers, sharing, settings, Companion chat, and
-control-plane workflows all migrate to this same client milestone by milestone.
+The native roster and chat ship with Companion creation, the full server-owned provider catalog,
+Claude and Codex subscription authorization, encrypted API-key connections, and MCP connection
+management. Its Plugins surface groups the existing accounts by provider, permits multiple labeled
+accounts for each product-owned Linear, GitHub, Notion, and Conductor category through the shared
+brokered OAuth routes, and retains custom HTTP or command MCP connections. Skills, files, routines,
+triggers, sharing, settings, and the remaining control-plane workflows continue migrating to this
+same client without mobile-only APIs.
 
 The new iOS app does not send `client_surface: native_mobile`; omitting that optional field selects
 the API's existing full first-party contract. The discriminator remains accepted temporarily for

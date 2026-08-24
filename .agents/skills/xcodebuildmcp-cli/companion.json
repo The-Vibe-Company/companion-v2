@@ -1,0 +1,39 @@
+{
+  "$schema": "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json",
+  "name": "xcodebuildmcp-cli",
+  "version": "0.1.0",
+  "title": "XcodeBuildMCP CLI",
+  "description": "Run deterministic Apple-platform discovery, build, test, simulator, debug, log, screenshot, and UI inspection workflows through the official XcodeBuildMCP executable.",
+  "notes": "## What it does\n\nThis is the verification and tool-execution capability for Apple-platform work. It uses help-first discovery, checks session defaults, keeps workflows minimal, and reports real build/test/run/UI results.\n\n## Boundary\n\nIt does not own product decisions, visual design, SwiftUI architecture, API parity, or authorization. It never silently installs tools or falls back to raw xcodebuild, xcrun, or simctl.",
+  "metadata": {
+    "companionSkillId": "5c4ab7b6-61ba-4b1d-b7a8-9e4efb1e5ce7",
+    "changelog": [
+      {
+        "version": "0.1.0",
+        "date": "2026-08-24",
+        "changes": [
+          "Add the portable official XcodeBuildMCP CLI workflow for Agents and Claude."
+        ]
+      }
+    ]
+  },
+  "environment": {
+    "env": {},
+    "secrets": {}
+  },
+  "dependencies": {},
+  "commands": [
+    {
+      "name": "Discover an Xcode project",
+      "desc": "Use help-first CLI discovery to identify the project, scheme, destination, and session configuration."
+    },
+    {
+      "name": "Build and test Apple targets",
+      "desc": "Run the smallest relevant package, simulator, device, or test-plan workflow and report real results."
+    },
+    {
+      "name": "Inspect a simulator surface",
+      "desc": "Build/run, query UI, capture screenshots, and collect logs without raw Apple tool fallbacks."
+    }
+  ]
+}
