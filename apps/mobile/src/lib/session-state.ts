@@ -70,6 +70,19 @@ export function onboardSession(session: Session, orgId: string): Session {
   return { ...session, orgId, needsOnboarding: false };
 }
 
+export function renameSessionUser(session: Session, name: string): Session {
+  return { ...session, user: { ...session.user, name } };
+}
+
+export function sameSessionAuthority(current: Session | null | undefined, expected: Session): current is Session {
+  return current?.cookie === expected.cookie && current.user.id === expected.user.id;
+}
+
+export function profileInitials(nameOrEmail: string): string {
+  const parts = nameOrEmail.trim().split(/[.\s@_-]+/).filter(Boolean);
+  return ((parts[0]?.[0] ?? "?") + (parts[1]?.[0] ?? "")).toUpperCase();
+}
+
 export function isRevokedSessionStatus(status: number): boolean {
   return status === 401;
 }

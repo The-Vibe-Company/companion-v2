@@ -13,7 +13,7 @@ export function ScreenHeader({
   action?: React.ReactNode;
 }) {
   return (
-    <View className="min-h-14 flex-row items-center gap-3 border-b border-border bg-surface px-4 py-2">
+    <View collapsable={false} className="min-h-14 flex-row items-center gap-3 border-b border-border bg-surface px-4 py-2">
       {onBack ? (
         <Pressable
           onPress={onBack}

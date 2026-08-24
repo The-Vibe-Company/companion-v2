@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
-import { configureApi, login, logout, whoami } from "./api";
+import { configureApi, login, logout, updateProfile as updateProfileRequest, whoami } from "./api";
 import { authClient, clearGoogleAuthSession } from "./auth-client";
 import { exchangeGoogleSession, type SignInResult } from "./google-sign-in";
 import { secureStorage } from "./secure-storage";
@@ -9,6 +9,8 @@ import {
   isRevokedSessionStatus,
   onboardSession,
   parseStoredSession,
+  renameSessionUser,
+  sameSessionAuthority,
   sessionFromIdentity,
 } from "./session-state";
 import type { Session } from "./types";
@@ -23,6 +25,7 @@ type SessionContextValue = {
   signIn(email: string, password: string): Promise<SignInResult>;
   signInWithGoogle(): Promise<SignInResult>;
   finishOnboarding(orgId: string): Promise<void>;
+  updateProfile(name: string): Promise<void>;
   signOut(): Promise<void>;
 };
 
@@ -33,9 +36,18 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
   const [restoreAttempt, setRestoreAttempt] = useState(0);
   const restoreGeneration = useRef(0);
+  const sessionRevision = useRef(0);
   const sessionRef = useRef<Session | null | undefined>(undefined);
+  const sessionStorageQueue = useRef<Promise<void>>(Promise.resolve());
+
+  const runSessionStorageMutation = useCallback((operation: () => Promise<void>): Promise<void> => {
+    const pending = sessionStorageQueue.current.then(operation, operation);
+    sessionStorageQueue.current = pending.catch(() => undefined);
+    return pending;
+  }, []);
 
   const publishSession = useCallback((next: Session | null | undefined) => {
+    sessionRevision.current += 1;
     sessionRef.current = next;
     setSession(next);
   }, []);
@@ -48,17 +60,30 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     // Both stores hold bearer authority after Google sign-in. Cleanup remains best effort so a
     // locked keychain or offline sign-out cannot strand the UI on the splash screen.
     await clearSessionAuthorities(
-      () => secureStorage.removeItem(sessionKey),
+      () => runSessionStorageMutation(() => secureStorage.removeItem(sessionKey)),
       clearGoogleAuthSession,
     );
-  }, [publishSession]);
+  }, [publishSession, runSessionStorageMutation]);
 
-  const persistSession = useCallback(async (next: Session) => {
-    await secureStorage.setItem(sessionKey, JSON.stringify(next));
+  const persistSession = useCallback(async (
+    next: Session,
+    generation = restoreGeneration.current,
+    expectedRevision?: number,
+  ): Promise<boolean> => {
+    const isCurrent = () => restoreGeneration.current === generation
+      && (expectedRevision === undefined || sessionRevision.current === expectedRevision);
+    let stored = false;
+    await runSessionStorageMutation(async () => {
+      if (!isCurrent()) return;
+      await secureStorage.setItem(sessionKey, JSON.stringify(next));
+      stored = isCurrent();
+    });
+    if (!stored || !isCurrent()) return false;
     configureApi(next, () => void clearSession());
     setBootstrapError(null);
     publishSession(next);
-  }, [clearSession, publishSession]);
+    return true;
+  }, [clearSession, publishSession, runSessionStorageMutation]);
 
   useEffect(() => {
     let cancelled = false;
@@ -93,7 +118,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         // A parse/schema failure is the one local condition that proves the persisted state is
         // unusable. Cleanup is best effort because SecureStore may still be unavailable.
         if (!current()) return;
-        await secureStorage.removeItem(sessionKey).catch(() => undefined);
+        await runSessionStorageMutation(() => secureStorage.removeItem(sessionKey)).catch(() => undefined);
         configureApi(null);
         publishSession(null);
         return;
@@ -103,15 +128,18 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       if (!current()) return;
       configureApi(restored, () => void clearSession());
       publishSession(restored);
+      const restoredRevision = sessionRevision.current;
 
       try {
         const me = await whoami();
-        if (!current()) return;
+        if (!current() || sessionRevision.current !== restoredRevision) return;
         const next = sessionFromIdentity(restored.cookie, me);
         configureApi(next, () => void clearSession());
         publishSession(next);
         // Keep a valid in-memory session even if a rolling-session write is temporarily unavailable.
-        await secureStorage.setItem(sessionKey, JSON.stringify(next)).catch(() => undefined);
+        await runSessionStorageMutation(async () => {
+          if (current()) await secureStorage.setItem(sessionKey, JSON.stringify(next));
+        }).catch(() => undefined);
       } catch (cause) {
         if (!current()) return;
         if (cause instanceof ApiError && isRevokedSessionStatus(cause.status)) {
@@ -119,6 +147,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           await clearSession();
           return;
         }
+        if (sessionRevision.current !== restoredRevision) return;
         // Network errors and authenticated 5xx responses are retryable; retain the restored state.
         configureApi(restored, () => void clearSession());
         publishSession(restored);
@@ -127,7 +156,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [clearSession, publishSession, restoreAttempt]);
+  }, [clearSession, publishSession, restoreAttempt, runSessionStorageMutation]);
 
   const signIn = useCallback(async (email: string, password: string): Promise<SignInResult> => {
     configureApi(null);
@@ -193,8 +222,22 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     const next = onboardSession(current, orgId);
     configureApi(next, () => void clearSession());
     publishSession(next);
-    await secureStorage.setItem(sessionKey, JSON.stringify(next)).catch(() => undefined);
-  }, [clearSession, publishSession]);
+    await runSessionStorageMutation(() => secureStorage.setItem(sessionKey, JSON.stringify(next))).catch(() => undefined);
+  }, [clearSession, publishSession, runSessionStorageMutation]);
+
+  const updateProfile = useCallback(async (name: string) => {
+    const current = sessionRef.current;
+    if (!current) throw new Error("A signed-in session is required to update the profile.");
+    const generation = restoreGeneration.current;
+    const profile = await updateProfileRequest(name);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const latest = sessionRef.current;
+      if (restoreGeneration.current !== generation || !sameSessionAuthority(latest, current)) return;
+      const revision = sessionRevision.current;
+      if (await persistSession(renameSessionUser(latest, profile.name), generation, revision)) return;
+    }
+    throw new Error("Your profile was updated, but this device could not refresh the session. Please try again.");
+  }, [persistSession]);
 
   const signOut = useCallback(async () => {
     await logout().catch(() => undefined);
@@ -213,6 +256,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     signIn,
     signInWithGoogle,
     finishOnboarding,
+    updateProfile,
     signOut,
   }), [
     session,
@@ -221,6 +265,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     signIn,
     signInWithGoogle,
     finishOnboarding,
+    updateProfile,
     signOut,
   ]);
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
