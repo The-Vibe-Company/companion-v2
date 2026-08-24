@@ -14,6 +14,7 @@ const OUTPUT_KEYS = [
   "containers",
   "dependencies",
   "skill",
+  "ios",
   "full",
 ];
 
@@ -178,7 +179,20 @@ export function classifyFiles(files, { forceFull = false } = {}) {
           ])),
     );
 
-  return { docs, design, quality, build, database, runtime, browser, containers, dependencies, skill, full };
+  const ios =
+    full ||
+    uniqueFiles.some((file) =>
+      !isDocumentation(file) && matchesAny(file, [
+        "apps/ios/",
+        "apps/api/",
+        "packages/auth/",
+        "packages/contracts/",
+        "packages/core/",
+        "packages/companion-runtime/",
+        "scripts/ios-",
+      ]));
+
+  return { docs, design, quality, build, database, runtime, browser, containers, dependencies, skill, ios, full };
 }
 
 function readArguments(argv) {

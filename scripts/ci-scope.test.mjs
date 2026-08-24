@@ -18,6 +18,7 @@ test("documentation-only changes avoid application jobs", () => {
     containers: false,
     dependencies: false,
     skill: false,
+    ios: false,
     full: false,
   });
 });
@@ -64,6 +65,13 @@ test("API changes run database, browser, and container checks", () => {
   assert.equal(result.browser, true);
   assert.equal(result.containers, true);
   assert.equal(result.runtime, true);
+  assert.equal(result.ios, true);
+});
+
+test("iOS changes request the native macOS lane", () => {
+  const result = classifyFiles(["apps/ios/Companion/Screens/LoginView.swift"]);
+  assert.equal(result.ios, true);
+  assert.equal(result.quality, true);
 });
 
 test("runtime and simulator changes run PostgreSQL, runtime, and container checks", () => {

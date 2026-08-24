@@ -55,10 +55,14 @@ xcodebuildmcp simulator build \
   --extra-args CODE_SIGNING_ALLOWED=NO
 ```
 
-Pour le smoke test authentifié, fournir les variables `COMPANION_IOS_E2E_API_URL`,
-`COMPANION_IOS_E2E_EMAIL` et `COMPANION_IOS_E2E_PASSWORD` au test `CompanionKit`. Ce test doit rester
-un contrôle manuel ou de livraison disposant de secrets : il se connecte réellement, envoie un
-message au Companion de test Z.ai et attend une nouvelle réponse corrélée.
+Le workflow `iOS E2E` exécute ce smoke test manuellement ou chaque lundi depuis `main`. Son
+environnement GitHub `ios-e2e` fournit `COMPANION_IOS_E2E_API_URL`,
+`COMPANION_IOS_E2E_EMAIL` et `COMPANION_IOS_E2E_PASSWORD`; les clés Box et Z.ai restent des secrets
+du dépôt. Le job démarre une stack et une base éphémères, seed le compte local, connecte Z.ai, crée
+un Companion temporaire, envoie un message avec `CompanionKit`, attend une nouvelle réponse
+corrélée, puis supprime le Companion et son Box avant d’arrêter la stack. Il ne s’exécute jamais sur
+une pull request et refuse toute URL d’API qui ne cible pas explicitement la boucle locale, afin de
+ne jamais contacter la base de production.
 
 La procédure d’archive, d’upload et de gestion des testeurs sera complétée avec le jalon TestFlight
 natif. Les testeurs restent gérés dans App Store Connect.
