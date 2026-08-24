@@ -25,8 +25,18 @@ const EXPECTED_RULES = [
 
 function runOxlint(fixture) {
   return spawnSync(
-    "pnpm",
-    ["exec", "oxlint", "--config", "oxlint.config.ts", "--format", "json", "--", fixture],
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      "node_modules/oxlint/bin/oxlint",
+      "--config",
+      "oxlint.config.ts",
+      "--format",
+      "json",
+      "--",
+      fixture,
+    ],
     { cwd: process.cwd(), encoding: "utf8", shell: false },
   );
 }

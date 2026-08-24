@@ -71,6 +71,7 @@ test("API changes run database, browser, and container checks", () => {
 test("iOS changes request the native macOS lane", () => {
   for (const file of [
     "apps/ios/Companion/Screens/LoginView.swift",
+    "scripts/app-store-connect-build.mjs",
     "scripts/select-ios-simulator.mjs",
   ]) {
     const result = classifyFiles([file]);

@@ -42,8 +42,8 @@ export function runIncrementalLint(
 
   write(`[anti-slop] Linting ${targets.length} changed JavaScript/TypeScript file(s).`);
   const result = run(
-    "pnpm",
-    ["exec", "oxlint", "--config", "oxlint.config.ts", "--", ...targets],
+    process.execPath,
+    ["--import", "tsx", "node_modules/oxlint/bin/oxlint", "--config", "oxlint.config.ts", "--", ...targets],
     { cwd, stdio: "inherit", shell: false },
   );
   if (result.error) throw new Error(`Oxlint could not start: ${result.error.message}`);
