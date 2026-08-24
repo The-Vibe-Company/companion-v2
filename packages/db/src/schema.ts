@@ -42,7 +42,7 @@ export const companionRuntimeRetirementStateEnum = pgEnum("companion_runtime_ret
   "active", "requested", "pending", "blocked", "retired",
 ]);
 export const companionClientSurfaceEnum = pgEnum("companion_client_surface", [
-  "web", "mobile_web", "native_mobile",
+  "web", "mobile_web",
 ]);
 export const companionImageStatusEnum = pgEnum("companion_image_status", [
   "requested", "building", "ready", "failed",
@@ -889,17 +889,12 @@ export const companionRuntimeInstances = pgTable(
     revisionCheck: check("companion_runtime_instances_revision_check", sql`${t.diskLayoutVersion} >= 0 and ${t.desiredSettingsRevision} >= 1 and ${t.appliedSettingsRevision} >= 0 and ${t.appliedSettingsRevision} <= ${t.desiredSettingsRevision} and ${t.appliedSkillsRevision} >= 0 and ((${t.appliedSettingsRevision} = 0) = (${t.appliedClientSurface} is null)) and jsonb_typeof(${t.appliedSelectedSkillIds}) = 'array' and jsonb_typeof(${t.appliedSkillRefs}) = 'array' and (${t.appliedSkillsDigest} is null or ${t.appliedSkillsDigest} ~ '^[0-9a-f]{64}$') and ((${t.skillsUpdateErrorCode} is null) = (${t.skillsUpdateErrorMessage} is null)) and (${t.skillsUpdateErrorCode} is null or ${t.skillsUpdateErrorCode} ~ '^[a-z][a-z0-9_]{0,63}$') and (${t.skillsUpdateErrorMessage} is null or (char_length(${t.skillsUpdateErrorMessage}) <= 500 and ${t.skillsUpdateErrorMessage} !~ E'[\\n\\r]')) and ${t.nextTurnSequence} >= 1 and ${t.nextOperationSequence} >= 1 and ${t.lastWriteEpoch} >= 0`),
     materialSnapshotCheck: check("companion_runtime_instances_material_snapshot_check", sql`
       ((${t.materialClientSurface} is null) = (${t.materialPiInvocationId} is null))
-      and (${t.materialClientSurface} is not null or ${t.materialExpiresAt} is null)
+      and ((${t.materialClientSurface} is null) = (${t.materialExpiresAt} is null))
       and (${t.materialPiInvocationId} is null or
         (char_length(${t.materialPiInvocationId}) between 1 and 200
           and ${t.materialPiInvocationId} !~ E'[\\n\\r]'))
-      and (${t.materialClientSurface} is null
-        or ${t.materialClientSurface} = 'native_mobile' and ${t.materialExpiresAt} is null
-        or ${t.materialClientSurface} in ('web','mobile_web') and ${t.materialExpiresAt} is not null)
       and ((${t.settingsClaimMaterialClientSurface} is null) = (${t.settingsClaimMaterialStagedAt} is null))
-      and (${t.settingsClaimMaterialStagedAt} is null
-        or ${t.settingsClaimMaterialClientSurface} = 'native_mobile' and ${t.settingsClaimMaterialExpiresAt} is null
-        or ${t.settingsClaimMaterialClientSurface} in ('web','mobile_web') and ${t.settingsClaimMaterialExpiresAt} is not null)
+      and ((${t.settingsClaimMaterialStagedAt} is null) = (${t.settingsClaimMaterialExpiresAt} is null))
     `),
     settingsActorCheck: check("companion_runtime_instances_settings_actor_check", sql`
       (${t.settingsActorId} is null or (char_length(${t.settingsActorId}) between 1 and 200 and ${t.settingsActorId} !~ E'[\\n\\r]'))
@@ -1129,10 +1124,7 @@ export const companionOperations = pgTable(
     targetRevisionCheck: check("companion_operations_target_revision_check", sql`(${t.targetSettingsRevision} is null or ${t.targetSettingsRevision} >= 1) and (${t.targetSkillsRevision} is null or ${t.targetSkillsRevision} >= 1) and ((${t.kind} in ('start','restart_pi','restart_box','apply_settings') and ${t.targetSettingsRevision} is not null and ${t.targetSkillsRevision} is not null) or (${t.kind} = 'stop' and ${t.targetSettingsRevision} is null and ${t.targetSkillsRevision} is not null) or (${t.kind} = 'delete' and ${t.targetSettingsRevision} is null and ${t.targetSkillsRevision} is null))`),
     resourceSnapshotCheck: check("companion_operations_resource_snapshot_check", sql`((${t.kind} = 'start' and ${t.clientSurface} is not null and (${t.modelId} is null or (char_length(${t.modelId}) between 1 and 200 and ${t.modelId} !~ E'[\n\r]')) and (${t.persona} is null or char_length(${t.persona}) <= 280) and ${t.canWriteSkills} is not null and jsonb_typeof(${t.providerIds}) = 'array' and jsonb_typeof(${t.selectedSkillIds}) = 'array' and jsonb_typeof(${t.skillRefs}) = 'array' and ${t.skillUpdateSelectedSkillIds} is null and ${t.skillUpdateRefs} is null and jsonb_typeof(${t.selectedMcpAccountIds}) = 'array') or (${t.kind} in ('restart_pi','restart_box','apply_settings') and ${t.clientSurface} is not null and (${t.modelId} is null or (char_length(${t.modelId}) between 1 and 200 and ${t.modelId} !~ E'[\n\r]')) and (${t.persona} is null or char_length(${t.persona}) <= 280) and ${t.canWriteSkills} is not null and jsonb_typeof(${t.providerIds}) = 'array' and jsonb_typeof(${t.selectedSkillIds}) = 'array' and jsonb_typeof(${t.skillRefs}) = 'array' and jsonb_typeof(${t.skillUpdateSelectedSkillIds}) = 'array' and jsonb_typeof(${t.skillUpdateRefs}) = 'array' and jsonb_typeof(${t.selectedMcpAccountIds}) = 'array') or (${t.kind} = 'stop' and ${t.clientSurface} is null and ${t.modelId} is null and ${t.persona} is null and ${t.canWriteSkills} is null and ${t.providerIds} is null and ${t.selectedSkillIds} is null and ${t.skillRefs} is null and jsonb_typeof(${t.skillUpdateSelectedSkillIds}) = 'array' and jsonb_typeof(${t.skillUpdateRefs}) = 'array' and ${t.selectedMcpAccountIds} is null) or (${t.kind} = 'delete' and ${t.clientSurface} is null and ${t.modelId} is null and ${t.persona} is null and ${t.canWriteSkills} is null and ${t.providerIds} is null and ${t.selectedSkillIds} is null and ${t.skillRefs} is null and ${t.skillUpdateSelectedSkillIds} is null and ${t.skillUpdateRefs} is null and ${t.selectedMcpAccountIds} is null))`),
     materialSnapshotCheck: check("companion_operations_material_snapshot_check", sql`
-      (${t.materialStagedAt} is not null or ${t.materialExpiresAt} is null)
-      and (${t.materialStagedAt} is null
-        or ${t.clientSurface} = 'native_mobile' and ${t.materialExpiresAt} is null
-        or ${t.clientSurface} in ('web','mobile_web') and ${t.materialExpiresAt} is not null)
+      (${t.materialStagedAt} is null) = (${t.materialExpiresAt} is null)
     `),
     providerOperationCheck: check("companion_operations_provider_operation_check", sql`${t.providerOperationId} is null or (char_length(${t.providerOperationId}) between 1 and 200 and ${t.providerOperationId} !~ E'[\\n\\r]')`),
     terminalCheck: check("companion_operations_terminal_check", sql`(${t.status} in ('succeeded','failed','interrupted','cancelled')) = (${t.settledAt} is not null)`),

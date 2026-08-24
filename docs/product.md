@@ -87,5 +87,6 @@ deployment management, or generic AI application builder. Scheduled Companion ro
 scope: Owner/Editor-gated cron prompts that enqueue ordinary turns. Webhook-fired Companion
 triggers are in scope: Owner/Editor-gated named prompts that an external webhook URL fires as
 ordinary turns. Chat files are in
-scope and bounded: images and documents sent with a message, and images Pi hands back from a turn. Native mobile remains outside Skills, Plugins, and Companion
-settings; it receives no injected Skills or MCP accounts.
+scope and bounded: images and documents sent with a message, and images Pi hands back from a turn.
+The native mobile app is a chat client at parity with the web thread; Skills, Plugins, and Companion
+settings management remain web surfaces.

@@ -151,52 +151,6 @@ describe("implicit settings activation", () => {
     expect(store.settlements[0]?.error?.code).toBe("pi_start_failed");
   });
 
-  it("activates native-mobile settings without claiming Skills or MCP layout", async () => {
-    const claim = settingsClaim({
-      clientSurface: "native_mobile",
-      targetSkillsRevision: 1,
-    });
-    const store = new MemoryRuntimeStore({
-      authorization: settingsAuthorization(claim, {
-        clientSurface: "native_mobile",
-        skillsRevision: 1,
-      }),
-    });
-    const ports = fakePorts(store);
-    ports.resourceStager.stageExistingBox = async (input) => {
-      expect(input.clientSurface).toBe("native_mobile");
-      expect(input.targetSkillsRevision).toBeNull();
-      return {
-        diskLayoutVersion: 14,
-        appliedSettingsRevision: input.targetSettingsRevision,
-        appliedSkillsRevision: null,
-        materialExpiresAt: null,
-      };
-    };
-    ports.pi.restartPiDaemon = async () => ({
-      state: "idle",
-      invocationId: "native-settings-pi",
-    });
-
-    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
-
-    expect(result.outcome).toBe("succeeded");
-    expect(store.authorization.piInvocationId).toBe("native-settings-pi");
-    expect(store.authorization.appliedSettingsRevision).toBe(2n);
-    expect(store.authorization.appliedSkillsRevision).toBe(1);
-    expect(store.observations).toEqual([expect.objectContaining({
-      piState: "idle",
-      piInvocationId: "native-settings-pi",
-      appliedSettingsRevision: 2n,
-    })]);
-    expect(store.observations[0]).not.toHaveProperty("appliedSkillsRevision");
-    expect(store.recordedMaterialSnapshots).toEqual([{
-      clientSurface: "native_mobile",
-      materialExpiresAt: null,
-    }]);
-    expect(store.publishedMaterialSnapshots).toEqual(["native-settings-pi"]);
-  });
-
   it("repeats stage and restart after takeover when the activation observation was lost", async () => {
     const claim = settingsClaim();
     const store = new MemoryRuntimeStore({

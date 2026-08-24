@@ -214,10 +214,10 @@ bounded bundled fallback; there is no global learned capability table.
 
 ## Resources and credentials
 
-Web and mobile-web starts resolve the actor's currently accessible selected Skills and member MCP
+Starts resolve the actor's currently accessible selected Skills and member MCP
 accounts. Runtime revalidates every id before staging. Empty selection means no library Skills or
-member MCP pins; the bundled Companion skill remains the Skills Hub bridge. Native mobile receives
-neither source. Native mobile authenticates email credentials directly or completes Google OAuth in
+member MCP pins; the bundled Companion skill remains the Skills Hub bridge.
+Native mobile authenticates email credentials directly or completes Google OAuth in
 the system browser, then keeps the same secure Better Auth cookie contract; new Google accounts may
 join a domain-matched organization or create a minimal workspace before entering chat. Companion
 ownership is not a resource-access fallback: an Editor cannot stage an

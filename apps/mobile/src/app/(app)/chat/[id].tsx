@@ -22,16 +22,33 @@ import {
   cancelTurn,
   getThread,
   listCompanions,
+  listPluginAccounts,
+  listSkillNames,
+  getProviders,
   retryTurn,
   sendMessage,
+  type PickedAttachment,
 } from "@/lib/api";
-import { ApiError, type Companion, type CompanionThread, type TranscriptEntry } from "@/lib/types";
+import {
+  ApiError,
+  type Companion,
+  type CompanionThread,
+  type NamedResource,
+  type TranscriptEntry,
+} from "@/lib/types";
 import { usePoll } from "@/lib/use-poll";
 import { uuid } from "@/lib/uuid";
 
 type ThreadResult = { thread: CompanionThread; raw: string };
-type PendingMessage = { id: string; content: string; failed: boolean };
+type PendingMessage = { id: string; content: string; files: PickedAttachment[]; failed: boolean };
 type ListItem = { kind: "entry"; entry: TranscriptEntry } | { kind: "pending"; pending: PendingMessage };
+
+/** Names the proposal cards may print. Loaded from this surface's own catalogs, never from Pi. */
+type ResourceNames = {
+  skills: NamedResource[];
+  plugins: NamedResource[];
+  models: NamedResource[];
+};
 
 function composerHint(thread: CompanionThread | null, name: string): string {
   if (!thread) return "Messages are saved before delivery.";
@@ -54,6 +71,7 @@ function pendingEntry(pending: PendingMessage): TranscriptEntry {
     ordinal: Number.MAX_SAFE_INTEGER,
     role: "user",
     content: pending.content,
+    reasoning: null,
     author_id: null,
     author_name: null,
     tool: null,
@@ -62,6 +80,15 @@ function pendingEntry(pending: PendingMessage): TranscriptEntry {
     trigger: null,
     turn_id: null,
     queued: !pending.failed,
+    // Staged ids are deliberately not uuids, so the list renders name chips and never fetches them.
+    attachments: pending.files.map((file, position) => ({
+      id: `staged-${position}`,
+      kind: "user_upload" as const,
+      content_type: file.type,
+      byte_size: file.byteSize,
+      filename: file.name,
+      position,
+    })),
     created_at: new Date().toISOString(),
   };
 }
@@ -87,6 +114,8 @@ export default function ChatScreen() {
   const router = useRouter();
   const [companion, setCompanion] = useState<Companion | null>(null);
   const [pending, setPending] = useState<PendingMessage[]>([]);
+  const [names, setNames] = useState<ResourceNames>({ skills: [], plugins: [], models: [] });
+  const [stoppingTurnId, setStoppingTurnId] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
   const [actionStatus, setActionStatus] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -129,10 +158,28 @@ export default function ChatScreen() {
     };
   }, [id]);
 
+  // Every lookup is display-only: a catalog that fails to load leaves ids unnamed, never blocks.
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.all([
+      listSkillNames().catch(() => []),
+      listPluginAccounts().catch(() => []),
+      getProviders()
+        .then((providers) => providers.catalog.flatMap((provider) =>
+          provider.models.map((model) => ({ id: model.id, label: model.name }))))
+        .catch(() => []),
+    ]).then(([skills, plugins, models]) => {
+      if (!cancelled) setNames({ skills, plugins, models });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
   const sendPending = useCallback(async (message: PendingMessage) => {
     setPending((items) => items.map((item) => item.id === message.id ? { ...item, failed: false } : item));
     try {
-      await sendMessage(id, message.content, message.id);
+      await sendMessage(id, message.content, message.id, message.files);
       setPending((items) => items.filter((item) => item.id !== message.id));
       poll.refresh();
     } catch {
@@ -140,8 +187,8 @@ export default function ChatScreen() {
     }
   }, [id, poll]);
 
-  const send = useCallback(async (content: string) => {
-    const message = { id: uuid(), content, failed: false };
+  const send = useCallback(async (content: string, files: readonly PickedAttachment[]) => {
+    const message = { id: uuid(), content, files: [...files], failed: false };
     setPending((items) => [...items, message]);
     await sendPending(message);
     return true;
@@ -165,6 +212,19 @@ export default function ChatScreen() {
   ) => {
     setThread(await answerDecision(id, decision, input));
   }, [id, setThread]);
+
+  /** Cancel a turn that has not settled: the active one from Stop, or a queued follow-up's row. */
+  const cancelUnsettled = useCallback(async (turnId: string) => {
+    setStoppingTurnId(turnId);
+    try {
+      setThread(await cancelTurn(id, turnId));
+    } catch {
+      // The turn may have settled or started between the tap and the request; the next poll answers.
+    } finally {
+      setStoppingTurnId(null);
+      poll.refresh();
+    }
+  }, [id, poll, setThread]);
 
   const retryInterrupted = async () => {
     const interrupted = thread?.interrupted_turn;
@@ -247,6 +307,7 @@ export default function ChatScreen() {
                 <MessageBubble
                   entry={pendingEntry(item.pending)}
                   own
+                  companionId={id}
                   failed={item.pending.failed}
                   onRetry={() => void sendPending(item.pending)}
                 />
@@ -258,23 +319,38 @@ export default function ChatScreen() {
               return (
                 <DecisionCard
                   decision={entry.decision}
+                  companionName={name}
                   canAct={thread?.can_send === true}
+                  skills={names.skills}
+                  plugins={names.plugins}
+                  models={names.models}
                   onDecide={(input) => decide(entry.decision!, input)}
                 />
               );
             }
+            const cancellable = entry.queued && entry.turn_id !== null && thread?.can_send === true;
             return (
               <MessageBubble
                 entry={entry}
                 own={entry.role === "user" && entry.author_id === thread?.viewer_id}
+                companionId={id}
                 companionIcon={icon}
+                onCancelQueued={cancellable ? () => void cancelUnsettled(entry.turn_id!) : undefined}
               />
             );
           }}
         />
       )}
 
-      {thread?.active_turn?.replying === true ? <ReplyingIndicator name={name} /> : null}
+      {thread?.active_turn?.replying === true ? (
+        <ReplyingIndicator
+          name={name}
+          stopping={stoppingTurnId === thread.active_turn.id}
+          onStop={thread.can_send
+            ? () => void cancelUnsettled(thread.active_turn!.id)
+            : undefined}
+        />
+      ) : null}
       {thread?.interrupted_turn ? (
         <InterruptedCard
           queuedCount={thread.queued_count}

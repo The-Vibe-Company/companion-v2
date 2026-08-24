@@ -85,7 +85,41 @@ export type CompanionToolRun = {
   title: string;
   status: "running" | "ok" | "error" | "timeout";
   detail: string | null;
+  /** A `data:image/...;base64,` frame of the Box desktop on a visual run, or null. */
+  screenshot: string | null;
 };
+
+export type CompanionConfigProposal = {
+  kind: "config";
+  add_skill_ids?: string[];
+  remove_skill_ids?: string[];
+  attach_plugin_ids?: string[];
+  detach_plugin_ids?: string[];
+  model_id?: string;
+  persona?: string | null;
+  connect_plugin?: { server_name: string; reason?: string };
+};
+
+export type CompanionRoutineProposal = {
+  kind: "routine";
+  name: string;
+  prompt: string;
+  cron: string;
+  timezone: string;
+};
+
+export type CompanionTriggerProposal = {
+  kind: "trigger";
+  name: string;
+  prompt: string;
+  provider: string;
+  target?: { repo?: string; events?: string[] };
+};
+
+export type CompanionDecisionProposal =
+  | CompanionConfigProposal
+  | CompanionRoutineProposal
+  | CompanionTriggerProposal;
 
 export type CompanionDecision = {
   request_id: string;
@@ -98,14 +132,61 @@ export type CompanionDecision = {
   decided_by_name: string | null;
   decided_at: string | null;
   expires_at: string;
-  proposal: { kind: "config" | "routine" | "trigger"; summary?: string } | null;
+  proposal: CompanionDecisionProposal | null;
 };
+
+export type CompanionAttachment = {
+  id: string;
+  kind: "user_upload" | "pi_output";
+  content_type: string;
+  byte_size: number;
+  filename: string;
+  position: number;
+};
+
+/** Mirrors of the contract's attachment bounds; the API re-validates every send. */
+export const ATTACHMENT_MAX_COUNT = 5;
+export const ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
+
+const ATTACHMENT_EXTENSION_TO_MIME = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+  ".pdf": "application/pdf",
+  ".csv": "text/csv",
+  ".txt": "text/plain",
+  ".md": "text/markdown",
+  ".markdown": "text/markdown",
+  ".json": "application/json",
+} satisfies Record<string, string>;
+
+const ATTACHMENT_MIME_TYPES = new Set<string>(Object.values(ATTACHMENT_EXTENSION_TO_MIME));
+
+export function isAttachmentImage(contentType: string): boolean {
+  return contentType.startsWith("image/");
+}
+
+/** The type a picked file declares, or null when this hub does not accept it at all. */
+export function declaredAttachmentContentType(file: { type: string; name: string }): string | null {
+  const declared = file.type.split(";")[0]?.trim().toLowerCase() ?? "";
+  if (ATTACHMENT_MIME_TYPES.has(declared)) return declared;
+  const extension = file.name.toLowerCase().match(/\.[^.]+$/)?.[0];
+  if (extension && extension in ATTACHMENT_EXTENSION_TO_MIME) {
+    // SAFETY: the `in` check above guarantees extension is one of this table's literal keys.
+    return ATTACHMENT_EXTENSION_TO_MIME[extension as keyof typeof ATTACHMENT_EXTENSION_TO_MIME];
+  }
+  return null;
+}
 
 export type TranscriptEntry = {
   event_id: string;
   ordinal: number;
   role: "user" | "assistant" | "system" | "tool" | "decision";
   content: string;
+  /** What Pi thought before it answered; only a reply carries it. */
+  reasoning: string | null;
   author_id: string | null;
   author_name: string | null;
   tool: CompanionToolRun | null;
@@ -114,6 +195,7 @@ export type TranscriptEntry = {
   trigger: { id: string | null; name: string } | null;
   turn_id: string | null;
   queued: boolean;
+  attachments: CompanionAttachment[];
   created_at: string;
 };
 
@@ -129,6 +211,9 @@ export type CompanionThread = {
   interrupted_turn: CompanionTurn | null;
   last_message_at: string | null;
 };
+
+/** A resource name this surface already loaded, so proposal cards never print Pi-supplied labels. */
+export type NamedResource = { id: string; label: string };
 
 export type ProviderDefinition = {
   id: string;

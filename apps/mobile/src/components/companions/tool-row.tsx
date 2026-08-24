@@ -1,4 +1,5 @@
 import { Ionicons } from "@expo/vector-icons";
+import { Image } from "expo-image";
 import { memo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 
@@ -28,6 +29,16 @@ export const ToolRow = memo(function ToolRow({ tool }: { tool: CompanionToolRun 
         <Text selectable className="border-t border-separator bg-surface-sunken p-3 font-mono text-xs leading-5 text-foreground">
           {tool.detail}
         </Text>
+      ) : null}
+      {open && tool.screenshot ? (
+        <View className="border-t border-separator bg-surface-sunken">
+          <Image
+            source={{ uri: tool.screenshot }}
+            accessibilityLabel="Box desktop when this run ended"
+            contentFit="contain"
+            style={{ width: "100%", height: 200 }}
+          />
+        </View>
       ) : null}
     </View>
   );

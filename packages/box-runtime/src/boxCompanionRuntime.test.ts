@@ -1249,32 +1249,19 @@ describe("staged Companion instructions", () => {
     expect(composedInstructions(undefined)).not.toContain("# This Companion");
   });
 
-  it("includes Skills Hub and the config catalog on web and mobile_web, not on native_mobile", () => {
-    for (const surface of ["web", "mobile_web"] as const) {
-      const text = composedInstructions(null, surface);
-      expect(text).toContain("Skills Hub");
-      expect(text).toContain("config-catalog.json");
-      expect(text).toContain("- Plugins:");
-      expect(text).toContain("- Routines:");
-      expect(text).toContain("- Triggers:");
-      expect(text).toContain(COMPANION_OUTBOX_INSTRUCTIONS);
-      expect(text).toContain("ask_user");
-      expect(text).toContain("propose_config");
-      expect(text).toContain("propose_routine");
-      expect(text).toContain("propose_trigger");
-    }
-    const native = composedInstructions(null, "native_mobile");
-    expect(native).not.toContain("Skills Hub");
-    expect(native).not.toContain("config-catalog.json");
-    expect(native).not.toContain("- Plugins:");
-    expect(native).not.toContain("- Skills:");
-    expect(native).toContain("- Routines:");
-    expect(native).toContain("- Triggers:");
-    expect(native).toContain(COMPANION_OUTBOX_INSTRUCTIONS);
-    expect(native).toContain("ask_user");
-    expect(native).toContain("propose_config");
-    expect(native).toContain("propose_routine");
-    expect(native).toContain("propose_trigger");
+  it("includes every staged capability for every Companion", () => {
+    const text = composedInstructions(null);
+    expect(text).toContain("Skills Hub");
+    expect(text).toContain("config-catalog.json");
+    expect(text).toContain("- Plugins:");
+    expect(text).toContain("- Skills:");
+    expect(text).toContain("- Routines:");
+    expect(text).toContain("- Triggers:");
+    expect(text).toContain(COMPANION_OUTBOX_INSTRUCTIONS);
+    expect(text).toContain("ask_user");
+    expect(text).toContain("propose_config");
+    expect(text).toContain("propose_routine");
+    expect(text).toContain("propose_trigger");
   });
 
   it("interpolates tool-run timeout constants rather than literals", () => {

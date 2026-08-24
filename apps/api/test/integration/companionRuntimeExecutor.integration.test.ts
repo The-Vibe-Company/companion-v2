@@ -2111,11 +2111,11 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       expect(await enqueueStop()).toEqual([{ ...stop[0], replayed: true }]);
 
       for (const [initialSurface, conflictingSurface] of [
-        ["web", "native_mobile"],
-        ["native_mobile", "web"],
+        ["web", "mobile_web"],
+        ["mobile_web", "web"],
       ] as const) {
         const startRequestId = randomUUID();
-        const enqueueStart = (surface: "web" | "native_mobile") => asApi({
+        const enqueueStart = (surface: "web" | "mobile_web") => asApi({
           orgId: ids.orgA,
           actorId: ids.editorA,
           action: (tx: Tx) => tx<Array<{ replayed: boolean }>>`
@@ -2533,14 +2533,13 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     }
   });
 
-  it("restages exactly once when warm material is missing, near expiry, or from another surface", async () => {
+  it("restages exactly once when warm material is missing or near expiry", async () => {
     if (!sql) throw new Error("runtime executor database is not initialized");
     const companions: string[] = [];
     try {
       for (const variant of [
         { name: "missing", boxId: "bx_2345678a", surface: "web", materialSurface: null, expires: null },
         { name: "near-expiry", boxId: "bx_2345678b", surface: "web", materialSurface: "web", expires: "2 hours 4 minutes" },
-        { name: "native-boundary", boxId: "bx_2345678c", surface: "native_mobile", materialSurface: "web", expires: "6 hours" },
       ] as const) {
         const [created] = await asApi({
           orgId: ids.orgA,
@@ -2673,8 +2672,8 @@ describe("Companion runtime executor PostgreSQL surface", () => {
   });
 
   it.each([
-    { from: "native_mobile", to: "web", oldPi: "pi-old-native", newPi: "pi-new-web" },
-    { from: "web", to: "native_mobile", oldPi: "pi-old-web", newPi: "pi-new-native" },
+    { from: "mobile_web", to: "web", oldPi: "pi-old-mobile", newPi: "pi-new-web" },
+    { from: "web", to: "mobile_web", oldPi: "pi-old-web", newPi: "pi-new-mobile" },
   ] as const)("invalidates a $from snapshot when an old executor observes a new $to Pi", async ({
     from,
     to,
@@ -2710,8 +2709,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         update companion_runtime_instances
         set material_client_surface = ${from}::public.companion_client_surface,
             material_pi_invocation_id = ${oldPi},
-            material_expires_at = CASE WHEN ${from} = 'native_mobile' THEN NULL
-              ELSE now() + interval '6 hours' END
+            material_expires_at = now() + interval '6 hours' 
         where companion_id = ${companionId}::uuid
       `;
 
@@ -4168,12 +4166,12 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     try {
       const claim = await claimWork();
       // An expired settings lease may leave its snapshot populated while higher-priority work is
-      // claimed. The fenced work actor/surface must win over that stale native-mobile claim.
+      // claimed. The fenced work actor/surface must win over that stale claim.
       await sql`
         update companion_runtime_instances
         set settings_claim_epoch = 77,
             settings_claim_actor_id = ${ids.viewerA},
-            settings_claim_client_surface = 'native_mobile',
+            settings_claim_client_surface = 'mobile_web',
             settings_claim_revision = desired_settings_revision,
             settings_claim_skills_revision = 1,
             settings_claim_can_write_skills = false,

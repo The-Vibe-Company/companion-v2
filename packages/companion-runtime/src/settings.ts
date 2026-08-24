@@ -4,7 +4,7 @@ import type { LeaseSession } from "./leaseSession";
 import type { RuntimeEngineDependencies } from "./ports";
 import { retryIdempotentLifecycle, type IdempotentLifecycleCall } from "./retry";
 import { activateRuntimeSettings } from "./settingsActivation";
-import type { RuntimeAuthorization, SettingsRuntimeClaim } from "./types";
+import type { RuntimeObservationInput, SettingsRuntimeClaim } from "./types";
 
 const SETTINGS_ACTIVATION_DEADLINE_MS = 10 * 60 * 1_000;
 
@@ -14,26 +14,18 @@ interface SettingsContext {
   deps: RuntimeEngineDependencies;
 }
 
-function snapshot(context: SettingsContext): {
-  authorization: RuntimeAuthorization;
-  clientSurface: SettingsRuntimeClaim["clientSurface"];
-  settingsRevision: bigint;
-  skillsRevision: number | null;
-  boxId: string;
-} {
+function snapshot(context: SettingsContext) {
   const authorization = context.session.authorization;
   const clientSurface = context.claim.clientSurface;
   const settingsRevision = context.claim.targetSettingsRevision;
-  const skillsRevision = clientSurface === "native_mobile"
-    ? null
-    : context.claim.targetSkillsRevision;
+  const skillsRevision = context.claim.targetSkillsRevision;
   if (
     !authorization?.authorized
     || !authorization.boxId
     || authorization.runtimeGeneration !== context.claim.runtimeGeneration
     || authorization.desiredSettingsRevision !== settingsRevision
-    || (clientSurface !== "native_mobile" && authorization.skillsRevision !== skillsRevision)
-    || (clientSurface !== "native_mobile" && skillsRevision === null)
+    || authorization.skillsRevision !== skillsRevision
+    || skillsRevision === null
   ) {
     throw new RuntimeInvariantError({
       code: "settings_snapshot_invalid",
@@ -139,16 +131,17 @@ export async function handleSettings(
         return await context.deps.pi.piDaemonStatus({ boxId: live.boxId, signal });
       }),
     });
-    await context.session.observe({
+    const observation: Omit<RuntimeObservationInput, "expectedSequence"> = {
       runtimeGeneration: context.claim.runtimeGeneration,
       observedAt: context.deps.clock.now(),
       piState: activated.piState,
       piInvocationId: activated.piInvocationId,
       appliedSettingsRevision: activated.appliedSettingsRevision,
-      ...(activated.appliedSkillsRevision === null
-        ? {}
-        : { appliedSkillsRevision: activated.appliedSkillsRevision }),
-    });
+    };
+    if (activated.appliedSkillsRevision !== null) {
+      observation.appliedSkillsRevision = activated.appliedSkillsRevision;
+    }
+    await context.session.observe(observation);
     await context.session.fencedMutation(async () =>
       await context.deps.store.publishMaterialSnapshot(context.session.fence, {
         piInvocationId: activated.piInvocationId,

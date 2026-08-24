@@ -4,6 +4,7 @@ import type {
   CompanionThread,
   CompanionTurn,
   CreateCompanionInput,
+  NamedResource,
   OnboardingContext,
   ProvidersResponse,
   Session,
@@ -152,22 +153,66 @@ export async function getThread(companionId: string): Promise<{ thread: Companio
   return { thread: (JSON.parse(raw) as { thread: CompanionThread }).thread, raw };
 }
 
+/** One staged file as the native pickers hand it over: a local uri plus its declared name/type. */
+export type PickedAttachment = { uri: string; name: string; type: string; byteSize: number };
+
+/** The file descriptor React Native's FormData accepts for a file part. */
+type NativeFormFilePart = { uri: string; name: string; type: string };
+/** FormData as React Native implements it; the DOM lib this project compiles against types Blob. */
+type NativeFormData = { append(name: string, value: string | NativeFormFilePart): void };
+
 export async function sendMessage(
   companionId: string,
   content: string,
   clientMessageId: string,
+  files: readonly PickedAttachment[] = [],
 ): Promise<CompanionTurn> {
-  return request<{ turn: CompanionTurn }>(
-    `/v1/companions/${encodeURIComponent(companionId)}/messages`,
-    {
+  const path = `/v1/companions/${encodeURIComponent(companionId)}/messages`;
+  if (files.length === 0) {
+    return request<{ turn: CompanionTurn }>(path, {
       method: "POST",
       body: JSON.stringify({
         content,
         client_message_id: clientMessageId,
-        client_surface: "native_mobile",
+        client_surface: "mobile_web",
       }),
-    },
-  ).then((result) => result.turn);
+    }).then((result) => result.turn);
+  }
+  const form = new FormData();
+  // SAFETY: React Native's runtime FormData accepts the file descriptor; only the compile-time DOM
+  // lib disagrees, so the append seam is re-typed once through the named contract above.
+  const nativeForm = form as NativeFormData;
+  nativeForm.append("content", content);
+  nativeForm.append("client_message_id", clientMessageId);
+  nativeForm.append("client_surface", "mobile_web");
+  for (const file of files) {
+    nativeForm.append("file", { uri: file.uri, name: file.name, type: file.type });
+  }
+  return request<{ turn: CompanionTurn }>(path, { method: "POST", body: form })
+    .then((result) => result.turn);
+}
+
+/** Where one attachment's bytes live; the route re-authorizes on every request. */
+export function attachmentUrl(companionId: string, attachmentId: string): string {
+  return `${apiUrl}/v1/companions/${encodeURIComponent(companionId)}/attachments/${encodeURIComponent(attachmentId)}`;
+}
+
+/** Session headers an image or download request must carry to that per-request route. */
+export function sessionHeaders() {
+  const headers = new Map<string, string>();
+  if (activeSession?.cookie) headers.set("cookie", activeSession.cookie);
+  if (activeSession?.orgId) headers.set("x-companion-org", activeSession.orgId);
+  return Object.fromEntries(headers);
+}
+
+export function listPluginAccounts(): Promise<NamedResource[]> {
+  return request<{ accounts: { id: string; label: string }[] }>("/v1/companion-plugins")
+    .then((result) => result.accounts.map((account) => ({ id: account.id, label: account.label })));
+}
+
+export function listSkillNames(): Promise<NamedResource[]> {
+  return request<{ id: string; slug: string }[]>("/v1/skills?lib=accessible")
+    .then((rows) => rows.map((row) => ({ id: row.id, label: row.slug })));
 }
 
 export function retryTurn(companionId: string, turnId: string, retryId: string): Promise<void> {
