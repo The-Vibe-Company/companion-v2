@@ -27,7 +27,6 @@ function jobs(overrides = {}, outputs = scopeOutputs) {
     "railway-containers": { result: "skipped" },
     browser: { result: "skipped" },
     "dependency-audit": { result: "skipped" },
-    "compatibility-node20": { result: "skipped" },
     coverage: { result: "skipped" },
     ...overrides,
   };
@@ -75,12 +74,9 @@ test("requires iOS quality whenever native or shared-contract scope is on", () =
   );
 });
 
-test("requires Node 20 on main pushes and Node 20 plus coverage weekly", () => {
-  assert.deepEqual(rejectedJobs(jobs(), "push"), ["compatibility-node20=skipped (required success)"]);
-  assert.deepEqual(rejectedJobs(jobs(), "schedule"), [
-    "compatibility-node20=skipped (required success)",
-    "coverage=skipped (required success)",
-  ]);
+test("requires coverage only for the weekly schedule", () => {
+  assert.deepEqual(rejectedJobs(jobs(), "push"), []);
+  assert.deepEqual(rejectedJobs(jobs(), "schedule"), ["coverage=skipped (required success)"]);
 });
 
 test("rejects failed, cancelled, and missing jobs even when scope disables them", () => {

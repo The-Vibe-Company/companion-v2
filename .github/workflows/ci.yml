@@ -653,49 +653,6 @@ jobs:
         # this isolated read while keeping the project's package manager pinned at 9.12.0.
         run: pnpm dlx pnpm@11.13.0 --pm-on-fail=ignore audit --prod --audit-level=high
 
-  compatibility-node20:
-    name: Compatibility Node 20
-    runs-on: ubuntu-latest
-    needs: scope
-    if: github.event_name == 'push' || github.event_name == 'schedule'
-    timeout-minutes: 20
-    env:
-      COMPANION_API_URL: http://127.0.0.1:13301
-      COMPANION_WEB_URL: http://127.0.0.1:13300
-      BETTER_AUTH_URL: http://127.0.0.1:13301
-      NEXT_PUBLIC_COMPANION_API_URL: http://127.0.0.1:13301
-      NEXT_PUBLIC_COMPANION_API_BASE: http://127.0.0.1:13300/v1
-      NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
-      NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-placeholder-anon-key
-    steps:
-      - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Set up pnpm
-        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 20
-          cache: pnpm
-
-      - name: Restore Node 20 cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: .turbo
-          key: turbo-node20-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-${{ github.sha }}-${{ github.run_attempt }}
-          restore-keys: turbo-node20-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Test anti-slop on Node 20
-        run: pnpm test:anti-slop
-
-      - name: Verify Node 20 compatibility
-        run: pnpm exec turbo run lint typecheck test build --continue=dependencies-successful --output-logs=errors-only
-
   coverage:
     name: Diagnostic Coverage
     runs-on: ubuntu-latest
@@ -744,7 +701,6 @@ jobs:
       - railway-containers
       - browser
       - dependency-audit
-      - compatibility-node20
       - coverage
     timeout-minutes: 5
     steps:
