@@ -49,3 +49,30 @@ Release builds ignore launch arguments and environment variables and always use
 The Debug-only `-glass-chat-demo`, `-glass-management-demo`, and
 `-glass-management-demo-plugins` launch arguments open interactive Liquid Glass showcases without
 requiring a server or account. They are excluded from Release behavior.
+
+## TestFlight release
+
+The `iOS TestFlight` workflow archives and uploads the Release app only after the matching `CI`
+workflow succeeds for an iOS change on `main`. It checks out that exact approved commit on the
+macOS 26 runner, verifies the complete approved push range, and checks the iPhoneOS 26 SDK before
+signing. It has no arbitrary-ref manual dispatch; an existing delivery can be retried from its
+GitHub Actions run. The workflow uses the protected `ios-testflight` environment and the
+`ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8`,
+`IOS_DISTRIBUTION_P12`, `IOS_DISTRIBUTION_P12_PASSWORD`, and `IOS_PROVISIONING_PROFILE` secrets. The
+signing certificate and profile are installed only in a temporary CI keychain and removed after the
+job.
+
+For an authorized local release, provide the same App Store Connect credentials without copying the
+private key into the repository:
+
+```bash
+ASC_KEY_ID="<key-id>" \
+ASC_ISSUER_ID="<issuer-id>" \
+ASC_KEY_PATH="/secure/path/AuthKey_<key-id>.p8" \
+IOS_PROVISIONING_PROFILE_SPECIFIER="Companion Native App Store 2026-08-24" \
+bash apps/ios/scripts/release.sh
+```
+
+The build number defaults to the current UTC second in `YYYYMMDDHHMMSS` form and can be overridden
+with `BUILD_NUMBER`. A successful export uploads to App Store Connect; it never submits the build
+for App Store review.
