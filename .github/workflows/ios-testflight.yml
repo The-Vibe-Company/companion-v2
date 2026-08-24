@@ -1,0 +1,72 @@
+name: iOS TestFlight
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/ios/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-testflight
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    name: Archive and upload native iOS
+    runs-on: macos-15
+    environment: ios-testflight
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install distribution signing assets
+        env:
+          IOS_DISTRIBUTION_P12: ${{ secrets.IOS_DISTRIBUTION_P12 }}
+          IOS_DISTRIBUTION_P12_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_P12_PASSWORD }}
+          IOS_PROVISIONING_PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE }}
+        run: |
+          keychain_path="$RUNNER_TEMP/companion-signing.keychain-db"
+          certificate_path="$RUNNER_TEMP/companion-distribution.p12"
+          profile_path="$HOME/Library/MobileDevice/Provisioning Profiles/e2dfd6f6-3e07-4168-bdf4-19adfc4c2c46.mobileprovision"
+          keychain_password="$(openssl rand -hex 32)"
+
+          printf '%s' "$IOS_DISTRIBUTION_P12" | base64 --decode > "$certificate_path"
+          mkdir -p "$(dirname "$profile_path")"
+          printf '%s' "$IOS_PROVISIONING_PROFILE" | base64 --decode > "$profile_path"
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" -P "$IOS_DISTRIBUTION_P12_PASSWORD" -t cert -f pkcs12 -k "$keychain_path" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+
+      - name: Archive and upload to App Store Connect
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          IOS_PROVISIONING_PROFILE_SPECIFIER: Companion Native App Store 2026-08-24
+          RELEASE_OUTPUT_DIR: ${{ runner.temp }}/companion-ios-release-${{ github.run_id }}-${{ github.run_attempt }}
+        run: bash apps/ios/scripts/release.sh
+
+      - name: Remove temporary signing assets
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/companion-signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/companion-distribution.p12"
+          rm -f "$HOME/Library/MobileDevice/Provisioning Profiles/e2dfd6f6-3e07-4168-bdf4-19adfc4c2c46.mobileprovision"
+
+      - name: Upload release diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ios-testflight-diagnostics
+          path: ${{ runner.temp }}/companion-ios-release-*/**/*.log
+          if-no-files-found: ignore
