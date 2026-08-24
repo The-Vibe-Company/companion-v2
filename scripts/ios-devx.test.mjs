@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { selectLatestIOSSimulator } from "./select-ios-simulator.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -151,8 +152,10 @@ test("CI builds iOS without secrets and isolates the live provider workflow", ()
   const e2e = read(".github/workflows/ios-e2e.yml");
 
   assert.match(ci, /^  ios-quality:$/m);
+  assert.match(ci, /^    runs-on: macos-26$/m);
   assert.match(ci, /xcodebuildmcp swift-package test --package-path apps\/ios\/CompanionKit/);
   assert.match(ci, /xcodebuildmcp simulator build/);
+  assert.match(ci, /node scripts\/select-ios-simulator\.mjs/);
   assert.match(e2e, /^  workflow_dispatch:$/m);
   assert.match(e2e, /^  schedule:$/m);
   assert.doesNotMatch(e2e, /^  pull_request:/m);
@@ -160,4 +163,23 @@ test("CI builds iOS without secrets and isolates the live provider workflow", ()
   assert.match(e2e, /COMPANION_BOX_API_KEY: \$\{\{ secrets\.COMPANION_BOX_E2E_API_KEY \}\}/);
   assert.match(e2e, /node scripts\/ios-e2e-fixture\.mjs prepare/);
   assert.match(e2e, /node scripts\/ios-e2e-fixture\.mjs cleanup/);
+});
+
+test("the CI simulator selector ignores other Apple platforms and chooses the latest iOS", () => {
+  const selected = selectLatestIOSSimulator({
+    data: {
+      simulators: [
+        { simulatorId: "vision", runtime: "visionOS 26.0", isAvailable: true },
+        { simulatorId: "ios-older", runtime: "iOS 25.4", isAvailable: true },
+        { simulatorId: "ios-unavailable", runtime: "iOS 27.0", isAvailable: false },
+        { simulatorId: "ios-latest", runtime: "iOS 26.5", isAvailable: true },
+      ],
+    },
+  });
+
+  assert.equal(selected.simulatorId, "ios-latest");
+  assert.throws(
+    () => selectLatestIOSSimulator({ data: { simulators: [{ simulatorId: "vision", runtime: "visionOS 26.0" }] } }),
+    /No available iOS simulator/,
+  );
 });

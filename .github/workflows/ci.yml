@@ -168,7 +168,7 @@ jobs:
 
   ios-quality:
     name: iOS Quality
-    runs-on: macos-15
+    runs-on: macos-26
     needs: scope
     if: needs.scope.outputs.ios == 'true'
     timeout-minutes: 25
@@ -188,18 +188,7 @@ jobs:
         id: simulator
         run: |
           xcodebuildmcp simulator list --output json > "$RUNNER_TEMP/simulators.json"
-          simulator_id="$(python3 - <<'PY'
-          import json
-          import os
-
-          with open(os.path.join(os.environ["RUNNER_TEMP"], "simulators.json"), encoding="utf-8") as source:
-              simulators = json.load(source).get("data", {}).get("simulators", [])
-          selected = next((item for item in simulators if item.get("isAvailable", True)), None)
-          if not selected:
-              raise SystemExit("No available iOS simulator")
-          print(selected["simulatorId"])
-          PY
-          )"
+          simulator_id="$(node scripts/select-ios-simulator.mjs "$RUNNER_TEMP/simulators.json")"
           echo "id=$simulator_id" >> "$GITHUB_OUTPUT"
 
       - name: Test CompanionKit
