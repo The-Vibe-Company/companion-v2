@@ -9,6 +9,7 @@ const SCOPE_OUTPUTS = [
   "containers",
   "dependencies",
   "skill",
+  "ios",
 ];
 
 function isTrue(value) {
@@ -31,6 +32,7 @@ export function rejectedJobs(jobs, eventName) {
     scope: true,
     hygiene: true,
     "skill-guards-macos": isTrue(outputs.skill),
+    "ios-quality": isTrue(outputs.ios),
     quality: isTrue(outputs.quality),
     "application-build": isTrue(outputs.build),
     "database-integration": isTrue(outputs.database),
