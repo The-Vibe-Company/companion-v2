@@ -18,6 +18,11 @@ enum AppConfig {
         return productionAPIURL
     }
 
+    static var callbackScheme: String {
+        Bundle.main.object(forInfoDictionaryKey: "CompanionURLScheme") as? String
+            ?? "dev.companion.mobile"
+    }
+
     private static func validURL(_ value: String?) -> URL? {
         guard let value, let url = URL(string: value), let scheme = url.scheme, url.host != nil else {
             return nil
