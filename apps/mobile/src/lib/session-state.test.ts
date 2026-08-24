@@ -5,6 +5,9 @@ import {
   isRevokedSessionStatus,
   onboardSession,
   parseStoredSession,
+  profileInitials,
+  renameSessionUser,
+  sameSessionAuthority,
   sessionFromIdentity,
   sessionRedirect,
 } from "./session-state";
@@ -56,6 +59,27 @@ describe("native session state", () => {
     expect(isRevokedSessionStatus(401)).toBe(true);
     expect(isRevokedSessionStatus(403)).toBe(false);
     expect(isRevokedSessionStatus(500)).toBe(false);
+  });
+
+  it("updates the cached profile name without changing session authority", () => {
+    expect(renameSessionUser(existingSession, "Ada Lovelace")).toEqual({
+      ...existingSession,
+      user: { ...existingSession.user, name: "Ada Lovelace" },
+    });
+  });
+
+  it("recognizes the same signed-in authority across identity refreshes", () => {
+    expect(sameSessionAuthority(
+      { ...existingSession, user: { ...existingSession.user, name: "Ada Lovelace" } },
+      existingSession,
+    )).toBe(true);
+    expect(sameSessionAuthority({ ...existingSession, cookie: "different" }, existingSession)).toBe(false);
+    expect(sameSessionAuthority(null, existingSession)).toBe(false);
+  });
+
+  it("matches the canonical first-two-token profile initials", () => {
+    expect(profileInitials("Ada Byron Lovelace")).toBe("AB");
+    expect(profileInitials("ada.lovelace@example.com")).toBe("AL");
   });
 
   it("cleans both persisted authorities on logout even when one store fails", async () => {

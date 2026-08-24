@@ -6,6 +6,7 @@ import {
   createOnboardingOrg,
   getOnboardingContext,
   joinOnboardingOrg,
+  updateProfile,
 } from "./api";
 
 const session = {
@@ -91,5 +92,18 @@ describe("mobile onboarding API", () => {
       org: { name: "Ada's workspace", autoJoin: false },
       invites: [],
     });
+  });
+
+  it("updates the signed-in profile through the self-service route", async () => {
+    configureApi(session);
+    const profile = { id: "user-1", name: "Ada Lovelace", initials: "AL" };
+    const fetchMock = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => Response.json(profile));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(updateProfile("Ada Lovelace")).resolves.toEqual(profile);
+    expect(fetchMock.mock.calls.at(0)?.[0]).toBe(`${apiUrl}/v1/users/me`);
+    const request = fetchMock.mock.calls.at(0)?.[1];
+    expect(request?.method).toBe("PUT");
+    expect(JSON.parse(String(request?.body))).toEqual({ name: "Ada Lovelace" });
   });
 });

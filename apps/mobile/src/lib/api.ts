@@ -99,6 +99,13 @@ export function whoami(): Promise<WhoAmI> {
   return request<WhoAmI>("/v1/auth/whoami");
 }
 
+export function updateProfile(name: string): Promise<{ id: string; name: string; initials: string }> {
+  return request("/v1/users/me", {
+    method: "PUT",
+    body: JSON.stringify({ name }),
+  });
+}
+
 export async function getOnboardingContext(): Promise<OnboardingContext> {
   try {
     return await request<OnboardingContext>(
