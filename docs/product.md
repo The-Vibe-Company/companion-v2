@@ -86,6 +86,7 @@ artifact surface outside the thread, harness selection, Box-provider marketplace
 deployment management, or generic AI application builder. Scheduled Companion routines are in
 scope: Owner/Editor-gated cron prompts that enqueue ordinary turns. Webhook-fired Companion
 triggers are in scope: Owner/Editor-gated named prompts that an external webhook URL fires as
-ordinary turns. Chat files are in
-scope and bounded: images and documents sent with a message, and images Pi hands back from a turn. Native mobile remains outside Skills, Plugins, and Companion
-settings; it receives no injected Skills or MCP accounts.
+ordinary turns. Chat files are in scope and bounded: images and documents sent with a message, and
+images Pi hands back from a turn. The iOS app is planned as a complete Companion client over the
+same API, not a reduced product surface: Skills, Plugins, MCP connections, files, routines,
+triggers, sharing, settings, and the remaining browser workflows migrate milestone by milestone.

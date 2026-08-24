@@ -16,17 +16,7 @@ icon = "play"
 command = "pnpm verify:change"
 icon = "test-tube"
 
-[scripts.run.mobile-ios]
+[scripts.run.ios]
 available_in = ["local"]
-command = "pnpm mobile:ios"
-icon = "smartphone"
-
-[scripts.run.mobile-android]
-available_in = ["local"]
-command = "pnpm mobile:android"
-icon = "smartphone"
-
-[scripts.run.mobile-metro]
-available_in = ["local"]
-command = "pnpm mobile:metro"
+command = "pnpm ios:dev"
 icon = "smartphone"

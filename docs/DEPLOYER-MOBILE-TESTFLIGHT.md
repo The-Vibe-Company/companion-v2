@@ -1,58 +1,64 @@
-# Déployer Companion mobile sur TestFlight
+# Déployer Companion iOS sur TestFlight
 
-L’application Expo autonome vit dans `apps/mobile`. Toutes les commandes EAS partent de la racine
-avec `pnpm mobile:eas …` : ce wrapper force la variante `production`, utilise la version exacte
-d’EAS CLI verrouillée dans le lockfile mobile et empêche la création accidentelle de l’identifiant
-local `dev.companion.mobile.dev` dans App Store Connect.
+L’application mobile est en cours de migration vers SwiftUI dans `apps/ios`. Le client Expo,
+EAS Build et EAS Update ont été retirés au début de la migration. Le client actuel sait restaurer
+une session, s’authentifier par e-mail ou Google, afficher les Companions et utiliser leur fil de
+discussion avec l’API `/v1` partagée. Le pipeline de livraison TestFlight reste à construire.
 
-## Configuration initiale
+Les builds TestFlight Expo déjà installés restent utilisables chez les testeurs, mais ils ne
+reçoivent plus de mise à jour. Il n’existe plus de mécanisme OTA ni de voie de secours EAS.
 
-Le projet utilise :
+## Identité conservée
 
-- l’organisation Expo `the-vibe-company` ;
-- l’identifiant iOS de production `dev.companion.mobile` ;
-- l’équipe Apple `K28B69CWQ7` ;
-- l’environnement EAS `production`, où `EXPO_PUBLIC_API_URL` vaut
-  `https://api.thecompanion.sh`.
+- bundle id Release : `dev.companion.mobile` ;
+- bundle id Debug : `dev.companion.mobile.dev` ;
+- équipe Apple : `K28B69CWQ7` ;
+- fiche App Store Connect : `6804447784`, « Companion (623507) » ;
+- nom affiché : `Companion (623507)` ;
+- nom de bundle : `Companion623507` ;
+- version marketing native initiale : `2.0.0`.
 
-Les certificats iOS et la clé App Store Connect sont gérés par EAS et ne sont jamais versionnés.
-La fiche App Store Connect porte l’identifiant `6804447784`, reporté dans
-`submit.production.ios.ascAppId` de `apps/mobile/eas.json`. Sans cet identifiant, une soumission non
-interactive peut échouer après le build. Apple ayant refusé le nom global déjà pris « Companion »,
-la fiche initiale a été créée sous « Companion (623507) » ; le nom public peut être remplacé dans
-App Store Connect quand un nom disponible est choisi, sans changer le nom affiché sous l’icône.
+Les valeurs Release sont définies dans `apps/ios/Config/Release.xcconfig` et ne doivent pas être
+surchargées par un argument de lancement. L’API de production reste épinglée à
+`https://api.thecompanion.sh`.
 
-`apps/mobile/pnpm-workspace.yaml` est volontairement présent même si l’application est exclue du
-workspace racine. EAS lance `pnpm install` sans l’option locale `--ignore-workspace` ; ce fichier
-garantit alors que le cloud utilise `apps/mobile/pnpm-lock.yaml` et trouve bien Expo.
+## État transitoire de la migration
 
-## Première livraison
+Après le merge du squelette natif, déconnecter manuellement l’intégration Expo↔GitHub dans le
+dashboard Expo. Sans cette action, les pushs sur `main` peuvent encore tenter de lancer un workflow
+EAS dont les fichiers n’existent plus.
 
-```bash
-pnpm mobile:release:test
-pnpm mobile:eas workflow:validate .eas/workflows/testflight.yml --non-interactive
-pnpm mobile:eas build --platform ios --profile production --auto-submit
-```
+Ne pas tenter une nouvelle livraison mobile avant que les deux éléments suivants soient présents et
+validés :
 
-Apple peut demander une connexion ou un code 2FA lors de la première configuration des
-identifiants. Une fois le build traité, gérer les testeurs et les informations de bêta dans App
-Store Connect > TestFlight.
+- `apps/ios/scripts/release.sh`, qui archive puis exporte avec `xcodebuild` et une clé App Store
+  Connect ;
+- `.github/workflows/ios-testflight.yml`, qui exécute cette commande sur macOS et utilise les
+  secrets `ASC_KEY_ID`, `ASC_ISSUER_ID` et `ASC_KEY_P8`.
 
-## Livraisons suivantes
+Avant la première livraison, configurer également `GOOGLE_CLIENT_ID` et `GOOGLE_CLIENT_SECRET` sur
+l’API publique. Vérifier dans la console Google que l’URL de rappel Better Auth de production est
+autorisée, puis réaliser une connexion Google complète depuis un build Release. Les tests mockés
+valident le contrat de redirection côté client, mais ne valident pas la configuration du fournisseur.
 
-Le workflow `.eas/workflows/testflight.yml` se déclenche sur `main` une fois GitHub relié au projet
-Expo avec `apps/mobile` comme répertoire de base. Il calcule l’empreinte native :
+Le futur numéro de build sera produit avec `date -u +%Y%m%d%H%M`, puis fourni à Xcode par
+`CURRENT_PROJECT_VERSION`. Cette valeur est monotone à la minute et ne dépend d’aucun état EAS.
 
-- nouvelle empreinte : build iOS puis soumission TestFlight ;
-- empreinte déjà construite : mise à jour EAS compatible, sans reconstruire le binaire.
-
-Commandes utiles :
+## Vérification locale actuelle
 
 ```bash
-pnpm mobile:eas build:list --platform ios
-pnpm mobile:eas update:list --branch production
-pnpm mobile:eas workflow:run .eas/workflows/testflight.yml
+xcodebuildmcp swift-package test --package-path apps/ios/CompanionKit
+xcodebuildmcp simulator build \
+  --workspace-path apps/ios/Companion.xcworkspace \
+  --scheme Companion \
+  --simulator-name "<simulateur disponible>" \
+  --extra-args CODE_SIGNING_ALLOWED=NO
 ```
 
-Pour revenir sur une mise à jour JavaScript, utiliser `pnpm mobile:eas update:republish --branch
-production`. Un binaire TestFlight se retire depuis App Store Connect.
+Pour le smoke test authentifié, fournir les variables `COMPANION_IOS_E2E_API_URL`,
+`COMPANION_IOS_E2E_EMAIL` et `COMPANION_IOS_E2E_PASSWORD` au test `CompanionKit`. Ce test doit rester
+un contrôle manuel ou de livraison disposant de secrets : il se connecte réellement, envoie un
+message au Companion de test Z.ai et attend une nouvelle réponse corrélée.
+
+La procédure d’archive, d’upload et de gestion des testeurs sera complétée avec le jalon TestFlight
+natif. Les testeurs restent gérés dans App Store Connect.
