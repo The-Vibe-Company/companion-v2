@@ -73,7 +73,7 @@ export interface CompanionRuntimeStageTiming {
   ok: boolean;
 }
 
-/** Credential-free snapshot Pi reads before proposing settings. Omitted on native_mobile. */
+/** Credential-free snapshot Pi reads before proposing settings. */
 export type CompanionConfigCatalog = {
   companion: {
     model_id: string | null;
@@ -251,14 +251,6 @@ const CONTROL_BUNDLE_RETRYABLE_STATUSES = new Set([408, 425, 429]);
 const SKILLS_TREE_REVISION_PATH = ".companion/runtime/state/skills-tree.version";
 const SKILLS_TREE_REUSED_MARKER = "companion-skills-tree-reused";
 const SKILLS_SNAPSHOT_CORRUPT_MARKER = "companion-skills-snapshot-corrupt";
-
-/** Skills a given surface actually receives; `native_mobile` gets none. */
-function injectedSkillsFor(input: {
-  clientSurface: CompanionClientSurface;
-  skills: CompanionRuntimeSkill[];
-}): CompanionRuntimeSkill[] {
-  return input.clientSurface === "native_mobile" ? [] : input.skills;
-}
 
 function skillsTreeRevisionOf(skills: CompanionRuntimeSkill[]): string {
   return createHash("sha256")
@@ -551,7 +543,7 @@ export const COMPANION_FILES_INSTRUCTIONS = [
   COMPANION_OUTBOX_INSTRUCTIONS,
 ].join("\n");
 
-function companionCapabilityInstructions(includeHub: boolean): string {
+function companionCapabilityInstructions(): string {
   const lines = [
     "# What you can do",
     "",
@@ -564,26 +556,22 @@ function companionCapabilityInstructions(includeHub: boolean): string {
     "- Triggers: a named prompt an external webhook fires. The person pastes a URL into a service they",
     "  control, and each event arrives here as an ordinary turn with a Trigger header and a bounded,",
     `  untrusted copy of the event payload. At most ${COMPANION_TRIGGER_MAX_PER_COMPANION} per Companion. You cannot create one yourself.`,
+    "- Skills: the skill packages selected for you are already installed and loaded. You do not install",
+    "  them to use them.",
+    "- Plugins: connected MCP servers appear as tools prefixed `mcp`. What is connected is what you have.",
+    "  An attached plugin also stages its own skill (for example `plugin-github` or `plugin-linear`)",
+    "  documenting that provider's tools, commits, and trigger wiring — read it before using the plugin.",
+    "- The Skills Hub: your workspace's skill library, its secrets, and its hosted skill databases are",
+    "  reachable over an authenticated API. You can publish and update skills, read secrets, and read and",
+    "  write skill-database state. The bundled `companion` skill documents every operation — read it",
+    "  before calling anything. That authority is the authority of the person whose settings staged this",
+    "  box: use it for what they asked for and nothing else. Your credentials for it live in the",
+    "  environment and rotate on every start; never print, copy, or write them anywhere.",
   ];
-  if (includeHub) {
-    lines.push(
-      "- Skills: the skill packages selected for you are already installed and loaded. You do not install",
-      "  them to use them.",
-      "- Plugins: connected MCP servers appear as tools prefixed `mcp`. What is connected is what you have.",
-      "  An attached plugin also stages its own skill (for example `plugin-github` or `plugin-linear`)",
-      "  documenting that provider's tools, commits, and trigger wiring — read it before using the plugin.",
-      "- The Skills Hub: your workspace's skill library, its secrets, and its hosted skill databases are",
-      "  reachable over an authenticated API. You can publish and update skills, read secrets, and read and",
-      "  write skill-database state. The bundled `companion` skill documents every operation — read it",
-      "  before calling anything. That authority is the authority of the person whose settings staged this",
-      "  box: use it for what they asked for and nothing else. Your credentials for it live in the",
-      "  environment and rotate on every start; never print, copy, or write them anywhere.",
-    );
-  }
   return lines.join("\n");
 }
 
-function companionConfigInstructions(includeCatalog: boolean): string {
+function companionConfigInstructions(): string {
   const body = [
     "# Changing your own configuration",
     "",
@@ -605,7 +593,6 @@ function companionConfigInstructions(includeCatalog: boolean): string {
     `- request_plugin_connection asks for a supported plugin connection (${COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS.join(", ")}) that does not exist yet.`,
     "  The person finishes it in the web UI; propose attaching it on a later turn.",
   ].join("\n");
-  if (!includeCatalog) return body;
   return [
     body,
     "",
@@ -691,27 +678,18 @@ export function parseOutboxManifest(stdout: string): CompanionOutboxEntry[] {
 /**
  * The staged instructions file: a constant operating brief, then the owner's persona as the last
  * word on voice. Composing it here rather than storing it keeps the brief out of every persona, out
- * of the 280-character persona budget, and identical for every Companion on a given surface.
- *
- * `native_mobile` stages no skills, MCP accounts, hub env, or config catalog, so that surface omits
- * the Skills / Plugins / Skills-Hub bullets and the catalog pointer. ask_user / propose_config /
- * propose_routine / propose_trigger stay: the interaction extension is staged for every surface, and
- * routines and triggers fire as ordinary turns on every surface.
+ * of the 280-character persona budget, and identical for every Companion.
  */
-export function composedInstructions(
-  persona?: string | null,
-  clientSurface: CompanionClientSurface = "web",
-): string {
+export function composedInstructions(persona?: string | null): string {
   const written = persona?.trim() ?? "";
-  const includeHub = clientSurface !== "native_mobile";
   const parts = [
     COMPANION_SITUATION_INSTRUCTIONS,
     COMPANION_THREAD_INSTRUCTIONS,
     COMPANION_MACHINE_INSTRUCTIONS,
     COMPANION_TURN_INSTRUCTIONS,
     COMPANION_FILES_INSTRUCTIONS,
-    companionCapabilityInstructions(includeHub),
-    companionConfigInstructions(includeHub),
+    companionCapabilityInstructions(),
+    companionConfigInstructions(),
   ];
   if (written) parts.push(`# This Companion\n\n${written}`);
   return `${parts.join("\n\n")}\n`;
@@ -2735,7 +2713,7 @@ fi`,
     configCatalog?: CompanionConfigCatalog | null;
     probe: { layoutCurrent: boolean; stdout: string };
   }): Promise<{ stagingMode: "refresh" | "skills"; skillBytesTransferred: number; skillsDigest: string }> {
-    const injectedSkills = injectedSkillsFor(input);
+    const injectedSkills = input.skills;
     const mcp = buildMcpAdapterInjection(input.mcpAccounts);
     const bundledSkill = injectedSkills.find((skill) => skill.slug === "companion");
     let skillsTreeRevision = skillsTreeRevisionOf(injectedSkills);
@@ -2794,7 +2772,7 @@ fi`,
         mode: 0o600,
       });
     }
-    if (input.clientSurface !== "native_mobile" && input.configCatalog) {
+    if (input.configCatalog) {
       controlFiles.push({
         path: ".companion/runtime/state/config-catalog.json",
         content: `${JSON.stringify(input.configCatalog)}\n`,
@@ -2804,7 +2782,7 @@ fi`,
     controlFiles.push(
       {
         path: ".companion/runtime/state/instructions.txt",
-        content: composedInstructions(input.instructions, input.clientSurface),
+        content: composedInstructions(input.instructions),
         mode: 0o600,
       },
       {
@@ -3329,7 +3307,7 @@ exit 1`;
         await this.#stagingProbe(box.id, {
           preserveSkills: input.preserveSkills === true,
           reuseSkills: input.reuseSkills === true,
-          skills: injectedSkillsFor(input),
+          skills: input.skills,
         }));
       if (!probed.layoutCurrent) {
         const layoutApplied = await this.#stageTimed("layout", async () =>

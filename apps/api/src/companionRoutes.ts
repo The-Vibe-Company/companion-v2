@@ -1730,7 +1730,7 @@ export function registerCompanionRoutes(
     companionId: string,
     requestId: string,
     kind: "start" | "stop" | "restart_pi" | "restart_box",
-    clientSurface: "web" | "mobile_web" | "native_mobile" = "web",
+    clientSurface: "web" | "mobile_web" = "web",
   ) {
     return tenant(c, ({ orgId, database }) => enqueueCompanionOperationV2({
       orgId,

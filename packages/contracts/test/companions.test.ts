@@ -327,8 +327,13 @@ describe("Companion chat contracts", () => {
     expect(sendCompanionMessageInputSchema.parse({
       content: "Ship it",
       client_message_id: clientMessageId,
+      client_surface: "mobile_web",
+    }).client_surface).toBe("mobile_web");
+    expect(() => sendCompanionMessageInputSchema.parse({
+      content: "Ship it",
+      client_message_id: clientMessageId,
       client_surface: "native_mobile",
-    }).client_surface).toBe("native_mobile");
+    })).toThrow();
     expect(() => sendCompanionMessageInputSchema.parse({ content: "Ship it" })).toThrow();
     expect(() => sendCompanionMessageInputSchema.parse({
       content: "Ship it",

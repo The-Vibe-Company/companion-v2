@@ -1300,7 +1300,7 @@ export function companionMessageEventId(clientMessageId: string): string {
   return `msg:${clientMessageId}`;
 }
 
-export const companionClientSurfaceSchema = z.enum(["web", "mobile_web", "native_mobile"]);
+export const companionClientSurfaceSchema = z.enum(["web", "mobile_web"]);
 export type CompanionClientSurface = z.infer<typeof companionClientSurfaceSchema>;
 
 export const sendCompanionMessageInputSchema = z.object({

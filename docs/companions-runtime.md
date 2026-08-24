@@ -180,10 +180,10 @@ immediately; the two-second sweep remains recovery rather than normal dispatch d
 Sending is the sole normal wake path. There is no Wake button and no first-keystroke prewarm. A cold
 send moves through durable start/dispatch checkpoints and finishes or fails explicitly within three
 minutes. A successful Pi prompt acknowledgement refreshes the Box TTL to six hours. That TTL is not
-credential freshness: before direct warm dispatch, a non-native material snapshot must remain valid
+credential freshness: before direct warm dispatch, the material snapshot must remain valid
 for the two-hour absolute turn deadline plus five minutes. A missing or shorter expiry creates the
 ordinary `start` operation, which restages and recycles Pi without restarting the Box. Runtime
-rechecks the same Pi-invocation binding, freshness, surface, and reserve under the lease immediately
+rechecks the same Pi-invocation binding, freshness, and reserve under the lease immediately
 before it claims a queued turn, so waiting behind another turn cannot consume the safety margin.
 The 0110 migration makes this a claim-protocol boundary as well as a data invariant. A pre-0110
 runtime may finish work it already holds but its legacy claim signature is quarantined and returns
@@ -429,7 +429,7 @@ finishes the connection in the web Plugins UI. Delivery to Pi uses the same `con
 `extension_ui_response` shape as other confirmations.
 
 Each staging writes a credential-free `config-catalog.json` (≤100 skills and plugins the settings
-actor can already name) so Pi can compose summaries without reading secrets. Native mobile omits it.
+actor can already name) so Pi can compose summaries without reading secrets.
 
 A `companion:routine:<name>` confirmation with a strict JSON `{summary, proposal}` body projects as
 `request_kind = routine_proposal`. Pi emits these through the staged `propose_routine` tool. The
@@ -591,10 +591,8 @@ constant operating brief plus the owner's persona line. The file carries no cred
 data. Pi receives it as `--append-system-prompt`. It lives at the same path within layout 14, so an
 existing Box gains the current brief at its next staging (`start`, `restart_pi`, `restart_box`, or
 `apply_settings`). `restart_pi` refreshes the same frozen credentials before it recycles the daemon.
-Native
-mobile receives a narrowed brief that omits Skills, plugins, the Skills Hub, and the config-catalog
-pointer, because that surface stages none of them. Routines, triggers, `propose_routine`, and
-`propose_trigger` stay on every surface: the interaction extension is staged for all of them, and a
+Routines, triggers, `propose_routine`, and
+`propose_trigger` are named for every Companion: the interaction extension is always staged, and a
 fire is an ordinary turn.
 
 **Outputs.** The layout-14 broker creates and empties `~/outbox` inside the serialized prompt
@@ -645,16 +643,14 @@ operator-safe message; Viewer receives a generic unavailable message.
 
 ## Skills, MCP, and provider credentials
 
-Web and mobile-web runtime work uses the checkpointed installed Skill versions plus the bundled
+Runtime work uses the checkpointed installed Skill versions plus the bundled
 Companion skill when the required revision is satisfied. Empty selection means no library Skills.
-Native mobile receives no Skills source.
 The control plane never executes package scripts.
 
 Member MCP accounts are selected by id, labeled, envelope-encrypted, and write-only. Runtime decrypts
 only accounts authorized for the current operation. Static credentials use the transient owner-only
 runtime channel. OAuth accounts stage only a stable generation and pinned HTTPS endpoint; access and
-refresh tokens are absent from durable Box JSON and `providers.env`. Native mobile receives no MCP
-accounts.
+refresh tokens are absent from durable Box JSON and `providers.env`.
 
 Provider connections are workspace-scoped and Owner/Admin-managed. Runtime resolves only the
 Companion's selected provider/model after ACL revalidation. API keys and OAuth refresh material stay
@@ -733,8 +729,8 @@ is bound and published only after a new idle Pi invocation proves activation. A 
 clears the proof as a mixed-version rollout guard. The
 runtime injects it as `COMPANION_DELEGATION_TOKEN` in `providers.env`, which is tmpfs-only, never
 snapshotted, and erased on stop; the bundled Companion skill's client already prefers that variable,
-so no client change is needed. `COMPANION_API_URL` is staged as `<origin>/v1` to match it. Native
-mobile stages no token, and a Companion whose settings actor has left the organization gets none.
+so no client change is needed. `COMPANION_API_URL` is staged as `<origin>/v1` to match it. A
+Companion whose settings actor has left the organization gets no token.
 
 Every request re-checks that the Companion still exists for the acting member, so deleting the
 Companion or removing that member refuses the live token at once — the token itself is never the
@@ -767,11 +763,17 @@ login captures `set-cookie`; Google login uses Better Auth's Expo authorization 
 browser, then adopts the returned cookie into the same chunked secure session. A new Google account
 completes an essential native onboarding by joining a domain-matched organization or creating a
 named workspace. The client resolves the current organization through `whoami` and sends the cookie
-plus `x-companion-org` on each REST request. Its v1 surface is deliberately chat-only: list, create,
-durable send/poll, `ask_user` decisions, and explicit interrupted-turn Retry/Cancel.
-Sends use `client_surface: native_mobile`, so runtime stages no library Skills, Skills Hub token,
-member MCP accounts, or config catalog for them. Provider connection, Plugins, Skills, routines,
-triggers, attachments, sharing, and Companion settings remain web surfaces.
+plus `x-companion-org` on each REST request. Its surface is deliberately chat-only, but the chat
+itself is at parity with the web thread: list, create, durable send/poll, message attachments (a
+multipart send and the per-request authorized attachment read, including Pi outbox files), every
+decision card — questions, shell/file permissions, and config/routine/trigger proposal
+Approve/Deny — Stop on the active turn, Cancel on queued turns, and explicit interrupted-turn
+Retry/Cancel. Proposal cards name skills, plugins, and models only from catalogs the client loaded
+itself (`/v1/skills?lib=accessible`, `/v1/companion-plugins`, `/v1/companion-providers`), never from
+the Pi payload. Sends use `client_surface: mobile_web` and stage exactly the same profile as any
+other client. Provider connection, Plugins,
+Skills, routines, and triggers management panels, sharing, and Companion settings remain web
+surfaces.
 
 Desktop remains Owner/Editor-only and never wakes Box. API performs user authorization, then sends a
 short-lived HMAC-authenticated request to a private runtime endpoint. Runtime revalidates access and

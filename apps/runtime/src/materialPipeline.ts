@@ -145,25 +145,23 @@ export function createRuntimeMaterialPipeline(input: {
         loadSkillArchive: input.loadSkillArchive,
         signal: stage.signal,
       });
-      const nativeMobile = stage.clientSurface === "native_mobile";
-      const hubCredential = nativeMobile ? undefined : hubTokensByMaterial.get(stage.material);
-      if (!nativeMobile && !hubCredential) {
+      const hubCredential = hubTokensByMaterial.get(stage.material);
+      if (!hubCredential) {
         throw new RuntimeMaterialError("runtime_material_invalid");
       }
       const hasOauth = oauthMaterialByMaterial.get(stage.material) ?? false;
       const mcpBrokerCredential = mcpBrokerTokensByMaterial.get(stage.material);
-      if (!nativeMobile && hasOauth && !mcpBrokerCredential) {
+      if (hasOauth && !mcpBrokerCredential) {
         throw new RuntimeMaterialError("runtime_material_invalid");
       }
-      const materialExpiresAt = nativeMobile
-        ? null
-        : earliestDate(hubCredential?.expiresAt ?? null, mcpBrokerCredential?.expiresAt ?? null);
-      const skills = nativeMobile
-        ? []
-        : [
-          input.bundledSkill,
-          ...resources.skills.filter((skill) => skill.slug !== COMPANION_SKILL_KEY),
-        ];
+      const materialExpiresAt = earliestDate(
+        hubCredential.expiresAt,
+        mcpBrokerCredential?.expiresAt ?? null,
+      );
+      const skills = [
+        input.bundledSkill,
+        ...resources.skills.filter((skill) => skill.slug !== COMPANION_SKILL_KEY),
+      ];
       // S3 reads and OAuth work above are asynchronous. Recheck the immutable ref tuples at the
       // final side-effect boundary so no local mutation can cross into Box unnoticed.
       assertRuntimeMaterialSnapshot({
@@ -180,32 +178,28 @@ export function createRuntimeMaterialPipeline(input: {
         replaceProviderAuth: true,
         instructions: stage.authorization.persona,
         modelId,
-        mcpCredentials: nativeMobile ? [] : resources.mcpCredentials,
-        mcpAccounts: nativeMobile ? [] : resources.mcpAccounts,
+        mcpCredentials: resources.mcpCredentials,
+        mcpAccounts: resources.mcpAccounts,
         skills,
         preserveSkills: stage.preserveInstalledSkills === true,
-        reuseSkills: !nativeMobile
-          && stage.preserveInstalledSkills !== true
+        reuseSkills: stage.preserveInstalledSkills !== true
           && stage.authorization.appliedSkillsRevision === stage.targetSkillsRevision,
         hubEnv: buildRuntimeHubEnvironment({
-          nativeMobile,
           apiUrl: input.apiUrl,
           orgId: stage.orgId,
           extraEnv: resources.extraEnv,
           hubCredential: hubCredential?.token,
           mcpBrokerCredential: mcpBrokerCredential?.token,
         }),
-        configCatalog: nativeMobile ? null : stage.material.configCatalog,
+        configCatalog: stage.material.configCatalog,
         signal: stage.signal,
       });
       return {
         diskLayoutVersion: observed.diskLayoutVersion,
         appliedSettingsRevision: stage.targetSettingsRevision,
-        appliedSkillsRevision: nativeMobile
-          ? null
-          : stage.preserveInstalledSkills
-            ? stage.authorization.appliedSkillsRevision
-            : stage.targetSkillsRevision,
+        appliedSkillsRevision: stage.preserveInstalledSkills
+          ? stage.authorization.appliedSkillsRevision
+          : stage.targetSkillsRevision,
         stagingMode: observed.stagingMode,
         skillBytesTransferred: observed.skillBytesTransferred,
         skillsDigest: observed.skillsDigest,
@@ -420,7 +414,6 @@ export function loadBundledCompanionRuntimeSkill(): Promise<CompanionRuntimeSkil
 }
 
 function buildRuntimeHubEnvironment(input: {
-  nativeMobile: boolean;
   apiUrl: string;
   orgId: string;
   extraEnv: RuntimeHubEnvironment;
@@ -428,7 +421,6 @@ function buildRuntimeHubEnvironment(input: {
   mcpBrokerCredential?: string;
 }): RuntimeHubEnvironment {
   const environment: RuntimeHubEnvironment = {};
-  if (input.nativeMobile) return environment;
   environment.COMPANION_API_URL = companionHubApiUrl(input.apiUrl);
   environment.COMPANION_WORKSPACE_ID = input.orgId;
   Object.assign(environment, input.extraEnv);
