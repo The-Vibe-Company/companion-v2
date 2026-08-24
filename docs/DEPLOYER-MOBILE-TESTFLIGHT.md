@@ -29,10 +29,19 @@ surchargées par un argument de lancement. L’API de production reste épinglé
 avec l’équipe Apple puis exporte avec `destination=upload`. L’export envoie le build à App Store
 Connect mais ne le soumet jamais à la revue App Store.
 
-`.github/workflows/ios-testflight.yml` exécute cette commande sur `macos-15` :
+`.github/workflows/ios-testflight.yml` exécute cette commande sur `macos-26`, après avoir vérifié
+que le SDK iPhoneOS 26 est actif :
 
-- automatiquement lorsqu’un changement `apps/ios/**` arrive sur `main` ;
-- manuellement avec `gh workflow run ios-testflight.yml --ref main`.
+- automatiquement lorsque le workflow `CI` du commit exact termine avec succès sur `main` et que
+  la plage complète `before → after` de ce push contient un changement `apps/ios/**` ;
+- en relance manuelle d’un run `iOS TestFlight` existant, qui conserve le même commit déjà validé.
+
+Le workflow ne propose pas de `workflow_dispatch` : une branche arbitraire ne peut donc pas modifier
+le script exécuté avec les secrets de signature. Le checkout de livraison est épinglé au
+`head_sha` du run `CI` réussi, et non à la dernière révision mouvante de `main`. Le job `Scope` de
+la CI transmet les SHA `before` et `after` dans un artefact lié au run ; la livraison vérifie que le
+SHA final correspond à l’événement avant d’inspecter tout le diff, y compris pour un push contenant
+plusieurs commits.
 
 Le job utilise l’environnement GitHub protégé `ios-testflight` et ses secrets `ASC_KEY_ID`,
 `ASC_ISSUER_ID`, `ASC_KEY_P8`, `IOS_DISTRIBUTION_P12`,

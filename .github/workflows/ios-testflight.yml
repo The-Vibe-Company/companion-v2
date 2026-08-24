@@ -1,14 +1,16 @@
 name: iOS TestFlight
 
 on:
-  workflow_dispatch:
-  push:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
     branches:
       - main
-    paths:
-      - "apps/ios/**"
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -16,14 +18,64 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  release-scope:
+    name: Select a CI-approved iOS commit
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      ios: ${{ steps.scope.outputs.ios }}
+      release_sha: ${{ steps.scope.outputs.release_sha }}
+    steps:
+      - name: Download the CI-approved push range
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ios-testflight-scope
+          path: ${{ runner.temp }}/ios-testflight-scope
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Checkout the CI-approved commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Detect native iOS changes
+        id: scope
+        env:
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+          TESTFLIGHT_BEFORE_SHA_FILE: ${{ runner.temp }}/ios-testflight-scope/before-sha
+          TESTFLIGHT_RELEASE_SHA_FILE: ${{ runner.temp }}/ios-testflight-scope/release-sha
+        run: node scripts/ios-testflight-scope.mjs
+
   upload:
     name: Archive and upload native iOS
-    runs-on: macos-15
+    needs: release-scope
+    if: needs.release-scope.outputs.ios == 'true'
+    runs-on: macos-26
     environment: ios-testflight
     timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.release-scope.outputs.release_sha }}
+
+      - name: Verify Xcode 26 toolchain
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          sdk_version="$(xcrun --sdk iphoneos --show-sdk-version)"
+          if [[ "$sdk_version" != 26.* ]]; then
+            echo "Expected the iPhoneOS 26 SDK, got $sdk_version" >&2
+            exit 1
+          fi
 
       - name: Install distribution signing assets
         env:
