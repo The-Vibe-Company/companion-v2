@@ -99,7 +99,8 @@ restarts anything, and they never appear in an operation snapshot or reach Pi.
 `companion_turns` stores one logical user request:
 
 - unique `(companion_id, client_message_id)`;
-- initiating `actor_id` and client surface;
+- initiating `actor_id` and the deprecated compatibility discriminator, when supplied by a legacy
+  client;
 - ordered queue position and durable state;
 - inactivity and absolute deadlines;
 - current attempt reference and terminal outcome;
@@ -429,7 +430,8 @@ finishes the connection in the web Plugins UI. Delivery to Pi uses the same `con
 `extension_ui_response` shape as other confirmations.
 
 Each staging writes a credential-free `config-catalog.json` (≤100 skills and plugins the settings
-actor can already name) so Pi can compose summaries without reading secrets. Native mobile omits it.
+actor can already name) so Pi can compose summaries without reading secrets. The iOS app uses this
+same full staging contract.
 
 A `companion:routine:<name>` confirmation with a strict JSON `{summary, proposal}` body projects as
 `request_kind = routine_proposal`. Pi emits these through the staged `propose_routine` tool. The
@@ -479,8 +481,8 @@ classified failures disable the routine. After delete, `routine_id` on historica
 and `routine_name` remains as the transcript header.
 
 `companion_api_read_thread` projects `routine {id, name}` on the originating user entry. The prompt
-stays in `content`; the web surface hides that bubble. The conversation-list projection masks it the
-same way: a routine-origin last message carries an empty `preview` and the `routine_name`, so no
+stays in `content`; first-party clients hide that bubble. The conversation-list projection masks it
+the same way: a routine-origin last message carries an empty `preview` and the `routine_name`, so no
 surface outside the thread reads the fire as a line the Owner typed.
 
 `next_fire_at` is stored with millisecond precision. The worker claims a routine, carries that
@@ -591,11 +593,10 @@ constant operating brief plus the owner's persona line. The file carries no cred
 data. Pi receives it as `--append-system-prompt`. It lives at the same path within layout 14, so an
 existing Box gains the current brief at its next staging (`start`, `restart_pi`, `restart_box`, or
 `apply_settings`). `restart_pi` refreshes the same frozen credentials before it recycles the daemon.
-Native
-mobile receives a narrowed brief that omits Skills, plugins, the Skills Hub, and the config-catalog
-pointer, because that surface stages none of them. Routines, triggers, `propose_routine`, and
-`propose_trigger` stay on every surface: the interaction extension is staged for all of them, and a
-fire is an ordinary turn.
+The full brief is the first-party contract. Only already-persisted Expo turns carrying the deprecated
+compatibility discriminator retain the narrowed historical staging behavior; new clients must not
+send that discriminator. Routines, triggers, `propose_routine`, and `propose_trigger` remain
+available in both the full contract and that compatibility path, and a fire is an ordinary turn.
 
 **Outputs.** The layout-14 broker creates and empties `~/outbox` inside the serialized prompt
 command, after proving Pi idle and immediately before prompt delivery. The positive ACK includes the
@@ -645,16 +646,15 @@ operator-safe message; Viewer receives a generic unavailable message.
 
 ## Skills, MCP, and provider credentials
 
-Web and mobile-web runtime work uses the checkpointed installed Skill versions plus the bundled
+First-party Companion runtime work uses the checkpointed installed Skill versions plus the bundled
 Companion skill when the required revision is satisfied. Empty selection means no library Skills.
-Native mobile receives no Skills source.
 The control plane never executes package scripts.
 
 Member MCP accounts are selected by id, labeled, envelope-encrypted, and write-only. Runtime decrypts
 only accounts authorized for the current operation. Static credentials use the transient owner-only
 runtime channel. OAuth accounts stage only a stable generation and pinned HTTPS endpoint; access and
-refresh tokens are absent from durable Box JSON and `providers.env`. Native mobile receives no MCP
-accounts.
+refresh tokens are absent from durable Box JSON and `providers.env`. The iOS app receives the same
+authorized MCP account contract as the rest of the product.
 
 Provider connections are workspace-scoped and Owner/Admin-managed. Runtime resolves only the
 Companion's selected provider/model after ACL revalidation. API keys and OAuth refresh material stay
@@ -733,8 +733,9 @@ is bound and published only after a new idle Pi invocation proves activation. A 
 clears the proof as a mixed-version rollout guard. The
 runtime injects it as `COMPANION_DELEGATION_TOKEN` in `providers.env`, which is tmpfs-only, never
 snapshotted, and erased on stop; the bundled Companion skill's client already prefers that variable,
-so no client change is needed. `COMPANION_API_URL` is staged as `<origin>/v1` to match it. Native
-mobile stages no token, and a Companion whose settings actor has left the organization gets none.
+so no client change is needed. `COMPANION_API_URL` is staged as `<origin>/v1` to match it. Only the
+deprecated Expo compatibility path stages no token, and a Companion whose settings actor has left
+the organization gets none.
 
 Every request re-checks that the Companion still exists for the acting member, so deleting the
 Companion or removing that member refuses the live token at once — the token itself is never the
@@ -760,18 +761,23 @@ The following always read PostgreSQL only:
 The web polls every three seconds while a turn or lifecycle operation is active and returns to a
 slower cadence when stable. There is no SSE and no Box-to-control-plane push agent.
 
-### Native mobile app
+### iOS app
 
-The standalone Expo client in `apps/mobile` reuses the existing Better Auth cookie session. Email
-login captures `set-cookie`; Google login uses Better Auth's Expo authorization proxy and the system
-browser, then adopts the returned cookie into the same chunked secure session. A new Google account
-completes an essential native onboarding by joining a domain-matched organization or creating a
-named workspace. The client resolves the current organization through `whoami` and sends the cookie
-plus `x-companion-org` on each REST request. Its v1 surface is deliberately chat-only: list, create,
-durable send/poll, `ask_user` decisions, and explicit interrupted-turn Retry/Cancel.
-Sends use `client_surface: native_mobile`, so runtime stages no library Skills, Skills Hub token,
-member MCP accounts, or config catalog for them. Provider connection, Plugins, Skills, routines,
-triggers, attachments, sharing, and Companion settings remain web surfaces.
+The SwiftUI client is being rebuilt in `apps/ios` for iOS 17 and later; Android is not supported.
+The initial skeleton does not yet ship authentication or product workflows, but its target is full
+feature parity over the existing `/v1` API rather than a separate or reduced mobile API. It reuses
+the existing Better Auth cookie session: email login captures `set-cookie`, while Google login uses
+Better Auth's authorization proxy and the system browser before adopting the returned cookie into
+Keychain-backed session state. A new Google account completes onboarding by joining a
+domain-matched organization or creating a named workspace. The app resolves the current
+organization through `whoami` and sends the cookie plus `x-companion-org` on each REST request.
+Skills, Plugins, MCP connections, files, routines, triggers, sharing, settings, Companion chat, and
+control-plane workflows all migrate to this same client milestone by milestone.
+
+The new iOS app does not send `client_surface: native_mobile`; omitting that optional field selects
+the API's existing full first-party contract. The discriminator remains accepted temporarily for
+compatibility with already-installed Expo builds and durable historical rows, but it is not an iOS
+product boundary and must not constrain the migration roadmap.
 
 Desktop remains Owner/Editor-only and never wakes Box. API performs user authorization, then sends a
 short-lived HMAC-authenticated request to a private runtime endpoint. Runtime revalidates access and

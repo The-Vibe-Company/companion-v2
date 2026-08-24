@@ -16,7 +16,7 @@ const HYGIENE_TESTS = [
   "scripts/ci-playwright-policy.test.mjs",
   "scripts/ci-gate.test.mjs",
   "scripts/lint-anti-slop.test.mjs",
-  "scripts/mobile-devx.test.mjs",
+  "scripts/ios-devx.test.mjs",
   "scripts/verify-change.test.mjs",
 ];
 

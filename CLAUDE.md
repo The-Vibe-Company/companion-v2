@@ -115,8 +115,10 @@ and runtime database URL only to `apps/runtime` without changing the published w
   names it: web, subagents, memory, files/outbox, skills, plugins, the Skills Hub, ask_user,
   propose_config, request_plugin_connection, routines (`propose_routine`), and triggers
   (`propose_trigger`). Interpolate the real
-  constants rather than literals. Omit what a surface does not receive (`native_mobile`). Do not
-  describe a capability the Box does not have. Voice stays in the persona line.
+  constants rather than literals. First-party clients share one Companion API and capability
+  contract; the iOS app must not request reduced staging through a client-surface discriminator or
+  invent mobile-only endpoints. Do not describe a capability the Box does not have. Voice stays in
+  the persona line.
 - A turn stalls after ten minutes without correlated activity and has a two-hour absolute deadline.
   A timed-out or ambiguous turn becomes visible and actionable; it never appears to reply forever.
 - Retry creates a new attempt and warns that earlier external effects may have succeeded. Cancel
