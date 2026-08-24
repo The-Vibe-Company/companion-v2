@@ -15,23 +15,24 @@ struct LoginView: View {
     private enum Field { case email, password }
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 30) {
-                Spacer(minLength: 72)
-                brand
-                form
-                Text("Use the same account and workspace as every other Companion client.")
-                    .font(.footnote)
-                    .foregroundStyle(Color.companionMuted)
-                    .multilineTextAlignment(.center)
-                Spacer(minLength: 32)
+        CompanionBackdrop {
+            ScrollView {
+                VStack(spacing: 28) {
+                    Spacer(minLength: 64)
+                    brand
+                    form
+                    Text("Use the same account and workspace as every other Companion client.")
+                        .font(.footnote)
+                        .foregroundStyle(Color.companionMuted)
+                        .multilineTextAlignment(.center)
+                    Spacer(minLength: 32)
+                }
+                .frame(maxWidth: 500)
+                .padding(.horizontal, 24)
+                .frame(maxWidth: .infinity)
             }
-            .frame(maxWidth: 500)
-            .padding(.horizontal, 24)
-            .frame(maxWidth: .infinity)
+            .scrollDismissesKeyboard(.interactively)
         }
-        .scrollDismissesKeyboard(.interactively)
-        .background(Color.companionCanvas)
     }
 
     private var brand: some View {
@@ -39,14 +40,9 @@ struct LoginView: View {
             Image("CompanionMark")
                 .resizable()
                 .scaledToFit()
-                .padding(7)
-                .frame(width: 74, height: 74)
-                .background(Color.companionSurface)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(Color.companionBorder, lineWidth: 0.5)
-                }
+                .padding(12)
+                .frame(width: 82, height: 82)
+                .companionGlass(radius: 24)
                 .accessibilityLabel("Companion")
             VStack(spacing: 6) {
                 Text("Companion").font(.title2.weight(.semibold))
@@ -74,17 +70,10 @@ struct LoginView: View {
                     Text(googleBusy ? "Opening Google…" : "Continue with Google")
                         .frame(maxWidth: .infinity)
                 }
-                .foregroundStyle(.primary)
-                .padding(.horizontal, 16)
+                .foregroundStyle(Color.companionInk)
                 .frame(minHeight: 48)
-                .background(Color.companionSurface)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .stroke(Color.companionBorder, lineWidth: 0.5)
-                }
-                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.glass)
             .disabled(busy || googleBusy)
             .accessibilityIdentifier("login.google")
 
@@ -145,18 +134,14 @@ struct LoginView: View {
                 }
                 .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.glassProminent)
+            .tint(Color.companionAccent)
             .controlSize(.large)
             .disabled(busy || googleBusy || email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || password.isEmpty)
             .accessibilityIdentifier("login.submit")
         }
         .padding(20)
-        .background(Color.companionSurface)
-        .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(Color.companionBorder, lineWidth: 0.5)
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .companionGlass(radius: 26)
     }
 
     private func submit() {
@@ -209,12 +194,7 @@ private extension View {
         self
             .padding(.horizontal, 12)
             .frame(minHeight: 48)
-            .background(Color.companionCanvas)
-            .overlay {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(Color.companionBorder, lineWidth: 0.5)
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .companionGlass(radius: 14, interactive: true)
     }
 }
 

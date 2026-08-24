@@ -37,6 +37,22 @@ public actor APIClient {
         let thread: CompanionThread
     }
 
+    private struct CompanionEnvelope: Decodable {
+        let companion: CompanionSummary
+    }
+
+    private struct ProviderConnectionEnvelope: Decodable {
+        let connection: CompanionProviderConnection
+    }
+
+    private struct PluginListEnvelope: Decodable {
+        let accounts: [CompanionPluginAccount]
+    }
+
+    private struct PluginAccountEnvelope: Decodable {
+        let account: CompanionPluginAccount
+    }
+
     private struct SocialSignInResponse: Decodable {
         let url: URL
         let redirect: Bool
@@ -47,6 +63,7 @@ public actor APIClient {
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
     private var authority: Session?
+    private var providerOAuthCookie: String?
 
     public init(baseURL: URL, session: URLSession? = nil) {
         self.baseURL = baseURL
@@ -171,6 +188,158 @@ public actor APIClient {
         try await decode(CompanionListEnvelope.self, path: "/v1/companions").companions
     }
 
+    public func createCompanion(_ input: CreateCompanionInput) async throws -> CompanionSummary {
+        let body = try encoder.encode(input)
+        return try await decode(
+            CompanionEnvelope.self,
+            path: "/v1/companions",
+            method: "POST",
+            body: body
+        ).companion
+    }
+
+    public func listCompanionProviders() async throws -> CompanionProvidersResponse {
+        try await decode(CompanionProvidersResponse.self, path: "/v1/companion-providers")
+    }
+
+    public func saveCompanionProvider(
+        providerID: String,
+        credential: String
+    ) async throws -> CompanionProviderConnection {
+        let id = providerID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? providerID
+        let body = try encoder.encode([
+            "auth_method": "api_key",
+            "credential": credential,
+        ])
+        return try await decode(
+            ProviderConnectionEnvelope.self,
+            path: "/v1/companion-providers/\(id)",
+            method: "PUT",
+            body: body
+        ).connection
+    }
+
+    public func setDefaultCompanionProvider(providerID: String) async throws {
+        let body = try encoder.encode(["provider_id": providerID])
+        _ = try await perform(
+            path: "/v1/companion-providers/default",
+            method: "PUT",
+            body: body
+        )
+    }
+
+    public func deleteCompanionProvider(providerID: String) async throws {
+        let id = providerID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? providerID
+        _ = try await perform(
+            path: "/v1/companion-providers/\(id)",
+            method: "DELETE",
+            body: nil
+        )
+    }
+
+    public func startCompanionProviderOAuth(
+        providerID: String
+    ) async throws -> CompanionProviderOAuthStart {
+        let body = try encoder.encode(["provider_id": providerID])
+        let (data, response) = try await perform(
+            path: "/v1/companion-providers/oauth/start",
+            method: "POST",
+            body: body,
+            timeout: 35
+        )
+        guard let cookie = Self.cookie(suffix: "companion_provider_oauth", from: response) else {
+            throw APIError(
+                status: 500,
+                code: "missing_oauth_session",
+                message: "The server did not return a provider sign-in session."
+            )
+        }
+        providerOAuthCookie = cookie
+        do {
+            return try decoder.decode(CompanionProviderOAuthStart.self, from: data)
+        } catch {
+            providerOAuthCookie = nil
+            throw APIError(status: 500, code: "invalid_response", message: "The provider sign-in response was unreadable.")
+        }
+    }
+
+    public func completeCompanionProviderOAuth(
+        authorizationCode: String
+    ) async throws -> CompanionProviderConnection {
+        let body = try encoder.encode(["authorization_code": authorizationCode])
+        let result = try await decode(
+            ProviderConnectionEnvelope.self,
+            path: "/v1/companion-providers/oauth/complete",
+            method: "POST",
+            body: body,
+            additionalHeaders: providerOAuthHeaders(),
+            timeout: 35
+        ).connection
+        providerOAuthCookie = nil
+        return result
+    }
+
+    public func pollCompanionProviderOAuth() async throws -> CompanionProviderOAuthPoll {
+        let result = try await decode(
+            CompanionProviderOAuthPoll.self,
+            path: "/v1/companion-providers/oauth/poll",
+            method: "POST",
+            body: nil,
+            additionalHeaders: providerOAuthHeaders(),
+            timeout: 65
+        )
+        if result.status == .connected { providerOAuthCookie = nil }
+        return result
+    }
+
+    public func cancelCompanionProviderOAuth() {
+        providerOAuthCookie = nil
+    }
+
+    public func listCompanionPlugins() async throws -> [CompanionPluginAccount] {
+        try await decode(PluginListEnvelope.self, path: "/v1/companion-plugins").accounts
+    }
+
+    public func saveCompanionPlugin(
+        _ input: SaveCompanionPluginInput
+    ) async throws -> CompanionPluginAccount {
+        let body = try encoder.encode(input)
+        return try await decode(
+            PluginAccountEnvelope.self,
+            path: "/v1/companion-plugins",
+            method: "POST",
+            body: body
+        ).account
+    }
+
+    /// Builds the authenticated POST loaded by the in-app OAuth browser. Performing the start
+    /// request inside that browser keeps its short-lived, HttpOnly callback cookie in the same
+    /// isolated cookie store as the provider redirect without introducing a mobile-only API.
+    public func companionPluginOAuthRequest(
+        serverName: String,
+        label: String
+    ) throws -> URLRequest {
+        let body = try encoder.encode([
+            "server_name": serverName,
+            "label": label,
+        ])
+        return try makeRequest(
+            path: "/v1/companion-plugins/oauth/start",
+            method: "POST",
+            body: body,
+            timeout: 12
+        )
+    }
+
+    public func deleteCompanionPlugin(accountID: String) async throws {
+        let id = accountID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? accountID
+        _ = try await perform(
+            path: "/v1/companion-plugins/\(id)",
+            method: "DELETE",
+            body: nil
+        )
+    }
+
     public func thread(companionID: String) async throws -> CompanionThread {
         let id = companionID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? companionID
         return try await decode(ThreadEnvelope.self, path: "/v1/companions/\(id)/thread").thread
@@ -196,14 +365,34 @@ public actor APIClient {
         _ type: T.Type,
         path: String,
         method: String = "GET",
-        body: Data? = nil
+        body: Data? = nil,
+        additionalHeaders: [String: String] = [:],
+        timeout: TimeInterval = 30
     ) async throws -> T {
-        let (data, _) = try await perform(path: path, method: method, body: body)
+        let (data, _) = try await perform(
+            path: path,
+            method: method,
+            body: body,
+            timeout: timeout,
+            additionalHeaders: additionalHeaders
+        )
         do {
             return try decoder.decode(type, from: data)
         } catch {
             throw APIError(status: 500, code: "invalid_response", message: "The server returned an unreadable response.")
         }
+    }
+
+    private func providerOAuthHeaders() throws -> [String: String] {
+        guard let providerOAuthCookie else {
+            throw APIError(
+                status: 400,
+                code: "oauth_not_started",
+                message: "Start provider sign-in before completing it."
+            )
+        }
+        let cookies = [authority?.cookie, providerOAuthCookie].compactMap { $0 }
+        return ["Cookie": cookies.joined(separator: "; ")]
     }
 
     @discardableResult
@@ -216,28 +405,13 @@ public actor APIClient {
         timeout: TimeInterval = 30,
         additionalHeaders: [String: String] = [:]
     ) async throws -> (Data, HTTPURLResponse) {
-        guard let url = URL(string: path, relativeTo: baseURL) else {
-            throw APIError(status: 0, code: "invalid_url", message: "The API address is invalid.")
-        }
-        var request = URLRequest(url: url)
-        request.httpMethod = method
-        request.httpBody = body
-        request.timeoutInterval = timeout
-        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
-        if let authority {
-            request.setValue(authority.cookie, forHTTPHeaderField: "Cookie")
-            if let orgID = authority.orgID {
-                request.setValue(orgID, forHTTPHeaderField: "x-companion-org")
-            }
-        }
-        if method != "GET" && method != "HEAD" && additionalHeaders["expo-origin"] == nil {
-            request.setValue(baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")), forHTTPHeaderField: "Origin")
-        }
-        for (name, value) in additionalHeaders {
-            request.setValue(value, forHTTPHeaderField: name)
-        }
+        let request = try makeRequest(
+            path: path,
+            method: method,
+            body: body,
+            timeout: timeout,
+            additionalHeaders: additionalHeaders
+        )
 
         let data: Data
         let response: URLResponse
@@ -266,6 +440,41 @@ public actor APIClient {
             )
         }
         return (data, http)
+    }
+
+    private func makeRequest(
+        path: String,
+        method: String,
+        body: Data?,
+        timeout: TimeInterval,
+        additionalHeaders: [String: String] = [:]
+    ) throws -> URLRequest {
+        guard let url = URL(string: path, relativeTo: baseURL) else {
+            throw APIError(status: 0, code: "invalid_url", message: "The API address is invalid.")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.httpBody = body
+        request.timeoutInterval = timeout
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
+        if let authority {
+            request.setValue(authority.cookie, forHTTPHeaderField: "Cookie")
+            if let orgID = authority.orgID {
+                request.setValue(orgID, forHTTPHeaderField: "x-companion-org")
+            }
+        }
+        if method != "GET" && method != "HEAD" && additionalHeaders["expo-origin"] == nil {
+            request.setValue(
+                baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")),
+                forHTTPHeaderField: "Origin"
+            )
+        }
+        for (name, value) in additionalHeaders {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
+        return request
     }
 
     static func sessionCookie(from response: HTTPURLResponse) -> String? {

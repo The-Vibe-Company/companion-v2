@@ -49,7 +49,7 @@ test("Debug and Release keep distinct native identities and API contracts", () =
   assert.match(shared, /^MARKETING_VERSION = 2\.0\.0$/m);
   assert.match(shared, /^DEVELOPMENT_TEAM = K28B69CWQ7$/m);
   assert.match(shared, /^SWIFT_VERSION = 6\.0$/m);
-  assert.match(shared, /^IPHONEOS_DEPLOYMENT_TARGET = 17\.0$/m);
+  assert.match(shared, /^IPHONEOS_DEPLOYMENT_TARGET = 26\.0$/m);
   assert.match(debug, /^PRODUCT_BUNDLE_IDENTIFIER = dev\.companion\.mobile\.dev$/m);
   assert.match(debug, /^COMPANION_URL_SCHEME = dev\.companion\.mobile\.dev$/m);
   assert.match(debug, /127\.0\.0\.1:3001/);
@@ -109,6 +109,29 @@ test("the Expo client and its repository-local skills are gone", () => {
     for (const skill of ["eas-app-stores", "eas-workflows", "expo-overview", "expo-router", "vercel-react-native-skills"]) {
       assert.equal(existsSync(resolve(ROOT, root, skill)), false, `${root}/${skill}`);
     }
+  }
+});
+
+test("Agents and Claude share the durable native iOS skill surface", () => {
+  const packages = {
+    "ios-product-dev": ["SKILL.md", "SOURCE.md", "companion.json", "evals/evals.json"],
+    "swiftui-expert-dev": ["SKILL.md", "SOURCE.md", "companion.json", "evals/evals.json"],
+    "xcodebuildmcp-cli": ["SKILL.md", "SOURCE.md", "LICENSE", "companion.json", "evals/evals.json"],
+  };
+
+  for (const [skill, files] of Object.entries(packages)) {
+    for (const file of files) {
+      const agentsPath = `.agents/skills/${skill}/${file}`;
+      const claudePath = `.claude/skills/${skill}/${file}`;
+      assert.equal(existsSync(resolve(ROOT, agentsPath)), true, agentsPath);
+      assert.equal(existsSync(resolve(ROOT, claudePath)), true, claudePath);
+      assert.equal(read(agentsPath), read(claudePath), `${skill}/${file} must stay mirrored`);
+    }
+    const manifest = JSON.parse(read(`.agents/skills/${skill}/companion.json`));
+    const evals = JSON.parse(read(`.agents/skills/${skill}/evals/evals.json`));
+    assert.equal(manifest.name, skill);
+    assert.equal(evals.skill_name, skill);
+    assert.equal(evals.evals.length, 4);
   }
 });
 

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json",
+  "name": "ios-product-dev",
+  "version": "0.1.0",
+  "title": "iOS product development",
+  "description": "Own end-to-end native iOS product work in SwiftUI while preserving Companion's shared API, authorization, accessibility, and runtime boundaries.",
+  "notes": "## What it does\n\nThis is the native iOS product owner for Companion. It shapes user-visible behavior, coordinates cross-platform design with design-frontend-dev, routes SwiftUI mechanics to swiftui-expert-dev, and verifies changes with xcodebuildmcp-cli.\n\n## Scope\n\nIt covers the SwiftUI app and its zero-dependency CompanionKit package. It preserves full /v1 product parity, role-aware durable state, native iOS 26 presentation, and accessibility. It does not own the cross-platform design register, replace SwiftUI implementation expertise, or run build tools directly.",
+  "metadata": {
+    "companionSkillId": "c74c6d15-7b11-4d95-9f55-7f62a5a579e4",
+    "changelog": [
+      {
+        "version": "0.1.0",
+        "date": "2026-08-24",
+        "changes": [
+          "Add the repo-local native iOS product owner for Agents and Claude."
+        ]
+      }
+    ]
+  },
+  "environment": {
+    "env": {},
+    "secrets": {}
+  },
+  "dependencies": {
+    "design-frontend-dev": "02decff6-b4ac-4d06-a494-abeeb08db9f3"
+  },
+  "commands": [
+    {
+      "name": "Build an iOS feature",
+      "desc": "Shape, implement, and verify a native SwiftUI feature with full Companion contract parity."
+    },
+    {
+      "name": "Polish a native surface",
+      "desc": "Coordinate visual direction, native controls, accessibility, and state coverage for an existing iOS screen."
+    },
+    {
+      "name": "Audit iOS product parity",
+      "desc": "Check a native client change for API, role, runtime, accessibility, and platform-boundary regressions."
+    }
+  ]
+}
