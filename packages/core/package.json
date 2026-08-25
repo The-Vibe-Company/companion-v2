@@ -20,7 +20,7 @@
     "@companion/skills": "workspace:*",
     "cron-parser": "^5.4.0",
     "drizzle-orm": "^0.45.2",
-    "free-email-domains": "^1.2.0",
+    "free-email-domains": "^1.9.107",
     "zod": "^3.24.1"
   },
   "devDependencies": {
