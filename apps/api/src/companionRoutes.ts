@@ -99,6 +99,8 @@ import {
   companionMcpAccessTokenSchema,
   issueCompanionMcpAccessToken,
   resolveCompanionMcpBrokerAuthorization,
+  registerCompanionNotificationDevice,
+  unregisterCompanionNotificationDevice,
 } from "@companion/core";
 import {
   COMPANION_ATTACHMENT_MAX_BYTES,
@@ -135,6 +137,10 @@ import {
   updateCompanionTriggerInputSchema,
   retryCompanionTurnInputSchema,
 } from "@companion/contracts";
+import {
+  notificationDeviceRegistrationSchema,
+  notificationInstallationIdSchema,
+} from "@companion/contracts/notifications";
 import {
   COMPANION_OPERATION_IDEMPOTENCY_HEADER,
   companionOperationRequestIdSchema,
@@ -218,6 +224,8 @@ function defaultCompanionRouteDependencies() {
     updateCompanionV2,
     resolveCompanionMcpBrokerAuthorization,
     issueCompanionMcpAccessToken,
+    registerCompanionNotificationDevice,
+    unregisterCompanionNotificationDevice,
   };
 }
 
@@ -499,6 +507,15 @@ function routeError<T>(c: Context, error: T): Response {
   return jsonError(c, error, errorStatus(error));
 }
 
+function notificationDeviceRouteError<T>(c: Context, error: T): Response {
+  const status = errorStatus(error);
+  // Device-registration failures can originate in a database driver whose diagnostic contains
+  // bound parameters. Keep this boundary deliberately opaque so an APNs token is never reflected
+  // to the client or forwarded to server-error telemetry.
+  // SAFETY: errorStatus returns only HTTP status values supported by Hono's response overload.
+  return c.json({ error: "Notification device request failed" }, status as never);
+}
+
 /**
  * The largest multipart send body the API will read. It is the attachment budget plus room for the
  * form's own framing, so a request that would only be refused later is refused before it is buffered.
@@ -567,6 +584,8 @@ export function registerCompanionRoutes(
     updateCompanionV2,
     resolveCompanionMcpBrokerAuthorization,
     issueCompanionMcpAccessToken,
+    registerCompanionNotificationDevice,
+    unregisterCompanionNotificationDevice,
   } = { ...defaultCompanionRouteDependencies(), ...dependencies };
 
   async function tenant<T>(
@@ -616,6 +635,36 @@ export function registerCompanionRoutes(
         return c.json({ error: "MCP authorization could not be refreshed" }, 503);
       }
       return c.json({ error: "MCP authorization is unavailable" }, 400);
+    }
+  });
+
+  app.put("/v1/notification-devices/:installationId", async (c) => {
+    try {
+      const installationId = notificationInstallationIdSchema.parse(c.req.param("installationId"));
+      const registration = notificationDeviceRegistrationSchema.parse(await c.req.json());
+      await tenant(c, ({ orgId, database }) => registerCompanionNotificationDevice({
+        orgId,
+        installationId,
+        registration,
+        database,
+      }));
+      return c.body(null, 204);
+    } catch (error) {
+      return notificationDeviceRouteError(c, error);
+    }
+  });
+
+  app.delete("/v1/notification-devices/:installationId", async (c) => {
+    try {
+      const installationId = notificationInstallationIdSchema.parse(c.req.param("installationId"));
+      await tenant(c, ({ orgId, database }) => unregisterCompanionNotificationDevice({
+        orgId,
+        installationId,
+        database,
+      }));
+      return c.body(null, 204);
+    } catch (error) {
+      return notificationDeviceRouteError(c, error);
     }
   });
 

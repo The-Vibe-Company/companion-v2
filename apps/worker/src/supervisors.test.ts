@@ -12,8 +12,9 @@ describe("worker supervisor isolation", () => {
       github: vi.fn(async () => null),
       skillDatabases: vi.fn(async () => skillDatabases),
       routines: vi.fn(async () => null),
+      apns: vi.fn(async () => null),
     });
-    expect(result).toEqual({ billing: null, github: null, skillDatabases, routines: null });
+    expect(result).toEqual({ billing: null, github: null, skillDatabases, routines: null, apns: null });
   });
 
   it("starts Skills Hub maintenance even when billing startup fails", async () => {
@@ -24,8 +25,9 @@ describe("worker supervisor isolation", () => {
       github: vi.fn(async () => null),
       skillDatabases: vi.fn(async () => skillDatabases),
       routines: vi.fn(async () => null),
+      apns: vi.fn(async () => null),
     });
-    expect(result).toEqual({ billing: null, github: null, skillDatabases, routines: null });
+    expect(result).toEqual({ billing: null, github: null, skillDatabases, routines: null, apns: null });
     expect(error).toHaveBeenCalledWith("billing supervisor failed to start");
     error.mockRestore();
   });
@@ -37,6 +39,7 @@ describe("worker supervisor isolation", () => {
       expect(idle?.hasRef()).toBe(true);
       expect(keepWorkerProcessAliveWhenIdle({ billing: supervisor() })).toBeNull();
       expect(keepWorkerProcessAliveWhenIdle({ billing: null, routines: supervisor() })).toBeNull();
+      expect(keepWorkerProcessAliveWhenIdle({ billing: null, apns: supervisor() })).toBeNull();
     } finally {
       if (idle) clearInterval(idle);
     }

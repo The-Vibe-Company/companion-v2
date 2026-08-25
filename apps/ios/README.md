@@ -25,6 +25,12 @@ Notion, and Conductor — through the existing brokered OAuth flow. Custom MCP p
 available over HTTP or a Box command with an optional encrypted credential, using the same shared
 endpoints and transports as the browser client.
 
+Push Notifications are requested immediately after the first active session. Debug registers
+`dev.companion.mobile.dev` with the APNs sandbox; Release registers `dev.companion.mobile` with
+production APNs. A tap waits for session and roster restoration, verifies the workspace and current
+access, then opens the existing chat. Foreground alerts include banner, Notification Center list,
+and sound unless that chat is already open. The app deliberately uses no numeric badge.
+
 Long-term native work is guided by the repo-local `ios-product-dev`, `swiftui-expert-dev`,
 `design-frontend-dev`, and `xcodebuildmcp-cli` skills. Their iOS-specific packages are mirrored
 byte-for-byte under `.agents/skills/` and `.claude/skills/` so Agents and Claude follow the same
@@ -57,6 +63,8 @@ alongside `-companion-icon-demo` to force the gallery's Reduce Motion path. The 
 The roster demo accepts the equivalent `COMPANION_ROSTER_DEMO_ACCESS` value and simulates a lost
 first deletion response followed by a same-key `202` retry. These arguments are excluded from Release
 behavior.
+Combine `-companion-roster-demo -companion-notification-demo` to inject a version-1 response payload
+and verify deferred navigation to Luna's chat without contacting APNs.
 
 ## TestFlight release
 
@@ -69,6 +77,14 @@ GitHub Actions run. The workflow uses the protected `ios-testflight` environment
 `IOS_DISTRIBUTION_P12`, `IOS_DISTRIBUTION_P12_PASSWORD`, and `IOS_PROVISIONING_PROFILE` secrets. The
 signing certificate and profile are installed only in a temporary CI keychain and removed after the
 job.
+
+Before distributing a push-enabled build, enable Push Notifications on both App IDs and replace the
+`IOS_PROVISIONING_PROFILE` secret with a regenerated profile containing the `aps-environment`
+entitlement. Deploy migration 0124 before that build, and configure the worker-only
+`COMPANION_APNS_KEY_ID`, `COMPANION_APNS_TEAM_ID`, and base64-encoded
+`COMPANION_APNS_PRIVATE_KEY_BASE64`. Validate background, terminated, foreground, decision, failure,
+and tap routing on a physical/TestFlight device with Apple's Push Notification Console. Removing all
+three worker variables is the push rollback; turns and the iOS app continue to function.
 
 If the matching `main` CI fails, no TestFlight delivery is created. A later successful CI run for
 an unrelated change does not retroactively release the earlier iOS commit; land the CI fix with an

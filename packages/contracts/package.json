@@ -6,7 +6,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./agent-operations": "./src/agentOperations.ts",
-    "./companion-runtime": "./src/companionRuntime.ts"
+    "./companion-runtime": "./src/companionRuntime.ts",
+    "./notifications": "./src/notifications.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

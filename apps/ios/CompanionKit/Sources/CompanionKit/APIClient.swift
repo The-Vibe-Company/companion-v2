@@ -192,6 +192,26 @@ public actor APIClient {
         try await decode(CompanionListEnvelope.self, path: "/v1/companions").companions
     }
 
+    public func registerNotificationDevice(
+        installationID: UUID,
+        registration: NotificationDeviceRegistration
+    ) async throws {
+        let body = try encoder.encode(registration)
+        _ = try await perform(
+            path: "/v1/notification-devices/\(installationID.uuidString.lowercased())",
+            method: "PUT",
+            body: body
+        )
+    }
+
+    public func unregisterNotificationDevice(installationID: UUID) async throws {
+        _ = try await perform(
+            path: "/v1/notification-devices/\(installationID.uuidString.lowercased())",
+            method: "DELETE",
+            body: nil
+        )
+    }
+
     public func createCompanion(_ input: CreateCompanionInput) async throws -> CompanionSummary {
         let body = try encoder.encode(input)
         return try await decode(

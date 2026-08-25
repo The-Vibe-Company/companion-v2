@@ -19,7 +19,7 @@ The process boundary is strict:
 |---|---|---|
 | `apps/web` | Render durable state; submit user intent | Never |
 | `apps/api` | Authenticate, authorize, persist intent, return `202` | Never |
-| `apps/worker` | Billing, GitHub, Skill Database cleanup, Companion routine fire | Never |
+| `apps/worker` | Billing, GitHub, Skill Database cleanup, routine fire, APNs delivery | Never |
 | `apps/runtime` | Claim, execute, observe, checkpoint, and settle runtime work | Sole owner |
 
 Only `apps/runtime` receives the Box service key. API, worker, and runtime use distinct PostgreSQL
@@ -29,7 +29,8 @@ checkpoint, and settle work under forced RLS and attempt-epoch fencing.
 The restricted API role may select the PostgreSQL projections needed for list/detail reads, but it
 cannot directly insert, update, or delete the Companion aggregate. Those writes cross only the
 tenant- and actor-scoped `companion_api_*` functions. The worker receives no hosted Companion table
-access; setting tenant, actor, or Runtime v2 protocol GUCs cannot manufacture either capability.
+access; setting tenant, actor, or Runtime v2 protocol GUCs cannot manufacture either capability. Its
+APNs access is limited to fenced notification claim/settlement functions.
 
 The browser is never a watchdog. Closing it, killing the API after its response, or losing one
 runtime replica does not abandon accepted work.
@@ -465,6 +466,28 @@ turns never show it. The companion read model (`GET /v1/companions`, `GET /v1/co
 carries the same ACK-gated fact as `runtime.replying`, so roster surfaces can animate a working
 Companion from PostgreSQL alone without a thread read.
 
+## iOS response notifications
+
+PostgreSQL creates one 24-hour delivery per active device of the durable turn author when a turn
+becomes `succeeded`, `failed`, or `interrupted`, and for each newly projected pending decision.
+`cancelled` never produces a notification. Routine- and trigger-origin turns retain the immutable
+Owner actor, so the same author rule applies without a second recipient model. Device/event
+uniqueness makes replayed settlement and claim takeover idempotent.
+
+The success alert is `<name> replied` with the latest normalized assistant text, capped at 180
+characters; image-only output uses a generic preview. Decisions use `<name> needs your answer` and
+the bounded title. Failure/interruption use their stable expurgated runtime message. Reasoning,
+tools, provider payloads, credentials, and numeric badges are absent. Application data is exactly
+`{version:1, org_id, companion_id, event}` and APNs `thread-id` is the Companion id.
+
+The worker claim function deletes expired deliveries and revalidates membership plus Owner or
+workspace access before returning any token or preview. Claims are leased and fenced. APNs `200`
+completes, `410` or a bad device token disables the installation, and `429`, authentication trouble,
+transport failure, or `5xx` retries with bounded backoff. A stable hash of the durable event key is
+the `apns-collapse-id`. The worker keeps one HTTP/2 session per Apple environment and renews its
+ES256 JWT inside Apple's token window. The supervisor is disabled when all APNs variables are absent
+and isolated from other worker supervisors when configuration is partial or invalid.
+
 ## Companion routines
 
 A routine is a named cron+timezone prompt that fires outside chat. The worker supervisor claims due
@@ -782,6 +805,14 @@ The new iOS app does not send `client_surface: native_mobile`; omitting that opt
 the API's existing full first-party contract. The discriminator remains accepted temporarily for
 compatibility with already-installed Expo builds and durable historical rows, but it is not an iOS
 product boundary and must not constrain the migration roadmap.
+
+After an active session is restored, the app requests alert/sound permission and registers its
+current APNs token through the shared cookie-authenticated API. The installation UUID is stable per
+bundle, while a new login idempotently reassigns it; logout first attempts the idempotent delete.
+Registration is repeated on launch so token rotation converges. A notification tap remains pending
+until session and roster restoration verify the organization and current Companion access, then
+opens the existing `.chat` destination without waking Box. Foreground banner, list, and sound are
+shown except when that Companion chat is already visible. There are no inline actions or badges.
 
 Desktop remains Owner/Editor-only and never wakes Box. API performs user authorization, then sends a
 short-lived HMAC-authenticated request to a private runtime endpoint. Runtime revalidates access and

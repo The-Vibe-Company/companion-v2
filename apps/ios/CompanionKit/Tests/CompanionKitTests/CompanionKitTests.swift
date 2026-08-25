@@ -45,6 +45,27 @@ private final class ManagementMockURLProtocol: URLProtocol, @unchecked Sendable 
     override func stopLoading() {}
 }
 
+private final class NotificationMockURLProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        do {
+            let handler = try #require(Self.handler)
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
 private func requestBody(_ request: URLRequest) throws -> Data {
     if let body = request.httpBody { return body }
     let stream = try #require(request.httpBodyStream)
@@ -64,6 +85,76 @@ private func requestBody(_ request: URLRequest) throws -> Data {
 @Test
 func usesTheSharedAPIContract() {
     #expect(CompanionKit.apiRootPath == "/v1")
+}
+
+@Test
+func decodesTheVersionedCompanionNotificationPayload() throws {
+    let payload = try JSONDecoder().decode(CompanionNotificationPayload.self, from: Data(#"""
+    {
+      "version":1,
+      "org_id":"66666666-6666-4666-8666-666666666666",
+      "companion_id":"11111111-1111-4111-8111-111111111111",
+      "event":"input_required"
+    }
+    """#.utf8))
+    #expect(payload.version == 1)
+    #expect(payload.orgID == "66666666-6666-4666-8666-666666666666")
+    #expect(payload.companionID == "11111111-1111-4111-8111-111111111111")
+    #expect(payload.event == .inputRequired)
+}
+
+@Test
+func synchronizesAndRemovesTheCurrentNotificationInstallation() async throws {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [NotificationMockURLProtocol.self]
+    let installationID = try #require(UUID(uuidString: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"))
+    NotificationMockURLProtocol.handler = { request in
+        #expect(request.url?.path == "/v1/notification-devices/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        #expect(request.httpMethod == "PUT")
+        #expect(request.value(forHTTPHeaderField: "x-companion-org") == "org-1")
+        let body = try requestBody(request)
+        let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: String])
+        #expect(json == [
+            "platform": "ios",
+            "device_token": String(repeating: "ab", count: 32),
+            "environment": "sandbox",
+            "bundle_id": "dev.companion.mobile.dev",
+        ])
+        let response = try #require(HTTPURLResponse(
+            url: request.url!, statusCode: 204, httpVersion: nil, headerFields: nil
+        ))
+        return (response, Data())
+    }
+    defer { NotificationMockURLProtocol.handler = nil }
+
+    let client = APIClient(
+        baseURL: URL(string: "http://127.0.0.1:3001")!,
+        session: URLSession(configuration: configuration)
+    )
+    await client.setAuthority(Session(
+        cookie: "better-auth.session_token=session",
+        orgID: "org-1",
+        needsOnboarding: false,
+        user: .init(id: "user-1", email: "stan@example.com", name: "Stan")
+    ))
+    try await client.registerNotificationDevice(
+        installationID: installationID,
+        registration: .init(
+            deviceToken: String(repeating: "ab", count: 32),
+            environment: .sandbox,
+            bundleID: "dev.companion.mobile.dev"
+        )
+    )
+
+    NotificationMockURLProtocol.handler = { request in
+        #expect(request.url?.path == "/v1/notification-devices/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        #expect(request.httpMethod == "DELETE")
+        let response = try #require(HTTPURLResponse(
+            url: request.url!, statusCode: 204, httpVersion: nil, headerFields: nil
+        ))
+        return (response, Data())
+    }
+    try await client.unregisterNotificationDevice(installationID: installationID)
 }
 
 @Test
