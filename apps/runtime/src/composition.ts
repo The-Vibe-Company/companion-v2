@@ -10,6 +10,7 @@ import {
   type RuntimeDesktopPort,
   type RuntimeDesktopReplayPort,
   type RuntimeHttpServer,
+  type RuntimeImageHealthSnapshot,
 } from "./server";
 
 export interface RuntimeService {
@@ -25,6 +26,8 @@ export interface RuntimeServiceDependencies {
   desktop?: RuntimeDesktopPort;
   /** Required with desktop ingress; production supplies the PostgreSQL-backed implementation. */
   desktopReplay?: RuntimeDesktopReplayPort;
+  /** Optional image builder liveness for /healthz; absent when Companions are disabled. */
+  imageHealth?: () => RuntimeImageHealthSnapshot;
   closeResources(): Promise<void>;
 }
 
@@ -48,6 +51,7 @@ export function composeRuntimeService(input: RuntimeServiceDependencies): Runtim
     health: {
       ping: () => input.store.ping(),
       snapshot: () => input.scheduler.snapshot(),
+      image: input.imageHealth,
     },
     desktop: input.desktop ?? disabledDesktop,
     desktopReplay: input.desktopReplay ?? disabledDesktopReplay,

@@ -31,6 +31,11 @@ interface RuntimeServiceConfigBase {
   desktopMaxSkewSeconds: number;
   shutdownDrainMs: number;
   releaseId: string;
+  /**
+   * Strict launch: refuse the cold-install fallback and fail a start with `runtime_image_unavailable`
+   * when no ready runtime image can be cloned. Default false — the loud fallback stays nominal.
+   */
+  requireRuntimeImage: boolean;
 }
 
 export type RuntimeServiceConfig = RuntimeServiceConfigBase & (
@@ -132,6 +137,10 @@ export function loadRuntimeServiceConfig(
     desktopMaxSkewSeconds: DESKTOP_REQUEST_MAX_SKEW_SECONDS,
     shutdownDrainMs,
     releaseId: deploymentReleaseId(env),
+    requireRuntimeImage: booleanEnv(
+      env.COMPANION_RUNTIME_REQUIRE_IMAGE,
+      "COMPANION_RUNTIME_REQUIRE_IMAGE",
+    ),
   };
   if (!enabled) {
     return {
@@ -264,6 +273,14 @@ function integerEnv(
     throw new RuntimeServiceConfigError(`${name} must be an integer from ${minimum} to ${maximum}`);
   }
   return value;
+}
+
+function booleanEnv(raw: string | undefined, name: string): boolean {
+  if (raw === undefined || raw.trim() === "") return false;
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "true" || normalized === "1") return true;
+  if (normalized === "false" || normalized === "0") return false;
+  throw new RuntimeServiceConfigError(`${name} must be true or false`);
 }
 
 function privateListenHost(host: string): string {

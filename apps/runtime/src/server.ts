@@ -29,9 +29,19 @@ export interface RuntimeSchedulerHealthSnapshot {
   activeCount: number;
 }
 
+/** Read-only image builder liveness surfaced on /healthz. Present only when the product is enabled. */
+export interface RuntimeImageHealthSnapshot {
+  loopAlive: boolean;
+  status: string | null;
+  lastErrorCode: string | null;
+  coldFallbackCount: number;
+}
+
 export interface RuntimeHealthPort {
   ping(): Promise<void>;
   snapshot(): RuntimeSchedulerHealthSnapshot;
+  /** Optional: absent when Companions are disabled and no builder runs. */
+  image?(): RuntimeImageHealthSnapshot;
 }
 
 export interface RuntimeDesktopMint {
@@ -146,19 +156,37 @@ export function createRuntimeHttpServer(options: RuntimeHttpServerOptions): Runt
       ? snapshot.activeCount
       : 0;
     const claimLoop = snapshot.claimLoopAlive && !snapshot.fatal && !unrecoveredClaimError;
-    const healthy = database && claimLoop && sweepFresh;
+    // Image builder liveness (when present) is a hard health gate: a dead loop means every create
+    // silently cold-installs. A `failed` digest is only informational — creates still succeed via the
+    // loud cold-install fallback — so it never flips health on its own.
+    let image: RuntimeImageHealthSnapshot | null = null;
+    try {
+      image = options.health.image?.() ?? null;
+    } catch {
+      image = null;
+    }
+    const imageBuilderAlive = image === null || image.loopAlive;
+    const healthy = database && claimLoop && sweepFresh && imageBuilderAlive;
+    // Undefined values are dropped by JSON.stringify, so image fields simply vanish when no builder
+    // runs — no conditional object spread, and the disabled-product response shape is unchanged.
     sendJson(response, healthy ? 200 : 503, {
       status: healthy ? "ok" : "unhealthy",
       checks: {
         database,
         claim_loop: claimLoop,
         sweep_fresh: sweepFresh,
+        image_builder: image === null ? undefined : imageBuilderAlive,
       },
       last_sweep_started_at: isoOrNull(snapshot.lastSweepStartedAt),
       last_sweep_completed_at: isoOrNull(snapshot.lastSweepCompletedAt),
       claim_loop_error_at: isoOrNull(snapshot.claimLoopErrorAt),
       active_count: activeCount,
       release_id: options.releaseId,
+      image: image === null ? undefined : {
+        status: image.status,
+        last_error_code: image.lastErrorCode,
+        cold_fallback_count: image.coldFallbackCount,
+      },
     });
   }
 

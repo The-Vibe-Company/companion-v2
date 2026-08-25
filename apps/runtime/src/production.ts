@@ -38,6 +38,7 @@ import {
   PostgresRuntimeDesktopReplayGuard,
 } from "./desktop";
 import { createImageBuildWorker } from "./imageBuildWorker";
+import { superviseImageBuilder } from "./imageBuilderSupervisor";
 import {
   createRuntimeMaterialPipeline,
   loadBundledCompanionRuntimeSkill,
@@ -121,11 +122,13 @@ export async function buildProductionRuntimeService(
   const database = factories.createDatabase(config);
   let archiveStorage: RuntimeArchiveStorage | null = null;
   let bakerAbort: AbortController | null = null;
+  let bakerRun: Promise<void> | null = null;
   const closeResources = resourceCloser({
     database,
     archiveStorage: () => archiveStorage,
     config,
     abortBaker: () => bakerAbort?.abort(),
+    awaitBaker: () => bakerRun,
   });
 
   try {
@@ -204,13 +207,20 @@ export async function buildProductionRuntimeService(
     const imageAbortController = new AbortController();
     bakerAbort = imageAbortController;
     const imageRegistry = new CompanionImageRegistry(database.sql);
+    const layoutIdentity = freshRuntime().layoutIdentity();
     const imageWorker = createImageBuildWorker({
       registry: imageRegistry,
-      identity: freshRuntime().layoutIdentity(),
+      identity: layoutIdentity,
       lifecycle,
       runtime: () => freshRuntime(),
       bundledSkill,
       executorId: config.executorId,
+      log,
+    });
+    const imageSupervisor = superviseImageBuilder({
+      worker: imageWorker,
+      registry: imageRegistry,
+      digest: layoutIdentity.imageMarker,
       log,
     });
     void imageWorker.requestCurrentImage().catch((error) => {
@@ -220,7 +230,9 @@ export async function buildProductionRuntimeService(
         error: describeThrownError(error),
       });
     });
-    void imageWorker.run(imageAbortController.signal).catch((error) => {
+    // Supervised, not fire-and-forget: liveness feeds /healthz and the run joins the shutdown drain
+    // so an in-flight bake settles before resources close. A crash leaves loopAlive false → 503.
+    bakerRun = imageSupervisor.run(imageAbortController.signal).catch((error) => {
       if (imageAbortController.signal.aborted) return;
       log.warn({
         ts: new Date().toISOString(),
@@ -256,6 +268,8 @@ export async function buildProductionRuntimeService(
       lifecycle,
       runtime: freshRuntime,
       runtimeImage: imageWorker.source(),
+      requireImage: config.requireRuntimeImage,
+      onColdFallback: (reason: string) => imageSupervisor.recordColdFallback(reason),
       log,
     };
     const kernel = factories.createKernel({
@@ -285,6 +299,7 @@ export async function buildProductionRuntimeService(
       scheduler: createRuntimeSchedulerAdapter(kernel.scheduler),
       desktop,
       desktopReplay: new PostgresRuntimeDesktopReplayGuard(database.sql),
+      imageHealth: () => imageSupervisor.snapshot(),
       closeResources,
     });
   } catch (error) {
@@ -328,12 +343,19 @@ function resourceCloser(input: {
   archiveStorage(): RuntimeArchiveStorage | null;
   config: RuntimeServiceConfig;
   abortBaker?: () => void;
+  awaitBaker?: () => Promise<void> | null;
 }): () => Promise<void> {
   let closing: Promise<void> | null = null;
   return () => {
     closing ??= (async () => {
       input.abortBaker?.();
       let failure: unknown;
+      // Join the builder run before closing the DB so an in-flight bake's registry writes settle.
+      try {
+        await input.awaitBaker?.();
+      } catch {
+        // The supervised run already logs its own death; never fail shutdown on it.
+      }
       try {
         await input.archiveStorage()?.close();
       } catch (error) {

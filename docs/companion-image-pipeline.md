@@ -112,12 +112,22 @@ migration 0123 and granted to the dedicated runtime role only; the role verifier
 ### What changes for creation
 
 - `createGenerationBox` waits on the registry row's published status with progression
-  (`requested → building → ready`), bounded well inside the claim-latency budget: a ready
-  image resolves on the first read; an in-flight build is never allowed to delay creation —
-  it falls back to a persisted, logged cold install while the builder keeps baking for the
-  next Companion.
-- Cold install remains as an explicit last resort behind a persisted decision (logged
-  reason), never a default triggered by timing luck.
+  (`requested → building → ready`). The snapshot clone is the nominal launch path, so the
+  wait is bounded by the room the operation's own cold-start deadline leaves after a reserve
+  for the create POST (`imageWaitBoundMs`, capped at `RUNTIME_IMAGE_WAIT_MS`), not by a hidden
+  3-second clamp. A ready image resolves on the first read and clones immediately; a `building`
+  or `requested` image is waited for up to that bound (cloning a pre-baked snapshot then skips
+  the 300s install, so the wait beats cold-installing, which blows the deadline regardless); a
+  `failed` build falls back immediately; and a wait that exhausts its bound cold-installs.
+- Cold install remains the last-resort fallback, but it is now loud, never silent: every create
+  that cold-installs despite a snapshot source is logged with a `fallbackReason`
+  (`image_build_failed`, `image_wait_exhausted`, `unknown_snapshot_fallback`, or `no_snapshot`)
+  and counted so `/healthz` (`image.cold_fallback_count`) surfaces a degraded launch path. The
+  registry-driven builder is supervised: a dead builder loop fails `/healthz` (`checks.image_builder`),
+  and a `failed` digest is reported (`image.status`) without flipping health, since creates still
+  succeed via the fallback. `COMPANION_RUNTIME_REQUIRE_IMAGE=true` makes creation strict — it
+  refuses the fallback and fails the start with the stable code `runtime_image_unavailable`
+  (action `retry`) so the ordered queue retries once a snapshot is ready.
 - The in-process baker class is retired: its infinite retry loop and sticky-resolution
   heuristics are deleted; only the single-attempt `bakeCompanionRuntimeImageOnce` unit
   remains, executed by the registry-driven builder under its lease. The diagnostic

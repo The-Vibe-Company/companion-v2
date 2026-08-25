@@ -7,6 +7,7 @@ import {
   type BoxState,
 } from "@companion/box-runtime";
 import { COMPANION_BUDGETS_BASE } from "@companion/contracts";
+import { RuntimeInvariantError } from "@companion/companion-runtime";
 import type {
   BrokerWriteOutcome,
   BrokerPromptWriteOutcome,
@@ -15,8 +16,37 @@ import type {
   RuntimeProcessLog,
 } from "@companion/companion-runtime";
 
-/** How long a Box create waits on the registry's published build before a cold install. */
+/**
+ * Absolute cap on how long a Box create waits on the registry's published build before a cold
+ * install. The effective bound is the smaller of this cap and the room the operation's cold-start
+ * deadline leaves after {@link IMAGE_WAIT_RESERVE_MS}; see {@link imageWaitBoundMs}.
+ */
 export const RUNTIME_IMAGE_WAIT_MS = 60_000;
+
+/**
+ * Time reserved after the snapshot wait for the work that still must finish before the cold-start
+ * deadline: at minimum the create POST itself. It is one Box provider call budget
+ * (`boxRequestTimeoutMs`). This is deliberately the *snapshot* fast-path reserve, not the full cold
+ * install: once a ready snapshot is cloned, staging skips the npm installs, so waiting up to the cap
+ * for that snapshot beats cold-installing (which blows the deadline regardless).
+ *
+ * TODO(companionBudgets): once the canary measures real clone-ready + Pi-start on the snapshot path,
+ * promote this to a derived `deriveCompanionBudgets` relation (create POST + clone-ready + Pi start)
+ * instead of reusing the single provider-call budget here.
+ */
+export const IMAGE_WAIT_RESERVE_MS = COMPANION_BUDGETS_BASE.boxRequestTimeoutMs;
+
+/**
+ * The bound handed to the registry wait: the room the cold-start deadline leaves after the reserve,
+ * clamped to the absolute cap and never negative. Absent a deadline (delete/health work, tests) it
+ * is the flat cap. A non-positive result means there is no time to wait — the create cold-installs
+ * immediately rather than pretending to wait.
+ */
+export function imageWaitBoundMs(deadlineAt: Date | undefined, nowMs: number): number {
+  if (!deadlineAt || !Number.isFinite(deadlineAt.getTime())) return RUNTIME_IMAGE_WAIT_MS;
+  const room = deadlineAt.getTime() - nowMs - IMAGE_WAIT_RESERVE_MS;
+  return Math.min(Math.max(room, 0), RUNTIME_IMAGE_WAIT_MS);
+}
 
 /** The durable image registry as seen by Box creation. Status is published in PostgreSQL. */
 export interface RuntimeImageSource {
@@ -42,6 +72,14 @@ export interface RuntimeBoxAdapterOptions {
   log?: RuntimeProcessLog;
   /** Each provider operation gets a bound even when delete/health work has no turn deadline. */
   providerDeadlineMs?: number;
+  /**
+   * Strict mode: refuse the silent cold-install fallback. When true, a create that cannot clone a
+   * ready snapshot fails the operation with `runtime_image_unavailable` (action retry) instead of
+   * cold-installing. Default false — the loud fallback stays the nominal safety net.
+   */
+  requireImage?: boolean;
+  /** Invoked once per create that cold-installs despite a snapshot source, with its fallback reason. */
+  onColdFallback?: (reason: string) => void;
   now?: () => number;
 }
 
@@ -64,18 +102,34 @@ export function createRuntimeBoxControl(options: RuntimeBoxAdapterOptions): Runt
       let from = image?.cloneName() ?? undefined;
       let imageWaitMs = 0;
       let fallbackReason:
-        | "image_build_pending" | "image_build_failed" | "no_snapshot"
+        | "image_wait_exhausted" | "image_build_failed" | "no_snapshot"
         | "unknown_snapshot_fallback" | undefined;
       if (image && from === undefined) {
-        // Wait on the registry's published build state instead of racing in-process baker
-        // memory; the bound keeps a broken build from consuming the operation deadline.
+        // Wait on the registry's published build state instead of racing in-process baker memory.
+        // The bound is derived from the operation's cold-start deadline (imageWaitDeadlineAt), so a
+        // ready snapshot clones, an in-flight build is waited for up to the room the deadline leaves,
+        // a failed build falls back immediately, and a wait that exhausts its bound cold-installs.
+        const boundMs = imageWaitBoundMs(input.imageWaitDeadlineAt, now());
         const waitStartedAt = now();
-        const resolution = await image.waitForResolution(RUNTIME_IMAGE_WAIT_MS, input.signal);
+        const resolution = boundMs > 0
+          ? await image.waitForResolution(boundMs, input.signal)
+          : "pending";
         imageWaitMs = now() - waitStartedAt;
         if (resolution === "ready") {
           from = image.expectedName();
         } else {
-          fallbackReason = resolution === "failed" ? "image_build_failed" : "image_build_pending";
+          fallbackReason = resolution === "failed" ? "image_build_failed" : "image_wait_exhausted";
+        }
+        if (options.requireImage && from === undefined) {
+          // Strict mode never cold-installs: fail the operation so the ordered queue retries once a
+          // snapshot is ready. The message stays a stable, provider-free expurgated string.
+          throw new RuntimeInvariantError({
+            code: "runtime_image_unavailable",
+            message: fallbackReason === "image_build_failed"
+              ? "The Companion runtime image build failed; refusing to cold install."
+              : "The Companion runtime image was not ready before the deadline; refusing to cold install.",
+            action: "retry",
+          });
         }
       }
       const create = (fromImage?: string) =>
@@ -97,6 +151,11 @@ export function createRuntimeBoxControl(options: RuntimeBoxAdapterOptions): Runt
         created = await create();
       }
       const result = created;
+      // A snapshot source that still ended without a clone name means this create cold-installed.
+      // Count it so /healthz can surface a silently degraded launch path even while creates succeed.
+      if (image && from === undefined) {
+        options.onColdFallback?.(fallbackReason ?? "no_snapshot");
+      }
       options.log?.info({
         ts: new Date(now()).toISOString(),
         event: "runtime.box.create",

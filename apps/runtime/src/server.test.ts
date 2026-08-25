@@ -45,6 +45,12 @@ async function start(input: {
   ping?: () => Promise<void>;
   authorizeAndMint?: ReturnType<typeof vi.fn>;
   replayIds?: Set<string>;
+  image?: () => {
+    loopAlive: boolean;
+    status: string | null;
+    lastErrorCode: string | null;
+    coldFallbackCount: number;
+  };
 } = {}) {
   let snapshot = input.snapshot ?? healthySnapshot();
   const authorizeAndMint = input.authorizeAndMint ?? vi.fn(async () => ({
@@ -63,6 +69,7 @@ async function start(input: {
     health: {
       ping: input.ping ?? (async () => undefined),
       snapshot: () => snapshot,
+      image: input.image,
     },
     desktop: { authorizeAndMint },
     desktopReplay: {
@@ -139,6 +146,41 @@ describe("private runtime HTTP server", () => {
     const failedPing = await fetch(`${databaseDown.server.baseUrl}/healthz`);
     expect(failedPing.status).toBe(503);
     expect(await failedPing.json()).toMatchObject({ checks: { database: false } });
+  });
+
+  it("surfaces image builder liveness: a dead loop fails health, a failed digest only informs", async () => {
+    const aliveFailed = await start({
+      image: () => ({
+        loopAlive: true,
+        status: "failed",
+        lastErrorCode: "image_build_failed",
+        coldFallbackCount: 4,
+      }),
+    });
+    const informational = await fetch(`${aliveFailed.server.baseUrl}/healthz`);
+    // A failed digest is reported but must NOT flip health — creates still work via cold fallback.
+    expect(informational.status).toBe(200);
+    expect(await informational.json()).toMatchObject({
+      status: "ok",
+      checks: { image_builder: true },
+      image: { status: "failed", last_error_code: "image_build_failed", cold_fallback_count: 4 },
+    });
+
+    const deadLoop = await start({
+      image: () => ({
+        loopAlive: false,
+        status: "building",
+        lastErrorCode: null,
+        coldFallbackCount: 0,
+      }),
+    });
+    const unhealthy = await fetch(`${deadLoop.server.baseUrl}/healthz`);
+    // A dead builder loop means every create silently cold-installs — a hard 503.
+    expect(unhealthy.status).toBe(503);
+    expect(await unhealthy.json()).toMatchObject({
+      status: "unhealthy",
+      checks: { image_builder: false },
+    });
   });
 
   it("binds desktop authorization to timestamp, path, and exact body before SQL reauthorization", async () => {
