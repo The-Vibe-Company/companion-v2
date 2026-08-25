@@ -186,6 +186,28 @@ describe("RuntimeEngine attempts", () => {
     expect(store.settlements).toEqual([{ terminalStatus: "succeeded" }]);
   });
 
+  it("asks a function-typed poll interval per Box before re-reading an empty event page", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
+    const ports = fakePorts(store);
+    ports.eventReads.push({ events: [], nextCursor: 0, acknowledgedCursor: 0, hasMore: false });
+    ports.eventReads.push(assistantAndSettlementPage());
+    const polled: string[] = [];
+    const dependencies = engineDependencies({ store, ports });
+    // The direct-transport facade answers 0 while the long-poll channel serves a Box; the loop
+    // must consult it per empty page rather than latching a flat cadence.
+    dependencies.eventPollIntervalMs = ({ boxId }) => {
+      polled.push(boxId);
+      return 0;
+    };
+    const engine = new RuntimeEngine(dependencies);
+
+    const result = await engine.execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(polled).toEqual([BOX_ID]);
+  });
+
   it("ends prompt ACK timing when Pi responds rather than after its durable checkpoint", async () => {
     const claim = attemptClaim();
     const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });

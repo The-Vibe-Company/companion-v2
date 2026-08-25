@@ -340,8 +340,22 @@ is sticky per port but must be re-registered after stop/resume — and records t
 same fenced proof as the material snapshot: `companion_runtime_instances.agent_hosted_url` is a
 token-free locator, both credentials (the provider proxy token and the bearer) live only in
 `agent_token_ciphertext` under the runtime master key, and `agent_observed_at` bounds freshness.
-In `shadow` a registration failure never fails the wake; in `on` it fails closed. Nothing consumes
-the direct channel yet: events, dispatch, and lifecycle still ride the exec transport.
+In `shadow` a registration failure never fails the wake; in `on` it fails closed.
+
+The runtime consumes the direct channel for the **event path only**. When the gate is `on` and the
+claim's material or a live staging carries an endpoint whose `agent_observed_at` is within the Box
+warm TTL, broker state, event reads, event acknowledgements, and the Pi daemon/health probe travel
+over the hosted proxy; the event read is a server-side long-poll (20 s requested, under the 25 s
+agent/proxy cap), which replaces the 500 ms exec polling cadence during an active turn. The facade
+in `apps/runtime` is the single ambiguity-safety point: these four calls are idempotent reads (the
+projection→checkpoint→ACK ordering is unchanged, and ack-after-commit makes re-reads safe), so any
+direct failure — connect, TLS, auth, timeout, or non-2xx — falls back to the exec transport for
+that one call and marks the endpoint suspect in memory; a suspect endpoint is re-probed by the next
+broker-state call after a short cooldown, never abandoned. Prompt dispatch, abort, decision
+delivery, files, outbox, and every lifecycle command stay on the exec transport. In `shadow` no
+real call is routed: the runtime performs one throttled direct health-plus-broker-state comparison
+per Box and logs the result. Endpoint tokens are decrypted only inside `apps/runtime`; a payload
+the shared broker-state/event-page parsers reject is a fallback, never a divergent error surface.
 
 When `COMPANION_PI_BUNDLE_ENABLED=true` and the runtime's S3 configuration is complete, the base
 layer no longer installs Pi from npm at boot. Instead the layout script downloads one self-hosted,
@@ -800,6 +814,12 @@ slower cadence when stable. There is no SSE and no Box-to-control-plane push age
 Box agent does not change this: its bearer authenticates **inbound** runtime-to-Box requests through
 the provider's hosted proxy, and the Box still never pushes anything at the control plane.
 
+Runtime→Box event reads have a second transport: with `COMPANION_DIRECT_TRANSPORT=on`, the active
+attempt's broker state, event reads, acknowledgements, and the health probe ride the hosted agent
+channel as bounded long-polls, with automatic per-call fallback to the exec transport. This changes
+how the runtime observes the Box, not what any member-facing read does — control-plane reads remain
+PostgreSQL-only, never wake a Box, and keep the same polling cadence.
+
 ### iOS app
 
 The SwiftUI client in `apps/ios` targets iOS 26 and later; Android is not supported. It is a full
@@ -864,6 +884,13 @@ the latest sweep is stale. Operators must be able to observe queue age, claim la
 attempt duration, lease takeover, deadline settlement, unknown/malformed event counts, canonical and
 duplicate Box discovery, permanent-delete progress, and expurgated failure codes without accessing
 secret payloads.
+
+The direct transport adds two structured process events, both expurgated by construction:
+`runtime.direct_transport.fallback` carries only the operation (`broker_state`, `read_events`,
+`ack_events`, or `pi_daemon_status`) and a stable code for why one direct call fell back to exec;
+`runtime.direct_transport.shadow` carries `match` plus the direct and exec latencies of one shadow
+comparison. Neither may ever contain the hosted URL, the proxy token, the bearer, or any response
+payload.
 
 Acceptance bounds:
 

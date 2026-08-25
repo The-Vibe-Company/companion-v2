@@ -264,6 +264,8 @@ export function attemptMaterial(overrides: Partial<RuntimeWorkMaterial> = {}): R
     hasVisibleOutput: false,
     attachments: [],
     configCatalog: null,
+    boxId: null,
+    agentEndpoint: null,
     ...overrides,
   };
 }

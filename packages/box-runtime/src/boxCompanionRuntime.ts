@@ -85,8 +85,9 @@ export type CompanionRuntimeStagePhase =
 
 /**
  * Phase 2 direct-transport rollout gate. `off` skips agent registration entirely; `shadow` and `on`
- * register the hosted endpoint at staging. Nothing consumes the direct channel yet, so beyond
- * registration the two active modes are identical for now.
+ * register the hosted endpoint at staging. In `on`, apps/runtime consumes the direct channel for
+ * the event path (broker state, event reads/acks, daemon probe) with per-call exec fallback; in
+ * `shadow` the endpoint only feeds a logged comparison and no real call is routed.
  */
 export type CompanionDirectTransportMode = "off" | "shadow" | "on";
 
@@ -1329,6 +1330,113 @@ function parseBrokerJournalRecord<T>(value: T): CompanionPiJournalRecord | null 
     kind: "pi_process_exit",
     exit: { code: code === null ? null : Number(code), signal: signalText },
   };
+}
+
+/**
+ * Validate one broker `runtime_state` payload into the durable broker-state contract. Shared by the
+ * exec transport and the direct agent client so both surface byte-identical failures: anything but
+ * a complete, well-typed payload is the same stable 502, never a partial state.
+ */
+export function parseCompanionPiBrokerStateData(data: unknown): CompanionPiBrokerState {
+  const record = isJsonObject(data) ? data : null;
+  const layoutMarkerText = stringValue(record?.layoutMarker);
+  const layoutMarker = layoutMarkerText !== null && layoutMarkerText.length <= 1024
+    ? layoutMarkerText
+    : null;
+  const counters = parseBrokerCounters(record?.counters);
+  const modelInputValues: Array<"text" | "image"> = [];
+  if (Array.isArray(record?.modelInput)) {
+    for (const item of record.modelInput) {
+      const text = stringValue(item);
+      if (text !== "text" && text !== "image") {
+        modelInputValues.length = 0;
+        break;
+      }
+      modelInputValues.push(text);
+    }
+  }
+  const modelInput = modelInputValues.length > 0
+    ? [...new Set(modelInputValues)]
+    : null;
+  if (
+    !record
+    || !opaqueBrokerId(record.invocationId)
+    || (record.activeAttemptId !== null && !opaqueBrokerId(record.activeAttemptId))
+    || !nonNegativeSafeInteger(record.tailCursor)
+    || !nonNegativeSafeInteger(record.acknowledgedCursor)
+    || record.acknowledgedCursor > record.tailCursor
+    || !counters
+    || !modelInput
+  ) {
+    throw new BoxRuntimeProviderError("Pi broker state is unavailable", 502);
+  }
+  return {
+    invocationId: record.invocationId,
+    layoutMarker,
+    activeAttemptId: record.activeAttemptId,
+    tailCursor: record.tailCursor,
+    acknowledgedCursor: record.acknowledgedCursor,
+    counters,
+    modelInput,
+  };
+}
+
+/**
+ * Validate one broker `read_events` payload into a monotonic journal page. Shared by the exec
+ * transport and the direct agent client; the monotonicity proof is part of the transport contract,
+ * so a direct-served page that would fail it here fails exactly as an exec-served page would.
+ */
+export function parseCompanionPiBrokerEventPageData(
+  data: unknown,
+  after: number,
+): CompanionPiBrokerEventPage {
+  const record = isJsonObject(data) ? data : null;
+  const parsedEvents = Array.isArray(record?.events)
+    ? record.events.map(parseBrokerJournalRecord)
+    : null;
+  const hasMore = z.boolean().safeParse(record?.hasMore);
+  if (
+    !record
+    || !parsedEvents
+    || parsedEvents.some((event) => event === null)
+    || !nonNegativeSafeInteger(record.nextCursor)
+    || !nonNegativeSafeInteger(record.acknowledgedCursor)
+    || !hasMore.success
+  ) {
+    throw new BoxRuntimeProviderError("Pi broker event journal could not be read", 502);
+  }
+  const events: CompanionPiJournalRecord[] = [];
+  for (const event of parsedEvents) {
+    if (event === null) {
+      throw new BoxRuntimeProviderError("Pi broker event journal could not be read", 502);
+    }
+    events.push(event);
+  }
+  let prior = Math.max(after, record.acknowledgedCursor);
+  for (const event of events) {
+    if (event.sequence <= prior || event.sequence > record.nextCursor) {
+      throw new BoxRuntimeProviderError("Pi broker event journal is not monotonic", 502);
+    }
+    prior = event.sequence;
+  }
+  if (events.length > 0 && prior !== record.nextCursor) {
+    throw new BoxRuntimeProviderError("Pi broker event cursor does not match its page", 502);
+  }
+  return {
+    events,
+    nextCursor: record.nextCursor,
+    acknowledgedCursor: record.acknowledgedCursor,
+    hasMore: hasMore.data,
+  };
+}
+
+/** Validate one broker `ack_events` payload. Shared by the exec transport and the direct client. */
+export function parseCompanionPiAckEventsData(data: unknown): { acknowledgedCursor: number } {
+  const record = isJsonObject(data) ? data : null;
+  if (!record || !nonNegativeSafeInteger(record.acknowledgedCursor)) {
+    throw new BoxRuntimeProviderError("Pi broker event acknowledgement failed", 502);
+  }
+  return { acknowledgedCursor: record.acknowledgedCursor };
 }
 
 /** Where the layout script is staged on the Box disk so it runs as a file, never as a command. */
@@ -4208,47 +4316,7 @@ done`,
       signal: input.signal,
       operation: "broker_state",
     });
-    const data = response?.success === true && isJsonObject(response.data) ? response.data : null;
-    const layoutMarkerText = stringValue(data?.layoutMarker);
-    const layoutMarker = layoutMarkerText !== null && layoutMarkerText.length <= 1024
-      ? layoutMarkerText
-      : null;
-    const counters = parseBrokerCounters(data?.counters);
-    const modelInputValues: Array<"text" | "image"> = [];
-    if (Array.isArray(data?.modelInput)) {
-      for (const item of data.modelInput) {
-        const text = stringValue(item);
-        if (text !== "text" && text !== "image") {
-          modelInputValues.length = 0;
-          break;
-        }
-        modelInputValues.push(text);
-      }
-    }
-    const modelInput = modelInputValues.length > 0
-      ? [...new Set(modelInputValues)]
-      : null;
-    if (
-      !data
-      || !opaqueBrokerId(data.invocationId)
-      || (data.activeAttemptId !== null && !opaqueBrokerId(data.activeAttemptId))
-      || !nonNegativeSafeInteger(data.tailCursor)
-      || !nonNegativeSafeInteger(data.acknowledgedCursor)
-      || data.acknowledgedCursor > data.tailCursor
-      || !counters
-      || !modelInput
-    ) {
-      throw new BoxRuntimeProviderError("Pi broker state is unavailable", 502);
-    }
-    return {
-      invocationId: data.invocationId,
-      layoutMarker,
-      activeAttemptId: data.activeAttemptId,
-      tailCursor: data.tailCursor,
-      acknowledgedCursor: data.acknowledgedCursor,
-      counters,
-      modelInput,
-    };
+    return parseCompanionPiBrokerStateData(response?.success === true ? response.data : null);
   }
 
   async dispatchExtensionUi(input: {
@@ -4355,11 +4423,7 @@ done`,
       },
       signal: input.signal,
     });
-    const data = response?.success === true && isJsonObject(response.data) ? response.data : null;
-    if (!data || !nonNegativeSafeInteger(data.acknowledgedCursor)) {
-      throw new BoxRuntimeProviderError("Pi broker event acknowledgement failed", 502);
-    }
-    return { acknowledgedCursor: data.acknowledgedCursor };
+    return parseCompanionPiAckEventsData(response?.success === true ? response.data : null);
   }
 
   async readEvents(input: {
@@ -4380,44 +4444,10 @@ done`,
       command,
       signal: input.signal,
     });
-    const data = response?.success === true && isJsonObject(response.data) ? response.data : null;
-    const parsedEvents = Array.isArray(data?.events)
-      ? data.events.map(parseBrokerJournalRecord)
-      : null;
-    const hasMore = z.boolean().safeParse(data?.hasMore);
-    if (
-      !data
-      || !parsedEvents
-      || parsedEvents.some((event) => event === null)
-      || !nonNegativeSafeInteger(data.nextCursor)
-      || !nonNegativeSafeInteger(data.acknowledgedCursor)
-      || !hasMore.success
-    ) {
-      throw new BoxRuntimeProviderError("Pi broker event journal could not be read", 502);
-    }
-    const events: CompanionPiJournalRecord[] = [];
-    for (const event of parsedEvents) {
-      if (event === null) {
-        throw new BoxRuntimeProviderError("Pi broker event journal could not be read", 502);
-      }
-      events.push(event);
-    }
-    let prior = Math.max(input.after, data.acknowledgedCursor);
-    for (const event of events) {
-      if (event.sequence <= prior || event.sequence > data.nextCursor) {
-        throw new BoxRuntimeProviderError("Pi broker event journal is not monotonic", 502);
-      }
-      prior = event.sequence;
-    }
-    if (events.length > 0 && prior !== data.nextCursor) {
-      throw new BoxRuntimeProviderError("Pi broker event cursor does not match its page", 502);
-    }
-    return {
-      events,
-      nextCursor: data.nextCursor,
-      acknowledgedCursor: data.acknowledgedCursor,
-      hasMore: hasMore.data,
-    };
+    return parseCompanionPiBrokerEventPageData(
+      response?.success === true ? response.data : null,
+      input.after,
+    );
   }
 
 

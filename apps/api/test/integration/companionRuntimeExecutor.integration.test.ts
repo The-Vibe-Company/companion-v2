@@ -4635,14 +4635,36 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     try {
       const claim = await claimWork();
       expect(claim.workKind).toBe("attempt");
+      // Phase 2.1 read path: the fenced material read carries the instance's Box id and the
+      // registered hosted agent endpoint, so an executor can rebuild the direct event channel
+      // after a process restart. Seeded directly because registration itself is covered by the
+      // record_material_snapshot proof above.
+      await sql`
+        update companion_runtime_instances
+        set agent_hosted_url = 'https://abc-8790.on.ascii.dev',
+            agent_token_ciphertext = 'agent-ciphertext',
+            agent_observed_at = now()
+        where companion_id = ${claim.companionId}::uuid
+      `;
+      const [instanceBox] = await sql<Array<{ boxId: string | null }>>`
+        select box_id as "boxId" from companion_runtime_instances
+        where companion_id = ${claim.companionId}::uuid
+      `;
       const material = await asRuntime((tx) => tx<Array<{
         promptText: string;
         providerMaterial: Array<IntegrationJsonObject>;
         skillMaterial: Array<IntegrationJsonObject>;
         mcpMaterial: Array<IntegrationJsonObject>;
+        boxId: string | null;
+        agentHostedUrl: string | null;
+        agentTokenCiphertext: string | null;
+        agentObserved: boolean;
       }>>`
         select prompt_text as "promptText", provider_material as "providerMaterial",
-          skill_material as "skillMaterial", mcp_material as "mcpMaterial"
+          skill_material as "skillMaterial", mcp_material as "mcpMaterial",
+          box_id as "boxId", agent_hosted_url as "agentHostedUrl",
+          agent_token_ciphertext as "agentTokenCiphertext",
+          agent_observed_at is not null as "agentObserved"
         from public.companion_runtime_get_material(
           ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
           ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
@@ -4651,6 +4673,12 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       `);
       expect(material).toHaveLength(1);
       expect(material[0]?.promptText).toBe(fixture.prompt);
+      expect(material[0]).toMatchObject({
+        boxId: instanceBox?.boxId ?? null,
+        agentHostedUrl: "https://abc-8790.on.ascii.dev",
+        agentTokenCiphertext: "agent-ciphertext",
+        agentObserved: true,
+      });
       expect(material[0]?.providerMaterial).toMatchObject([{
         provider_id: providerId,
         credential_generation: providerGeneration,

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   decryptOpaqueValue,
   encryptCompanionMcpRuntimeCredential,
+  encryptOpaqueValue,
 } from "@companion/core";
 import {
   type LeaseFence,
@@ -77,6 +78,8 @@ function workMaterial(accessExpiresAt?: string | null): RuntimeWorkMaterial {
     hasVisibleOutput: false,
     attachments: [],
     configCatalog: null,
+    boxId: null,
+    agentEndpoint: null,
   };
 }
 
@@ -304,6 +307,151 @@ describe("runtime material provider and Box stager", () => {
       ...JSON.parse(ciphertext),
     }, masterKey);
     expect(JSON.parse(decrypted)).toEqual({ proxyToken, bearerToken });
+  });
+
+  it("feeds the direct-transport registry from a live staging and from a durable material read", async () => {
+    const nowMs = Date.parse("2027-01-01T00:00:00.000Z");
+    const proxyToken = "c".repeat(64);
+    const bearerToken = "d".repeat(64);
+    const observedAt = new Date(nowMs - 60_000);
+    const durableCiphertext = JSON.stringify(encryptOpaqueValue({
+      orgId,
+      purpose: "companion_box_agent_endpoint",
+      subjectId: companionId,
+      value: JSON.stringify({ proxyToken, bearerToken }),
+    }, masterKey));
+    const material = {
+      ...workMaterial(null),
+      boxId: "bx_23456789",
+      agentEndpoint: {
+        hostedUrl: "https://abc-8790.on.ascii.dev",
+        tokenCiphertext: durableCiphertext,
+        observedAt,
+      },
+    };
+    const store = fakeStore({
+      getMaterial: vi.fn(async () => material),
+      getConfigCatalog: vi.fn(async () => null),
+      mintHubToken: vi.fn(async () => ({
+        token: "cmp_pat_hubtokenfixture000000000000000000000000",
+        expiresAt: new Date(nowMs + 6 * 60 * 60 * 1_000),
+      })),
+      mintMcpBrokerToken: vi.fn(async () => ({
+        token: `cmp_mcp_${"e".repeat(48)}`,
+        expiresAt: new Date(nowMs + 6 * 60 * 60 * 1_000),
+      })),
+    });
+    const registered: Array<{
+      boxId: string;
+      endpoint: { hostedUrl: string; proxyToken: string; bearerToken: string; observedAt: Date };
+    }> = [];
+    const stageExistingBox = vi.fn(async () => ({
+      boxId: "bx_23456789",
+      diskLayoutVersion: 14 as const,
+      agentEndpoint: {
+        hostedUrl: "https://fresh-8790.on.ascii.dev",
+        proxyToken: "f".repeat(64),
+        bearerToken: "g".repeat(64),
+      },
+    }));
+    const pipeline = createRuntimeMaterialPipeline({
+      masterKey,
+      apiUrl: "https://api.example.test",
+      bundledSkill: {
+        slug: "companion",
+        version: "1.0.0",
+        checksum: `sha256:${"1".repeat(64)}`,
+        archive: Buffer.from("bundled"),
+      },
+      runtime: () => fakeRuntime(stageExistingBox),
+      loadSkillArchive: vi.fn(),
+      loadAttachment: vi.fn(),
+      storeAttachment: vi.fn(),
+      registerAgentEndpoint: (boxId, endpoint) => registered.push({ boxId, endpoint }),
+      now: () => nowMs,
+    });
+
+    // A durable material read decrypts the stored tokens and registers the endpoint by Box id.
+    await expect(pipeline.materialProvider.getMaterial({ store, fence })).resolves.toBe(material);
+    expect(registered).toEqual([{
+      boxId: "bx_23456789",
+      endpoint: {
+        hostedUrl: "https://abc-8790.on.ascii.dev",
+        proxyToken,
+        bearerToken,
+        observedAt,
+      },
+    }]);
+
+    // A live staging registers the freshly minted endpoint with a now() observation.
+    await pipeline.resourceStager.stageExistingBox({
+      orgId,
+      companionId,
+      boxId: "bx_23456789",
+      allowBoxCreate: false,
+      authorization: {
+        ...authorization,
+        mcpRefs: [{ account_id: accountId, credential_generation: generation }],
+      },
+      material,
+      clientSurface: "web",
+      targetSettingsRevision: 3n,
+      targetSkillsRevision: 4,
+      signal: new AbortController().signal,
+    });
+    expect(registered[1]).toEqual({
+      boxId: "bx_23456789",
+      endpoint: {
+        hostedUrl: "https://fresh-8790.on.ascii.dev",
+        proxyToken: "f".repeat(64),
+        bearerToken: "g".repeat(64),
+        observedAt: new Date(nowMs),
+      },
+    });
+  });
+
+  it("skips registration on an undecryptable endpoint without failing the claim", async () => {
+    const nowMs = Date.parse("2027-01-01T00:00:00.000Z");
+    const material = {
+      ...workMaterial(null),
+      boxId: "bx_23456789",
+      agentEndpoint: {
+        hostedUrl: "https://abc-8790.on.ascii.dev",
+        tokenCiphertext: "{\"ciphertext\":\"corrupted\"}",
+        observedAt: new Date(nowMs),
+      },
+    };
+    const store = fakeStore({
+      getMaterial: vi.fn(async () => material),
+      getConfigCatalog: vi.fn(async () => null),
+      mintHubToken: vi.fn(async () => ({
+        token: "cmp_pat_hubtokenfixture000000000000000000000000",
+        expiresAt: new Date(nowMs + 6 * 60 * 60 * 1_000),
+      })),
+      mintMcpBrokerToken: vi.fn(async () => ({
+        token: `cmp_mcp_${"e".repeat(48)}`,
+        expiresAt: new Date(nowMs + 6 * 60 * 60 * 1_000),
+      })),
+    });
+    const registered: Array<{ boxId: string }> = [];
+    const pipeline = createRuntimeMaterialPipeline({
+      masterKey,
+      apiUrl: "https://api.example.test",
+      bundledSkill: {
+        slug: "companion",
+        version: "1.0.0",
+        checksum: `sha256:${"1".repeat(64)}`,
+        archive: Buffer.from("bundled"),
+      },
+      runtime: () => fakeRuntime(vi.fn()),
+      loadSkillArchive: vi.fn(),
+      loadAttachment: vi.fn(),
+      storeAttachment: vi.fn(),
+      registerAgentEndpoint: (boxId) => registered.push({ boxId }),
+      now: () => nowMs,
+    });
+    await expect(pipeline.materialProvider.getMaterial({ store, fence })).resolves.toBe(material);
+    expect(registered).toHaveLength(0);
   });
 
   it.each([

@@ -34,6 +34,10 @@ import { composeRuntimeService, type RuntimeService } from "./composition";
 import { loadRuntimeServiceConfig, type RuntimeServiceConfig } from "./config";
 import { createRuntimeDatabase, type RuntimeDatabase } from "./database";
 import {
+  createDirectRuntimePiControl,
+  DirectBoxEndpointRegistry,
+} from "./directBoxTransport";
+import {
   createRuntimeDesktopPort,
   PostgresRuntimeDesktopAuthorizer,
   PostgresRuntimeDesktopReplayGuard,
@@ -250,11 +254,27 @@ export async function buildProductionRuntimeService(
       });
     });
     archiveStorage = factories.createArchiveStorage();
+    // The direct-transport registry exists whenever the gate is not off: `shadow` needs endpoints
+    // to compare against, `on` needs them to route the event path. `off` stays byte-for-byte the
+    // exec-only composition.
+    const endpointRegistry = config.directTransport === "off"
+      ? null
+      : new DirectBoxEndpointRegistry();
     const material = createRuntimeMaterialPipeline({
       masterKey: config.masterKey,
       apiUrl: config.apiUrl,
       bundledSkill,
       runtime: freshRuntime,
+      ...(endpointRegistry
+        ? {
+          registerAgentEndpoint: (boxId: string, endpoint: {
+            hostedUrl: string;
+            proxyToken: string;
+            bearerToken: string;
+            observedAt: Date;
+          }) => endpointRegistry.register(boxId, endpoint),
+        }
+        : {}),
       loadSkillArchive: async (storagePath, signal) => {
         const storage = archiveStorage;
         if (!storage) throw new Error("runtime archive storage is closed");
@@ -281,10 +301,23 @@ export async function buildProductionRuntimeService(
       onColdFallback: (reason: string) => imageSupervisor.recordColdFallback(reason),
       log,
     };
+    const execPi = createRuntimePiControl(adapters);
+    const direct = endpointRegistry
+      ? createDirectRuntimePiControl({
+        mode: config.directTransport === "on" ? "on" : "shadow",
+        exec: execPi,
+        registry: endpointRegistry,
+        layoutFullMarker: layoutIdentity.fullMarker,
+        log,
+      })
+      : null;
     const kernel = factories.createKernel({
       store,
       box: createRuntimeBoxControl(adapters),
-      pi: createRuntimePiControl(adapters),
+      pi: direct?.pi ?? execPi,
+      ...(direct && config.directTransport === "on"
+        ? { eventPollIntervalMs: direct.eventPollIntervalMs }
+        : {}),
       materialProvider: material.materialProvider,
       projectionRedactorFactory: material.projectionRedactorFactory,
       resourceStager: material.resourceStager,

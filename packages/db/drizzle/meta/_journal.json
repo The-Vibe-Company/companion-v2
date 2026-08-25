@@ -876,6 +876,13 @@
       "when": 1790528800000,
       "tag": "0124_companion_box_agent_endpoint",
       "breakpoints": true
+    },
+    {
+      "idx": 125,
+      "version": "7",
+      "when": 1790615200000,
+      "tag": "0125_companion_agent_endpoint_read",
+      "breakpoints": true
     }
   ]
 }

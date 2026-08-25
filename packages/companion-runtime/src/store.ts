@@ -343,6 +343,28 @@ function decodeAttachments(row: RuntimeSqlRow): RuntimeAttachment[] {
   });
 }
 
+/**
+ * Decode the hosted agent endpoint columns, enforcing the database's all-or-nothing CHECK on this
+ * side of the boundary too: half an endpoint is a contract violation, never a partial credential.
+ */
+function decodeAgentEndpoint(row: RuntimeSqlRow): RuntimeWorkMaterial["agentEndpoint"] {
+  const hostedUrl = nullableText(row, "agent_hosted_url");
+  const tokenCiphertext = nullableText(row, "agent_token_ciphertext");
+  const observedAt = row.agent_observed_at;
+  if (hostedUrl === null && tokenCiphertext === null && observedAt === null) return null;
+  if (
+    hostedUrl === null
+    || hostedUrl.length > 2_048
+    || tokenCiphertext === null
+    || tokenCiphertext.length > 8_192
+    || !(observedAt instanceof Date)
+    || !Number.isFinite(observedAt.getTime())
+  ) {
+    throw new RuntimeStoreContractError();
+  }
+  return { hostedUrl, tokenCiphertext, observedAt };
+}
+
 function decodeMaterial(row: RuntimeSqlRow): RuntimeWorkMaterial {
   const credentialSnapshotMatches = booleanValue(row.credential_snapshot_matches);
   if (credentialSnapshotMatches === null) {
@@ -401,7 +423,15 @@ function decodeMaterial(row: RuntimeSqlRow): RuntimeWorkMaterial {
     hasVisibleOutput,
     attachments: decodeAttachments(row),
     configCatalog: null,
+    boxId: decodeMaterialBoxId(row),
+    agentEndpoint: decodeAgentEndpoint(row),
   };
+}
+
+function decodeMaterialBoxId(row: RuntimeSqlRow): string | null {
+  const boxId = nullableText(row, "box_id");
+  if (boxId !== null && !BOX_ID_PATTERN.test(boxId)) throw new RuntimeStoreContractError();
+  return boxId;
 }
 
 function decodeSkillUpdateMaterial(row: RuntimeSqlRow): RuntimeSkillUpdateMaterial {
@@ -773,7 +803,8 @@ export class PostgresRuntimeStore implements RuntimeStore {
       const rows = await this.sql.unsafe<RuntimeSqlRow[]>(`
         SELECT turn_id, attempt_id, message_event_id, prompt_text, decision_request_kind,
                decision_response_payload, provider_material, skill_material, mcp_material,
-               model_input, has_visible_output, attachments, credential_snapshot_matches
+               model_input, has_visible_output, attachments, credential_snapshot_matches,
+               box_id, agent_hosted_url, agent_token_ciphertext, agent_observed_at
         FROM public.companion_runtime_get_material(
           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
           $6::text, $7::public.companion_runtime_work_kind, $8::uuid, $9::integer

@@ -450,6 +450,9 @@ function startRuntime(executorId: string): ManagedProcess {
       COMPANION_BOX_READY_TIMEOUT_MS: "10000",
       COMPANION_PI_BROKER_TIMEOUT_MS: "5000",
       COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS: "10000",
+      // Full direct-transport rollout: every staging registers the hosted agent endpoint and the
+      // kernel consumes the event path over it, with per-call fallback to the exec transport.
+      COMPANION_DIRECT_TRANSPORT: "on",
     },
   );
 }
@@ -487,6 +490,9 @@ async function startBoxWithRetry(): Promise<void> {
           BOX_SIM_PORT: String(boxPort),
           BOX_SIM_API_KEY: boxApiKey,
           BOX_SIM_CONTROL_TOKEN: controlToken,
+          // Ephemeral agent listener: staging learns the hosted URL from `host url`, so no
+          // caller needs the concrete port and it can never collide with the reserved pair.
+          BOX_SIM_AGENT_PORT: "0",
         },
       );
       await waitForHttp(`${boxControlBase}/state`, candidate, {
@@ -895,6 +901,11 @@ describe("Runtime v2 real-process control plane", () => {
       from companion_transcript_entries where companion_id = ${companionId}::uuid
     `;
     expect(coldProjection?.assistants).toBeGreaterThanOrEqual(1);
+    // Direct transport carried the cold turn's event path: staging registered the hosted agent
+    // endpoint, and no direct call had to fall back to the exec transport.
+    const runtimeOutput = runtimeProcess?.output() ?? "";
+    expect(runtimeOutput).toContain("\"phase\":\"agent_registration\"");
+    expect(runtimeOutput).not.toContain("runtime.direct_transport.fallback");
 
     apiProcess = startApi();
     await waitForHttp(`${apiBase}/health`, apiProcess);

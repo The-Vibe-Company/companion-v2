@@ -30,6 +30,7 @@ import { encryptOpaqueValue } from "@companion/core";
 import { packDir } from "@companion/skills";
 import { companionAttachmentKey } from "@companion/storage";
 
+import { decryptCompanionAgentEndpointTokens } from "./directBoxTransport";
 import {
   assertRuntimeMaterialSnapshot,
   collectRuntimeCredentialSensitiveValues,
@@ -71,6 +72,17 @@ export function createRuntimeMaterialPipeline(input: {
     contentType: string;
     signal: AbortSignal;
   }): Promise<void>;
+  /**
+   * Direct-transport endpoint sink, present only when the rollout gate enables the direct channel.
+   * Receives the decrypted hosted agent endpoint at staging time and on every fenced material read
+   * that carries one, so the event path can go direct without waiting for a fresh staging.
+   */
+  registerAgentEndpoint?: (boxId: string, endpoint: {
+    hostedUrl: string;
+    proxyToken: string;
+    bearerToken: string;
+    observedAt: Date;
+  }) => void;
   now?: () => number;
 }): RuntimeMaterialPipeline {
   const now = input.now ?? Date.now;
@@ -103,6 +115,24 @@ export function createRuntimeMaterialPipeline(input: {
         // an unusable capability, but it is never staged or included in material expiry.
         const mcpBrokerToken = await store.mintMcpBrokerToken(fence, RUNTIME_LEASE_SECONDS);
         if (hasOauth && mcpBrokerToken) mcpBrokerTokensByMaterial.set(material, mcpBrokerToken);
+      }
+      if (input.registerAgentEndpoint && material.boxId && material.agentEndpoint) {
+        try {
+          const tokens = decryptCompanionAgentEndpointTokens({
+            orgId: fence.orgId,
+            companionId: fence.companionId,
+            tokenCiphertext: material.agentEndpoint.tokenCiphertext,
+            masterKey: input.masterKey,
+          });
+          input.registerAgentEndpoint(material.boxId, {
+            hostedUrl: material.agentEndpoint.hostedUrl,
+            proxyToken: tokens.proxyToken,
+            bearerToken: tokens.bearerToken,
+            observedAt: material.agentEndpoint.observedAt,
+          });
+        } catch {
+          // An undecryptable endpoint only keeps this Box on the exec transport; the claim proceeds.
+        }
       }
       return material;
     },
@@ -199,6 +229,16 @@ export function createRuntimeMaterialPipeline(input: {
         configCatalog: nativeMobile ? null : stage.material.configCatalog,
         signal: stage.signal,
       });
+      // A live staging holds the endpoint in plaintext for exactly this moment: hand it to the
+      // direct-transport registry now so the very next turn on this Box can go direct.
+      if (input.registerAgentEndpoint && observed.agentEndpoint) {
+        input.registerAgentEndpoint(stage.boxId, {
+          hostedUrl: observed.agentEndpoint.hostedUrl,
+          proxyToken: observed.agentEndpoint.proxyToken,
+          bearerToken: observed.agentEndpoint.bearerToken,
+          observedAt: new Date(now()),
+        });
+      }
       return {
         diskLayoutVersion: observed.diskLayoutVersion,
         appliedSettingsRevision: stage.targetSettingsRevision,

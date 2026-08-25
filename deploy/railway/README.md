@@ -106,8 +106,12 @@ never has.
 `COMPANION_DIRECT_TRANSPORT` (`off` | `shadow` | `on`, empty means `off`) is the Phase 2
 direct-transport rollout gate on the runtime service. `shadow` and `on` make every staging register
 the on-box Companion agent's hosted proxy endpoint (`host 8790` via the provider) and store it
-encrypted; nothing consumes the direct channel yet. In `shadow` a registration failure never fails
-a wake; in `on` it fails closed. Start with `shadow` when rolling out.
+encrypted. `on` routes the event path — broker state, long-poll event reads, acknowledgements, and
+the daemon probe — over that channel with automatic per-call fallback to the exec transport, which
+retires the 500 ms exec polling during active turns; `shadow` routes nothing and only logs one
+throttled direct-vs-exec comparison per Box. In `shadow` a registration failure never fails a wake;
+in `on` it fails closed. Start with `shadow` when rolling out, then move to `on` once
+`runtime.direct_transport.shadow` reports matches.
 
 ## PostgreSQL roles
 

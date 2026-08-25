@@ -4,6 +4,7 @@ export * from "./companionPermissionBroker";
 export * from "./companionPiInjection";
 export * from "./companionPiBroker";
 export * from "./companionBoxAgent";
+export * from "./companionBoxAgentClient";
 export * from "./companionMcpGateway";
 export * from "./companionRuntimeBaker";
 export * from "./companionRuntimeImage";

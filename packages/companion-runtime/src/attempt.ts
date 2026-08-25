@@ -430,8 +430,11 @@ async function consumeEvents(
       invocationId: auth.piInvocationId,
     });
     if (page.nextCursor === auth.eventCursor) {
+      const pollInterval = context.deps.eventPollIntervalMs;
       await context.deps.clock.sleep(
-        context.deps.eventPollIntervalMs ?? 500,
+        typeof pollInterval === "function"
+          ? pollInterval({ boxId: requiredRuntime(context).boxId })
+          : pollInterval ?? 500,
         context.session.signal,
       );
       continue;

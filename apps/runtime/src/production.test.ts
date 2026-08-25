@@ -227,6 +227,8 @@ describe("production runtime composition", () => {
       COMPANION_DIRECT_TRANSPORT: "off",
       COMPANION_PI_MCP_ADAPTER_PACKAGE: "npm:pi-mcp-adapter@2.12.1",
     });
+    // Gate off: today's exec-only composition, byte-for-byte — no direct poll-interval override.
+    expect(kernelInput?.eventPollIntervalMs).toBeUndefined();
     const control = (kernelInput as CreateRuntimeKernelInput).box;
     await control.getStatus({ boxId: "bx_23456789", signal: new AbortController().signal });
     await control.getStatus({ boxId: "bx_23456789", signal: new AbortController().signal });
@@ -252,5 +254,75 @@ describe("production runtime composition", () => {
     expect(db.close).toHaveBeenCalledOnce();
     expect(configuredMasterKey).toEqual(Buffer.alloc(32));
     expect(configuredHmacKey).toEqual(Buffer.alloc(32));
+  });
+
+  it.each([
+    { mode: "on", pollOverride: true },
+    { mode: "shadow", pollOverride: false },
+  ])("wires the direct transport facade when the gate is $mode", async ({ mode, pollOverride }) => {
+    const db = database();
+    (db.sql.unsafe as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    const store = {} as RuntimeStore;
+    let kernelInput: CreateRuntimeKernelInput | undefined;
+    const factories = {
+      createDatabase: () => db,
+      createStore: () => store,
+      createLifecycle: () => ({} as unknown as BoxRuntimeLifecycleClient),
+      createBoxRuntime: vi.fn(() => ({
+        layoutIdentity: () => ({
+          layoutVersion: 14,
+          packages: [],
+          qmdPackage: "@tobilu/qmd@2.8.3",
+          minimumPiVersion: "0.84.2",
+          overlayRevision: 1,
+          overlayMarker: "overlay",
+          baseMarker: "14:base",
+          fullMarker: "14:base:overlay=overlay",
+          imageMarker: "14:base:overlay=overlay:skill=none:boot=1",
+          imageName: "companion-l14-aaaaaaaaaaaa",
+        }),
+      } as unknown as CompanionBoxRuntimeV2)),
+      createArchiveStorage: () => ({
+        load: vi.fn(async () => Buffer.from("archive")),
+        store: vi.fn(async () => undefined),
+        close: vi.fn(),
+      }),
+      loadBundledSkill: vi.fn(async () => ({
+        slug: "companion",
+        version: "1.0.0",
+        checksum: `sha256:${"1".repeat(64)}`,
+        archive: Buffer.from("bundled"),
+      })),
+      createKernel: (input) => {
+        kernelInput = input;
+        return { scheduler: scheduler() };
+      },
+    } satisfies RuntimeProductionFactories;
+
+    const service = await buildProductionRuntimeService({
+      env: {
+        DATABASE_COMPANION_RUNTIME_URL: databaseUrl,
+        COMPANION_COMPANIONS_ENABLED: "true",
+        COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS: "example.test",
+        COMPANION_BOX_API_KEY: "box-secret",
+        COMPANION_BOX_API_BASE: "http://127.0.0.1:13400",
+        COMPANION_SECRETS_MASTER_KEY: Buffer.alloc(32, 17).toString("base64"),
+        COMPANION_RUNTIME_DESKTOP_HMAC_SECRET: Buffer.alloc(32, 23).toString("base64"),
+        COMPANION_API_URL: "http://127.0.0.1:3001",
+        COMPANION_DIRECT_TRANSPORT: mode,
+      },
+      factories,
+    });
+
+    // `on` hands the kernel the per-Box direct poll interval; `shadow` keeps the flat cadence.
+    if (pollOverride) {
+      const interval = kernelInput?.eventPollIntervalMs;
+      expect(interval).toEqual(expect.any(Function));
+      expect((interval as (input: { boxId: string }) => number)({ boxId: "bx_23456789" })).toBe(500);
+    } else {
+      expect(kernelInput?.eventPollIntervalMs).toBeUndefined();
+    }
+    expect(kernelInput?.pi).toEqual(expect.any(Object));
+    await service.application.stop();
   });
 });

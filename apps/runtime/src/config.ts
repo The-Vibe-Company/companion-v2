@@ -38,9 +38,11 @@ interface RuntimeServiceConfigBase {
    */
   requireRuntimeImage: boolean;
   /**
-   * Phase 2 direct-transport rollout gate. `off` (default) skips Box agent endpoint registration;
-   * `shadow` and `on` register the hosted endpoint at staging. The runtime does not consume the
-   * direct channel yet, so the two active modes differ only in failure posture during registration.
+   * Phase 2 direct-transport rollout gate. `off` (default) skips Box agent endpoint registration
+   * and keeps the exec-only composition byte-for-byte. `shadow` registers the hosted endpoint at
+   * staging and logs one throttled direct-vs-exec comparison per Box without routing any real
+   * call. `on` additionally routes the event path — broker state, event reads/acks, and the
+   * daemon probe — over the direct channel with per-call fallback to exec.
    */
   directTransport: "off" | "shadow" | "on";
 }

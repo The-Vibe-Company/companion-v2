@@ -390,6 +390,19 @@ export interface RuntimeWorkMaterial {
   attachments: RuntimeAttachment[];
   /** Credential-free snapshot of what this Companion could select, or null when it is not staged. */
   configCatalog: RuntimeConfigCatalog | null;
+  /** The instance's current Box, when one exists. Read-only companion to {@link agentEndpoint}. */
+  boxId: string | null;
+  /**
+   * The hosted direct-transport agent endpoint staging registered for this Box, or null when none
+   * was registered. Only ciphertext crosses this boundary: the proxy and bearer tokens are
+   * masterKey-encrypted by apps/runtime, and `observedAt` carries the freshness the runtime judges
+   * before trusting the URL for a direct call.
+   */
+  agentEndpoint: {
+    hostedUrl: string;
+    tokenCiphertext: string;
+    observedAt: Date;
+  } | null;
 }
 
 /** Credential-free immutable Skill snapshot captured by a user Pi-shutdown operation. */

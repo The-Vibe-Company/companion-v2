@@ -320,7 +320,12 @@ export interface RuntimeEngineDependencies {
   clock: RuntimeClock;
   jitter: () => number;
   executorId: string;
-  eventPollIntervalMs?: number;
+  /**
+   * Delay after an empty event page before the next read. A function form lets the transport
+   * composition answer per Box: the direct long-poll channel already waited server-side, so its
+   * empty pages re-poll immediately, while the exec transport keeps the flat cadence.
+   */
+  eventPollIntervalMs?: number | ((input: { boxId: string }) => number);
   /** Process logs for failures. Absent in unit tests unless a test captures them. */
   log?: RuntimeProcessLog;
 }

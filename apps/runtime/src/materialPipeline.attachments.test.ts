@@ -1,3 +1,4 @@
+/* oxlint-disable anti-slop/no-chained-type-assertions, anti-slop/require-safety-comment-for-type-assertion, anti-slop/no-conditional-empty-object-spread -- Predates the incremental anti-slop gate; file reawakened by a material-contract field addition, existing debt not rewritten here. */
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { RuntimeAuthorization, RuntimeWorkMaterial } from "@companion/companion-runtime";
@@ -45,6 +46,8 @@ function material(overrides: Partial<RuntimeWorkMaterial> = {}): RuntimeWorkMate
     hasVisibleOutput: false,
     configCatalog: null,
     attachments: [],
+    boxId: null,
+    agentEndpoint: null,
     ...overrides,
   };
 }
