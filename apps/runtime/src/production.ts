@@ -44,6 +44,7 @@ import {
   createRuntimeMaterialPipeline,
   loadBundledCompanionRuntimeSkill,
 } from "./materialPipeline";
+import { createPiBundleUrlProvider } from "./piBundlePresigner";
 import {
   createRuntimeSchedulerAdapter,
   type RuntimeKernelScheduler,
@@ -73,6 +74,8 @@ export interface RuntimeProductionFactories {
     options?: {
       onTiming?: (sample: BoxProviderCallTiming) => void;
       companionSkillChecksum?: string;
+      /** Mints a fresh presigned Pi-bundle download URL per layout script generation. */
+      bundleUrlProvider?: () => Promise<string>;
     },
   ): CompanionBoxRuntimeV2;
   createArchiveStorage(): RuntimeArchiveStorage;
@@ -160,6 +163,7 @@ export async function buildProductionRuntimeService(
     }
 
     const boxEnv = runtimeBoxEnvironment(config, env);
+    const bundleUrlProvider = createPiBundleUrlProvider(env);
     const lifecycle = factories.createLifecycle(boxEnv, {
       onTiming: (sample) => {
         log.info({
@@ -200,6 +204,10 @@ export async function buildProductionRuntimeService(
         });
       },
       companionSkillChecksum: bundledSkill.checksum,
+      // Undefined when bundle mode is off or S3 is not fully configured; the box runtime then keeps
+      // the COMPANION_PI_INSTALL_COMMAND escape hatch. The runtime service is the only process with
+      // both the Box credential and the S3 credential, so presigning happens here and nowhere else.
+      ...(bundleUrlProvider ? { bundleUrlProvider } : {}),
     };
     const freshRuntime = (): CompanionBoxRuntimeV2 => factories.createBoxRuntime(
       boxEnv,
@@ -317,6 +325,7 @@ const BOX_RUNTIME_ENV_KEYS = [
   "COMPANION_PI_BROKER_COMMAND",
   "COMPANION_PI_BROKER_SOCKET",
   "COMPANION_PI_BROKER_TIMEOUT_MS",
+  "COMPANION_PI_BUNDLE_ENABLED",
   "COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS",
   "COMPANION_PI_INSTALL_COMMAND",
   "COMPANION_PI_MCP_ADAPTER_PACKAGE",

@@ -64,6 +64,7 @@ jobs:
           S3_REGION: ${{ secrets.PI_BUNDLE_S3_REGION }}
           S3_ACCESS_KEY_ID: ${{ secrets.PI_BUNDLE_S3_ACCESS_KEY_ID }}
           S3_SECRET_ACCESS_KEY: ${{ secrets.PI_BUNDLE_S3_SECRET_ACCESS_KEY }}
+          # Defaults to the skill-archives bucket; PI_BUNDLE_S3_BUCKET stays a dedicated-bucket override.
           S3_BUCKET_PI_BUNDLES: ${{ vars.PI_BUNDLE_S3_BUCKET }}
           S3_FORCE_PATH_STYLE: ${{ vars.PI_BUNDLE_S3_FORCE_PATH_STYLE }}
         run: node scripts/upload-pi-bundle.mjs "${{ steps.build.outputs.tarball }}" "${{ steps.build.outputs.object_key }}"

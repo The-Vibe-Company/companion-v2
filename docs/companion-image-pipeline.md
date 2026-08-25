@@ -142,11 +142,14 @@ replaces it with a self-hosted, content-addressed artifact.
 
 - `packages/box-runtime/src/piBundle.ts` holds the single-source pins (`COMPANION_PI_BUNDLE`:
   `piVersion`, the four extension `packages`, `qmdPackage`, `nodeMajor`, `sha256`, `bundleFormat`).
-  The artifact is `companion-pi-bundle-<sha12>.tar.gz`, a tarball carrying `pi/` (the Pi prefix
-  tree), `pi-agent-dir/` (the four installed extensions), and `tools/` (the qmd prefix tree).
-- Bundle mode turns on when `COMPANION_PI_BUNDLE_BASE_URL` is set (the public bucket base URL, for
-  example the `companion-pi-bundles` bucket on Tigris; never hardcoded). The layout script then
-  `curl`s the object (retrying, with a `node` fetch fallback), verifies it with `sha256sum -c`
+  The artifact is `pi-bundles/companion-pi-bundle-<sha12>.tar.gz`, a tarball carrying `pi/` (the Pi
+  prefix tree), `pi-agent-dir/` (the four installed extensions), and `tools/` (the qmd prefix tree),
+  stored in the existing skill-archives bucket — no dedicated bucket and never a public one.
+- Bundle mode turns on when `COMPANION_PI_BUNDLE_ENABLED=true` and the runtime's `S3_*`
+  configuration is complete. At staging time `apps/runtime/src/piBundlePresigner.ts` mints a
+  presigned GET URL (1 h expiry, fresh per layout script generation, since stagings can be hours
+  apart) and injects it into the script. The layout script then
+  `curl`s that URL (retrying, with a `node` fetch fallback), verifies it with `sha256sum -c`
   against the pin, `tar`-extracts it into `~/.companion/dist/<sha12>/`, checks the Box's Node major
   against `nodeMajor`, and wires PATH (`dist/<sha12>/pi/bin` first, `pi-agent-dir` → `~/.companion/pi`,
   `tools` → `~/.companion/tools`). Nothing is fetched from npm.
@@ -158,14 +161,15 @@ replaces it with a self-hosted, content-addressed artifact.
 - `COMPANION_PI_INSTALL_COMMAND` stays the dev/emergency escape hatch and behaves exactly as before
   when no bundle is configured. When both are set, the bundle wins. Bundle identity is folded into
   the base layout marker as `:bundle=<sha12>`; the escape-hatch marker omits it, so identities never
-  collide. A new bundle sha is a new base marker: warm Boxes relayout once at their next health tick
+  collide. The presigned URL never reaches any identity or marker — only the sha does. A new bundle
+  sha is a new base marker: warm Boxes relayout once at their next health tick
   and the registry re-bakes. `disk_layout_version` stays 14 — no migration.
 - Build and publish: `scripts/build-pi-bundle.sh` (reads the pins from `piBundle.ts`, builds the
   three trees, smoke-tests, tars, prints the sha256) and `.github/workflows/pi-bundle.yml` (builds on
   the pinned Node major, uploads to S3 at the content-addressed key with `scripts/upload-pi-bundle.mjs`).
-  A CI guard (`pnpm pi-bundle:check`) HEADs the object derived from the pin so a pin cannot merge
-  before its artifact exists; it skips gracefully while the sha is still the placeholder or no base
-  URL is configured.
+  A CI guard (`pnpm pi-bundle:check`) HEADs the object derived from the pin with the S3 SDK (the
+  bucket is not public) so a pin cannot merge before its artifact exists; it skips gracefully while
+  the sha is still the placeholder or the S3 credentials are not configured.
 
 ## Phase 2 — staged, proven checkpoints
 

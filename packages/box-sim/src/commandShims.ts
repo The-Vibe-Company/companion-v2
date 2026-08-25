@@ -486,10 +486,11 @@ function installedLayout(machine: BoxSimCommandMachine): BoxSimCommandResult {
   if (expected && recorded === expected && brokerReady) {
     return ok("companion-layout-unchanged\n");
   }
-  // A bundle-mode layout script downloads and verifies one immutable tarball before it writes
-  // anything. The injected fault fails that step: it prints the fixed marker as its last stderr line
-  // and returns before any layout file is written, exactly as the real script's `exit 1` does.
-  const bundleMode = /(?:^|\n)bundle_base='[^']*'/.test(script);
+  // A bundle-mode layout script downloads one immutable tarball through its injected presigned URL
+  // and verifies it before it writes anything. The injected fault fails that step: it prints the
+  // fixed marker as its last stderr line and returns before any layout file is written, exactly as
+  // the real script's `exit 1` does.
+  const bundleMode = /(?:^|\n)bundle_url='[^']*'/.test(script);
   if (bundleMode && machine.bundleDownloadFault) {
     return failed(`${BUNDLE_FAULT_MARKER[machine.bundleDownloadFault]}\n`);
   }

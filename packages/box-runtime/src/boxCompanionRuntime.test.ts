@@ -926,6 +926,7 @@ describe("default Pi packages on the Box disk", () => {
     mcpCredentials: Array<{ env_key: string; value: string }> = [],
     companionSkillChecksum?: string,
     mcpAccounts: CompanionStagedMcpAccount[] = [],
+    runtimeOptions: { bundleUrlProvider?: () => Promise<string> } = {},
   ): Promise<string> {
     stagedFiles.clear();
     layoutCommands.length = 0;
@@ -962,9 +963,13 @@ describe("default Pi packages on the Box disk", () => {
       throw new Error(`unexpected Box request: ${method} ${url}`);
     }));
 
+    const options: ConstructorParameters<typeof AsciiBoxCompanionRuntime>[1] = {
+      ...runtimeOptions,
+    };
+    if (companionSkillChecksum) options.companionSkillChecksum = companionSkillChecksum;
     await new AsciiBoxCompanionRuntime(
       { COMPANION_BOX_API_KEY: "box_test", ...env },
-      companionSkillChecksum ? { companionSkillChecksum } : undefined,
+      options,
     )
       .stageExistingBox({
         companionId: "11111111-1111-4111-8111-111111111111",
@@ -1299,16 +1304,25 @@ describe("default Pi packages on the Box disk", () => {
       .toBe("npm:pi-mcp-adapter@^2.12.1");
   });
 
-  const BUNDLE_BASE = "https://companion-pi-bundles.fly.storage.tigris.dev";
+  // A presigned GET on the content-addressed key inside the skill-archives bucket, as
+  // apps/runtime's presigner would mint it. The runtime treats it as an opaque input.
+  const BUNDLE_URL =
+    "https://fly.storage.tigris.dev/skill-archives/"
+    + `${companionPiBundleObjectKey(COMPANION_PI_BUNDLE.sha256)}`
+    + "?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Expires=3600&X-Amz-Signature=deadbeef";
+  const BUNDLE_ENV = { COMPANION_PI_BUNDLE_ENABLED: "true" };
+  const BUNDLE_OPTIONS = { bundleUrlProvider: async () => BUNDLE_URL };
 
   it("downloads, verifies, and extracts the pinned bundle instead of installing npm at boot", async () => {
-    const script = await stagedLayoutScript({ COMPANION_PI_BUNDLE_BASE_URL: `${BUNDLE_BASE}/` });
-    const key = companionPiBundleObjectKey(COMPANION_PI_BUNDLE.sha256);
+    const script = await stagedLayoutScript(BUNDLE_ENV, [], undefined, [], BUNDLE_OPTIONS);
     const distDir = `$HOME/.companion/dist/${companionPiBundleShaShort(COMPANION_PI_BUNDLE.sha256)}`;
-    // The download names the content-addressed key under the configured base, with retry.
-    expect(script).toContain(`bundle_base='${BUNDLE_BASE}'`);
-    expect(script).toContain(`bundle_key='${key}'`);
-    expect(script).toContain("curl -fsSL --retry 3 -o \"$bundle_archive\" \"$bundle_base/$bundle_key\"");
+    // The object key is content-addressed under the pi-bundles/ prefix of the shared bucket.
+    expect(companionPiBundleObjectKey(COMPANION_PI_BUNDLE.sha256)).toBe(
+      `pi-bundles/companion-pi-bundle-${companionPiBundleShaShort(COMPANION_PI_BUNDLE.sha256)}.tar.gz`,
+    );
+    // The download uses the injected presigned URL exactly, with retry.
+    expect(script).toContain(`bundle_url='${BUNDLE_URL}'`);
+    expect(script).toContain("curl -fsSL --retry 3 -o \"$bundle_archive\" \"$bundle_url\"");
     // The checksum is verified against the pin, then the tarball is extracted into its dist dir.
     expect(script).toContain(`bundle_sha='${COMPANION_PI_BUNDLE.sha256}'`);
     expect(script).toContain("sha256sum -c -");
@@ -1334,9 +1348,11 @@ describe("default Pi packages on the Box disk", () => {
   });
 
   it("folds the bundle sha into the base layout marker so warm Boxes relayout once", async () => {
-    const script = await stagedLayoutScript({ COMPANION_PI_BUNDLE_BASE_URL: BUNDLE_BASE });
+    const script = await stagedLayoutScript(BUNDLE_ENV, [], undefined, [], BUNDLE_OPTIONS);
     const shaShort = companionPiBundleShaShort(COMPANION_PI_BUNDLE.sha256);
     expect(script).toContain(`:bundle=${shaShort}'`);
+    // The presigned URL is transport, never identity: it must not leak into any marker.
+    expect(script).not.toContain(`:bundle=${BUNDLE_URL}`);
     // The install marker never carries a bundle segment, so identities never collide.
     const installScript = await stagedLayoutScript({
       COMPANION_PI_INSTALL_COMMAND: "curl -fsSL https://pi.test/install | bash",
@@ -1344,14 +1360,45 @@ describe("default Pi packages on the Box disk", () => {
     expect(installScript).not.toContain(":bundle=");
   });
 
-  it("lets the bundle win when both a bundle base URL and an install command are set", async () => {
-    const script = await stagedLayoutScript({
-      COMPANION_PI_BUNDLE_BASE_URL: BUNDLE_BASE,
-      COMPANION_PI_INSTALL_COMMAND: "curl -fsSL https://pi.test/install | bash",
-    });
+  it("lets the bundle win when both bundle mode and an install command are set", async () => {
+    const script = await stagedLayoutScript(
+      {
+        ...BUNDLE_ENV,
+        COMPANION_PI_INSTALL_COMMAND: "curl -fsSL https://pi.test/install | bash",
+      },
+      [],
+      undefined,
+      [],
+      BUNDLE_OPTIONS,
+    );
     expect(script).toContain("tar -xzf \"$bundle_archive\" -C \"$bundle_dir\"");
     expect(script).not.toContain("https://pi.test/install");
     expect(script).toContain(":bundle=");
+  });
+
+  it("keeps the escape hatch when bundle mode is enabled without a URL provider", async () => {
+    // S3 credentials absent → apps/runtime injects no provider → the flag alone changes nothing,
+    // and the identity carries no bundle segment so the marker matches the installed layout.
+    const script = await stagedLayoutScript({
+      ...BUNDLE_ENV,
+      COMPANION_PI_INSTALL_COMMAND: "curl -fsSL https://pi.test/install | bash",
+    });
+    expect(script).toContain("$pi_install_script");
+    expect(script).not.toContain("bundle_dir=");
+    expect(script).not.toContain(":bundle=");
+  });
+
+  it("mints a fresh presigned URL for every layout script generation", async () => {
+    let minted = 0;
+    const options = {
+      bundleUrlProvider: async () => `${BUNDLE_URL}&X-Amz-Date=2026${(minted += 1)}`,
+    };
+    const first = await stagedLayoutScript(BUNDLE_ENV, [], undefined, [], options);
+    const second = await stagedLayoutScript(BUNDLE_ENV, [], undefined, [], options);
+    expect(minted).toBe(2);
+    expect(first).toContain("X-Amz-Date=20261");
+    expect(second).toContain("X-Amz-Date=20262");
+    expect(second).not.toContain("X-Amz-Date=20261");
   });
 
   it("keeps the escape-hatch install exactly as it is when no bundle is configured", async () => {
@@ -1367,7 +1414,7 @@ describe("default Pi packages on the Box disk", () => {
   });
 
   it("is a script bash can parse in bundle mode", async () => {
-    const script = await stagedLayoutScript({ COMPANION_PI_BUNDLE_BASE_URL: BUNDLE_BASE });
+    const script = await stagedLayoutScript(BUNDLE_ENV, [], undefined, [], BUNDLE_OPTIONS);
     const parsed = spawnSync("bash", ["-n"], { input: script, encoding: "utf8" });
     expect(parsed.stderr).toBe("");
     expect(parsed.status).toBe(0);
@@ -1399,10 +1446,13 @@ describe("default Pi packages on the Box disk", () => {
         throw new Error(`unexpected Box request: ${method} ${url}`);
       }));
 
-      const runtime = new AsciiBoxCompanionRuntime({
-        COMPANION_BOX_API_KEY: "box_test",
-        COMPANION_PI_BUNDLE_BASE_URL: BUNDLE_BASE,
-      });
+      const runtime = new AsciiBoxCompanionRuntime(
+        {
+          COMPANION_BOX_API_KEY: "box_test",
+          COMPANION_PI_BUNDLE_ENABLED: "true",
+        },
+        BUNDLE_OPTIONS,
+      );
       await expect(runtime.stageExistingBox({
         companionId: "11111111-1111-4111-8111-111111111111",
         runtimeGeneration: 1,

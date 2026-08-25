@@ -188,7 +188,7 @@ describe("semantic Box command shims", () => {
       "#!/usr/bin/env bash",
       "base_layout='14:npm:pi-mcp-adapter@2.12.1:qmd=@tobilu/qmd@2.8.3:pi>=0.84.2:bundle=abcdef012345'",
       "expected_layout='14:npm:pi-mcp-adapter@2.12.1:qmd=@tobilu/qmd@2.8.3:pi>=0.84.2:bundle=abcdef012345:overlay=aaaaaaaaaaaaaaaa'",
-      "bundle_base='https://companion-pi-bundles.example/'",
+      "bundle_url='https://skill-archives.example/pi-bundles/companion-pi-bundle-abcdef012345.tar.gz?X-Amz-Expires=3600&X-Amz-Signature=deadbeef'",
     ].join("\n");
     const cases: Array<["download" | "checksum" | "node", string]> = [
       ["download", "companion-bundle-download-failed"],
@@ -212,7 +212,7 @@ describe("semantic Box command shims", () => {
       "#!/usr/bin/env bash",
       "base_layout='14:npm:pi-mcp-adapter@2.12.1:qmd=@tobilu/qmd@2.8.3:pi>=0.84.2:bundle=abcdef012345'",
       "expected_layout='14:npm:pi-mcp-adapter@2.12.1:qmd=@tobilu/qmd@2.8.3:pi>=0.84.2:bundle=abcdef012345:overlay=aaaaaaaaaaaaaaaa'",
-      "bundle_base='https://companion-pi-bundles.example/'",
+      "bundle_url='https://skill-archives.example/pi-bundles/companion-pi-bundle-abcdef012345.tar.gz?X-Amz-Expires=3600&X-Amz-Signature=deadbeef'",
     ].join("\n");
     putBoxFile(machine, ".companion/bin/ensure-pi-layout.sh", Buffer.from(bundleScript));
     expect(await executeBoxCommand(machine, 'bash "$HOME/.companion/bin/ensure-pi-layout.sh"'))

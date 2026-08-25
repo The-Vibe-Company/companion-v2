@@ -326,13 +326,17 @@ instead. That marker is split into two layers:
   (`companion-l14-<hash>`).
 - **overlay** — broker source, permission extension, and daemon unit. Cheap to rewrite in place.
 
-When `COMPANION_PI_BUNDLE_BASE_URL` is set, the base layer no longer installs Pi from npm at boot.
-Instead the layout script downloads one self-hosted, content-addressed tarball
-(`companion-pi-bundle-<sha12>.tar.gz`, pinned in `packages/box-runtime/src/piBundle.ts` with its
+When `COMPANION_PI_BUNDLE_ENABLED=true` and the runtime's S3 configuration is complete, the base
+layer no longer installs Pi from npm at boot. Instead the layout script downloads one self-hosted,
+content-addressed tarball (`pi-bundles/companion-pi-bundle-<sha12>.tar.gz` in the existing
+skill-archives bucket, pinned in `packages/box-runtime/src/piBundle.ts` with its
 sha256, Pi version, the four extensions, `qmd`, and the built Node major), checksum-verifies it,
 extracts it into `~/.companion/dist/<sha12>/`, checks the Box's Node major against the manifest, and
 wires the pinned Pi, its extensions, and `qmd` onto the runtime PATH — nothing is fetched from a
-public registry, and only the pinned checksum, never the download host, is trusted. Its three failure
+public registry and the bucket is never public. The runtime service, which already holds the S3
+credentials, mints a fresh presigned GET URL for each layout script it generates and injects it into
+the script; the Box holds no S3 credential, and only the pinned checksum, never the URL, is
+trusted. Its three failure
 points print fixed markers (`companion-bundle-download-failed`, `companion-bundle-checksum-mismatch`,
 `companion-bundle-node-mismatch`) that map to the stable codes `pi_bundle_download_failed`,
 `pi_bundle_checksum_mismatch`, `pi_bundle_node_mismatch`, and the layout marker is never written on

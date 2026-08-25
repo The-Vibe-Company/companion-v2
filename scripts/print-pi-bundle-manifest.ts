@@ -8,6 +8,7 @@ import {
   COMPANION_PI_BUNDLE,
   COMPANION_PI_NPM_PACKAGE,
   companionPiBundleObjectKey,
+  PI_BUNDLE_OBJECT_PREFIX,
 } from "../packages/box-runtime/src/index";
 
 const stripNpm = (spec: string): string => spec.replace(/^npm:/, "");
@@ -18,6 +19,7 @@ const lines = [
   `PI_BUNDLE_QMD_PACKAGE='${stripNpm(COMPANION_PI_BUNDLE.qmdPackage)}'`,
   `PI_BUNDLE_NODE_MAJOR='${COMPANION_PI_BUNDLE.nodeMajor}'`,
   `PI_BUNDLE_FORMAT='${COMPANION_PI_BUNDLE.bundleFormat}'`,
+  `PI_BUNDLE_OBJECT_PREFIX='${PI_BUNDLE_OBJECT_PREFIX}'`,
   `PI_BUNDLE_OBJECT_KEY='${companionPiBundleObjectKey(COMPANION_PI_BUNDLE.sha256)}'`,
 ];
 

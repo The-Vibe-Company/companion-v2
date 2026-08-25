@@ -14,16 +14,20 @@
  * them to write the download-and-verify script and to fold the bundle identity into the base layout
  * marker so a new bundle relayouts every warm Box on its next wake.
  *
- * Bundle mode is off unless `COMPANION_PI_BUNDLE_BASE_URL` is set. When it is off, the layout script
+ * Bundle mode is off unless `COMPANION_PI_BUNDLE_ENABLED=true`. When it is off, the layout script
  * keeps installing Pi with `COMPANION_PI_INSTALL_COMMAND` exactly as it does today, so the escape
- * hatch that production currently relies on is never removed by this file.
+ * hatch that production currently relies on is never removed by this file. The artifact lives in
+ * the existing skill-archives bucket under the `pi-bundles/` prefix — never a public bucket — and
+ * the Box downloads it through a presigned GET URL that `apps/runtime` mints fresh for each layout
+ * script generation. This module owns only the object key and the pins; it never sees a URL.
  */
 
 /**
- * Placeholder checksum until the CI pipeline builds and publishes the first real artifact to the
- * `companion-pi-bundles` bucket. While this value is set, bundle mode still generates a fully valid
- * download-and-verify script — but the artifact guard (`scripts/check-pi-bundle-artifact.ts`) skips
- * its S3 HEAD so a pin can land in the repository before the artifact it names exists.
+ * Placeholder checksum until the CI pipeline builds and publishes the first real artifact under the
+ * `pi-bundles/` prefix of the skill-archives bucket. While this value is set, bundle mode still
+ * generates a fully valid download-and-verify script — but the artifact guard
+ * (`scripts/check-pi-bundle-artifact.ts`) skips its S3 HEAD so a pin can land in the repository
+ * before the artifact it names exists.
  *
  * TODO(pi-bundle): replace with the sha256 printed by `scripts/build-pi-bundle.sh` once the artifact
  * is published, and delete this placeholder. The guard then enforces "no pin without an artifact".
@@ -98,28 +102,37 @@ export function companionPiBundleShaShort(sha: string = COMPANION_PI_BUNDLE.sha2
 }
 
 /**
- * The content-addressed object key. The checksum lives in the name, so a HEAD tells CI whether this
- * pin is already published and a Box downloading it can never silently get a different artifact.
+ * The prefix that keeps Pi bundle artifacts a distinct object family inside the shared
+ * skill-archives bucket, next to `companion-attachments/`, `orgs/`, and the per-org archive trees.
+ */
+export const PI_BUNDLE_OBJECT_PREFIX = "pi-bundles";
+
+/**
+ * The content-addressed object key inside the skill-archives bucket. The checksum lives in the
+ * name, so a HEAD tells CI whether this pin is already published and a Box downloading it can never
+ * silently get a different artifact.
  */
 export function companionPiBundleObjectKey(sha: string = COMPANION_PI_BUNDLE.sha256): string {
-  return `companion-pi-bundle-${companionPiBundleShaShort(sha)}.tar.gz`;
+  return `${PI_BUNDLE_OBJECT_PREFIX}/companion-pi-bundle-${companionPiBundleShaShort(sha)}.tar.gz`;
 }
 
 /**
- * Read the bundle download base URL. Undefined turns bundle mode off and the layout script falls back
- * to `COMPANION_PI_INSTALL_COMMAND`. The value is never hardcoded: it is a deployment input pointing
- * at the public `companion-pi-bundles` bucket (Tigris `fly.storage.tigris.dev`, or any S3-compatible
- * public host), and only the pinned checksum, not the host, is trusted.
+ * Whether the deployment has switched bundle mode on. The gate is an explicit flag rather than an
+ * inference from the pin or from S3 credentials: the runtime always holds S3 credentials for skill
+ * archives, and inferring from a non-placeholder sha would silently flip every deployment the
+ * moment a pin lands, taking away the operational off switch. `COMPANION_PI_BUNDLE_ENABLED=true`
+ * is that switch; anything else keeps the `COMPANION_PI_INSTALL_COMMAND` escape hatch.
  */
-export function piBundleBaseUrl(env: NodeJS.ProcessEnv = process.env): string | undefined {
-  const raw = env.COMPANION_PI_BUNDLE_BASE_URL?.trim();
-  if (!raw) return undefined;
-  return raw.replace(/\/+$/, "");
+export function piBundleEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.COMPANION_PI_BUNDLE_ENABLED?.trim() === "true";
 }
 
-/** Everything the layout script needs to download, verify, and place one bundle. */
+/**
+ * Everything the layout script needs to verify and place one bundle. Deliberately no URL: the
+ * download URL is a short-lived presigned GET minted by `apps/runtime` per script generation, so it
+ * is an input to the script, never part of this env-derived plan.
+ */
 export interface CompanionPiBundlePlan {
-  readonly baseUrl: string;
   readonly objectKey: string;
   readonly manifest: CompanionPiBundleManifest;
 }
@@ -129,9 +142,8 @@ export function companionPiBundlePlan(
   env: NodeJS.ProcessEnv = process.env,
   manifest: CompanionPiBundleManifest = COMPANION_PI_BUNDLE,
 ): CompanionPiBundlePlan | null {
-  const baseUrl = piBundleBaseUrl(env);
-  if (!baseUrl) return null;
-  return { baseUrl, objectKey: companionPiBundleObjectKey(manifest.sha256), manifest };
+  if (!piBundleEnabled(env)) return null;
+  return { objectKey: companionPiBundleObjectKey(manifest.sha256), manifest };
 }
 
 /** Map a Box layout stderr line to its persistable bundle failure code, or null. */

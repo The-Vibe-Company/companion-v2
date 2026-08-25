@@ -25,7 +25,7 @@ sha256_of() {
 # Read the pins from piBundle.ts so this build matches the runtime's pin exactly.
 manifest="$(pnpm --filter @companion/api exec tsx "$repo_root/scripts/print-pi-bundle-manifest.ts")"
 eval "$manifest"
-: "${PI_BUNDLE_PI_PACKAGE:?}" "${PI_BUNDLE_EXTENSIONS:?}" "${PI_BUNDLE_QMD_PACKAGE:?}" "${PI_BUNDLE_NODE_MAJOR:?}"
+: "${PI_BUNDLE_PI_PACKAGE:?}" "${PI_BUNDLE_EXTENSIONS:?}" "${PI_BUNDLE_QMD_PACKAGE:?}" "${PI_BUNDLE_NODE_MAJOR:?}" "${PI_BUNDLE_OBJECT_PREFIX:?}"
 
 # Refuse to build on the wrong Node major: a native addon compiled here would not load on the Box.
 node_major="$(node -p 'process.versions.node.split(".")[0]')"
@@ -83,8 +83,11 @@ tar --sort=name --mtime="@0" --owner=0 --group=0 --numeric-owner \
 
 sha="$(sha256_of "$tarball")"
 sha_short="${sha:0:12}"
-object_key="companion-pi-bundle-${sha_short}.tar.gz"
-final="$out_dir/$object_key"
+# The published key lives under the pi-bundles/ prefix of the skill-archives bucket; the local
+# artifact keeps the flat name.
+artifact_name="companion-pi-bundle-${sha_short}.tar.gz"
+object_key="${PI_BUNDLE_OBJECT_PREFIX}/${artifact_name}"
+final="$out_dir/$artifact_name"
 mv "$tarball" "$final"
 
 echo "build-pi-bundle: built $final"

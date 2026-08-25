@@ -1305,18 +1305,28 @@ function validPackageSpec(spec: string, variable: string): string {
   return spec;
 }
 
+/**
+ * One bundle staging: the env-derived plan plus the presigned download URL minted for exactly this
+ * script generation. The URL is short-lived transport, so it is an input here and never folds into
+ * any layout identity — only the pinned sha does.
+ */
+interface CompanionPiStagedBundle {
+  readonly plan: CompanionPiBundlePlan;
+  readonly url: string;
+}
+
 function setupScript(
   installCommand: string | undefined,
   piPackages: readonly string[],
   qmdPackage: string,
   layoutIdentity: CompanionPiLayoutIdentity,
-  bundle: CompanionPiBundlePlan | null = null,
+  bundle: CompanionPiStagedBundle | null = null,
 ): string {
   // Bundle mode wins over the install command: when a bundle is configured, the install command is
   // ignored so the two never both run. With no bundle, behavior is exactly today's.
   const configuredInstall = bundle ? undefined : installCommand?.trim();
   const bundleDistDir = bundle
-    ? `$HOME/.companion/dist/${companionPiBundleShaShort(bundle.manifest.sha256)}`
+    ? `$HOME/.companion/dist/${companionPiBundleShaShort(bundle.plan.manifest.sha256)}`
     : null;
   const encodedBrokerSource = Buffer.from(COMPANION_PI_BROKER_SOURCE, "utf8").toString("base64");
   const encodedBoxIgnore = Buffer.from(RUNTIME_IMAGE_BOXIGNORE, "utf8").toString("base64");
@@ -1329,24 +1339,24 @@ printf '%s' "$PATH" > "$COMPANION_PI_INSTALL_PATH_FILE"
     : undefined;
   const bundleEnsureBlock = bundle
     ? `# The self-hosted Pi bundle replaces the npm-at-boot install. One immutable, content-addressed
-# tarball is downloaded, checksum-verified against the pin, and extracted; nothing is fetched from a
-# public registry. Each failure prints a fixed marker as its LAST stderr line so the control plane
-# maps it to a stable code, and it exits before the layout marker is written so the Box relayouts.
-bundle_base=${shellQuote(bundle.baseUrl)}
-bundle_key=${shellQuote(bundle.objectKey)}
-bundle_sha=${shellQuote(bundle.manifest.sha256)}
-bundle_node_major=${shellQuote(bundle.manifest.nodeMajor.toString(10))}
+# tarball is downloaded through a short-lived presigned URL, checksum-verified against the pin, and
+# extracted; nothing is fetched from a public registry and the bucket is never public. Each failure
+# prints a fixed marker as its LAST stderr line so the control plane maps it to a stable code, and
+# it exits before the layout marker is written so the Box relayouts.
+bundle_url=${shellQuote(bundle.url)}
+bundle_sha=${shellQuote(bundle.plan.manifest.sha256)}
+bundle_node_major=${shellQuote(bundle.plan.manifest.nodeMajor.toString(10))}
 bundle_dir="${bundleDistDir!}"
 bundle_archive="$(mktemp)"
 companion_bundle_cleanup() { rm -f "$bundle_archive"; }
 trap companion_bundle_cleanup EXIT
 if command -v curl >/dev/null 2>&1; then
-  if ! curl -fsSL --retry 3 -o "$bundle_archive" "$bundle_base/$bundle_key"; then
+  if ! curl -fsSL --retry 3 -o "$bundle_archive" "$bundle_url"; then
     echo 'companion-bundle-download-failed' >&2
     exit 1
   fi
 elif command -v node >/dev/null 2>&1; then
-  if ! COMPANION_BUNDLE_URL="$bundle_base/$bundle_key" COMPANION_BUNDLE_OUT="$bundle_archive" node <<'COMPANION_BUNDLE_FETCH'
+  if ! COMPANION_BUNDLE_URL="$bundle_url" COMPANION_BUNDLE_OUT="$bundle_archive" node <<'COMPANION_BUNDLE_FETCH'
 const fs = require("node:fs");
 const url = process.env.COMPANION_BUNDLE_URL;
 const out = process.env.COMPANION_BUNDLE_OUT;
@@ -1892,6 +1902,8 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
   readonly #qmdPackage: string;
   /** The self-hosted Pi bundle plan, or null when bundle mode is off (install-command mode). */
   readonly #bundle: CompanionPiBundlePlan | null;
+  /** Mints a fresh presigned GET URL for the bundle object each time a layout script is generated. */
+  readonly #bundleUrlProvider: (() => Promise<string>) | undefined;
   readonly #onTiming: ((sample: BoxProviderCallTiming) => void) | undefined;
   readonly #onStageTiming: ((sample: CompanionRuntimeStageTiming) => void) | undefined;
   readonly #companionSkillChecksum: string | undefined;
@@ -1910,6 +1922,14 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
       companionSkillChecksum?: string;
       /** Isolates disposable research snapshots without changing the production disk marker. */
       imageIdentitySalt?: string;
+      /**
+       * Mints the presigned bundle download URL. Staging calls can be hours apart, so every layout
+       * script generation asks for a fresh URL rather than caching one. Bundle mode requires both
+       * `COMPANION_PI_BUNDLE_ENABLED=true` and this provider: without it (S3 credentials absent),
+       * the runtime falls back to the install-command escape hatch and the layout identity carries
+       * no bundle segment, so the marker always describes what the script actually installs.
+       */
+      bundleUrlProvider?: () => Promise<string>;
     },
   ) {
     const apiKey = env.COMPANION_BOX_API_KEY?.trim();
@@ -1935,8 +1955,12 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
     this.#piPackages = resolvePiPackages(env);
     this.#qmdPackage = validPackageSpec(QMD_PACKAGE, "QMD_PACKAGE");
     // Bundle mode wins over the install command when both are configured; the install command stays
-    // the dev and emergency escape hatch when no bundle base URL is set.
-    this.#bundle = companionPiBundlePlan(env);
+    // the dev and emergency escape hatch when bundle mode is off. Both the enabled flag and a URL
+    // provider are required: a deployment that enables the flag without S3 credentials degrades to
+    // the escape hatch instead of generating a script that cannot download anything.
+    const bundlePlan = companionPiBundlePlan(env);
+    this.#bundle = bundlePlan && options?.bundleUrlProvider ? bundlePlan : null;
+    this.#bundleUrlProvider = this.#bundle ? options?.bundleUrlProvider : undefined;
     this.#onTiming = options?.onTiming;
     this.#onStageTiming = options?.onStageTiming;
     this.#companionSkillChecksum = options?.companionSkillChecksum;
@@ -2627,6 +2651,12 @@ done`,
         502,
       );
     }
+    // A fresh presigned URL per generation: refreshes and stagings can be hours apart, and an
+    // expired URL baked into a reused script would fail every later download.
+    const stagedBundle: CompanionPiStagedBundle | null =
+      this.#bundle && this.#bundleUrlProvider
+        ? { plan: this.#bundle, url: await this.#bundleUrlProvider() }
+        : null;
     await this.#writeFile(
       boxId,
       PI_LAYOUT_SCRIPT_PATH,
@@ -2635,7 +2665,7 @@ done`,
         this.#piPackages,
         this.#qmdPackage,
         this.layoutIdentity(),
-        this.#bundle,
+        stagedBundle,
       ),
     );
     // A Box whose marker already matches exits in milliseconds. The budget is for the run that does
