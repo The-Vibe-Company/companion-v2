@@ -14,9 +14,14 @@ struct CompanionAvatar: View {
     var icon: CompanionSummary.Icon?
     var size: CGFloat = 48
     var state: CompanionAvatarState = .idle
+    var reduceMotionOverride: Bool? = nil
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
     @State private var animationStart = Date()
+
+    private var reduceMotion: Bool {
+        reduceMotionOverride ?? systemReduceMotion
+    }
 
     private var configuration: CompanionAvatarConfiguration {
         CompanionAvatarConfiguration(icon: icon)

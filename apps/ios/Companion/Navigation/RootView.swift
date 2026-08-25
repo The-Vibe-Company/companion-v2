@@ -11,12 +11,9 @@ struct RootView: View {
         Group {
 #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("-companion-icon-demo") {
-                if ProcessInfo.processInfo.arguments.contains("-companion-reduce-motion") {
-                    CompanionIconCatalogDemoView()
-                        .environment(\.accessibilityReduceMotion, true)
-                } else {
-                    CompanionIconCatalogDemoView()
-                }
+                CompanionIconCatalogDemoView(
+                    forceReduceMotion: ProcessInfo.processInfo.arguments.contains("-companion-reduce-motion")
+                )
             } else if ProcessInfo.processInfo.arguments.contains("-glass-chat-demo") {
                 GlassChatDemoView()
             } else if ProcessInfo.processInfo.arguments.contains("-glass-management-demo-plugins") {

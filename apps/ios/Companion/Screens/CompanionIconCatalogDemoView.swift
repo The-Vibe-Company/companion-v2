@@ -4,7 +4,17 @@ import CompanionKit
 
 struct CompanionIconCatalogDemoView: View {
     private let baseIcon = CompanionSummary.Icon(shape: 1, mouth: 1, accessory: 1, color: 2)
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var forceReduceMotion = false
+
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+
+    private var reduceMotion: Bool {
+        forceReduceMotion || systemReduceMotion
+    }
+
+    private var reduceMotionOverride: Bool? {
+        forceReduceMotion ? true : nil
+    }
 
     var body: some View {
         NavigationStack {
@@ -83,7 +93,8 @@ struct CompanionIconCatalogDemoView: View {
                                         name: "\(title) \(index + 1)",
                                         icon: icon(index),
                                         size: 64,
-                                        state: .still
+                                        state: .still,
+                                        reduceMotionOverride: reduceMotionOverride
                                     )
                                     Text("\(index + 1)")
                                         .font(.caption.monospacedDigit())
@@ -110,7 +121,13 @@ struct CompanionIconCatalogDemoView: View {
         identifier: String
     ) -> some View {
         VStack(spacing: 7) {
-            CompanionAvatar(name: label, icon: baseIcon, size: 64, state: state)
+            CompanionAvatar(
+                name: label,
+                icon: baseIcon,
+                size: 64,
+                state: state,
+                reduceMotionOverride: reduceMotionOverride
+            )
             Text(label)
                 .font(.caption)
                 .foregroundStyle(Color.companionMuted)
@@ -121,7 +138,13 @@ struct CompanionIconCatalogDemoView: View {
 
     private func sizeSample(_ size: Int) -> some View {
         VStack(spacing: 7) {
-            CompanionAvatar(name: "Size \(size)", icon: baseIcon, size: CGFloat(size), state: .still)
+            CompanionAvatar(
+                name: "Size \(size)",
+                icon: baseIcon,
+                size: CGFloat(size),
+                state: .still,
+                reduceMotionOverride: reduceMotionOverride
+            )
             Text("\(size) pt")
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(Color.companionMuted)

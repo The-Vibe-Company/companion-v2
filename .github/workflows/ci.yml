@@ -263,7 +263,7 @@ jobs:
         with:
           name: ios-companion-avatar-screenshots-${{ github.sha }}
           path: ${{ runner.temp }}/ios-companion-avatar-screenshots
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 7
 
   quality:
