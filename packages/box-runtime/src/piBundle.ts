@@ -23,19 +23,6 @@
  */
 
 /**
- * Placeholder checksum until the CI pipeline builds and publishes the first real artifact under the
- * `pi-bundles/` prefix of the skill-archives bucket. While this value is set, bundle mode still
- * generates a fully valid download-and-verify script — but the artifact guard
- * (`scripts/check-pi-bundle-artifact.ts`) skips its S3 HEAD so a pin can land in the repository
- * before the artifact it names exists.
- *
- * TODO(pi-bundle): replace with the sha256 printed by `scripts/build-pi-bundle.sh` once the artifact
- * is published, and delete this placeholder. The guard then enforces "no pin without an artifact".
- */
-export const PI_BUNDLE_PLACEHOLDER_SHA256 =
-  "0000000000000000000000000000000000000000000000000000000000000000";
-
-/**
  * The npm package that ships the Pi coding agent. It is the same package the escape-hatch install
  * command installs (`npm i -g @earendil-works/pi-coding-agent@<piVersion>`); the bundle build reads
  * it so the pinned Pi in the tarball is exactly the pinned Pi in install mode.
@@ -77,7 +64,7 @@ export const COMPANION_PI_BUNDLE = {
   ],
   qmdPackage: "npm:@tobilu/qmd@2.8.3",
   nodeMajor: 24,
-  sha256: PI_BUNDLE_PLACEHOLDER_SHA256,
+  sha256: "c0845a48fc7c385d9864132b5de8c6bdd1bad73e8313ffda37b4a83dd84db8c2",
   bundleFormat: 1,
 } as const satisfies CompanionPiBundleManifest;
 
@@ -93,7 +80,7 @@ export type CompanionPiBundleFailureCode =
 
 /** True while the pin still points at the placeholder — the artifact guard skips its HEAD then. */
 export function isPiBundleShaPlaceholder(sha: string = COMPANION_PI_BUNDLE.sha256): boolean {
-  return sha === PI_BUNDLE_PLACEHOLDER_SHA256 || /^0+$/.test(sha);
+  return /^0+$/.test(sha);
 }
 
 /** The 12-hex-character short digest that names the on-disk dist directory and the object key. */
