@@ -151,7 +151,7 @@ final class CompanionUITests: XCTestCase {
     @MainActor
     func testCompanionAvatarScreenshotsAcrossDemos() throws {
         let chat = XCUIApplication()
-        chat.launchArguments = ["-glass-chat-demo"]
+        chat.launchArguments = ["-glass-chat-demo", "-companion-avatar-ui-evidence"]
         chat.launch()
 
         let composer = chat.descendants(matching: .any)["demo.composer"]

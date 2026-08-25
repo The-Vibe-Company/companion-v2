@@ -12,6 +12,9 @@ struct GlassChatDemoView: View {
 
     private let companionName = "Companion"
     private let icon = CompanionSummary.Icon(shape: 1, mouth: 1, accessory: 6, color: 2)
+    private let holdsReplyingForEvidence = ProcessInfo.processInfo.arguments.contains(
+        "-companion-avatar-ui-evidence"
+    )
 
     var body: some View {
         NavigationStack {
@@ -188,6 +191,8 @@ struct GlassChatDemoView: View {
         draft = ""
         messages.append(.init(content: content, kind: .mine, timestamp: "maintenant"))
         replying = true
+
+        guard !holdsReplyingForEvidence else { return }
 
         Task {
             try? await Task.sleep(for: .seconds(1.2))
