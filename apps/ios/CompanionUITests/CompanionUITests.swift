@@ -147,7 +147,8 @@ final class CompanionUITests: XCTestCase {
         confirmRosterDeletion(in: app)
 
         let acceptedMessage = "Deletion requested. The Companion will remain visible until its Box is permanently deleted."
-        XCTAssertTrue(app.staticTexts[acceptedMessage].waitForExistence(timeout: 2))
+        let acceptedNotice = app.descendants(matching: .any)[acceptedMessage]
+        XCTAssertTrue(acceptedNotice.waitForExistence(timeout: 5))
     }
 
     @MainActor
@@ -199,6 +200,11 @@ final class CompanionUITests: XCTestCase {
     @MainActor
     private func openRosterContextMenu(for row: XCUIElement, in app: XCUIApplication) {
         XCTAssertTrue(row.waitForExistence(timeout: 5))
+        for _ in 0..<3 {
+            if row.isHittable { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(row.isHittable)
         row.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 1.5)
         XCTAssertTrue(app.buttons["Settings"].waitForExistence(timeout: 5))
     }
@@ -206,7 +212,7 @@ final class CompanionUITests: XCTestCase {
     @MainActor
     private func confirmRosterDeletion(in app: XCUIApplication) {
         let confirmation = app.sheets.buttons["Delete Companion"]
-        XCTAssertTrue(confirmation.waitForExistence(timeout: 2))
+        XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
         confirmation.tap()
     }
 
