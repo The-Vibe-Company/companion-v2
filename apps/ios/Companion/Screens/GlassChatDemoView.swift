@@ -11,11 +11,15 @@ struct GlassChatDemoView: View {
     @State private var showDesignInfo = false
 
     private let companionName = "Companion"
-    private let icon = CompanionSummary.Icon(shape: 1, mouth: 1, accessory: 6, color: 2)
+    private let icon = CompanionSummary.Icon(shape: 1, mouth: 1, accessory: 6, color: 7)
+
+    private var visualTheme: CompanionVisualTheme {
+        CompanionVisualTheme(icon: icon)
+    }
 
     var body: some View {
         NavigationStack {
-            CompanionBackdrop {
+            CompanionBackdrop(style: .companion(visualTheme.base)) {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(spacing: 16) {
@@ -33,7 +37,8 @@ struct GlassChatDemoView: View {
                                     authorName: message.author,
                                     timestamp: message.timestamp,
                                     companionName: companionName,
-                                    icon: icon
+                                    icon: icon,
+                                    accent: visualTheme.accent
                                 )
                                 .id(message.id)
                             }
@@ -64,6 +69,7 @@ struct GlassChatDemoView: View {
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
+            .tint(visualTheme.accent)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button { showRoster = true } label: {
@@ -162,11 +168,12 @@ struct GlassChatDemoView: View {
                 Button(action: send) {
                     Image(systemName: "arrow.up")
                         .font(.system(size: 17, weight: .bold))
+                        .foregroundStyle(visualTheme.accentForeground)
                         .frame(width: 46, height: 46)
                 }
                 .buttonStyle(.glassProminent)
                 .buttonBorderShape(.circle)
-                .tint(Color.companionAccent)
+                .tint(visualTheme.accent)
                 .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || replying)
                 .accessibilityLabel("Envoyer")
                 .accessibilityIdentifier("demo.send")
@@ -203,7 +210,7 @@ private struct GlassRosterDemoView: View {
     @Environment(\.dismiss) private var dismiss
 
     private let companions = [
-        DemoRosterEntry(name: "Companion", preview: "Direction iOS 26 validée", status: "En ligne", icon: .init(shape: 1, mouth: 1, accessory: 6, color: 2), unread: false),
+        DemoRosterEntry(name: "Companion", preview: "Direction iOS 26 validée", status: "En ligne", icon: .init(shape: 1, mouth: 1, accessory: 6, color: 7), unread: false),
         DemoRosterEntry(name: "Inbox Triage", preview: "3 décisions à relire", status: "En veille", icon: .init(shape: 0, mouth: 2, accessory: 0, color: 7), unread: true),
         DemoRosterEntry(name: "Linear Bot", preview: "THE-379 est prête", status: "En ligne", icon: .init(shape: 2, mouth: 1, accessory: 3, color: 4), unread: true),
         DemoRosterEntry(name: "Optimizer", preview: "Audit terminé", status: "En veille", icon: .init(shape: 5, mouth: 4, accessory: 1, color: 3), unread: false),
@@ -211,7 +218,7 @@ private struct GlassRosterDemoView: View {
 
     var body: some View {
         NavigationStack {
-            CompanionBackdrop {
+            CompanionBackdrop(style: .neutral) {
                 ScrollView {
                     LazyVStack(spacing: 12) {
                         ForEach(companions) { companion in
@@ -236,7 +243,9 @@ private struct GlassRosterDemoView: View {
                                                 .lineLimit(1)
                                             Spacer()
                                             if companion.unread {
-                                                Circle().fill(Color.companionAccent).frame(width: 8, height: 8)
+                                                Circle()
+                                                    .fill(CompanionVisualTheme(icon: companion.icon).accent)
+                                                    .frame(width: 8, height: 8)
                                             }
                                         }
                                     }
@@ -245,6 +254,7 @@ private struct GlassRosterDemoView: View {
                                 .companionGlass(radius: 22, interactive: true)
                             }
                             .buttonStyle(.plain)
+                            .accessibilityIdentifier(companion.accessibilityID)
                             .accessibilityLabel("\(companion.name), \(companion.status), \(companion.preview)\(companion.unread ? ", non lu" : "")")
                         }
                     }
@@ -254,6 +264,7 @@ private struct GlassRosterDemoView: View {
             }
             .navigationTitle("Conversations")
             .navigationBarTitleDisplayMode(.large)
+            .tint(Color.companionInk)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Fermer") { dismiss() }
@@ -270,6 +281,10 @@ private struct DemoRosterEntry: Identifiable {
     let status: String
     let icon: CompanionSummary.Icon
     let unread: Bool
+
+    var accessibilityID: String {
+        "demo.roster.\(name.lowercased().replacingOccurrences(of: " ", with: "-"))"
+    }
 }
 
 private struct DemoMessage: Identifiable {

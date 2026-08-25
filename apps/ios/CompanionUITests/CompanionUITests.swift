@@ -25,6 +25,11 @@ final class CompanionUITests: XCTestCase {
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertTrue(send.exists)
 
+        app.buttons["Ouvrir les conversations"].tap()
+        XCTAssertTrue(app.navigationBars["Conversations"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.buttons["demo.roster.inbox-triage"].exists)
+        app.buttons["Fermer"].tap()
+
         composer.tap()
         composer.typeText("Le détail est impeccable.")
         XCTAssertTrue(send.isEnabled)
