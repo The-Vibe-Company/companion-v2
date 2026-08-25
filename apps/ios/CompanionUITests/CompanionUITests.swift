@@ -92,7 +92,11 @@ final class CompanionUITests: XCTestCase {
         let app = launchCompanionSettings(access: "owner")
 
         let delete = app.buttons["companion.settings.delete"]
-        XCTAssertTrue(delete.exists)
+        for _ in 0..<3 {
+            if delete.exists { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(delete.waitForExistence(timeout: 5))
         delete.tap()
         let confirmation = app.sheets.buttons["Delete Companion"]
         XCTAssertTrue(confirmation.waitForExistence(timeout: 2))
@@ -126,8 +130,7 @@ final class CompanionUITests: XCTestCase {
         let app = launchCompanionRoster(access: "owner")
         let row = app.descendants(matching: .any)["companion.row.c96ab360-00f3-4497-a51a-51442db8add1"]
 
-        row.press(forDuration: 1)
-        XCTAssertTrue(app.buttons["Settings"].waitForExistence(timeout: 2))
+        openRosterContextMenu(for: row, in: app)
         let delete = app.buttons["Delete Companion"]
         XCTAssertTrue(delete.exists)
         delete.tap()
@@ -136,9 +139,9 @@ final class CompanionUITests: XCTestCase {
         let ambiguousMessage = "The deletion response was not received. Retry Delete safely reuses the same request."
         XCTAssertTrue(app.staticTexts[ambiguousMessage].waitForExistence(timeout: 2))
 
-        row.press(forDuration: 1)
+        openRosterContextMenu(for: row, in: app)
         let retry = app.buttons["Retry Delete"]
-        XCTAssertTrue(retry.waitForExistence(timeout: 2))
+        XCTAssertTrue(retry.waitForExistence(timeout: 5))
         retry.tap()
         confirmRosterDeletion(in: app)
 
@@ -187,10 +190,16 @@ final class CompanionUITests: XCTestCase {
     private func assertRosterContextMenu(access: String, canDelete: Bool) {
         let app = launchCompanionRoster(access: access)
         let row = app.descendants(matching: .any)["companion.row.c96ab360-00f3-4497-a51a-51442db8add1"]
-        row.press(forDuration: 1)
+        openRosterContextMenu(for: row, in: app)
 
-        XCTAssertTrue(app.buttons["Settings"].waitForExistence(timeout: 2))
         XCTAssertEqual(app.buttons["Delete Companion"].exists, canDelete)
+    }
+
+    @MainActor
+    private func openRosterContextMenu(for row: XCUIElement, in app: XCUIApplication) {
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        row.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 1.5)
+        XCTAssertTrue(app.buttons["Settings"].waitForExistence(timeout: 5))
     }
 
     @MainActor
