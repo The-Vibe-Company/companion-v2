@@ -57,6 +57,12 @@ import {
   type CompanionPiLayoutIdentity,
   type CompanionPiLayoutRefresh,
 } from "./companionRuntimeImage";
+import {
+  companionPiBundlePlan,
+  companionPiBundleShaShort,
+  piBundleFailureCodeFromOutput,
+  type CompanionPiBundlePlan,
+} from "./piBundle";
 import type { BoxProviderCallOperation, BoxProviderCallTiming } from "./boxMaintenanceClient";
 
 export type CompanionRuntimeStagePhase =
@@ -340,6 +346,7 @@ interface CompanionPiLayoutInput {
   qmdPackage: string;
   minimumPiVersion: string;
   companionSkillChecksum?: string;
+  bundleSha?: string;
   imageIdentitySalt?: string;
 }
 
@@ -966,14 +973,15 @@ export class BoxRuntimeConfigurationError extends Error {
 export class BoxRuntimeProviderError extends Error {
   readonly status: number;
   readonly code?: string;
-  readonly stableCode: string = "box_provider_error";
+  readonly stableCode: string;
   readonly action = "retry" as const;
 
-  constructor(message: string, status: number, code?: string) {
+  constructor(message: string, status: number, code?: string, stableCode = "box_provider_error") {
     super(message);
     this.name = "BoxRuntimeProviderError";
     this.status = status;
     this.code = code;
+    this.stableCode = stableCode;
   }
 }
 
@@ -1302,8 +1310,14 @@ function setupScript(
   piPackages: readonly string[],
   qmdPackage: string,
   layoutIdentity: CompanionPiLayoutIdentity,
+  bundle: CompanionPiBundlePlan | null = null,
 ): string {
-  const configuredInstall = installCommand?.trim();
+  // Bundle mode wins over the install command: when a bundle is configured, the install command is
+  // ignored so the two never both run. With no bundle, behavior is exactly today's.
+  const configuredInstall = bundle ? undefined : installCommand?.trim();
+  const bundleDistDir = bundle
+    ? `$HOME/.companion/dist/${companionPiBundleShaShort(bundle.manifest.sha256)}`
+    : null;
   const encodedBrokerSource = Buffer.from(COMPANION_PI_BROKER_SOURCE, "utf8").toString("base64");
   const encodedBoxIgnore = Buffer.from(RUNTIME_IMAGE_BOXIGNORE, "utf8").toString("base64");
   const encodedInstallScript = configuredInstall
@@ -1313,7 +1327,67 @@ ${configuredInstall}
 printf '%s' "$PATH" > "$COMPANION_PI_INSTALL_PATH_FILE"
 `).toString("base64")
     : undefined;
-  const ensureInstalled = configuredInstall
+  const bundleEnsureBlock = bundle
+    ? `# The self-hosted Pi bundle replaces the npm-at-boot install. One immutable, content-addressed
+# tarball is downloaded, checksum-verified against the pin, and extracted; nothing is fetched from a
+# public registry. Each failure prints a fixed marker as its LAST stderr line so the control plane
+# maps it to a stable code, and it exits before the layout marker is written so the Box relayouts.
+bundle_base=${shellQuote(bundle.baseUrl)}
+bundle_key=${shellQuote(bundle.objectKey)}
+bundle_sha=${shellQuote(bundle.manifest.sha256)}
+bundle_node_major=${shellQuote(bundle.manifest.nodeMajor.toString(10))}
+bundle_dir="${bundleDistDir!}"
+bundle_archive="$(mktemp)"
+companion_bundle_cleanup() { rm -f "$bundle_archive"; }
+trap companion_bundle_cleanup EXIT
+if command -v curl >/dev/null 2>&1; then
+  if ! curl -fsSL --retry 3 -o "$bundle_archive" "$bundle_base/$bundle_key"; then
+    echo 'companion-bundle-download-failed' >&2
+    exit 1
+  fi
+elif command -v node >/dev/null 2>&1; then
+  if ! COMPANION_BUNDLE_URL="$bundle_base/$bundle_key" COMPANION_BUNDLE_OUT="$bundle_archive" node <<'COMPANION_BUNDLE_FETCH'
+const fs = require("node:fs");
+const url = process.env.COMPANION_BUNDLE_URL;
+const out = process.env.COMPANION_BUNDLE_OUT;
+fetch(url)
+  .then((response) => { if (!response.ok) process.exit(1); return response.arrayBuffer(); })
+  .then((body) => fs.writeFileSync(out, Buffer.from(body)))
+  .catch(() => process.exit(1));
+COMPANION_BUNDLE_FETCH
+  then
+    echo 'companion-bundle-download-failed' >&2
+    exit 1
+  fi
+else
+  echo 'companion-bundle-download-failed' >&2
+  exit 1
+fi
+if ! printf '%s  %s\\n' "$bundle_sha" "$bundle_archive" | sha256sum -c - >/dev/null 2>&1; then
+  echo 'companion-bundle-checksum-mismatch' >&2
+  exit 1
+fi
+rm -rf "$bundle_dir"
+mkdir -p "$bundle_dir"
+tar -xzf "$bundle_archive" -C "$bundle_dir"
+rm -f "$bundle_archive"
+trap - EXIT
+# The pinned Pi wins over any Box image copy: its bin directory goes first on PATH.
+PATH="$bundle_dir/pi/bin:$PATH"
+export PATH
+bundle_node_bin="$(command -v node 2>/dev/null || true)"
+if [ -z "$bundle_node_bin" ]; then
+  echo 'companion-bundle-node-mismatch' >&2
+  exit 1
+fi
+bundle_actual_node_major="$("$bundle_node_bin" -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)"
+if [ "$bundle_actual_node_major" != "$bundle_node_major" ]; then
+  echo 'companion-bundle-node-mismatch' >&2
+  exit 1
+fi`
+    : undefined;
+  const ensureInstalled = bundleEnsureBlock
+    ?? (configuredInstall
     ? `pi_install_log="$(mktemp)"
 pi_install_script="$(mktemp)"
 pi_install_path_file="$(mktemp)"
@@ -1350,6 +1424,32 @@ trap - EXIT`
     : `if ! command -v pi >/dev/null 2>&1; then
   echo 'Pi is not installed; configure COMPANION_PI_INSTALL_COMMAND or preinstall pi in the Box image' >&2
   exit 1
+fi`);
+  const packageInstallBlock = bundle
+    ? `# The bundle already carries every pinned Pi package and the semantic-search binary, so no npm
+# install and no \`pi install\` runs on the Box. Place the baked agent extensions and tools into the
+# persistent layout the daemon wrapper resolves at runtime.
+cp -a "$bundle_dir/pi-agent-dir/." "$HOME/.companion/pi/"
+if [ -d "$bundle_dir/tools" ]; then
+  cp -a "$bundle_dir/tools/." "$HOME/.companion/tools/"
+fi`
+    : `${piPackages
+    .map((spec) => `PI_CODING_AGENT_DIR="$HOME/.companion/pi" "$pi_bin" install ${shellQuote(spec)}`)
+    .join("\n")}
+# Semantic memory search is an optimization: pi-memory recalls without it, so a Box that cannot
+# install it is still a working Box. Nothing in this block may end a staging, which is why it runs
+# outside errexit and why the reported line is a fixed shape rather than npm's own words: the
+# control plane falls back to the last stdout line when a later step fails without stderr, and a
+# registry's output is not something to persist there. The full log stays on the Box for an operator.
+# The marker below is written either way: a Box that missed this keeps plain recall until a pin
+# changes, which is cheaper than re-running the whole layout on every wake to retry an optimization.
+qmd_log="$HOME/.companion/runtime/logs/qmd-install.log"
+set +e
+npm install --global --prefix "$HOME/.companion/tools" ${shellQuote(qmdPackage)} >"$qmd_log" 2>&1
+qmd_status=$?
+set -e
+if [ "$qmd_status" -ne 0 ]; then
+  printf 'Memory search binary %s did not install (exit %s); see runtime/logs/qmd-install.log\\n' ${shellQuote(qmdPackage)} "$qmd_status"
 fi`;
   return `#!/usr/bin/env bash
 set -euo pipefail
@@ -1537,24 +1637,7 @@ if (!currentEnough) {
 }
 COMPANION_PI_VERSION
 pi_bin_dir="$(dirname "$pi_bin")"
-${piPackages
-    .map((spec) => `PI_CODING_AGENT_DIR="$HOME/.companion/pi" "$pi_bin" install ${shellQuote(spec)}`)
-    .join("\n")}
-# Semantic memory search is an optimization: pi-memory recalls without it, so a Box that cannot
-# install it is still a working Box. Nothing in this block may end a staging, which is why it runs
-# outside errexit and why the reported line is a fixed shape rather than npm's own words: the
-# control plane falls back to the last stdout line when a later step fails without stderr, and a
-# registry's output is not something to persist there. The full log stays on the Box for an operator.
-# The marker below is written either way: a Box that missed this keeps plain recall until a pin
-# changes, which is cheaper than re-running the whole layout on every wake to retry an optimization.
-qmd_log="$HOME/.companion/runtime/logs/qmd-install.log"
-set +e
-npm install --global --prefix "$HOME/.companion/tools" ${shellQuote(qmdPackage)} >"$qmd_log" 2>&1
-qmd_status=$?
-set -e
-if [ "$qmd_status" -ne 0 ]; then
-  printf 'Memory search binary %s did not install (exit %s); see runtime/logs/qmd-install.log\\n' ${shellQuote(qmdPackage)} "$qmd_status"
-fi
+${packageInstallBlock}
 companion_layout_apply_overlay
 # A Box running its create setupScript has no user D-Bus session yet, so no user-manager command
 # belongs here: it would fail with "Failed to connect to bus" and mark the whole setup failed even
@@ -1807,6 +1890,8 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
   readonly #installCommand: string | undefined;
   readonly #piPackages: readonly string[];
   readonly #qmdPackage: string;
+  /** The self-hosted Pi bundle plan, or null when bundle mode is off (install-command mode). */
+  readonly #bundle: CompanionPiBundlePlan | null;
   readonly #onTiming: ((sample: BoxProviderCallTiming) => void) | undefined;
   readonly #onStageTiming: ((sample: CompanionRuntimeStageTiming) => void) | undefined;
   readonly #companionSkillChecksum: string | undefined;
@@ -1849,6 +1934,9 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
     this.#installCommand = env.COMPANION_PI_INSTALL_COMMAND;
     this.#piPackages = resolvePiPackages(env);
     this.#qmdPackage = validPackageSpec(QMD_PACKAGE, "QMD_PACKAGE");
+    // Bundle mode wins over the install command when both are configured; the install command stays
+    // the dev and emergency escape hatch when no bundle base URL is set.
+    this.#bundle = companionPiBundlePlan(env);
     this.#onTiming = options?.onTiming;
     this.#onStageTiming = options?.onStageTiming;
     this.#companionSkillChecksum = options?.companionSkillChecksum;
@@ -1863,6 +1951,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
       minimumPiVersion: MINIMUM_IMAGE_SAFE_PI_VERSION,
     };
     if (this.#companionSkillChecksum) layoutInput.companionSkillChecksum = this.#companionSkillChecksum;
+    if (this.#bundle) layoutInput.bundleSha = this.#bundle.manifest.sha256;
     if (this.#imageIdentitySalt) layoutInput.imageIdentitySalt = this.#imageIdentitySalt;
     return companionPiLayoutIdentity(layoutInput);
   }
@@ -2546,6 +2635,7 @@ done`,
         this.#piPackages,
         this.#qmdPackage,
         this.layoutIdentity(),
+        this.#bundle,
       ),
     );
     // A Box whose marker already matches exits in milliseconds. The budget is for the run that does
@@ -2556,6 +2646,22 @@ done`,
     // for is kept and the member's next message short-circuits.
     const result = await this.#command(boxId, `bash "$HOME/${PI_LAYOUT_SCRIPT_PATH}"`, 300);
     if (!result.success) {
+      // The bundle branch prints a fixed marker as its last stderr line for the three failures it can
+      // attribute — download, checksum, Node major — so the operator gets a stable code instead of a
+      // generic provider error. The marker is never written on failure, so the Box relayouts cleanly.
+      const bundleCode = piBundleFailureCodeFromOutput(result.stderr) ?? piBundleFailureCodeFromOutput(result.stdout);
+      if (bundleCode) {
+        throw new BoxRuntimeProviderError(
+          bundleCode === "pi_bundle_checksum_mismatch"
+            ? "The pinned Pi bundle failed its checksum verification."
+            : bundleCode === "pi_bundle_node_mismatch"
+              ? "The Box Node version does not match the pinned Pi bundle."
+              : "The pinned Pi bundle could not be downloaded.",
+          502,
+          undefined,
+          bundleCode,
+        );
+      }
       // The bare message cost a production probe to diagnose, so the failing line travels with it.
       throw new BoxRuntimeProviderError(
         `Pi runtime layout failed to install${commandFailureDetail(result)}`,

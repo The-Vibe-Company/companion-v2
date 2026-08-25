@@ -91,6 +91,16 @@ endpoint are both required.
 `COMPANION_API_URL` on runtime must be the API's public HTTPS origin. It is staged into the Box for
 Skills Hub access, so a `*.railway.internal` address is not usable there.
 
+Set `COMPANION_PI_BUNDLE_BASE_URL` on the runtime service to the public base URL of the
+`companion-pi-bundles` bucket (for example `https://<bucket>.fly.storage.tigris.dev`). Runtime reads
+it to have each Box download and checksum-verify the pinned Pi bundle
+(`packages/box-runtime/src/piBundle.ts`) instead of installing Pi from npm at boot. Only the pinned
+checksum, never this host, is trusted, so a public read-only bucket is sufficient; the value is a
+deployment input and is never hardcoded. Leaving it empty keeps the escape-hatch
+`COMPANION_PI_INSTALL_COMMAND` install path. Publishing new bundle artifacts (the
+`.github/workflows/pi-bundle.yml` job) uses separate write credentials
+(`PI_BUNDLE_S3_*` secrets and the `PI_BUNDLE_S3_BUCKET` variable) that the runtime service never has.
+
 ## PostgreSQL roles
 
 Create four credentials:

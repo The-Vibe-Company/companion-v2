@@ -326,6 +326,22 @@ instead. That marker is split into two layers:
   (`companion-l14-<hash>`).
 - **overlay** — broker source, permission extension, and daemon unit. Cheap to rewrite in place.
 
+When `COMPANION_PI_BUNDLE_BASE_URL` is set, the base layer no longer installs Pi from npm at boot.
+Instead the layout script downloads one self-hosted, content-addressed tarball
+(`companion-pi-bundle-<sha12>.tar.gz`, pinned in `packages/box-runtime/src/piBundle.ts` with its
+sha256, Pi version, the four extensions, `qmd`, and the built Node major), checksum-verifies it,
+extracts it into `~/.companion/dist/<sha12>/`, checks the Box's Node major against the manifest, and
+wires the pinned Pi, its extensions, and `qmd` onto the runtime PATH — nothing is fetched from a
+public registry, and only the pinned checksum, never the download host, is trusted. Its three failure
+points print fixed markers (`companion-bundle-download-failed`, `companion-bundle-checksum-mismatch`,
+`companion-bundle-node-mismatch`) that map to the stable codes `pi_bundle_download_failed`,
+`pi_bundle_checksum_mismatch`, `pi_bundle_node_mismatch`, and the layout marker is never written on
+failure, so the Box relayouts cleanly. The bundle sha is folded into the base marker as
+`:bundle=<sha12>`, so a new bundle relayouts warm Boxes once and re-bakes the registry without a
+`disk_layout_version` bump. `COMPANION_PI_INSTALL_COMMAND` remains the escape hatch (unchanged when no
+bundle is configured); when both are set the bundle wins, and its marker segment keeps the two
+identities from colliding.
+
 The image identity extends the full disk-layout marker with the immutable bundled Companion-skill
 checksum and boot-profile revision; those image-only inputs never force an in-place tenant relayout.
 `companion_images` is the provider-wide, content-addressed registry for those snapshots. It

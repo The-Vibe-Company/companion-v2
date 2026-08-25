@@ -183,6 +183,43 @@ describe("semantic Box command shims", () => {
       .toMatchObject({ success: true, stdout: "companion-layout-overlay\n" });
   });
 
+  it("fails a bundle-mode layout with a fixed marker and writes no layout file on an injected fault", async () => {
+    const bundleScript = [
+      "#!/usr/bin/env bash",
+      "base_layout='14:npm:pi-mcp-adapter@2.12.1:qmd=@tobilu/qmd@2.8.3:pi>=0.84.2:bundle=abcdef012345'",
+      "expected_layout='14:npm:pi-mcp-adapter@2.12.1:qmd=@tobilu/qmd@2.8.3:pi>=0.84.2:bundle=abcdef012345:overlay=aaaaaaaaaaaaaaaa'",
+      "bundle_base='https://companion-pi-bundles.example/'",
+    ].join("\n");
+    const cases: Array<["download" | "checksum" | "node", string]> = [
+      ["download", "companion-bundle-download-failed"],
+      ["checksum", "companion-bundle-checksum-mismatch"],
+      ["node", "companion-bundle-node-mismatch"],
+    ];
+    for (const [fault, marker] of cases) {
+      const machine = createBoxSimCommandMachine({ boxId: "bx_23456789", scenario: "normal" });
+      machine.bundleDownloadFault = fault;
+      putBoxFile(machine, ".companion/bin/ensure-pi-layout.sh", Buffer.from(bundleScript));
+      const result = await executeBoxCommand(machine, 'bash "$HOME/.companion/bin/ensure-pi-layout.sh"');
+      expect(result.success).toBe(false);
+      expect(result.stderr.trim().split(/\r?\n/).at(-1)).toBe(marker);
+      expect(machine.persistentFiles.has(".companion/runtime/state/pi-layout.version")).toBe(false);
+    }
+  });
+
+  it("installs a bundle-mode layout normally when no download fault is injected", async () => {
+    const machine = createBoxSimCommandMachine({ boxId: "bx_23456789", scenario: "normal" });
+    const bundleScript = [
+      "#!/usr/bin/env bash",
+      "base_layout='14:npm:pi-mcp-adapter@2.12.1:qmd=@tobilu/qmd@2.8.3:pi>=0.84.2:bundle=abcdef012345'",
+      "expected_layout='14:npm:pi-mcp-adapter@2.12.1:qmd=@tobilu/qmd@2.8.3:pi>=0.84.2:bundle=abcdef012345:overlay=aaaaaaaaaaaaaaaa'",
+      "bundle_base='https://companion-pi-bundles.example/'",
+    ].join("\n");
+    putBoxFile(machine, ".companion/bin/ensure-pi-layout.sh", Buffer.from(bundleScript));
+    expect(await executeBoxCommand(machine, 'bash "$HOME/.companion/bin/ensure-pi-layout.sh"'))
+      .toMatchObject({ success: true, stdout: "companion-layout-base\n" });
+    expect(machine.persistentFiles.has(".companion/runtime/state/pi-layout.version")).toBe(true);
+  });
+
   it("round-trips the adapter's POSIX quoting, including apostrophes", () => {
     const payload = { id: "req-1", type: "prompt", message: "don't execute this" };
     expect(decodeShellQuoted(shellQuote("don't"))).toBe("don't");

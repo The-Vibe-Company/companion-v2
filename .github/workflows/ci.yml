@@ -258,6 +258,13 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # A Pi bundle pin may not merge before its artifact is published. The guard skips gracefully
+      # while the pin is still the placeholder sha, so this lands before the first real publish.
+      - name: Check the pinned Pi bundle artifact exists
+        env:
+          COMPANION_PI_BUNDLE_BASE_URL: ${{ vars.COMPANION_PI_BUNDLE_BASE_URL }}
+        run: pnpm pi-bundle:check
+
       - name: Test anti-slop integration
         run: pnpm test:anti-slop
 

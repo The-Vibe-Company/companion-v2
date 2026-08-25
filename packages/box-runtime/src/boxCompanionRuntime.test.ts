@@ -31,6 +31,11 @@ import {
   resolvePiPackages,
 } from "./boxCompanionRuntime";
 import { companionPiLayoutIdentity } from "./companionRuntimeImage";
+import {
+  COMPANION_PI_BUNDLE,
+  companionPiBundleObjectKey,
+  companionPiBundleShaShort,
+} from "./piBundle";
 import type { PiJsonObject } from "./companionPiBroker";
 import type { CompanionStagedMcpAccount } from "./companionPiInjection";
 
@@ -1292,6 +1297,128 @@ describe("default Pi packages on the Box disk", () => {
     // A deployment that pinned a range before this existed keeps working.
     expect(resolvePiPackages({ COMPANION_PI_MCP_ADAPTER_PACKAGE: "npm:pi-mcp-adapter@^2.12.1" })[0])
       .toBe("npm:pi-mcp-adapter@^2.12.1");
+  });
+
+  const BUNDLE_BASE = "https://companion-pi-bundles.fly.storage.tigris.dev";
+
+  it("downloads, verifies, and extracts the pinned bundle instead of installing npm at boot", async () => {
+    const script = await stagedLayoutScript({ COMPANION_PI_BUNDLE_BASE_URL: `${BUNDLE_BASE}/` });
+    const key = companionPiBundleObjectKey(COMPANION_PI_BUNDLE.sha256);
+    const distDir = `$HOME/.companion/dist/${companionPiBundleShaShort(COMPANION_PI_BUNDLE.sha256)}`;
+    // The download names the content-addressed key under the configured base, with retry.
+    expect(script).toContain(`bundle_base='${BUNDLE_BASE}'`);
+    expect(script).toContain(`bundle_key='${key}'`);
+    expect(script).toContain("curl -fsSL --retry 3 -o \"$bundle_archive\" \"$bundle_base/$bundle_key\"");
+    // The checksum is verified against the pin, then the tarball is extracted into its dist dir.
+    expect(script).toContain(`bundle_sha='${COMPANION_PI_BUNDLE.sha256}'`);
+    expect(script).toContain("sha256sum -c -");
+    expect(script).toContain(`tar -xzf "$bundle_archive" -C "$bundle_dir"`);
+    expect(script).toContain(`bundle_dir="${distDir}"`);
+    // Pi resolves from the bundle first, and the Node major is checked against the manifest.
+    expect(script).toContain(`PATH="$bundle_dir/pi/bin:$PATH"`);
+    expect(script).toContain(`bundle_node_major='${COMPANION_PI_BUNDLE.nodeMajor}'`);
+    // The baked extensions and tools are placed into the persistent layout the daemon resolves.
+    expect(script).toContain(`cp -a "$bundle_dir/pi-agent-dir/." "$HOME/.companion/pi/"`);
+    expect(script).toContain(`cp -a "$bundle_dir/tools/." "$HOME/.companion/tools/"`);
+    // Every registry install the npm path runs is gone.
+    expect(script).not.toContain(`"$pi_bin" install`);
+    expect(script).not.toContain("npm install --global");
+    // The three failure markers are emitted for the download-and-verify sequence.
+    for (const marker of [
+      "companion-bundle-download-failed",
+      "companion-bundle-checksum-mismatch",
+      "companion-bundle-node-mismatch",
+    ]) {
+      expect(script).toContain(`echo '${marker}' >&2`);
+    }
+  });
+
+  it("folds the bundle sha into the base layout marker so warm Boxes relayout once", async () => {
+    const script = await stagedLayoutScript({ COMPANION_PI_BUNDLE_BASE_URL: BUNDLE_BASE });
+    const shaShort = companionPiBundleShaShort(COMPANION_PI_BUNDLE.sha256);
+    expect(script).toContain(`:bundle=${shaShort}'`);
+    // The install marker never carries a bundle segment, so identities never collide.
+    const installScript = await stagedLayoutScript({
+      COMPANION_PI_INSTALL_COMMAND: "curl -fsSL https://pi.test/install | bash",
+    });
+    expect(installScript).not.toContain(":bundle=");
+  });
+
+  it("lets the bundle win when both a bundle base URL and an install command are set", async () => {
+    const script = await stagedLayoutScript({
+      COMPANION_PI_BUNDLE_BASE_URL: BUNDLE_BASE,
+      COMPANION_PI_INSTALL_COMMAND: "curl -fsSL https://pi.test/install | bash",
+    });
+    expect(script).toContain("tar -xzf \"$bundle_archive\" -C \"$bundle_dir\"");
+    expect(script).not.toContain("https://pi.test/install");
+    expect(script).toContain(":bundle=");
+  });
+
+  it("keeps the escape-hatch install exactly as it is when no bundle is configured", async () => {
+    const script = await stagedLayoutScript({
+      COMPANION_PI_INSTALL_COMMAND: "curl -fsSL https://pi.test/install | bash",
+    });
+    expect(script).toContain("$pi_install_script");
+    expect(script).not.toContain("bundle_dir=");
+    expect(script).not.toContain("companion-bundle-download-failed");
+    for (const spec of resolvePiPackages({})) {
+      expect(script).toContain(`"$pi_bin" install '${spec}'`);
+    }
+  });
+
+  it("is a script bash can parse in bundle mode", async () => {
+    const script = await stagedLayoutScript({ COMPANION_PI_BUNDLE_BASE_URL: BUNDLE_BASE });
+    const parsed = spawnSync("bash", ["-n"], { input: script, encoding: "utf8" });
+    expect(parsed.stderr).toBe("");
+    expect(parsed.status).toBe(0);
+  });
+
+  it("maps each bundle stderr marker to its stable code and never writes the layout marker", async () => {
+    const cases: Array<{ marker: string; code: string }> = [
+      { marker: "companion-bundle-download-failed", code: "pi_bundle_download_failed" },
+      { marker: "companion-bundle-checksum-mismatch", code: "pi_bundle_checksum_mismatch" },
+      { marker: "companion-bundle-node-mismatch", code: "pi_bundle_node_mismatch" },
+    ];
+    for (const { marker, code } of cases) {
+      const stagedPaths: string[] = [];
+      vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+        const url = String(rawUrl);
+        const method = init?.method ?? "GET";
+        if (url.endsWith("/boxes/bx_23456789") && method === "GET") return response({ box: box("ready") });
+        if (url.endsWith("/files") && method === "PUT") {
+          stagedPaths.push(requiredText(parseBoxTestBody(init?.body), "path"));
+          return response({ ok: true });
+        }
+        if (url.endsWith("/commands") && method === "POST") {
+          const command = requiredText(parseBoxTestBody(init?.body), "command");
+          if (/^\s*bash\s/.test(command) && command.includes("ensure-pi-layout.sh")) {
+            return response({ success: false, exitCode: 1, stdout: "", stderr: `${marker}\n` });
+          }
+          return response(commandResult("companion-box-runnable\n"));
+        }
+        throw new Error(`unexpected Box request: ${method} ${url}`);
+      }));
+
+      const runtime = new AsciiBoxCompanionRuntime({
+        COMPANION_BOX_API_KEY: "box_test",
+        COMPANION_PI_BUNDLE_BASE_URL: BUNDLE_BASE,
+      });
+      await expect(runtime.stageExistingBox({
+        companionId: "11111111-1111-4111-8111-111111111111",
+        runtimeGeneration: 1,
+        orgId: "22222222-2222-4222-8222-222222222222",
+        boxId: "bx_23456789",
+        clientSurface: "web",
+        providerAuth: {},
+        replaceProviderAuth: false,
+        modelId: "glm-4.6",
+        mcpCredentials: [],
+        mcpAccounts: [],
+        skills: [],
+      })).rejects.toMatchObject({ stableCode: code });
+      // The Box never records a layout version on a failed download, so its next wake relayouts.
+      expect(stagedPaths).not.toContain(".companion/runtime/state/pi-layout.version");
+    }
   });
 });
 

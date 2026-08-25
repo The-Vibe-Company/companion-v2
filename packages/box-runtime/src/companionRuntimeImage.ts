@@ -73,9 +73,17 @@ export function companionPiBaseLayoutMarker(input: {
   packages: readonly string[];
   qmdPackage: string;
   minimumPiVersion: string;
+  /**
+   * The active Pi bundle's sha256, present only in bundle mode. Folding its short digest into the
+   * base marker makes a new bundle a new base identity: warm Boxes relayout once at their next health
+   * tick and the registry re-bakes, all without a `disk_layout_version` bump. Escape-hatch installs
+   * omit it, so a bundle identity and an install identity never collide.
+   */
+  bundleSha?: string;
 }): string {
-  return `${input.layoutVersion.toString(10)}:${input.packages.join(",")}`
+  const base = `${input.layoutVersion.toString(10)}:${input.packages.join(",")}`
     + `:qmd=${input.qmdPackage}:pi>=${input.minimumPiVersion}`;
+  return input.bundleSha ? `${base}:bundle=${input.bundleSha.slice(0, 12)}` : base;
 }
 
 export function companionPiLayoutIdentity(input: {
@@ -86,6 +94,8 @@ export function companionPiLayoutIdentity(input: {
   overlayRevision?: number;
   companionSkillChecksum?: string;
   bootProfileRevision?: number;
+  /** The active Pi bundle sha256; present only in bundle mode. Folded into the base marker. */
+  bundleSha?: string;
   /** Development-only salt used to isolate disposable research snapshots. */
   imageIdentitySalt?: string;
 }): CompanionPiLayoutIdentity {

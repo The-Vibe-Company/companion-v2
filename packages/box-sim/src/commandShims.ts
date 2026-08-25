@@ -138,6 +138,12 @@ export interface BoxSimCommandMachine {
    * transport's demonstrated habit of mangling large bodies. Null leaves the transport honest.
    */
   mangleOutboxChunkBytes: number | null;
+  /**
+   * Injects a self-hosted Pi bundle failure into the layout install: the download or its checksum
+   * (or the Node major) fails so the bundle branch of the setup script prints its fixed marker and
+   * writes no layout file. Null leaves the bundle download honest.
+   */
+  bundleDownloadFault: "download" | "checksum" | "node" | null;
   /** Directories whose write bit was cleared; their entries can no longer be unlinked. */
   readOnlyDirectories: Set<string>;
   piController?: BoxSimPiController;
@@ -168,6 +174,7 @@ export function createBoxSimCommandMachine(input: {
     extensionDirectoryCreated: false,
     unknownCommandDigests: [],
     mangleOutboxChunkBytes: null,
+    bundleDownloadFault: null,
     readOnlyDirectories: new Set<string>(),
   };
 }
@@ -458,6 +465,13 @@ function failed(stderr: string, exitCode = 1, stdout = ""): BoxSimCommandResult 
   return { success: false, exitCode, stdout, stderr };
 }
 
+/** Marker the layout script prints as its last stderr line for each injected bundle fault. */
+const BUNDLE_FAULT_MARKER: Record<NonNullable<BoxSimCommandMachine["bundleDownloadFault"]>, string> = {
+  download: "companion-bundle-download-failed",
+  checksum: "companion-bundle-checksum-mismatch",
+  node: "companion-bundle-node-mismatch",
+};
+
 function installedLayout(machine: BoxSimCommandMachine): BoxSimCommandResult {
   const script = machine.persistentFiles.get(".companion/bin/ensure-pi-layout.sh")?.toString("utf8");
   if (!script) return failed("staged Pi layout script is missing");
@@ -471,6 +485,13 @@ function installedLayout(machine: BoxSimCommandMachine): BoxSimCommandResult {
   machine.layoutInstalled = true;
   if (expected && recorded === expected && brokerReady) {
     return ok("companion-layout-unchanged\n");
+  }
+  // A bundle-mode layout script downloads and verifies one immutable tarball before it writes
+  // anything. The injected fault fails that step: it prints the fixed marker as its last stderr line
+  // and returns before any layout file is written, exactly as the real script's `exit 1` does.
+  const bundleMode = /(?:^|\n)bundle_base='[^']*'/.test(script);
+  if (bundleMode && machine.bundleDownloadFault) {
+    return failed(`${BUNDLE_FAULT_MARKER[machine.bundleDownloadFault]}\n`);
   }
   writeSimulatedLayoutFiles(machine, expected);
   if (expected && base && recorded.split(":overlay=")[0] === base) {

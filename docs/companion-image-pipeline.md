@@ -133,6 +133,40 @@ migration 0123 and granted to the dedicated runtime role only; the role verifier
   remains, executed by the registry-driven builder under its lease. The diagnostic
   startup-autoresearch harness (`scripts/box-startup-research`) was removed with it.
 
+## Self-hosted Pi bundle (Phase 1-B)
+
+The cold-install path — `npm i -g @earendil-works/pi-coding-agent`, four `pi install`
+runs, and a qmd install — is the dominant contributor to the ~300 s install, and its
+duration and success depend on whatever a public npm registry serves at boot. Phase 1-B
+replaces it with a self-hosted, content-addressed artifact.
+
+- `packages/box-runtime/src/piBundle.ts` holds the single-source pins (`COMPANION_PI_BUNDLE`:
+  `piVersion`, the four extension `packages`, `qmdPackage`, `nodeMajor`, `sha256`, `bundleFormat`).
+  The artifact is `companion-pi-bundle-<sha12>.tar.gz`, a tarball carrying `pi/` (the Pi prefix
+  tree), `pi-agent-dir/` (the four installed extensions), and `tools/` (the qmd prefix tree).
+- Bundle mode turns on when `COMPANION_PI_BUNDLE_BASE_URL` is set (the public bucket base URL, for
+  example the `companion-pi-bundles` bucket on Tigris; never hardcoded). The layout script then
+  `curl`s the object (retrying, with a `node` fetch fallback), verifies it with `sha256sum -c`
+  against the pin, `tar`-extracts it into `~/.companion/dist/<sha12>/`, checks the Box's Node major
+  against `nodeMajor`, and wires PATH (`dist/<sha12>/pi/bin` first, `pi-agent-dir` → `~/.companion/pi`,
+  `tools` → `~/.companion/tools`). Nothing is fetched from npm.
+- The three failure points print a fixed marker as their last stderr line —
+  `companion-bundle-download-failed`, `companion-bundle-checksum-mismatch`,
+  `companion-bundle-node-mismatch` — which `#applyPiLayout` maps to the stable codes
+  `pi_bundle_download_failed`, `pi_bundle_checksum_mismatch`, `pi_bundle_node_mismatch`. The layout
+  marker is never written on failure, so the Box relayouts cleanly on its next wake.
+- `COMPANION_PI_INSTALL_COMMAND` stays the dev/emergency escape hatch and behaves exactly as before
+  when no bundle is configured. When both are set, the bundle wins. Bundle identity is folded into
+  the base layout marker as `:bundle=<sha12>`; the escape-hatch marker omits it, so identities never
+  collide. A new bundle sha is a new base marker: warm Boxes relayout once at their next health tick
+  and the registry re-bakes. `disk_layout_version` stays 14 — no migration.
+- Build and publish: `scripts/build-pi-bundle.sh` (reads the pins from `piBundle.ts`, builds the
+  three trees, smoke-tests, tars, prints the sha256) and `.github/workflows/pi-bundle.yml` (builds on
+  the pinned Node major, uploads to S3 at the content-addressed key with `scripts/upload-pi-bundle.mjs`).
+  A CI guard (`pnpm pi-bundle:check`) HEADs the object derived from the pin so a pin cannot merge
+  before its artifact exists; it skips gracefully while the sha is still the placeholder or no base
+  URL is configured.
+
 ## Phase 2 — staged, proven checkpoints
 
 Generalize the `companion_operations.checkpoint` mechanism to staging itself: each

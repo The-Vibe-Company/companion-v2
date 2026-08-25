@@ -7,3 +7,4 @@ export * from "./companionMcpGateway";
 export * from "./companionRuntimeBaker";
 export * from "./companionRuntimeImage";
 export * from "./companionRuntimeError";
+export * from "./piBundle";
