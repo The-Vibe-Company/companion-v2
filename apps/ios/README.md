@@ -49,13 +49,14 @@ xcodebuildmcp swift-package test --package-path apps/ios/CompanionKit
 Release builds ignore launch arguments and environment variables and always use
 `https://api.thecompanion.sh`.
 
-The Debug-only `-glass-chat-demo`, `-glass-management-demo`,
-`-glass-management-demo-plugins`, `-companion-settings-demo`, and `-companion-roster-demo` launch
-arguments open interactive showcases without requiring a server or account. The settings demo accepts
+The Debug-only `-glass-chat-demo`, `-glass-management-demo`, `-glass-management-demo-plugins`,
+`-companion-icon-demo`, `-companion-settings-demo`, and `-companion-roster-demo` launch arguments
+open deterministic showcases without requiring a server or account. Add `-companion-reduce-motion`
+alongside `-companion-icon-demo` to force the gallery's Reduce Motion path. The settings demo accepts
 `COMPANION_SETTINGS_DEMO_ACCESS=owner|editor|viewer` for deterministic role and deletion UI tests.
 The roster demo accepts the equivalent `COMPANION_ROSTER_DEMO_ACCESS` value and simulates a lost
-first deletion response followed by a same-key `202` retry.
-These routes are excluded from Release behavior.
+first deletion response followed by a same-key `202` retry. These arguments are excluded from Release
+behavior.
 
 ## TestFlight release
 

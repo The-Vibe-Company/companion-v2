@@ -12,6 +12,9 @@ struct GlassChatDemoView: View {
 
     private let companionName = "Companion"
     private let icon = CompanionSummary.Icon(shape: 1, mouth: 1, accessory: 6, color: 7)
+    private let holdsReplyingForEvidence = ProcessInfo.processInfo.arguments.contains(
+        "-companion-avatar-ui-evidence"
+    )
 
     private var visualTheme: CompanionVisualTheme {
         CompanionVisualTheme(icon: icon)
@@ -80,7 +83,12 @@ struct GlassChatDemoView: View {
 
                 ToolbarItem(placement: .principal) {
                     HStack(spacing: 9) {
-                        CompanionAvatar(name: companionName, icon: icon, size: 32, isReplying: replying)
+                        CompanionAvatar(
+                            name: companionName,
+                            icon: icon,
+                            size: 32,
+                            state: replying ? .thinking : .idle
+                        )
                         VStack(alignment: .leading, spacing: 1) {
                             Text(companionName)
                                 .font(.subheadline.weight(.semibold))
@@ -127,7 +135,7 @@ struct GlassChatDemoView: View {
 
     private var replyingBubble: some View {
         HStack(alignment: .bottom, spacing: 9) {
-            CompanionAvatar(name: companionName, icon: icon, size: 30, isReplying: true)
+            CompanionAvatar(name: companionName, icon: icon, size: 30, state: .thinking)
                 .accessibilityHidden(true)
             HStack(spacing: 5) {
                 ForEach(0..<3, id: \.self) { index in
@@ -191,6 +199,8 @@ struct GlassChatDemoView: View {
         messages.append(.init(content: content, kind: .mine, timestamp: "maintenant"))
         replying = true
 
+        guard !holdsReplyingForEvidence else { return }
+
         Task {
             try? await Task.sleep(for: .seconds(1.2))
             messages.append(
@@ -226,7 +236,7 @@ private struct GlassRosterDemoView: View {
                                 dismiss()
                             } label: {
                                 HStack(spacing: 13) {
-                                    CompanionAvatar(name: companion.name, icon: companion.icon, size: 48)
+                                    CompanionAvatar(name: companion.name, icon: companion.icon, size: 48, state: .idle)
                                     VStack(alignment: .leading, spacing: 5) {
                                         HStack {
                                             Text(companion.name)
