@@ -20,7 +20,7 @@ struct ChatView: View {
     }
 
     var body: some View {
-        CompanionBackdrop {
+        CompanionBackdrop(style: .companion(visualTheme.base)) {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 16) {
@@ -43,7 +43,8 @@ struct ChatView: View {
                                 MessageEntryView(
                                     entry: entry,
                                     own: entry.role == "user" && entry.authorID == thread?.viewerID,
-                                    companion: currentCompanion
+                                    companion: currentCompanion,
+                                    accent: visualTheme.accent
                                 )
                                 .id(entry.id)
                             }
@@ -55,6 +56,8 @@ struct ChatView: View {
                             ForEach(pendingMessages) { pending in
                                 PendingMessageView(
                                     message: pending,
+                                    accent: visualTheme.accent,
+                                    accentForeground: visualTheme.accentForeground,
                                     retry: { retry(pending.id) },
                                     dismiss: { dismiss(pending.id) }
                                 )
@@ -84,6 +87,7 @@ struct ChatView: View {
         }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { headerToolbar }
+        .tint(visualTheme.accent)
         .task(id: companion.id) {
             await reload()
             while !Task.isCancelled {
@@ -117,7 +121,11 @@ struct ChatView: View {
         }
 
         ToolbarItem(placement: .topBarTrailing) {
-            CompanionStatusBadge(runtime: currentCompanion.runtime, compact: true)
+            CompanionStatusBadge(
+                runtime: currentCompanion.runtime,
+                compact: true,
+                replyingColor: visualTheme.accent
+            )
         }
     }
 
@@ -125,7 +133,7 @@ struct ChatView: View {
         HStack(spacing: 10) {
             ProgressView()
                 .controlSize(.small)
-                .tint(Color.companionAccent)
+                .tint(visualTheme.accent)
             Text("\(currentCompanion.name) is replying…")
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(Color.companionInk.opacity(0.76))
@@ -213,11 +221,12 @@ struct ChatView: View {
                                 }
                             }
                             .font(.system(size: 17, weight: .bold))
+                            .foregroundStyle(visualTheme.accentForeground)
                             .frame(width: 46, height: 46)
                         }
                         .buttonStyle(.glassProminent)
                         .buttonBorderShape(.circle)
-                        .tint(Color.companionAccent)
+                        .tint(visualTheme.accent)
                         .disabled(sendDisabled)
                         .accessibilityLabel("Send message")
                         .accessibilityIdentifier("chat.send")
@@ -232,6 +241,10 @@ struct ChatView: View {
 
     private var sendDisabled: Bool {
         sending || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || thread?.canSend == false
+    }
+
+    private var visualTheme: CompanionVisualTheme {
+        CompanionVisualTheme(icon: currentCompanion.icon)
     }
 
     private var statusLabel: String {
@@ -362,6 +375,7 @@ struct ChatMessageBubble: View {
     var queued = false
     var companionName = "Companion"
     var icon: CompanionSummary.Icon?
+    var accent = Color.companionAccent
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 9) {
@@ -413,7 +427,7 @@ struct ChatMessageBubble: View {
 
         if kind == .mine {
             contentView
-                .companionGlass(radius: 18, tint: Color.companionAccent.opacity(0.10))
+                .companionGlass(radius: 18, tint: accent.opacity(0.10))
         } else {
             contentView
                 .companionMaterial(radius: 18)
@@ -425,6 +439,7 @@ private struct MessageEntryView: View {
     let entry: TranscriptEntry
     let own: Bool
     let companion: CompanionSummary
+    let accent: Color
 
     var body: some View {
         ChatMessageBubble(
@@ -434,7 +449,8 @@ private struct MessageEntryView: View {
             timestamp: timeLabel,
             queued: entry.queued,
             companionName: companion.name,
-            icon: companion.icon
+            icon: companion.icon,
+            accent: accent
         )
     }
 
@@ -462,6 +478,8 @@ private struct PendingMessage: Identifiable, Equatable {
 
 private struct PendingMessageView: View {
     let message: PendingMessage
+    let accent: Color
+    let accentForeground: Color
     let retry: () -> Void
     let dismiss: () -> Void
 
@@ -470,7 +488,8 @@ private struct PendingMessageView: View {
             ChatMessageBubble(
                 content: message.content,
                 kind: .mine,
-                timestamp: message.failed ? "Not delivered" : "Sending…"
+                timestamp: message.failed ? "Not delivered" : "Sending…",
+                accent: accent
             )
 
             if message.failed {
@@ -483,7 +502,8 @@ private struct PendingMessageView: View {
                             .buttonStyle(.glass)
                         Button("Retry", action: retry)
                             .buttonStyle(.glassProminent)
-                            .tint(Color.companionAccent)
+                            .tint(accent)
+                            .foregroundStyle(accentForeground)
                     }
                     .controlSize(.small)
                 }
