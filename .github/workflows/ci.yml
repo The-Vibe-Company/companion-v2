@@ -215,15 +215,17 @@ jobs:
       - name: Test CompanionKit
         run: xcodebuildmcp swift-package test --package-path apps/ios/CompanionKit
 
-      - name: Build the simulator application
+      - name: Build and test the simulator application
         run: >-
-          xcodebuildmcp simulator build
+          xcodebuildmcp simulator test
           --workspace-path apps/ios/Companion.xcworkspace
           --scheme Companion
           --configuration Debug
           --simulator-id "${{ steps.simulator.outputs.id }}"
           --derived-data-path "$RUNNER_TEMP/companion-derived-data"
           --extra-args CODE_SIGNING_ALLOWED=NO
+          --extra-args=-only-testing:CompanionUITests
+          --progress
 
   quality:
     name: Quality Node 22

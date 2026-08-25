@@ -147,14 +147,15 @@ test("the iOS launcher derives the API port from Conductor and uses XcodeBuildMC
   assert.doesNotMatch(launcher, /iPhone 17|\bxcodebuild\b|\bxcrun\b|\bsimctl\b/);
 });
 
-test("CI builds iOS without secrets and isolates the live provider workflow", () => {
+test("CI builds and exercises iOS without secrets and isolates the live provider workflow", () => {
   const ci = read(".github/workflows/ci.yml");
   const e2e = read(".github/workflows/ios-e2e.yml");
 
   assert.match(ci, /^  ios-quality:$/m);
   assert.match(ci, /^    runs-on: macos-26$/m);
   assert.match(ci, /xcodebuildmcp swift-package test --package-path apps\/ios\/CompanionKit/);
-  assert.match(ci, /xcodebuildmcp simulator build/);
+  assert.match(ci, /xcodebuildmcp simulator test/);
+  assert.match(ci, /--extra-args=-only-testing:CompanionUITests/);
   assert.match(ci, /node scripts\/select-ios-simulator\.mjs/);
   assert.match(e2e, /^  workflow_dispatch:$/m);
   assert.match(e2e, /^  schedule:$/m);
