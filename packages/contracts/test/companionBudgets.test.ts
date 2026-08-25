@@ -190,7 +190,7 @@ describe("SQL budget contract", () => {
     expect(contract.companion_runtime_observe_instance?.map(sqlIntervalToMs))
       .toContain(base.coldStartDeadlineMs);
     expect(contract.companion_runtime_assign_operation_intent?.map(sqlIntervalToMs))
-      .toEqual([base.coldStartDeadlineMs]);
+      .toEqual([base.coldStartDeadlineMs, base.coldStartDeadlineMs]);
     expect(contract.companion_fire_routine?.map(sqlIntervalToMs))
       .toEqual([COMPANION_ROUTINE_MISSED_GRACE_MS]);
     expect(contract.companion_api_fire_trigger?.map(sqlIntervalToMs))

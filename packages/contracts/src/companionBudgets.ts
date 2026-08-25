@@ -183,8 +183,8 @@ export const COMPANION_SQL_BUDGET_CONTRACT: Readonly<Record<string, readonly str
   companion_runtime_settle: ["30 seconds", "30 seconds", "15 seconds"],
   // Health observation windows + coldStartDeadlineMs + leaseSeconds.
   companion_runtime_observe_instance: ["5 minutes", "3 minutes", "30 seconds"],
-  // coldStartDeadlineMs for the operation intent window.
-  companion_runtime_assign_operation_intent: ["3 minutes"],
+  // coldStartDeadlineMs for the initial operation intent and explicit retry refresh.
+  companion_runtime_assign_operation_intent: ["3 minutes", "3 minutes"],
   // Deferred-delete retry ladder.
   companion_runtime_defer_delete: ["5 seconds", "15 seconds", "30 seconds", "60 seconds"],
   // COMPANION_ROUTINE_MISSED_GRACE_MS twin.

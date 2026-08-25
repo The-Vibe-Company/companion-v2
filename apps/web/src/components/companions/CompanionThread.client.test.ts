@@ -301,6 +301,42 @@ describe("CompanionThread composer", () => {
     expect(onCancelInterrupted).toHaveBeenCalledWith(interruptedThread.interrupted_turn?.id);
   });
 
+  it("shows the Box start lifecycle when retrying a turn without a usable Box", async () => {
+    const startRetry: CompanionOperation = { ...retryOperation, kind: "start" };
+    const failedCompanion: Companion = {
+      ...companion,
+      runtime: {
+        ...companion.runtime,
+        latest_operation: {
+          ...startRetry,
+          status: "failed",
+          error: null,
+        },
+      },
+    };
+    const { container, poll } = await mountPolling(
+      interruptedThread,
+      async () => startRetry,
+    );
+
+    await act(async () => button(container, "Retry turn").click());
+
+    expect(container.textContent).toContain(
+      "Retry accepted. The Companion will start before this turn runs again.",
+    );
+    expect(container.textContent).not.toContain("Pi will restart");
+    expect([...container.querySelectorAll("button")]
+      .some((candidate) => candidate.textContent === "Retry turn")).toBe(false);
+
+    await poll(interruptedThread, failedCompanion);
+
+    expect(container.textContent).toContain(
+      "The Companion could not start. Retry or cancel this turn.",
+    );
+    expect(button(container, "Retry turn")).toBeTruthy();
+    expect(button(container, "Cancel turn")).toBeTruthy();
+  });
+
   it("explains when Cancel loses a race with a running retry", async () => {
     const onCancelInterrupted = vi.fn(async () => {
       throw new ApiFetchError("Companion turn retry is already running", 409);

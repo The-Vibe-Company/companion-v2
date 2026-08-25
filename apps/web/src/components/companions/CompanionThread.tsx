@@ -63,13 +63,18 @@ function InterruptedTurnNotice({
     if (actionError) errorRef.current?.focus();
   }, [actionError]);
 
+  const latestRetryOperation = latestOperation
+    && (latestOperation.kind === "start" || latestOperation.kind === "restart_pi")
+    && latestOperation.source_turn_id === turn.id
+    ? latestOperation
+    : null;
+
   useEffect(() => {
-    if (latestOperation?.kind !== "restart_pi"
-      || latestOperation.source_turn_id !== turn.id
-      || !["failed", "interrupted", "cancelled"].includes(latestOperation.status)) return;
+    if (!latestRetryOperation
+      || !["failed", "interrupted", "cancelled"].includes(latestRetryOperation.status)) return;
     retryIdRef.current = null;
-    if (acceptedRetry?.id === latestOperation.id) setAcceptedRetry(null);
-  }, [acceptedRetry?.id, latestOperation, turn.id]);
+    if (acceptedRetry?.id === latestRetryOperation.id) setAcceptedRetry(null);
+  }, [acceptedRetry?.id, latestRetryOperation, turn.id]);
 
   const retry = async () => {
     if (!canAct || action) return;
@@ -100,17 +105,16 @@ function InterruptedTurnNotice({
     }
   };
 
-  const durableRetry = latestOperation?.kind === "restart_pi"
-    && latestOperation.source_turn_id === turn.id
-    ? latestOperation
-    : null;
+  const durableRetry = latestRetryOperation;
   const retryOperation = acceptedRetry && acceptedRetry.id !== durableRetry?.id
     ? acceptedRetry
     : durableRetry ?? acceptedRetry;
   const retryPending = retryOperation?.status === "pending" || retryOperation?.status === "running";
   const retryFailure = retryOperation
     && (retryOperation.status === "failed" || retryOperation.status === "interrupted")
-    ? retryOperation.error?.message ?? "Pi could not restart. Retry or cancel this turn."
+    ? retryOperation.error?.message ?? (retryOperation.kind === "start"
+      ? "The Companion could not start. Retry or cancel this turn."
+      : "Pi could not restart. Retry or cancel this turn.")
     : null;
 
   return (
@@ -136,7 +140,9 @@ function InterruptedTurnNotice({
           <>
             {retryPending ? (
               <p className="chat-interruption__status" role="status">
-                Retry accepted. Pi will restart before this turn runs again.
+                {retryOperation.kind === "start"
+                  ? "Retry accepted. The Companion will start before this turn runs again."
+                  : "Retry accepted. Pi will restart before this turn runs again."}
               </p>
             ) : null}
             <div className="chat-interruption__actions">

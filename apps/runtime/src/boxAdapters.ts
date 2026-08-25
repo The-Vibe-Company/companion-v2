@@ -132,14 +132,18 @@ export function createRuntimeBoxControl(options: RuntimeBoxAdapterOptions): Runt
           });
         }
       }
+      // `deadlineAt` was minted by the engine before the optional image wait. Reusing it here can
+      // make the create POST start with an already-expired deadline after a 60-second wait. Refresh
+      // the single-call budget now, still capped by the operation-level image wait deadline.
+      const createDeadlineSource = input.imageWaitDeadlineAt ?? input.deadlineAt;
       const create = (fromImage?: string) =>
         options.lifecycle.createGenerationBoxAfterObservedAbsence({
-        companionId: input.companionId,
-        generation: generationNumber(input.generation),
-        ttlSeconds: input.ttlSeconds,
-        deadlineAt: deadline(input.deadlineAt),
-        signal: input.signal,
-        ...(fromImage ? { from: fromImage } : {}),
+          companionId: input.companionId,
+          generation: generationNumber(input.generation),
+          ttlSeconds: input.ttlSeconds,
+          deadlineAt: deadline(createDeadlineSource),
+          signal: input.signal,
+          ...(fromImage ? { from: fromImage } : {}),
         });
       let created: Awaited<ReturnType<typeof create>>;
       try {
