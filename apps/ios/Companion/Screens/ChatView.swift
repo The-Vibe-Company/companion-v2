@@ -5,6 +5,7 @@ struct ChatView: View {
     @Environment(SessionStore.self) private var sessionStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let companion: CompanionSummary
+    let onSettings: () -> Void
     @State private var currentCompanion: CompanionSummary
     @State private var thread: CompanionThread?
     @State private var draft = ""
@@ -12,15 +13,17 @@ struct ChatView: View {
     @State private var sending = false
     @State private var error: String?
     @State private var pendingMessages: [PendingMessage] = []
+    @State private var markdownByEventID: [String: CachedMarkdownDocument] = [:]
     @State private var reloadGeneration = 0
 
-    init(companion: CompanionSummary) {
+    init(companion: CompanionSummary, onSettings: @escaping () -> Void) {
         self.companion = companion
+        self.onSettings = onSettings
         _currentCompanion = State(initialValue: companion)
     }
 
     var body: some View {
-        CompanionBackdrop {
+        CompanionBackdrop(style: .companion(visualTheme.base)) {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 16) {
@@ -43,7 +46,9 @@ struct ChatView: View {
                                 MessageEntryView(
                                     entry: entry,
                                     own: entry.role == "user" && entry.authorID == thread?.viewerID,
-                                    companion: currentCompanion
+                                    companion: currentCompanion,
+                                    accent: visualTheme.accent,
+                                    markdown: markdownByEventID[entry.eventID]?.document
                                 )
                                 .id(entry.id)
                             }
@@ -55,6 +60,8 @@ struct ChatView: View {
                             ForEach(pendingMessages) { pending in
                                 PendingMessageView(
                                     message: pending,
+                                    accent: visualTheme.accent,
+                                    accentForeground: visualTheme.accentForeground,
                                     retry: { retry(pending.id) },
                                     dismiss: { dismiss(pending.id) }
                                 )
@@ -84,6 +91,7 @@ struct ChatView: View {
         }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { headerToolbar }
+        .tint(visualTheme.accent)
         .task(id: companion.id) {
             await reload()
             while !Task.isCancelled {
@@ -91,6 +99,7 @@ struct ChatView: View {
                 if !Task.isCancelled { await reload(silently: true) }
             }
         }
+        .onChange(of: companion) { currentCompanion = companion }
     }
 
     @ToolbarContentBuilder
@@ -101,7 +110,7 @@ struct ChatView: View {
                     name: currentCompanion.name,
                     icon: currentCompanion.icon,
                     size: 32,
-                    isReplying: currentCompanion.runtime.replying
+                    state: currentCompanion.runtime.replying ? .thinking : .idle
                 )
                 VStack(alignment: .leading, spacing: 1) {
                     Text(currentCompanion.name)
@@ -117,7 +126,20 @@ struct ChatView: View {
         }
 
         ToolbarItem(placement: .topBarTrailing) {
-            CompanionStatusBadge(runtime: currentCompanion.runtime, compact: true)
+            CompanionStatusBadge(
+                runtime: currentCompanion.runtime,
+                compact: true,
+                replyingColor: visualTheme.accent
+            )
+        }
+
+        ToolbarItem(placement: .topBarTrailing) {
+            Button(action: onSettings) {
+                Image(systemName: "gearshape")
+                    .frame(width: 44, height: 44)
+            }
+            .accessibilityLabel("Settings for \(currentCompanion.name)")
+            .accessibilityIdentifier("chat.settings")
         }
     }
 
@@ -125,7 +147,7 @@ struct ChatView: View {
         HStack(spacing: 10) {
             ProgressView()
                 .controlSize(.small)
-                .tint(Color.companionAccent)
+                .tint(visualTheme.accent)
             Text("\(currentCompanion.name) is replying…")
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(Color.companionInk.opacity(0.76))
@@ -161,7 +183,7 @@ struct ChatView: View {
 
     private var emptyState: some View {
         VStack(spacing: 18) {
-            CompanionAvatar(name: currentCompanion.name, icon: currentCompanion.icon, size: 76)
+            CompanionAvatar(name: currentCompanion.name, icon: currentCompanion.icon, size: 76, state: .idle)
             VStack(spacing: 6) {
                 Text("Start the conversation")
                     .font(.title3.weight(.semibold))
@@ -213,11 +235,12 @@ struct ChatView: View {
                                 }
                             }
                             .font(.system(size: 17, weight: .bold))
+                            .foregroundStyle(visualTheme.accentForeground)
                             .frame(width: 46, height: 46)
                         }
                         .buttonStyle(.glassProminent)
                         .buttonBorderShape(.circle)
-                        .tint(Color.companionAccent)
+                        .tint(visualTheme.accent)
                         .disabled(sendDisabled)
                         .accessibilityLabel("Send message")
                         .accessibilityIdentifier("chat.send")
@@ -232,6 +255,10 @@ struct ChatView: View {
 
     private var sendDisabled: Bool {
         sending || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || thread?.canSend == false
+    }
+
+    private var visualTheme: CompanionVisualTheme {
+        CompanionVisualTheme(icon: currentCompanion.icon)
     }
 
     private var statusLabel: String {
@@ -251,7 +278,9 @@ struct ChatView: View {
         if !silently { loading = true }
         do {
             let next = try await sessionStore.thread(companionID: companion.id)
+            let renderedMarkdown = await renderedMarkdown(for: next.entries)
             guard generation == reloadGeneration else { return }
+            markdownByEventID = renderedMarkdown
             thread = next
             let persistedEventIDs = Set(next.entries.map(\.eventID))
             pendingMessages.removeAll { pending in
@@ -268,6 +297,18 @@ struct ChatView: View {
             currentCompanion = refreshed
         }
         if generation == reloadGeneration { loading = false }
+    }
+
+    private func renderedMarkdown(
+        for entries: [TranscriptEntry]
+    ) async -> [String: CachedMarkdownDocument] {
+        let sources = entries.lazy
+            .filter { $0.role == "assistant" }
+            .map { MarkdownDocumentSource(eventID: $0.eventID, content: $0.content) }
+        return await MarkdownDocumentRenderer.render(
+            sources: Array(sources),
+            reusing: markdownByEventID
+        )
     }
 
     private var entries: [TranscriptEntry] {
@@ -362,22 +403,32 @@ struct ChatMessageBubble: View {
     var queued = false
     var companionName = "Companion"
     var icon: CompanionSummary.Icon?
+    var accent = Color.companionAccent
+    var markdown: MarkdownDocument?
 
+    @ViewBuilder
     var body: some View {
-        HStack(alignment: .bottom, spacing: 9) {
+        if kind == .assistant {
+            row.accessibilityElement(children: .contain)
+        } else {
+            row.accessibilityElement(children: .combine)
+        }
+    }
+
+    private var row: some View {
+        HStack(alignment: kind == .assistant ? .top : .bottom, spacing: 9) {
             if kind == .mine { Spacer(minLength: 54) }
 
             if kind == .assistant {
-                CompanionAvatar(name: companionName, icon: icon, size: 30)
+                CompanionAvatar(name: companionName, icon: icon, size: 30, state: .still)
                     .accessibilityHidden(true)
             }
 
             bubble
 
-            if kind != .mine { Spacer(minLength: 36) }
+            if kind != .mine { Spacer(minLength: kind == .assistant ? 12 : 36) }
         }
         .frame(maxWidth: .infinity)
-        .accessibilityElement(children: .combine)
     }
 
     @ViewBuilder
@@ -389,10 +440,14 @@ struct ChatMessageBubble: View {
                     .foregroundStyle(Color.companionMuted)
             }
 
-            Text(content)
-                .font(.body)
-                .foregroundStyle(Color.companionInk)
-                .textSelection(.enabled)
+            if kind == .assistant, let markdown {
+                MarkdownMessageView(document: markdown, accent: accent)
+            } else {
+                Text(content)
+                    .font(.body)
+                    .foregroundStyle(Color.companionInk)
+                    .textSelection(.enabled)
+            }
 
             if queued || timestamp != nil {
                 HStack(spacing: 6) {
@@ -407,15 +462,22 @@ struct ChatMessageBubble: View {
                 .foregroundStyle(Color.companionMuted)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 11)
-        .frame(maxWidth: 340, alignment: .leading)
 
         if kind == .mine {
             contentView
-                .companionGlass(radius: 18, tint: Color.companionAccent.opacity(0.10))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 11)
+                .frame(maxWidth: 340, alignment: .leading)
+                .companionGlass(radius: 18, tint: accent.opacity(0.10))
+        } else if kind == .assistant {
+            contentView
+                .padding(.vertical, 3)
+                .frame(maxWidth: 680, alignment: .leading)
         } else {
             contentView
+                .padding(.horizontal, 14)
+                .padding(.vertical, 11)
+                .frame(maxWidth: 340, alignment: .leading)
                 .companionMaterial(radius: 18)
         }
     }
@@ -425,6 +487,8 @@ private struct MessageEntryView: View {
     let entry: TranscriptEntry
     let own: Bool
     let companion: CompanionSummary
+    let accent: Color
+    let markdown: MarkdownDocument?
 
     var body: some View {
         ChatMessageBubble(
@@ -434,7 +498,9 @@ private struct MessageEntryView: View {
             timestamp: timeLabel,
             queued: entry.queued,
             companionName: companion.name,
-            icon: companion.icon
+            icon: companion.icon,
+            accent: accent,
+            markdown: entry.role == "assistant" ? markdown : nil
         )
     }
 
@@ -462,6 +528,8 @@ private struct PendingMessage: Identifiable, Equatable {
 
 private struct PendingMessageView: View {
     let message: PendingMessage
+    let accent: Color
+    let accentForeground: Color
     let retry: () -> Void
     let dismiss: () -> Void
 
@@ -470,7 +538,8 @@ private struct PendingMessageView: View {
             ChatMessageBubble(
                 content: message.content,
                 kind: .mine,
-                timestamp: message.failed ? "Not delivered" : "Sending…"
+                timestamp: message.failed ? "Not delivered" : "Sending…",
+                accent: accent
             )
 
             if message.failed {
@@ -483,7 +552,8 @@ private struct PendingMessageView: View {
                             .buttonStyle(.glass)
                         Button("Retry", action: retry)
                             .buttonStyle(.glassProminent)
-                            .tint(Color.companionAccent)
+                            .tint(accent)
+                            .foregroundStyle(accentForeground)
                     }
                     .controlSize(.small)
                 }

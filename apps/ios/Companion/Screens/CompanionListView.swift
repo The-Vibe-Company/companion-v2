@@ -1,9 +1,17 @@
 import SwiftUI
 import CompanionKit
 
+@MainActor
+struct CompanionListServices {
+    let listCompanions: () async throws -> [CompanionSummary]
+    let deleteCompanion: (String, UUID) async throws -> CompanionOperationSummary
+}
+
 struct CompanionListView: View {
     @Environment(SessionStore.self) private var sessionStore
     let session: Session
+    private let services: CompanionListServices?
+    @State private var path: [CompanionRoute] = []
     @State private var companions: [CompanionSummary] = []
     @State private var query = ""
     @State private var loading = true
@@ -12,10 +20,21 @@ struct CompanionListView: View {
     @State private var showingCreateCompanion = false
     @State private var showingProviders = false
     @State private var showingPlugins = false
+    @State private var companionToDelete: CompanionSummary?
+    @State private var deleteRequestIDs: [String: UUID] = [:]
+    @State private var deletingCompanionIDs: Set<String> = []
+    @State private var acceptedDeletions: [String: CompanionOperationSummary] = [:]
+    @State private var rosterNotice: String?
+    @State private var rosterActionError: String?
+
+    init(session: Session, services: CompanionListServices? = nil) {
+        self.session = session
+        self.services = services
+    }
 
     var body: some View {
-        NavigationStack {
-            CompanionBackdrop {
+        NavigationStack(path: $path) {
+            CompanionBackdrop(style: .neutral) {
                 Group {
                     if loading && companions.isEmpty {
                         loadingState
@@ -63,27 +82,53 @@ struct CompanionListView: View {
                     companions.insert(companion, at: 0)
                     Task { await reload(silently: true) }
                 }
+                .tint(Color.companionAccent)
             }
             .sheet(isPresented: $showingProviders) {
                 ProviderManagementView()
+                    .tint(Color.companionAccent)
             }
             .sheet(isPresented: $showingPlugins) {
                 PluginManagementView()
+                    .tint(Color.companionAccent)
+            }
+            .confirmationDialog(
+                "Delete \(companionToDelete?.name ?? "Companion")?",
+                isPresented: Binding(
+                    get: { companionToDelete != nil },
+                    set: { if !$0 { companionToDelete = nil } }
+                ),
+                titleVisibility: .visible,
+                presenting: companionToDelete
+            ) { companion in
+                Button("Delete Companion", role: .destructive) {
+                    Task { await delete(companion) }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: { _ in
+                Text("Its Box, thread, and Companion record will be permanently deleted. This cannot be undone.")
             }
             .task(id: session.orgID) {
                 await reload()
                 while !Task.isCancelled {
-                    let interval: UInt64 = companions.contains(where: { $0.runtime.replying }) ? 8 : 45
+                    let interval: UInt64 = companions.contains(where: hasActiveWork) ? 8 : 45
                     try? await Task.sleep(for: .seconds(interval))
                     if !Task.isCancelled { await reload(silently: true) }
                 }
             }
+            .tint(Color.companionInk)
         }
     }
 
     private var roster: some View {
         ScrollView {
             LazyVStack(spacing: 12) {
+                if let rosterActionError {
+                    CompanionErrorNotice(message: rosterActionError)
+                } else if let rosterNotice {
+                    CompanionSuccessNotice(message: rosterNotice)
+                }
+
                 HStack {
                     Text("Your durable conversations")
                         .font(.subheadline)
@@ -96,10 +141,37 @@ struct CompanionListView: View {
                 .padding(.horizontal, 4)
 
                 ForEach(visibleCompanions) { companion in
-                    NavigationLink(value: companion) {
-                        CompanionRow(companion: companion)
+                    NavigationLink(value: CompanionRoute.chat(companion.id)) {
+                        CompanionRow(
+                            companion: companion,
+                            deletionOperation: effectiveDeletion(for: companion)
+                        )
                     }
                     .buttonStyle(.plain)
+                    .accessibilityIdentifier("companion.row.\(companion.id)")
+                    .contextMenu {
+                        Button("Settings", systemImage: "gearshape") {
+                            path.append(.settings(companion.id))
+                        }
+
+                        if companion.access.canDeleteCompanion {
+                            Divider()
+                            if deletingCompanionIDs.contains(companion.id) {
+                                Button("Deleting…", systemImage: "clock") {}
+                                    .disabled(true)
+                            } else if effectiveDeletion(for: companion)?.isActive == true {
+                                Button("Deletion requested", systemImage: "clock") {}
+                                    .disabled(true)
+                            } else {
+                                Button(deleteMenuLabel(for: companion), systemImage: "trash", role: .destructive) {
+                                    companionToDelete = companion
+                                }
+                            }
+                        }
+                    }
+                    .accessibilityAction(named: "Settings") {
+                        path.append(.settings(companion.id))
+                    }
                 }
             }
             .padding(.horizontal, 16)
@@ -108,8 +180,8 @@ struct CompanionListView: View {
         }
         .refreshable { await reload() }
         .scrollIndicators(.hidden)
-        .navigationDestination(for: CompanionSummary.self) { companion in
-            ChatView(companion: companion)
+        .navigationDestination(for: CompanionRoute.self) { route in
+            destination(for: route)
         }
     }
 
@@ -171,9 +243,25 @@ struct CompanionListView: View {
         let generation = reloadGeneration
         if !silently { loading = true }
         do {
-            let next = try await sessionStore.listCompanions()
+            let next: [CompanionSummary]
+            if let services {
+                next = try await services.listCompanions()
+            } else {
+                next = try await sessionStore.listCompanions()
+            }
             guard generation == reloadGeneration else { return }
             companions = next
+            let nextIDs = Set(next.map(\.id))
+            let reconciledDeletionIDs = Set(next.compactMap { companion in
+                companion.deletionOperation == nil ? nil : companion.id
+            })
+            deleteRequestIDs = deleteRequestIDs.filter { companionID, _ in
+                nextIDs.contains(companionID) && !reconciledDeletionIDs.contains(companionID)
+            }
+            acceptedDeletions = acceptedDeletions.filter { nextIDs.contains($0.key) }
+            if let missingRoute = path.last?.companionID, !nextIDs.contains(missingRoute) {
+                path.removeAll()
+            }
             error = nil
         } catch let apiError as APIError where apiError.status == 403 || apiError.status == 404 {
             guard generation == reloadGeneration else { return }
@@ -184,10 +272,208 @@ struct CompanionListView: View {
         }
         if generation == reloadGeneration { loading = false }
     }
+
+    @ViewBuilder
+    private func destination(for route: CompanionRoute) -> some View {
+        if let companion = companions.first(where: { $0.id == route.companionID }) {
+            switch route {
+            case .chat(let companionID):
+                ChatView(companion: companion) {
+                    path.append(.settings(companionID))
+                }
+            case .settings:
+                CompanionSettingsView(
+                    companion: companion,
+                    onSaved: replace,
+                    onDeletionAccepted: deletionAccepted,
+                    onDeletionAmbiguous: { companionID, requestID in
+                        deleteRequestIDs[companionID] = requestID
+                    }
+                )
+            }
+        } else {
+            ContentUnavailableView(
+                "Companion unavailable",
+                systemImage: "bubble.left.and.exclamationmark.bubble.right",
+                description: Text("This Companion is no longer available in the workspace.")
+            )
+        }
+    }
+
+    private func replace(_ updated: CompanionSummary) {
+        guard let index = companions.firstIndex(where: { $0.id == updated.id }) else { return }
+        companions[index] = updated.preservingListProjection(from: companions[index])
+    }
+
+    private func effectiveDeletion(for companion: CompanionSummary) -> CompanionOperationSummary? {
+        companion.deletionOperation ?? acceptedDeletions[companion.id]
+    }
+
+    private func hasActiveWork(_ companion: CompanionSummary) -> Bool {
+        companion.runtime.replying
+            || companion.runtime.state == .provisioning
+            || companion.runtime.state == .stopping
+            || deletingCompanionIDs.contains(companion.id)
+            || deleteRequestIDs[companion.id] != nil
+            || effectiveDeletion(for: companion)?.isActive == true
+    }
+
+    private func deleteMenuLabel(for companion: CompanionSummary) -> String {
+        if deleteRequestIDs[companion.id] != nil { return "Retry Delete" }
+        guard let operation = effectiveDeletion(for: companion) else { return "Delete Companion" }
+        if operation.status == .failed || operation.status == .interrupted || operation.status == .cancelled {
+            return "Retry Delete"
+        }
+        return "Delete Companion"
+    }
+
+    private func delete(_ companion: CompanionSummary) async {
+        guard companion.access.canDeleteCompanion,
+              !deletingCompanionIDs.contains(companion.id) else { return }
+        deletingCompanionIDs.insert(companion.id)
+        defer { deletingCompanionIDs.remove(companion.id) }
+        rosterActionError = nil
+        rosterNotice = nil
+        let requestID = deleteRequestIDs[companion.id] ?? UUID()
+        deleteRequestIDs[companion.id] = requestID
+        do {
+            let operation: CompanionOperationSummary
+            if let services {
+                operation = try await services.deleteCompanion(companion.id, requestID)
+            } else {
+                operation = try await sessionStore.deleteCompanion(
+                    companionID: companion.id,
+                    requestID: requestID
+                )
+            }
+            deleteRequestIDs[companion.id] = nil
+            deletionAccepted(companion.id, operation)
+        } catch {
+            if let apiError = error as? APIError, apiError.status == 0 {
+                rosterActionError = "The deletion response was not received. Retry Delete safely reuses the same request."
+            } else {
+                rosterActionError = companionDisplayMessage(
+                    error,
+                    fallback: "This Companion could not be deleted."
+                )
+            }
+        }
+        companionToDelete = nil
+    }
+
+    private func deletionAccepted(_ companionID: String, _ operation: CompanionOperationSummary) {
+        acceptedDeletions[companionID] = operation
+        rosterActionError = nil
+        rosterNotice = "Deletion requested. The Companion will remain visible until its Box is permanently deleted."
+        path.removeAll()
+        Task { await reload(silently: true) }
+    }
+}
+
+#if DEBUG
+struct CompanionRosterDemoView: View {
+    @State private var demoState = CompanionRosterDemoState()
+
+    private let access: CompanionAccess
+
+    init() {
+        let rawAccess = ProcessInfo.processInfo.environment["COMPANION_ROSTER_DEMO_ACCESS"] ?? "owner"
+        access = CompanionAccess(rawValue: rawAccess) ?? .viewer
+    }
+
+    var body: some View {
+        CompanionListView(
+            session: CompanionRosterDemoFixtures.session,
+            services: CompanionListServices(
+                listCompanions: {
+                    [CompanionRosterDemoFixtures.companion(access: access)]
+                },
+                deleteCompanion: { companionID, requestID in
+                    try demoState.delete(companionID: companionID, requestID: requestID)
+                }
+            )
+        )
+    }
+}
+
+@MainActor
+private final class CompanionRosterDemoState {
+    private var firstRequestID: UUID?
+
+    func delete(companionID: String, requestID: UUID) throws -> CompanionOperationSummary {
+        guard companionID == CompanionRosterDemoFixtures.companionID else {
+            throw APIError(status: 404, code: "not_found", message: "Companion not found.")
+        }
+        if firstRequestID == nil {
+            firstRequestID = requestID
+            throw APIError(status: 0, code: "network_error", message: "The server could not be reached.")
+        }
+        guard firstRequestID == requestID else {
+            throw APIError(status: 400, code: "idempotency_mismatch", message: "The delete request changed unexpectedly.")
+        }
+        return CompanionRosterDemoFixtures.deleteOperation
+    }
+}
+
+@MainActor
+private enum CompanionRosterDemoFixtures {
+    static let companionID = "c96ab360-00f3-4497-a51a-51442db8add1"
+
+    static let session = Session(
+        cookie: "demo-session",
+        orgID: "demo-org",
+        needsOnboarding: false,
+        user: .init(id: "demo-user", email: "demo@example.com", name: "Demo")
+    )
+
+    static func companion(access: CompanionAccess) -> CompanionSummary {
+        decode(#"""
+        {
+          "id":"\#(companionID)",
+          "name":"Luna",
+          "persona":"Keep releases calm",
+          "model_id":"claude-sonnet",
+          "icon":{"shape":6,"mouth":1,"accessory":6,"color":2},
+          "access":"\#(access.rawValue)",
+          "hidden":false,
+          "unread":false,
+          "last_message":{"preview":"Release notes are ready.","role":"assistant","created_at":"2026-08-25T08:00:00.000Z"},
+          "runtime":{"state":"running","replying":false,"last_error":null,"provider_ids":["anthropic"],"latest_operation":null}
+        }
+        """#)
+    }
+
+    static var deleteOperation: CompanionOperationSummary {
+        decode(#"""
+        {
+          "id":"14757274-8d64-455c-a394-334665a258f0",
+          "kind":"delete",
+          "status":"pending",
+          "error":null
+        }
+        """#)
+    }
+
+    private static func decode<Value: Decodable>(_ json: String) -> Value {
+        try! JSONDecoder().decode(Value.self, from: Data(json.utf8))
+    }
+}
+#endif
+
+private enum CompanionRoute: Hashable {
+    case chat(String)
+    case settings(String)
+
+    var companionID: String {
+        switch self {
+        case .chat(let id), .settings(let id): return id
+        }
+    }
 }
 
 private struct CompanionRow: View {
     let companion: CompanionSummary
+    let deletionOperation: CompanionOperationSummary?
 
     var body: some View {
         HStack(spacing: 14) {
@@ -196,7 +482,7 @@ private struct CompanionRow: View {
                     name: companion.name,
                     icon: companion.icon,
                     size: 52,
-                    isReplying: companion.runtime.replying
+                    state: companion.runtime.replying ? .thinking : .idle
                 )
                 Circle()
                     .fill(statusColor)
@@ -217,7 +503,7 @@ private struct CompanionRow: View {
                 }
 
                 HStack(alignment: .center, spacing: 8) {
-                    Text(companion.lastMessage?.preview ?? companion.persona ?? "No messages yet")
+                    Text(preview)
                         .font(.subheadline)
                         .foregroundStyle(companion.unread ? Color.companionInk : Color.companionMuted)
                         .fontWeight(companion.unread ? .medium : .regular)
@@ -225,7 +511,7 @@ private struct CompanionRow: View {
                     Spacer(minLength: 4)
                     if companion.unread {
                         Circle()
-                            .fill(Color.companionAccent)
+                            .fill(visualTheme.accent)
                             .frame(width: 8, height: 8)
                             .accessibilityLabel("Unread")
                     }
@@ -237,7 +523,16 @@ private struct CompanionRow: View {
         .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .companionGlass(radius: 22, interactive: true)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(companion.name), \(statusLabel), \(companion.lastMessage?.preview ?? "no messages")\(companion.unread ? ", unread" : "")")
+        .accessibilityLabel("\(companion.name), \(statusLabel), \(preview)\(companion.unread ? ", unread" : "")")
+    }
+
+    private var preview: String {
+        guard let deletionOperation else {
+            return companion.lastMessage?.preview ?? companion.persona ?? "No messages yet"
+        }
+        if deletionOperation.isActive { return "Deletion requested" }
+        if let message = deletionOperation.error?.message { return message }
+        return companion.lastMessage?.preview ?? companion.persona ?? "No messages yet"
     }
 
     private var statusLabel: String {
@@ -252,13 +547,17 @@ private struct CompanionRow: View {
     }
 
     private var statusColor: Color {
-        if companion.runtime.replying { return .companionAccent }
+        if companion.runtime.replying { return visualTheme.accent }
         switch companion.runtime.state {
         case .running: return .companionSuccess
         case .provisioning: return .companionWarning
         case .error: return .companionDanger
         case .notCreated, .stopped, .stopping, .unknown: return .companionMuted
         }
+    }
+
+    private var visualTheme: CompanionVisualTheme {
+        CompanionVisualTheme(icon: companion.icon)
     }
 
     private var timeLabel: String {

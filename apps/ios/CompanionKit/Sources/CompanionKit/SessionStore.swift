@@ -165,6 +165,37 @@ public final class SessionStore {
         }
     }
 
+    public func updateCompanion(
+        companionID: String,
+        input: UpdateCompanionInput
+    ) async throws -> CompanionSummary {
+        do {
+            let companion = try await client.updateCompanion(companionID: companionID, input: input)
+            await persistRollingAuthority()
+            return companion
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func deleteCompanion(
+        companionID: String,
+        requestID: UUID
+    ) async throws -> CompanionOperationSummary {
+        do {
+            let operation = try await client.deleteCompanion(
+                companionID: companionID,
+                requestID: requestID
+            )
+            await persistRollingAuthority()
+            return operation
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
     public func listCompanionProviders() async throws -> CompanionProvidersResponse {
         do {
             let providers = try await client.listCompanionProviders()

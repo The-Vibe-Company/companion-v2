@@ -78,12 +78,79 @@ public enum CompanionRuntimeState: String, Codable, Hashable, Sendable {
     }
 }
 
+public enum CompanionAccess: String, Codable, Hashable, Sendable {
+    case owner
+    case editor
+    case viewer
+
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = Self(rawValue: value) ?? .viewer
+    }
+
+    public var canEditCompanionSettings: Bool {
+        self == .owner || self == .editor
+    }
+
+    public var canDeleteCompanion: Bool {
+        self == .owner
+    }
+}
+
+public enum CompanionOperationKind: String, Codable, Hashable, Sendable {
+    case delete
+    case stop
+    case restartPi = "restart_pi"
+    case restartBox = "restart_box"
+    case start
+    case applySettings = "apply_settings"
+    case unknown
+
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = Self(rawValue: value) ?? .unknown
+    }
+}
+
+public enum CompanionOperationStatus: String, Codable, Hashable, Sendable {
+    case pending
+    case running
+    case succeeded
+    case failed
+    case interrupted
+    case cancelled
+    case unknown
+
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = Self(rawValue: value) ?? .unknown
+    }
+}
+
+public struct CompanionRuntimeSafeError: Codable, Hashable, Sendable {
+    public let code: String
+    public let message: String
+    public let action: String
+}
+
+public struct CompanionOperationSummary: Codable, Identifiable, Hashable, Sendable {
+    public let id: String
+    public let kind: CompanionOperationKind
+    public let status: CompanionOperationStatus
+    public let error: CompanionRuntimeSafeError?
+
+    public var isActive: Bool {
+        status == .pending || status == .running
+    }
+}
+
 public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
     public let id: String
     public let name: String
     public let persona: String?
     public let modelID: String?
     public let icon: Icon?
+    public let access: CompanionAccess
     public let hidden: Bool
     public let unread: Bool
     public let lastMessage: LastMessage?
@@ -119,11 +186,27 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
         public let state: CompanionRuntimeState
         public let replying: Bool
         public let lastError: String?
+        public let providerIDs: [String]
+        public let latestOperation: CompanionOperationSummary?
 
         enum CodingKeys: String, CodingKey {
             case state
             case replying
             case lastError = "last_error"
+            case providerIDs = "provider_ids"
+            case latestOperation = "latest_operation"
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            state = try container.decode(CompanionRuntimeState.self, forKey: .state)
+            replying = try container.decodeIfPresent(Bool.self, forKey: .replying) ?? false
+            lastError = try container.decodeIfPresent(String.self, forKey: .lastError)
+            providerIDs = try container.decodeIfPresent([String].self, forKey: .providerIDs) ?? []
+            latestOperation = try container.decodeIfPresent(
+                CompanionOperationSummary.self,
+                forKey: .latestOperation
+            )
         }
     }
 
@@ -133,10 +216,69 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
         case persona
         case modelID = "model_id"
         case icon
+        case access
         case hidden
         case unread
         case lastMessage = "last_message"
         case runtime
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        persona = try container.decodeIfPresent(String.self, forKey: .persona)
+        modelID = try container.decodeIfPresent(String.self, forKey: .modelID)
+        icon = try container.decodeIfPresent(Icon.self, forKey: .icon)
+        access = try container.decodeIfPresent(CompanionAccess.self, forKey: .access) ?? .viewer
+        hidden = try container.decodeIfPresent(Bool.self, forKey: .hidden) ?? false
+        unread = try container.decodeIfPresent(Bool.self, forKey: .unread) ?? false
+        lastMessage = try container.decodeIfPresent(LastMessage.self, forKey: .lastMessage)
+        runtime = try container.decode(Runtime.self, forKey: .runtime)
+    }
+
+    public var deletionOperation: CompanionOperationSummary? {
+        guard runtime.latestOperation?.kind == .delete else { return nil }
+        return runtime.latestOperation
+    }
+
+    public func preservingListProjection(from previous: CompanionSummary) -> CompanionSummary {
+        CompanionSummary(
+            id: id,
+            name: name,
+            persona: persona,
+            modelID: modelID,
+            icon: icon,
+            access: access,
+            hidden: hidden,
+            unread: unread,
+            lastMessage: lastMessage ?? previous.lastMessage,
+            runtime: runtime
+        )
+    }
+
+    private init(
+        id: String,
+        name: String,
+        persona: String?,
+        modelID: String?,
+        icon: Icon?,
+        access: CompanionAccess,
+        hidden: Bool,
+        unread: Bool,
+        lastMessage: LastMessage?,
+        runtime: Runtime
+    ) {
+        self.id = id
+        self.name = name
+        self.persona = persona
+        self.modelID = modelID
+        self.icon = icon
+        self.access = access
+        self.hidden = hidden
+        self.unread = unread
+        self.lastMessage = lastMessage
+        self.runtime = runtime
     }
 }
 
@@ -325,6 +467,49 @@ public struct CreateCompanionInput: Encodable, Equatable, Sendable {
         case selectedSkillIDs = "selected_skill_ids"
         case selectedMCPAccountIDs = "selected_mcp_account_ids"
         case icon
+    }
+}
+
+public struct UpdateCompanionInput: Encodable, Equatable, Sendable {
+    public let name: String
+    public let persona: String?
+    public let providerID: String
+    public let modelID: String
+    public let icon: CompanionSummary.Icon
+
+    public init(
+        name: String,
+        persona: String?,
+        providerID: String,
+        modelID: String,
+        icon: CompanionSummary.Icon
+    ) {
+        self.name = name
+        self.persona = persona
+        self.providerID = providerID
+        self.modelID = modelID
+        self.icon = icon
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case persona
+        case providerID = "provider_id"
+        case modelID = "model_id"
+        case icon
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(name, forKey: .name)
+        if let persona {
+            try container.encode(persona, forKey: .persona)
+        } else {
+            try container.encodeNil(forKey: .persona)
+        }
+        try container.encode(providerID, forKey: .providerID)
+        try container.encode(modelID, forKey: .modelID)
+        try container.encode(icon, forKey: .icon)
     }
 }
 
