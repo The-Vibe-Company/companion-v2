@@ -237,8 +237,16 @@ struct CompanionStatusBadge: View {
         .foregroundStyle(Color.companionInk.opacity(0.78))
         .padding(.horizontal, compact ? 8 : 10)
         .padding(.vertical, compact ? 5 : 6)
-        .background(.thinMaterial, in: Capsule())
-        .overlay { Capsule().stroke(Color.companionBorder, lineWidth: 0.6) }
+        .background {
+            if !compact {
+                Capsule().fill(.thinMaterial)
+            }
+        }
+        .overlay {
+            if !compact {
+                Capsule().stroke(Color.companionBorder, lineWidth: 0.6)
+            }
+        }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Box, \(label.lowercased())")
     }
