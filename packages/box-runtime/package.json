@@ -11,8 +11,10 @@
   "scripts": {
     "broker:generate": "node scripts/generate-companion-pi-broker.mjs",
     "broker:check": "node scripts/generate-companion-pi-broker.mjs --check",
+    "agent:generate": "node scripts/generate-companion-box-agent.mjs",
+    "agent:check": "node scripts/generate-companion-box-agent.mjs --check",
     "typecheck": "tsc --noEmit",
-    "test": "pnpm broker:check && vitest run"
+    "test": "pnpm broker:check && pnpm agent:check && vitest run"
   },
   "dependencies": {
     "@companion/contracts": "workspace:*",

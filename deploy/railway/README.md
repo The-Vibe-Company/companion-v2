@@ -103,6 +103,12 @@ keeps the escape-hatch `COMPANION_PI_INSTALL_COMMAND` install path. Publishing n
 secrets and the optional `PI_BUNDLE_S3_BUCKET` dedicated-bucket override) that the runtime service
 never has.
 
+`COMPANION_DIRECT_TRANSPORT` (`off` | `shadow` | `on`, empty means `off`) is the Phase 2
+direct-transport rollout gate on the runtime service. `shadow` and `on` make every staging register
+the on-box Companion agent's hosted proxy endpoint (`host 8790` via the provider) and store it
+encrypted; nothing consumes the direct channel yet. In `shadow` a registration failure never fails
+a wake; in `on` it fails closed. Start with `shadow` when rolling out.
+
 ## PostgreSQL roles
 
 Create four credentials:

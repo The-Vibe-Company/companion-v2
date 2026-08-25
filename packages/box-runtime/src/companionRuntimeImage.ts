@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { COMPANION_BOX_AGENT_SOURCE } from "./companionBoxAgentSource";
 import { COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE } from "./companionPermissionBroker";
 import { COMPANION_PI_BROKER_SOURCE } from "./companionPiBrokerSource";
 
@@ -7,7 +8,7 @@ import { COMPANION_PI_BROKER_SOURCE } from "./companionPiBrokerSource";
  * Bump when the daemon wrapper or systemd unit changes without a broker/extension source change.
  * Overlay writes are the cheap in-place path for companions that are already running.
  */
-export const COMPANION_PI_OVERLAY_REVISION = 6;
+export const COMPANION_PI_OVERLAY_REVISION = 7;
 /** Bump when the archive/resume warmup profile changes without changing the runtime layout. */
 export const COMPANION_RUNTIME_BOOT_PROFILE_REVISION = 1;
 
@@ -64,6 +65,8 @@ export function companionPiOverlayMarker(overlayRevision = COMPANION_PI_OVERLAY_
     .update(COMPANION_PI_BROKER_SOURCE)
     .update("\n")
     .update(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE)
+    .update("\n")
+    .update(COMPANION_BOX_AGENT_SOURCE)
     .digest("hex")
     .slice(0, 16);
 }

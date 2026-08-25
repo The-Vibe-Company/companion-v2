@@ -1,6 +1,6 @@
 /* oxlint-disable anti-slop/no-known-value-widening, anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Existing simulator command parsing predates the incremental anti-slop gate. */
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { z } from "zod";
 
 import type { BoxSimCommandResult, BoxSimPiController } from "./protocol";
@@ -15,6 +15,7 @@ const CONTROL_BUNDLE_ALLOWED_PATHS = new Set([
   ".companion/runtime/state/instructions.txt",
   ".companion/runtime/state/model.txt",
   ".companion/runtime/state/providers.env",
+  ".companion/runtime/state/agent-auth.json",
   ".companion/bin/git-credential-github",
   ".companion/bin/gh",
 ]);
@@ -70,6 +71,7 @@ export type BoxSimCommandKind =
   | "match-skills-revision"
   | "join-file-parts"
   | "prepare-skills"
+  | "agent-register"
   | "start-or-restart-daemon"
   | "daemon-state"
   | "rpc-command"
@@ -146,6 +148,18 @@ export interface BoxSimCommandMachine {
   bundleDownloadFault: "download" | "checksum" | "node" | null;
   /** Directories whose write bit was cleared; their entries can no longer be unlinked. */
   readOnlyDirectories: Set<string>;
+  /**
+   * The provider's `host <port>` registrations. Sticky per port on purpose: ascii.dev keeps one
+   * stable hosted URL and `_token` per port across re-registrations, and the adapter relies on it.
+   */
+  hostedPorts: Map<number, { title: string; url: string }>;
+  /**
+   * Mints the token-free base of a hosted URL. The server wires this to its agent listener so the
+   * minted endpoint is actually reachable; without it the URL points at an unroutable port.
+   */
+  hostedUrlFactory?: (port: number) => string;
+  /** True once the agent registration command enabled and started the agent user unit. */
+  agentUnitEnabled: boolean;
   piController?: BoxSimPiController;
 }
 
@@ -176,6 +190,8 @@ export function createBoxSimCommandMachine(input: {
     mangleOutboxChunkBytes: null,
     bundleDownloadFault: null,
     readOnlyDirectories: new Set<string>(),
+    hostedPorts: new Map(),
+    agentUnitEnabled: false,
   };
 }
 
@@ -364,6 +380,11 @@ export function classifyBoxCommand(command: string): BoxSimCommandKind {
   if (brokerCommand) return "rpc-command";
   if (command.includes("companion-pi-journal") && command.includes("companion-pi-restarts")) {
     return "daemon-diagnostics";
+  }
+  // The agent registration script also runs `systemctl --user daemon-reload`, so it must be
+  // recognized by its own endpoint marker before the daemon-reload family below can claim it.
+  if (command.includes("companion-agent-endpoint") && command.includes("host url")) {
+    return "agent-register";
   }
   // Activation now waits for the ready/unready marker inside the same Box command. Match its
   // credential and daemon-reload side effects before the narrower read-only status probe.
@@ -722,7 +743,36 @@ function objectRecord(value: BoxSimJsonValue | undefined): BoxSimJsonObject | nu
   return parsed.success ? parsed.data : null;
 }
 
-async function executeBrokerControl(
+/**
+ * Registers the Companion box agent's hosted endpoint. The provider keeps one URL and `_token` per
+ * port for the lifetime of the Box, so a re-registration after stop/resume must answer with the
+ * same endpoint the first registration minted.
+ */
+function registeredAgentEndpoint(
+  machine: BoxSimCommandMachine,
+  command: string,
+): BoxSimCommandResult {
+  const port = Number(/\bhost url (\d+)\b/.exec(command)?.[1]);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+    return failed("simulated agent registration names no hosted port");
+  }
+  machine.agentUnitEnabled = true;
+  let hosted = machine.hostedPorts.get(port);
+  if (!hosted) {
+    // The factory only knows where the shared agent listener is; the per-box path and the proxy
+    // `_token` are minted here. Port 0 makes the factory-less default unroutable on purpose.
+    const origin = machine.hostedUrlFactory?.(port) ?? "http://127.0.0.1:0";
+    hosted = {
+      title: /--title (\S+)/.exec(command)?.[1] ?? "companion-agent",
+      url: `${origin}/boxes/${machine.boxId}?_token=${randomBytes(32).toString("hex")}`,
+    };
+    machine.hostedPorts.set(port, hosted);
+  }
+  return ok(`companion-agent-endpoint ${hosted.url}\n`);
+}
+
+/** Answer the layout-14 broker's control commands. Both transports must serve identical bytes. */
+export async function executeBrokerControl(
   machine: BoxSimCommandMachine,
   command: BoxSimJsonObject,
 ): Promise<BoxSimCommandResult | null> {
@@ -1177,6 +1227,8 @@ export async function executeBoxCommand(
         }
       }
       return ok();
+    case "agent-register":
+      return registeredAgentEndpoint(machine, command);
     case "start-or-restart-daemon":
       return startDaemon(machine, command.includes("systemctl --user restart"));
     case "daemon-state": {

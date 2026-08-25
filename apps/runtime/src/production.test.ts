@@ -198,6 +198,7 @@ describe("production runtime composition", () => {
         COMPANION_RUNTIME_DESKTOP_HMAC_SECRET: hmacKey.toString("base64"),
         COMPANION_API_URL: "http://127.0.0.1:3001",
         COMPANION_PI_MCP_ADAPTER_PACKAGE: "npm:pi-mcp-adapter@2.12.1",
+        COMPANION_DIRECT_TRANSPORT: "off",
         UNRELATED_DATABASE_SECRET: "must-not-be-forwarded",
       },
       factories,
@@ -223,6 +224,7 @@ describe("production runtime composition", () => {
       COMPANION_BOX_API_KEY: "box-secret",
       COMPANION_BOX_API_BASE: "http://127.0.0.1:13400",
       COMPANION_BOX_TTL_SECONDS: "21600",
+      COMPANION_DIRECT_TRANSPORT: "off",
       COMPANION_PI_MCP_ADAPTER_PACKAGE: "npm:pi-mcp-adapter@2.12.1",
     });
     const control = (kernelInput as CreateRuntimeKernelInput).box;

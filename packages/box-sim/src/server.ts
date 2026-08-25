@@ -1,7 +1,11 @@
+/* oxlint-disable anti-slop/no-chained-type-assertions, anti-slop/no-conditional-empty-object-spread, anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unknown-returns, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Existing simulator HTTP boundary parsing predates the incremental anti-slop gate. */
+
+import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Socket } from "node:net";
 
+import { executeBrokerControl, type BoxSimCommandMachine } from "./commandShims";
 import { createBoxSimPiController } from "./piController";
 import {
   BOX_SIM_CONTROL_PREFIX,
@@ -24,6 +28,10 @@ export interface BoxSimServerOptions extends BoxSimulatorOptions {
   bodyLimitBytes?: number;
   simulator?: BoxSimulator;
   piControllerFactory?: BoxSimPiControllerFactory;
+  /** When set, a second listener serves the hosted Companion box agent for every simulated Box. */
+  agentPort?: number;
+  /** Test seam for the agent's long-poll ceiling; production caps at the proxy-safe 25 s. */
+  agentLongPollCapMs?: number;
 }
 
 export interface BoxSimServerHandle {
@@ -31,6 +39,8 @@ export interface BoxSimServerHandle {
   readonly simulator: BoxSimulator;
   readonly baseUrl: string;
   readonly controlUrl: string;
+  /** Base URL of the agent listener; throws when the server was built without agentPort. */
+  readonly agentBaseUrl: string;
   listen(): Promise<void>;
   close(): Promise<void>;
 }
@@ -162,6 +172,14 @@ export function createBoxSimServer(options: BoxSimServerOptions = {}): BoxSimSer
   }
   if (!Number.isSafeInteger(bodyLimitBytes) || bodyLimitBytes < 1) {
     throw new Error("Box simulator bodyLimitBytes must be a positive integer");
+  }
+  const agentPort = options.agentPort;
+  if (agentPort !== undefined && (!Number.isSafeInteger(agentPort) || agentPort < 0 || agentPort > 65_535)) {
+    throw new Error("Box simulator agentPort must be between 0 and 65535");
+  }
+  const agentLongPollCapMs = options.agentLongPollCapMs ?? 25_000;
+  if (!Number.isSafeInteger(agentLongPollCapMs) || agentLongPollCapMs < 0) {
+    throw new Error("Box simulator agentLongPollCapMs must be a non-negative integer");
   }
 
   const simulator = options.simulator ?? new BoxSimulator({
@@ -679,15 +697,279 @@ export function createBoxSimServer(options: BoxSimServerOptions = {}): BoxSimSer
     socket.once("close", () => sockets.delete(socket));
   });
 
-  function resolvedBaseUrl(): string {
-    const address = server.address();
+  // ---- Companion box agent listener -------------------------------------------------------------
+  // The second listener stands in for one hosted agent per Box, all answering from the SAME command
+  // machines the exec transport mutates, so both transports must observe byte-identical broker data.
+  // The `_token` gate below simulates the ascii.dev proxy sitting in front of the real agent. The
+  // real agent's per-client auth-failure ban is intentionally not simulated here: it lives in
+  // CompanionBoxAgentCore and is unit-tested there.
+
+  interface AgentResult {
+    status: number;
+    body: JsonObject;
+  }
+
+  function agentError(status: number, code: string, message: string, ambiguous = false): AgentResult {
+    return { status, body: { error: { code, message, ambiguous } } };
+  }
+
+  function agentLayoutMarker(machine: BoxSimCommandMachine): string | null {
+    return machine.persistentFiles.get(".companion/runtime/state/pi-layout.version")
+      ?.toString("utf8").trim() || null;
+  }
+
+  /** True when the presented proxy `_token` matches any hosted registration minted for this Box. */
+  function proxyTokenMatches(machine: BoxSimCommandMachine, presented: string | null): boolean {
+    if (!presented) return false;
+    for (const hosted of machine.hostedPorts.values()) {
+      let minted: string | null;
+      try {
+        minted = new URL(hosted.url).searchParams.get("_token");
+      } catch {
+        minted = null;
+      }
+      if (minted && minted === presented) return true;
+    }
+    return false;
+  }
+
+  /** Timing-safe digest comparison against the staged `{ tokenSha256 }`, mirroring the real agent. */
+  function bearerMatches(machine: BoxSimCommandMachine, authorization: string | undefined): boolean {
+    const token = typeof authorization === "string"
+      ? /^Bearer\s+(\S+)$/.exec(authorization.trim())?.[1]
+      : undefined;
+    const authFile = machine.persistentFiles
+      .get(".companion/runtime/state/agent-auth.json")?.toString("utf8");
+    if (!token || !authFile) return false;
+    let storedSha256: unknown;
+    try {
+      const parsed = JSON.parse(authFile) as unknown;
+      storedSha256 = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as JsonObject).tokenSha256
+        : undefined;
+    } catch {
+      return false;
+    }
+    if (typeof storedSha256 !== "string" || !/^[a-f0-9]{64}$/.test(storedSha256)) return false;
+    const presented = createHash("sha256").update(token, "utf8").digest();
+    const expected = Buffer.from(storedSha256, "hex");
+    return presented.length === expected.length && timingSafeEqual(presented, expected);
+  }
+
+  let agentCommandSequence = 0;
+
+  /** Run one broker control command and map its envelope exactly as the real agent core does. */
+  async function agentBroker(
+    machine: BoxSimCommandMachine,
+    type: string,
+    fields: JsonObject,
+  ): Promise<AgentResult> {
+    if (machine.daemon.status !== "active" || !machine.daemon.rpcReady) {
+      // The daemon owns the broker socket, so a stopped Pi is an unreachable broker, not an error
+      // from it. This is the retryable state the real agent reports during staging and restarts.
+      return agentError(503, "broker_unavailable", "Pi broker is unreachable");
+    }
+    agentCommandSequence += 1;
+    const result = await executeBrokerControl(machine, {
+      id: `agent:${agentCommandSequence.toString(10)}`,
+      type,
+      // SAFETY: broker control fields are JSON scalars/objects assembled by the handlers below.
+      ...(fields as Record<string, string | number>),
+    });
+    if (!result) return agentError(502, "broker_failed", "Pi broker command failed");
+    const response = JSON.parse(result.stdout) as JsonObject;
+    const data = response.data;
+    if (response.success === true && data && typeof data === "object" && !Array.isArray(data)) {
+      return { status: 200, body: data as JsonObject };
+    }
+    const error = response.error && typeof response.error === "object" && !Array.isArray(response.error)
+      ? response.error as JsonObject
+      : null;
+    return agentError(
+      502,
+      typeof error?.code === "string" && error.code ? error.code : "broker_failed",
+      typeof error?.message === "string" ? error.message : "Pi broker command failed",
+      error?.ambiguous === true,
+    );
+  }
+
+  function agentNonNegativeInteger(query: URLSearchParams, name: string, fallback: number): number | null {
+    const raw = query.get(name);
+    if (raw === null || raw === "") return fallback;
+    if (!/^\d{1,15}$/.test(raw)) return null;
+    const value = Number(raw);
+    return Number.isSafeInteger(value) && value >= 0 ? value : null;
+  }
+
+  async function agentEvents(machine: BoxSimCommandMachine, query: URLSearchParams): Promise<AgentResult> {
+    const after = agentNonNegativeInteger(query, "after", 0);
+    if (after === null) return agentError(400, "invalid_request", "after must be a non-negative integer");
+    const limit = agentNonNegativeInteger(query, "limit", 0);
+    if (limit === null) return agentError(400, "invalid_request", "limit must be a non-negative integer");
+    const requestedWait = agentNonNegativeInteger(query, "wait_ms", 0);
+    if (requestedWait === null) {
+      return agentError(400, "invalid_request", "wait_ms must be a non-negative integer");
+    }
+    const deadline = Date.now() + Math.min(requestedWait, agentLongPollCapMs);
+    // Long-poll, not SSE: an empty page re-polls the shared machine until an event arrives or the
+    // capped deadline passes, then the last read is returned as-is.
+    for (;;) {
+      const result = await agentBroker(machine, "read_events", {
+        after,
+        ...(limit > 0 ? { limit } : {}),
+      });
+      if (result.status !== 200) return result;
+      const events = result.body.events;
+      if (Array.isArray(events) && events.length > 0) return result;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return result;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(25, remaining)));
+    }
+  }
+
+  async function agentAck(machine: BoxSimCommandMachine, request: IncomingMessage): Promise<AgentResult> {
+    let body: unknown;
+    try {
+      body = await readJsonBody(request, 64 * 1024);
+    } catch (error) {
+      if (error instanceof BoxSimHttpError && error.status === 413) {
+        return agentError(413, "payload_too_large", "request body exceeds the agent limit");
+      }
+      return agentError(400, "invalid_request", "a JSON body is required");
+    }
+    const through = body && typeof body === "object" && !Array.isArray(body)
+      ? (body as JsonObject).through
+      : undefined;
+    if (!Number.isSafeInteger(through) || Number(through) < 0) {
+      return agentError(400, "invalid_request", "through must be a non-negative integer");
+    }
+    return agentBroker(machine, "ack_events", { through: Number(through) });
+  }
+
+  function sendAccessDenied(response: ServerResponse): void {
+    if (response.destroyed || response.headersSent) return;
+    const payload = Buffer.from("Access denied", "utf8");
+    response.writeHead(403, {
+      "Cache-Control": "no-store",
+      "Content-Length": payload.byteLength,
+      "Content-Type": "text/plain; charset=utf-8",
+    });
+    response.end(payload);
+  }
+
+  async function handleAgent(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    // (1) The proxy link itself can drop mid-flight; this fires before any gate answers.
+    if (simulator.consumeFault("agent.disconnect")) {
+      request.socket.destroy();
+      return;
+    }
+    const url = new URL(request.url ?? "/", "http://box-sim-agent.invalid");
+    const match = /^\/boxes\/([^/]+)(\/.*)$/.exec(url.pathname);
+    if (!match) {
+      sendJson(response, 404, { error: { code: "not_found", message: "unknown agent route", ambiguous: false } });
+      return;
+    }
+    // (2) The proxy `_token` gate. An unknown Box and a wrong token answer identically: the real
+    // proxy denies without revealing whether the hosted service exists.
+    let machine: BoxSimCommandMachine;
+    try {
+      machine = simulator.commandMachine(decodePathSegment(match[1]!));
+    } catch {
+      sendAccessDenied(response);
+      return;
+    }
+    if (!proxyTokenMatches(machine, url.searchParams.get("_token"))) {
+      sendAccessDenied(response);
+      return;
+    }
+    // (3) The agent's own bearer gate, behind the proxy as defense in depth.
+    if (!bearerMatches(machine, request.headers.authorization)) {
+      sendJson(response, 401, {
+        error: { code: "unauthorized", message: "a valid agent bearer token is required", ambiguous: false },
+      });
+      return;
+    }
+    const path = match[2]!.replace(/\/+$/, "") || "/";
+    const method = request.method ?? "GET";
+    if (method === "GET" && path === "/v1/health") {
+      sendJson(response, 200, {
+        agentVersion: 1,
+        piUnit: machine.daemon.status === "active" ? "active" : "inactive",
+        brokerSocketReady: machine.daemon.status === "active" && machine.daemon.rpcReady,
+        layoutMarker: agentLayoutMarker(machine),
+      });
+      return;
+    }
+    if (method === "GET" && path === "/v1/broker/state") {
+      const result = await agentBroker(machine, "runtime_state", {});
+      sendJson(response, result.status, result.body);
+      return;
+    }
+    if (method === "GET" && path === "/v1/events") {
+      await withFault({
+        request,
+        response,
+        point: "agent.events",
+        operation: () => agentEvents(machine, url.searchParams),
+        respond: (result) => sendJson(response, result.status, result.body),
+      });
+      return;
+    }
+    if (method === "POST" && path === "/v1/ack") {
+      const result = await agentAck(machine, request);
+      sendJson(response, result.status, result.body);
+      return;
+    }
+    sendJson(response, 404, { error: { code: "not_found", message: "unknown agent route", ambiguous: false } });
+  }
+
+  const agentServer = agentPort === undefined ? null : createServer((request, response) => {
+    void handleAgent(request, response).catch(() => {
+      if (response.destroyed) return;
+      sendJson(response, 500, {
+        error: { code: "agent_internal", message: "the box agent simulator failed to answer", ambiguous: false },
+      });
+    });
+  });
+  agentServer?.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  });
+  if (agentServer) {
+    // Late-bound: the machines mint hosted URLs during command execution, which only ever happens
+    // after listen(), so resolving the agent address inside the factory is safe.
+    simulator.setHostedUrlFactory(() => resolvedUrl(agentServer, "agent"));
+  }
+
+  function resolvedUrl(target: Server, label: "provider" | "agent"): string {
+    const address = target.address();
     if (!address || typeof address === "string") {
-      throw new Error("Box simulator is not listening");
+      throw new Error(`Box simulator ${label} listener is not listening`);
     }
     const connectHost = address.address === "0.0.0.0" || address.address === "::"
       ? "127.0.0.1"
       : address.family === "IPv6" ? `[${address.address}]` : address.address;
     return `http://${connectHost}:${address.port}`;
+  }
+
+  function resolvedBaseUrl(): string {
+    return resolvedUrl(server, "provider");
+  }
+
+  function listenOn(target: Server, targetPort: number): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const onError = (error: Error): void => {
+        target.off("listening", onListening);
+        reject(error);
+      };
+      const onListening = (): void => {
+        target.off("error", onError);
+        resolve();
+      };
+      target.once("error", onError);
+      target.once("listening", onListening);
+      target.listen(targetPort, host);
+    });
   }
 
   return {
@@ -699,30 +981,26 @@ export function createBoxSimServer(options: BoxSimServerOptions = {}): BoxSimSer
     get controlUrl() {
       return `${resolvedBaseUrl()}${BOX_SIM_CONTROL_PREFIX}`;
     },
+    get agentBaseUrl() {
+      if (!agentServer) throw new Error("Box simulator was created without an agent listener");
+      return resolvedUrl(agentServer, "agent");
+    },
     async listen() {
-      if (server.listening) return;
-      await new Promise<void>((resolve, reject) => {
-        const onError = (error: Error): void => {
-          server.off("listening", onListening);
-          reject(error);
-        };
-        const onListening = (): void => {
-          server.off("error", onError);
-          resolve();
-        };
-        server.once("error", onError);
-        server.once("listening", onListening);
-        server.listen(port, host);
-      });
+      if (!server.listening) await listenOn(server, port);
+      if (agentServer && !agentServer.listening) await listenOn(agentServer, agentPort!);
       void (server.address() as AddressInfo | null);
     },
     async close() {
       await simulator.dispose();
       for (const socket of sockets) socket.destroy();
-      if (!server.listening) return;
-      await new Promise<void>((resolve, reject) => {
-        server.close((error) => error ? reject(error) : resolve());
-      });
+      const closing: Array<Promise<void>> = [];
+      for (const target of [server, agentServer]) {
+        if (!target?.listening) continue;
+        closing.push(new Promise<void>((resolve, reject) => {
+          target.close((error) => error ? reject(error) : resolve());
+        }));
+      }
+      await Promise.all(closing);
     },
   };
 }

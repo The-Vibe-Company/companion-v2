@@ -402,9 +402,15 @@ describe("PostgresRuntimeStore", () => {
     await expect(store.recordMaterialSnapshot(fence, {
       clientSurface: "web",
       materialExpiresAt,
+      agentEndpoint: { hostedUrl: "https://abc-8790.on.ascii.dev", tokenCiphertext: "ct" },
     })).resolves.toBe(true);
     expect(sql.calls[0]?.query).toContain("public.companion_runtime_record_material_snapshot(");
-    expect(sql.calls[0]?.parameters.slice(-2)).toEqual(["web", materialExpiresAt]);
+    expect(sql.calls[0]?.parameters.slice(-4)).toEqual([
+      "web",
+      materialExpiresAt,
+      "https://abc-8790.on.ascii.dev",
+      "ct",
+    ]);
 
     sql.rows = [{ published: true }];
     await expect(store.publishMaterialSnapshot(fence, {

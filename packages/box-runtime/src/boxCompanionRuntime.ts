@@ -1,6 +1,6 @@
 /* oxlint-disable anti-slop/no-conditional-empty-object-spread, anti-slop/no-known-value-widening, anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Existing Box wire decoders predate the incremental anti-slop gate. */
 
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   COMPANION_ATTACHMENT_FILENAME_PATTERN,
@@ -51,6 +51,14 @@ import {
   type PiJsonObject,
 } from "./companionPiBroker";
 import {
+  COMPANION_BOX_AGENT_AUTH_PATH,
+  COMPANION_BOX_AGENT_DEFAULT_PORT,
+  COMPANION_BOX_AGENT_HOST_TITLE,
+  COMPANION_BOX_AGENT_SCRIPT_PATH,
+  COMPANION_BOX_AGENT_SOURCE,
+  COMPANION_BOX_AGENT_UNIT_NAME,
+} from "./companionBoxAgent";
+import {
   COMPANION_PI_LAYOUT_REFRESH_LABEL,
   companionPiLayoutIdentity,
   parseCompanionPiLayoutRefresh,
@@ -72,7 +80,27 @@ export type CompanionRuntimeStagePhase =
   | "resource_preflight"
   | "control_bundle"
   | "skill_transfer"
-  | "skill_apply";
+  | "skill_apply"
+  | "agent_registration";
+
+/**
+ * Phase 2 direct-transport rollout gate. `off` skips agent registration entirely; `shadow` and `on`
+ * register the hosted endpoint at staging. Nothing consumes the direct channel yet, so beyond
+ * registration the two active modes are identical for now.
+ */
+export type CompanionDirectTransportMode = "off" | "shadow" | "on";
+
+/**
+ * The hosted inbound endpoint of the on-box Companion agent, registered through the provider's
+ * `host <port>` proxy at staging. Both tokens are credentials: the proxy token gates the provider
+ * proxy and the bearer authenticates inbound runtime requests at the agent itself. Neither may be
+ * logged or persisted in plaintext.
+ */
+export interface CompanionBoxAgentEndpoint {
+  hostedUrl: string;
+  proxyToken: string;
+  bearerToken: string;
+}
 
 export interface CompanionRuntimeStageTiming {
   phase: CompanionRuntimeStagePhase;
@@ -863,6 +891,7 @@ export interface CompanionBoxRuntimeV2 {
     stagingMode: "refresh" | "skills";
     skillBytesTransferred: number;
     skillsDigest: string;
+    agentEndpoint: CompanionBoxAgentEndpoint | null;
   }>;
   /** Replace only the installed Skills tree; no provider, MCP, Hub or credential inputs exist. */
   stageSkillTree(input: {
@@ -1098,6 +1127,32 @@ function labeledDiagnosticLines(stdout: string, label: string): string[] {
     .filter(Boolean);
 }
 
+const AGENT_PROXY_TOKEN_PATTERN = /^[A-Za-z0-9._-]{16,256}$/;
+
+/**
+ * Split the provider's hosted URL into a token-free locator plus the proxy token credential.
+ * The plain-HTTP form exists only for the deterministic Box simulator; ascii.dev always mints
+ * HTTPS. Anything unparseable yields null so a mangled URL is a stable failure, never stored.
+ */
+export function parseHostedAgentEndpoint(
+  value: string | undefined,
+): { hostedUrl: string; proxyToken: string } | null {
+  if (!value || value.length > 2_048) return null;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+  if (url.username || url.password || url.hash) return null;
+  const proxyToken = url.searchParams.get("_token") ?? "";
+  if (!AGENT_PROXY_TOKEN_PATTERN.test(proxyToken)) return null;
+  url.search = "";
+  url.hash = "";
+  return { hostedUrl: url.toString().replace(/\/+$/, ""), proxyToken };
+}
+
 /**
  * The part of a systemd `Process:` or `Main PID:` line worth storing. The line opens with the full
  * ExecStart path and closes with the exit code, so clamping its head would spend the budget on a
@@ -1305,6 +1360,16 @@ function validPackageSpec(spec: string, variable: string): string {
   return spec;
 }
 
+/** Fail loud on a misspelled rollout value rather than silently staying on the exec transport. */
+export function companionDirectTransportMode(
+  env: NodeJS.ProcessEnv = process.env,
+): CompanionDirectTransportMode {
+  const raw = env.COMPANION_DIRECT_TRANSPORT?.trim().toLowerCase();
+  if (!raw || raw === "off") return "off";
+  if (raw === "shadow" || raw === "on") return raw;
+  throw new BoxRuntimeConfigurationError("COMPANION_DIRECT_TRANSPORT must be off, shadow, or on");
+}
+
 /**
  * One bundle staging: the env-derived plan plus the presigned download URL minted for exactly this
  * script generation. The URL is short-lived transport, so it is an input here and never folds into
@@ -1329,6 +1394,7 @@ function setupScript(
     ? `$HOME/.companion/dist/${companionPiBundleShaShort(bundle.plan.manifest.sha256)}`
     : null;
   const encodedBrokerSource = Buffer.from(COMPANION_PI_BROKER_SOURCE, "utf8").toString("base64");
+  const encodedAgentSource = Buffer.from(COMPANION_BOX_AGENT_SOURCE, "utf8").toString("base64");
   const encodedBoxIgnore = Buffer.from(RUNTIME_IMAGE_BOXIGNORE, "utf8").toString("base64");
   const encodedInstallScript = configuredInstall
     ? Buffer.from(`#!/usr/bin/env bash
@@ -1573,6 +1639,50 @@ KillMode=control-group
 WantedBy=default.target
 COMPANION_PI_SERVICE_TAIL
   } > "$HOME/.config/systemd/user/companion-pi-daemon.service"
+  # The Box agent is the dark-shipped network front-end for the direct transport: a second daemon
+  # speaking the broker's owner-only socket protocol behind the provider's hosted proxy. It is
+  # installed and enabled on every Box but stays unreachable until a staging registers its port.
+  printf '%s' ${shellQuote(encodedAgentSource)} | base64 --decode > "$HOME/${COMPANION_BOX_AGENT_SCRIPT_PATH}"
+  chmod 700 "$HOME/${COMPANION_BOX_AGENT_SCRIPT_PATH}"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'set -euo pipefail'
+    printf 'NODE_BIN=%q\n' "$node_bin"
+    printf 'PATH=%q:"$PATH"\n' "$pi_bin_dir"
+    printf '%s\n' 'export PATH'
+    cat <<'COMPANION_BOX_AGENT_DAEMON'
+# A Box restore may remount the image with Node at a different absolute path than the baker used.
+if [ ! -x "$NODE_BIN" ]; then
+  NODE_BIN="$(command -v node 2>/dev/null || true)"
+fi
+if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
+  echo 'box-agent: node is unavailable after Box restore' >&2
+  exit 1
+fi
+exec "$NODE_BIN" "$HOME/${COMPANION_BOX_AGENT_SCRIPT_PATH}"
+COMPANION_BOX_AGENT_DAEMON
+  } > "$HOME/.companion/bin/box-agent-daemon"
+  chmod 700 "$HOME/.companion/bin/box-agent-daemon"
+  cat <<'COMPANION_BOX_AGENT_SERVICE' > "$HOME/.config/systemd/user/${COMPANION_BOX_AGENT_UNIT_NAME}"
+[Unit]
+Description=Companion Box agent
+After=network-online.target
+
+[Service]
+Type=simple
+UMask=0077
+ExecStart=%h/.companion/bin/box-agent-daemon
+Restart=on-failure
+RestartSec=2
+KillMode=control-group
+
+[Install]
+WantedBy=default.target
+COMPANION_BOX_AGENT_SERVICE
+  # 'systemctl --user enable' needs a user bus that a create-time Box does not have yet; the wants
+  # symlink is what enable would write, and it is what revives the listener after stop/resume.
+  mkdir -p "$HOME/.config/systemd/user/default.target.wants"
+  ln -sf "../${COMPANION_BOX_AGENT_UNIT_NAME}" "$HOME/.config/systemd/user/default.target.wants/${COMPANION_BOX_AGENT_UNIT_NAME}"
   # Populate Jiti's source-hashed extension cache before the image is snapshotted. The cache is an
   # optimization only: a failure leaves Pi's normal compilation path intact and never blocks layout.
   startup_cache_marker="$HOME/.companion/runtime/state/pi-startup-cache.version"
@@ -1597,7 +1707,9 @@ if [ -f "$layout_marker" ] \
   && [ "$recorded" = "$expected_layout" ] \
   && [ -x "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}" ] \
   && [ -x "$HOME/.companion/bin/pi-daemon" ] \
-  && [ -f "$HOME/.config/systemd/user/companion-pi-daemon.service" ]; then
+  && [ -f "$HOME/.config/systemd/user/companion-pi-daemon.service" ] \\
+  && [ -x "$HOME/${COMPANION_BOX_AGENT_SCRIPT_PATH}" ] \\
+  && [ -f "$HOME/.config/systemd/user/${COMPANION_BOX_AGENT_UNIT_NAME}" ]; then
   printf '%s\\n' ${shellQuote(COMPANION_PI_LAYOUT_REFRESH_LABEL.none)}
   exit 0
 fi
@@ -1908,6 +2020,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
   readonly #onStageTiming: ((sample: CompanionRuntimeStageTiming) => void) | undefined;
   readonly #companionSkillChecksum: string | undefined;
   readonly #imageIdentitySalt: string | undefined;
+  readonly #directTransport: CompanionDirectTransportMode;
   /**
    * The current staging call's budget. Private file/command helpers share it so cancellation covers
    * the whole layout transaction without leaking into a later adapter call.
@@ -1965,6 +2078,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
     this.#onStageTiming = options?.onStageTiming;
     this.#companionSkillChecksum = options?.companionSkillChecksum;
     this.#imageIdentitySalt = options?.imageIdentitySalt;
+    this.#directTransport = companionDirectTransportMode(env);
   }
 
   layoutIdentity() {
@@ -2410,6 +2524,7 @@ done`,
       ".companion/runtime/state/instructions.txt",
       ".companion/runtime/state/model.txt",
       ".companion/runtime/state/providers.env",
+      COMPANION_BOX_AGENT_AUTH_PATH,
       COMPANION_GIT_CREDENTIAL_HELPER_PATH,
       COMPANION_GH_WRAPPER_PATH,
     ]);
@@ -2731,7 +2846,9 @@ done`,
       + ` if [ "$recorded" = ${shellQuote(this.layoutIdentity().fullMarker)} ] \\
   && [ -x "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}" ] \\
   && [ -x "$HOME/.companion/bin/pi-daemon" ] \\
-  && [ -f "$HOME/.config/systemd/user/companion-pi-daemon.service" ]; then
+  && [ -f "$HOME/.config/systemd/user/companion-pi-daemon.service" ] \\
+  && [ -x "$HOME/${COMPANION_BOX_AGENT_SCRIPT_PATH}" ] \\
+  && [ -f "$HOME/.config/systemd/user/${COMPANION_BOX_AGENT_UNIT_NAME}" ]; then
   printf '%s\\n' ${shellQuote(COMPANION_PI_LAYOUT_REFRESH_LABEL.none)}
 fi;`
       + (input.preserveSkills
@@ -2766,7 +2883,9 @@ fi;`
 if [ "$recorded" = ${shellQuote(expected)} ] \\
   && [ -x "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}" ] \\
   && [ -x "$HOME/.companion/bin/pi-daemon" ] \\
-  && [ -f "$HOME/.config/systemd/user/companion-pi-daemon.service" ]; then
+  && [ -f "$HOME/.config/systemd/user/companion-pi-daemon.service" ] \\
+  && [ -x "$HOME/${COMPANION_BOX_AGENT_SCRIPT_PATH}" ] \\
+  && [ -f "$HOME/.config/systemd/user/${COMPANION_BOX_AGENT_UNIT_NAME}" ]; then
   printf '%s\\n' ${shellQuote(COMPANION_PI_LAYOUT_REFRESH_LABEL.none)}
 fi`,
         15,
@@ -2910,6 +3029,8 @@ fi`,
     preserveSkills: boolean;
     hubEnv?: Record<string, string>;
     configCatalog?: CompanionConfigCatalog | null;
+    /** SHA-256 of this staging's freshly minted agent bearer; the plaintext never lands on disk. */
+    agentAuthTokenSha256?: string | null;
     probe: { layoutCurrent: boolean; stdout: string };
   }): Promise<{ stagingMode: "refresh" | "skills"; skillBytesTransferred: number; skillsDigest: string }> {
     const injectedSkills = injectedSkillsFor(input);
@@ -2995,6 +3116,15 @@ fi`,
         mode: 0o600,
       },
     );
+    if (input.agentAuthTokenSha256) {
+      // Every staging rotates the agent bearer: only the digest reaches the Box, and the agent
+      // re-reads it per request, so rotation needs no agent restart.
+      controlFiles.push({
+        path: COMPANION_BOX_AGENT_AUTH_PATH,
+        content: `${JSON.stringify({ tokenSha256: input.agentAuthTokenSha256 })}\n`,
+        mode: 0o600,
+      });
+    }
     if (mcp.gatewayAccounts.some((account) => account.github)) {
       controlFiles.push({
         path: COMPANION_GIT_CREDENTIAL_HELPER_PATH,
@@ -3484,6 +3614,7 @@ exit 1`;
     stagingMode: "refresh" | "skills";
     skillBytesTransferred: number;
     skillsDigest: string;
+    agentEndpoint: CompanionBoxAgentEndpoint | null;
   }> {
     companionBoxName(input.companionId, input.runtimeGeneration);
     this.#stagingSignal = input.signal;
@@ -3517,6 +3648,9 @@ exit 1`;
         await this.#stageTimed("interaction_extension", async () =>
           await this.#stageCompanionInteractionExtension(box.id));
       }
+      const agentBearerToken = this.#directTransport === "off"
+        ? null
+        : randomBytes(32).toString("hex");
       const staged = await this.#injectPiResources({
         boxId: box.id,
         clientSurface: input.clientSurface,
@@ -3531,16 +3665,90 @@ exit 1`;
         preserveSkills: input.preserveSkills === true,
         hubEnv: input.hubEnv,
         configCatalog: input.configCatalog,
+        agentAuthTokenSha256: agentBearerToken
+          ? createHash("sha256").update(agentBearerToken, "utf8").digest("hex")
+          : null,
         probe: probed,
       });
+      const agentEndpoint = agentBearerToken
+        ? await this.#stageTimed("agent_registration", async () =>
+          await this.#registerBoxAgent(box.id, agentBearerToken, input.signal))
+        : null;
       return {
         boxId: box.id,
         diskLayoutVersion: COMPANION_PI_DISK_LAYOUT_VERSION,
+        agentEndpoint,
         ...staged,
       };
     } finally {
       this.#stagingSignal = undefined;
     }
+  }
+
+  /**
+   * Bring the dark-shipped agent daemon up and register its hosted proxy endpoint. The provider's
+   * `host` mapping is sticky per port but must be re-run after stop/resume, and staging is the one
+   * moment the runtime is already paying provider commands, so every staging re-registers. In
+   * `shadow` mode a registration failure never fails the wake: nothing consumes the channel yet, so
+   * the miss is telemetry (`agent_registration` stage failure), not an outage. In `on` mode it
+   * fails closed.
+   */
+  async #registerBoxAgent(
+    boxId: string,
+    bearerToken: string,
+    signal?: AbortSignal,
+  ): Promise<CompanionBoxAgentEndpoint | null> {
+    const port = COMPANION_BOX_AGENT_DEFAULT_PORT;
+    let result: CommandEnvelope;
+    try {
+      result = await this.#command(
+        boxId,
+        `set -euo pipefail
+${PREPARE_USER_BUS}
+systemctl --user daemon-reload
+systemctl --user reset-failed ${COMPANION_BOX_AGENT_UNIT_NAME} >/dev/null 2>&1 || true
+systemctl --user enable ${COMPANION_BOX_AGENT_UNIT_NAME} >/dev/null 2>&1 || true
+systemctl --user start ${COMPANION_BOX_AGENT_UNIT_NAME}
+companion_agent_state=unknown
+for companion_agent_probe in $(seq 1 50); do
+  companion_agent_state="$(systemctl --user is-active ${COMPANION_BOX_AGENT_UNIT_NAME} 2>/dev/null || true)"
+  if [ "$companion_agent_state" = active ]; then break; fi
+  sleep 0.1
+done
+if [ "$companion_agent_state" != active ]; then
+  echo 'Companion box agent failed to start' >&2
+  exit 1
+fi
+# \`host\` is the provider's sticky per-port service registration; its URL and query token are
+# minted by the provider. They are parsed from the marker line below and never echoed elsewhere.
+host ${port.toString(10)} --title ${COMPANION_BOX_AGENT_HOST_TITLE} >/dev/null 2>&1 || true
+companion_agent_url="$(host url ${port.toString(10)} 2>/dev/null | grep -Eo 'https?://[^[:space:]]+' | tail -n 1)"
+if [ -z "$companion_agent_url" ]; then
+  echo 'Companion box agent hosted endpoint is unavailable' >&2
+  exit 1
+fi
+printf 'companion-agent-endpoint %s\\n' "$companion_agent_url"`,
+        90,
+        signal,
+      );
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason ?? error;
+      if (this.#directTransport === "shadow") return null;
+      throw error;
+    }
+    const endpoint = result.success
+      ? parseHostedAgentEndpoint(labeledDiagnosticLines(result.stdout, "companion-agent-endpoint")[0])
+      : null;
+    if (!endpoint) {
+      if (this.#directTransport === "shadow") return null;
+      throw new BoxRuntimeProviderError(
+        result.success
+          ? "Companion box agent endpoint registration returned an invalid URL"
+          : `Companion box agent registration failed${commandFailureDetail(result)}`,
+        502,
+      );
+    }
+    return { ...endpoint, bearerToken };
   }
 
   async stageSkillTree(input: {

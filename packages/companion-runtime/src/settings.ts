@@ -129,6 +129,7 @@ export async function handleSettings(
             await context.deps.store.recordMaterialSnapshot(context.session.fence, {
               clientSurface: live.clientSurface,
               materialExpiresAt: staged.materialExpiresAt,
+              agentEndpoint: staged.agentEndpoint ?? null,
             }));
           return staged;
         });

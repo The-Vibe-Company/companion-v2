@@ -324,7 +324,24 @@ instead. That marker is split into two layers:
 
 - **base** — Pi and npm pins. Slow to install; baked into a named ascii.dev snapshot
   (`companion-l14-<hash>`).
-- **overlay** — broker source, permission extension, and daemon unit. Cheap to rewrite in place.
+- **overlay** — broker source, permission extension, the daemon units, and the Box agent source.
+  Cheap to rewrite in place.
+
+The overlay also dark-ships `companion-box-agent`: a second enabled systemd user unit that is a
+network front-end speaking the broker's existing one-command-per-connection Unix socket protocol.
+It serves `GET /v1/health`, `GET /v1/broker/state`, `GET /v1/events` (bounded long-poll of at most
+25 seconds — not SSE), and `POST /v1/ack` on `0.0.0.0:8790`, and deliberately nothing else: no
+exec, no file writes, no credentials, no systemd control, no prompt or decision delivery. Arbitrary
+inbound TCP to a Box is firewalled, so its only inbound channel is the provider's `host <port>`
+HTTPS proxy. When `COMPANION_DIRECT_TRANSPORT` is `shadow` or `on` (default `off`), each staging
+rotates a per-box bearer (only its SHA-256 lands on the Box, in
+`~/.companion/runtime/state/agent-auth.json`), starts the unit, re-runs `host 8790` — the mapping
+is sticky per port but must be re-registered after stop/resume — and records the endpoint under the
+same fenced proof as the material snapshot: `companion_runtime_instances.agent_hosted_url` is a
+token-free locator, both credentials (the provider proxy token and the bearer) live only in
+`agent_token_ciphertext` under the runtime master key, and `agent_observed_at` bounds freshness.
+In `shadow` a registration failure never fails the wake; in `on` it fails closed. Nothing consumes
+the direct channel yet: events, dispatch, and lifecycle still ride the exec transport.
 
 When `COMPANION_PI_BUNDLE_ENABLED=true` and the runtime's S3 configuration is complete, the base
 layer no longer installs Pi from npm at boot. Instead the layout script downloads one self-hosted,
@@ -779,7 +796,9 @@ The following always read PostgreSQL only:
 - ordinary settled polling.
 
 The web polls every three seconds while a turn or lifecycle operation is active and returns to a
-slower cadence when stable. There is no SSE and no Box-to-control-plane push agent.
+slower cadence when stable. There is no SSE and no Box-to-control-plane push agent. The dark-shipped
+Box agent does not change this: its bearer authenticates **inbound** runtime-to-Box requests through
+the provider's hosted proxy, and the Box still never pushes anything at the control plane.
 
 ### iOS app
 
@@ -871,5 +890,7 @@ task, voice, file library, file versioning, artifact surface outside a thread, a
 alternate Box provider, pool, generic model/provider marketplace, container catalog, deployment
 platform, or AI app builder. Bounded chat attachments, scheduled Companion routines, and
 webhook-fired Companion triggers are in scope and are specified above.
-It adds no SSE, Box push bearer, detached API executor, automatic Full Box repair, automatic replay
-after ambiguous dispatch, or global learned capability table.
+It adds no SSE, Box-to-control-plane push bearer, detached API executor, automatic Full Box repair,
+automatic replay after ambiguous dispatch, or global learned capability table. The Box agent's
+per-staging bearer is not that excluded push bearer: it authenticates inbound runtime→Box requests
+arriving through the provider proxy, never a Box-initiated call to the control plane.

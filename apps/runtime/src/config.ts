@@ -37,6 +37,12 @@ interface RuntimeServiceConfigBase {
    * when no ready runtime image can be cloned. Default false — the loud fallback stays nominal.
    */
   requireRuntimeImage: boolean;
+  /**
+   * Phase 2 direct-transport rollout gate. `off` (default) skips Box agent endpoint registration;
+   * `shadow` and `on` register the hosted endpoint at staging. The runtime does not consume the
+   * direct channel yet, so the two active modes differ only in failure posture during registration.
+   */
+  directTransport: "off" | "shadow" | "on";
 }
 
 export type RuntimeServiceConfig = RuntimeServiceConfigBase & (
@@ -142,6 +148,7 @@ export function loadRuntimeServiceConfig(
       env.COMPANION_RUNTIME_REQUIRE_IMAGE,
       "COMPANION_RUNTIME_REQUIRE_IMAGE",
     ),
+    directTransport: directTransportEnv(env.COMPANION_DIRECT_TRANSPORT),
   };
   if (!enabled) {
     return {
@@ -274,6 +281,13 @@ function integerEnv(
     throw new RuntimeServiceConfigError(`${name} must be an integer from ${minimum} to ${maximum}`);
   }
   return value;
+}
+
+function directTransportEnv(raw: string | undefined): "off" | "shadow" | "on" {
+  if (raw === undefined || raw.trim() === "") return "off";
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "off" || normalized === "shadow" || normalized === "on") return normalized;
+  throw new RuntimeServiceConfigError("COMPANION_DIRECT_TRANSPORT must be off, shadow, or on");
 }
 
 function booleanEnv(raw: string | undefined, name: string): boolean {

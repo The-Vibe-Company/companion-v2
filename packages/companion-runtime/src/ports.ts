@@ -198,6 +198,12 @@ export interface RuntimeResourceStager {
     skillsDigest?: string;
     /** Earliest expiry among the bounded credentials written into this snapshot. */
     materialExpiresAt: Date | null;
+    /**
+     * Hosted direct-transport agent endpoint registered by this staging, when the rollout gate
+     * enables it. The ciphertext is minted by apps/runtime under the master key; agent token
+     * plaintext never enters companion-runtime or PostgreSQL.
+     */
+    agentEndpoint?: { hostedUrl: string; tokenCiphertext: string } | null;
   }>;
   /** Atomically replace only the Skills tree. This surface never receives runtime credentials. */
   stageSkillTree(input: {

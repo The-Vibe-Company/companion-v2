@@ -614,12 +614,14 @@ BEGIN
     END IF;
 
     -- 0110 records staged credential expiry and publishes it only after a new Pi invocation.
+    -- 0124 re-created the record function with the hosted Box-agent endpoint arguments, so the
+    -- feature detection keys on that latest signature.
     IF pg_catalog.to_regprocedure(
-      'public.companion_runtime_record_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,public.companion_client_surface,timestamp with time zone)'
+      'public.companion_runtime_record_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,public.companion_client_surface,timestamp with time zone,text,text)'
     ) IS NOT NULL THEN
       companion_runtime_functions := companion_runtime_functions || ARRAY[
         'public.companion_runtime_claim_work(text,integer,integer,bigint,integer)'::regprocedure,
-        'public.companion_runtime_record_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,public.companion_client_surface,timestamp with time zone)'::regprocedure,
+        'public.companion_runtime_record_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,public.companion_client_surface,timestamp with time zone,text,text)'::regprocedure,
         'public.companion_runtime_publish_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text)'::regprocedure
       ];
       internal_runtime_functions := internal_runtime_functions || ARRAY[

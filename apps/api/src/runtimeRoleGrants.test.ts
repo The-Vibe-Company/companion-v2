@@ -89,7 +89,7 @@ describe("Skills Hub runtime-role grants", () => {
     );
     expect(sql).toContain("companion_resolve_mcp_broker_token(text)");
     expect(sql).toContain(
-      "companion_runtime_record_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,public.companion_client_surface,timestamp with time zone)",
+      "companion_runtime_record_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,public.companion_client_surface,timestamp with time zone,text,text)",
     );
     expect(sql).toContain(
       "companion_runtime_publish_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text)",

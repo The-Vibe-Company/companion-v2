@@ -869,6 +869,13 @@
       "when": 1790442400000,
       "tag": "0123_companion_image_registry_access",
       "breakpoints": true
+    },
+    {
+      "idx": 124,
+      "version": "7",
+      "when": 1790528800000,
+      "tag": "0124_companion_box_agent_endpoint",
+      "breakpoints": true
     }
   ]
 }

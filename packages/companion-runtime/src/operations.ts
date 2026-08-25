@@ -404,6 +404,7 @@ async function stageCapturedResources(
     await context.deps.store.recordMaterialSnapshot(context.session.fence, {
       clientSurface,
       materialExpiresAt: staged.materialExpiresAt,
+      agentEndpoint: staged.agentEndpoint ?? null,
     }));
   logStageTiming(context, "installing_layout", startedAt, {
     stagingMode: staged.stagingMode ?? "skills",

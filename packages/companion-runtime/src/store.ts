@@ -78,6 +78,8 @@ export interface RuntimeStore {
   recordMaterialSnapshot(fence: LeaseFence, input: {
     clientSurface: ClientSurface;
     materialExpiresAt: Date | null;
+    /** Ciphertext-only hosted agent endpoint; absent while the direct-transport gate is off. */
+    agentEndpoint?: { hostedUrl: string; tokenCiphertext: string } | null;
   }): Promise<true | null>;
   publishMaterialSnapshot(fence: LeaseFence, input: {
     piInvocationId: string;
@@ -900,15 +902,23 @@ export class PostgresRuntimeStore implements RuntimeStore {
   async recordMaterialSnapshot(fence: LeaseFence, input: {
     clientSurface: ClientSurface;
     materialExpiresAt: Date | null;
+    agentEndpoint?: { hostedUrl: string; tokenCiphertext: string } | null;
   }): Promise<true | null> {
     return await mapped(async () => {
       const rows = await this.sql.unsafe<RuntimeSqlRow[]>(`
         SELECT public.companion_runtime_record_material_snapshot(
           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
           $6::text, $7::public.companion_runtime_work_kind, $8::uuid,
-          $9::public.companion_client_surface, $10::timestamptz
+          $9::public.companion_client_surface, $10::timestamptz,
+          $11::text, $12::text
         ) AS recorded
-      `, [...fenceParameters(fence), input.clientSurface, input.materialExpiresAt]);
+      `, [
+        ...fenceParameters(fence),
+        input.clientSurface,
+        input.materialExpiresAt,
+        input.agentEndpoint?.hostedUrl ?? null,
+        input.agentEndpoint?.tokenCiphertext ?? null,
+      ]);
       const recorded = one(rows, "record material snapshot").recorded;
       const recordedValue = booleanValue(recorded);
       if (recordedValue === null) throw new RuntimeStoreContractError();

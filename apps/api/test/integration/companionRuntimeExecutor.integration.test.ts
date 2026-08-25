@@ -544,7 +544,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
             'public.companion_runtime_get_config_catalog(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)',
             'public.companion_runtime_mint_hub_token(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)',
             'public.companion_runtime_mint_mcp_broker_token(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)',
-            'public.companion_runtime_record_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,public.companion_client_surface,timestamp with time zone)',
+            'public.companion_runtime_record_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,public.companion_client_surface,timestamp with time zone,text,text)',
             'public.companion_runtime_publish_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text)',
             'public.companion_runtime_get_attempt_terminal_projection(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)',
             'public.companion_runtime_register_duplicate_cleanups(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text[])',
@@ -575,7 +575,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       .rejects.toThrow(/permission denied/i);
 
     const runtimeOnlySignatures = [
-      "public.companion_runtime_record_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,public.companion_client_surface,timestamp with time zone)",
+      "public.companion_runtime_record_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,public.companion_client_surface,timestamp with time zone,text,text)",
       "public.companion_runtime_publish_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text)",
       "public.companion_runtime_claim_work(text,integer,integer,bigint,integer,integer)",
       "public.companion_runtime_defer_delete(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)",
@@ -2789,7 +2789,8 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         select public.companion_runtime_record_material_snapshot(
           ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
           ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
-          ${claim.workKind}, ${claim.workId}::uuid, 'web', ${expiresAt}
+          ${claim.workKind}, ${claim.workId}::uuid, 'web', ${expiresAt},
+          'https://abc-8790.on.ascii.dev', 'agent-ciphertext'
         ) as recorded
       `);
       expect(recorded).toEqual({ recorded: true });
@@ -2798,6 +2799,22 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         from companion_runtime_instances where companion_id = ${companionId}::uuid
       `;
       expect(beforePi).toEqual({ surface: null, expiresAt: null });
+      // The hosted agent endpoint publishes with the fenced record itself: it is per-Box state,
+      // deliberately not gated on the Pi invocation the material snapshot waits for.
+      const [agentEndpoint] = await sql<Array<{
+        hostedUrl: string | null;
+        tokenCiphertext: string | null;
+        observed: boolean;
+      }>>`
+        select agent_hosted_url as "hostedUrl", agent_token_ciphertext as "tokenCiphertext",
+          agent_observed_at is not null as observed
+        from companion_runtime_instances where companion_id = ${companionId}::uuid
+      `;
+      expect(agentEndpoint).toEqual({
+        hostedUrl: "https://abc-8790.on.ascii.dev",
+        tokenCiphertext: "agent-ciphertext",
+        observed: true,
+      });
 
       const publish = (piInvocationId: string) => asRuntime((tx) => tx<Array<{
         published: boolean;
@@ -2950,7 +2967,8 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         select public.companion_runtime_record_material_snapshot(
           ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
           ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
-          ${claim.workKind}, ${claim.workId}::uuid, 'web', ${expiresAt}
+          ${claim.workKind}, ${claim.workId}::uuid, 'web', ${expiresAt},
+          null, null
         ) as recorded
       `);
       expect(await record(firstClaim)).toEqual([{ recorded: true }]);

@@ -114,6 +114,7 @@ describe("implicit settings activation", () => {
     expect(store.recordedMaterialSnapshots).toEqual([{
       clientSurface: "web",
       materialExpiresAt: new Date("2026-08-16T18:00:00.000Z"),
+      agentEndpoint: null,
     }]);
     expect(store.publishedMaterialSnapshots).toEqual([PI_INVOCATION_ID]);
     expect(store.settlements).toEqual([{ terminalStatus: "succeeded" }]);
@@ -193,6 +194,7 @@ describe("implicit settings activation", () => {
     expect(store.recordedMaterialSnapshots).toEqual([{
       clientSurface: "native_mobile",
       materialExpiresAt: null,
+      agentEndpoint: null,
     }]);
     expect(store.publishedMaterialSnapshots).toEqual(["native-settings-pi"]);
   });

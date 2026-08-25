@@ -26,6 +26,7 @@ import {
   sanitizeCompanionAttachmentFilename,
   sniffCompanionAttachmentMime,
 } from "@companion/contracts";
+import { encryptOpaqueValue } from "@companion/core";
 import { packDir } from "@companion/skills";
 import { companionAttachmentKey } from "@companion/storage";
 
@@ -210,6 +211,25 @@ export function createRuntimeMaterialPipeline(input: {
         skillBytesTransferred: observed.skillBytesTransferred,
         skillsDigest: observed.skillsDigest,
         materialExpiresAt,
+        // Both hosted-endpoint tokens are credentials; only masterKey ciphertext crosses into the
+        // durable store, so companion-runtime and PostgreSQL never see agent plaintext.
+        agentEndpoint: observed.agentEndpoint
+          ? {
+            hostedUrl: observed.agentEndpoint.hostedUrl,
+            tokenCiphertext: JSON.stringify(encryptOpaqueValue(
+              {
+                orgId: stage.orgId,
+                purpose: "companion_box_agent_endpoint",
+                subjectId: stage.companionId,
+                value: JSON.stringify({
+                  proxyToken: observed.agentEndpoint.proxyToken,
+                  bearerToken: observed.agentEndpoint.bearerToken,
+                }),
+              },
+              input.masterKey,
+            )),
+          }
+          : null,
       };
     },
     async stageSkillTree(stage) {

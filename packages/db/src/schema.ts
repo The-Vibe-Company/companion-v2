@@ -815,6 +815,11 @@ export const companionRuntimeInstances = pgTable(
     materialClientSurface: companionClientSurfaceEnum("material_client_surface"),
     materialPiInvocationId: text("material_pi_invocation_id"),
     materialExpiresAt: timestamp("material_expires_at", { withTimezone: true }),
+    // Hosted direct-transport agent endpoint (0124). The URL is token-free; every credential lives
+    // in the masterKey ciphertext, and observed_at is the freshness bound a consumer must judge.
+    agentHostedUrl: text("agent_hosted_url"),
+    agentTokenCiphertext: text("agent_token_ciphertext"),
+    agentObservedAt: timestamp("agent_observed_at", { withTimezone: true }),
     settingsActorId: text("settings_actor_id"),
     settingsCheckpoint: text("settings_checkpoint").notNull().default("pending"),
     settingsCheckpointSequence: bigint("settings_checkpoint_sequence", { mode: "number" }).notNull().default(0),
@@ -900,6 +905,10 @@ export const companionRuntimeInstances = pgTable(
       and (${t.settingsClaimMaterialStagedAt} is null
         or ${t.settingsClaimMaterialClientSurface} = 'native_mobile' and ${t.settingsClaimMaterialExpiresAt} is null
         or ${t.settingsClaimMaterialClientSurface} in ('web','mobile_web') and ${t.settingsClaimMaterialExpiresAt} is not null)
+    `),
+    agentEndpointCheck: check("companion_runtime_instances_agent_endpoint_check", sql`
+      ((${t.agentHostedUrl} is null) = (${t.agentTokenCiphertext} is null))
+      and ((${t.agentHostedUrl} is null) = (${t.agentObservedAt} is null))
     `),
     settingsActorCheck: check("companion_runtime_instances_settings_actor_check", sql`
       (${t.settingsActorId} is null or (char_length(${t.settingsActorId}) between 1 and 200 and ${t.settingsActorId} !~ E'[\\n\\r]'))

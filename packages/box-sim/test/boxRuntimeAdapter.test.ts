@@ -1,3 +1,6 @@
+/* oxlint-disable anti-slop/no-conditional-empty-object-spread, anti-slop/no-runtime-typeof, anti-slop/require-safety-comment-for-type-assertion -- Existing adapter contract fixtures predate the incremental anti-slop gate. */
+
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
@@ -157,6 +160,36 @@ describe("production Box runtime v2 against the simulator", () => {
       acknowledgedCursor: acknowledgedThrough,
     });
   });
+
+  it("registers the hosted agent endpoint and stages its bearer digest when direct transport is on", async () => {
+    const harness = await provision({
+      apiKey: "box_adapter_direct_transport",
+      companionId: "44444444-4444-4444-8444-444444444444",
+      generation: 2,
+      env: { COMPANION_DIRECT_TRANSPORT: "on" },
+      agentPort: 0,
+    });
+    const { server, boxId, staged } = harness;
+
+    const endpoint = staged.agentEndpoint;
+    if (!endpoint) throw new Error("staging returned no agent endpoint with direct transport on");
+    // The stored locator is token-free: both tokens are credentials and travel separately.
+    expect(endpoint.hostedUrl).toBe(`${server.agentBaseUrl}/boxes/${boxId}`);
+    expect(endpoint.hostedUrl).not.toContain("_token");
+    expect(endpoint.proxyToken).toMatch(/^[a-f0-9]{64}$/);
+
+    const machine = server.simulator.commandMachine(boxId);
+    const authFile = machine.persistentFiles
+      .get(".companion/runtime/state/agent-auth.json")?.toString("utf8");
+    if (!authFile) throw new Error("staging left no agent auth digest on the Box");
+    // Only the digest of the rotating bearer ever reaches the Box disk.
+    expect(JSON.parse(authFile)).toEqual({
+      tokenSha256: createHash("sha256").update(endpoint.bearerToken, "utf8").digest("hex"),
+    });
+    expect(authFile).not.toContain(endpoint.bearerToken);
+    expect(machine.agentUnitEnabled).toBe(true);
+    expect(machine.unknownCommandDigests).toEqual([]);
+  });
 });
 
 async function provision(input: {
@@ -164,13 +197,17 @@ async function provision(input: {
   companionId: string;
   generation: number;
   piScenario?: string;
+  env?: Record<string, string>;
+  agentPort?: number;
 }): Promise<{
   server: BoxSimServerHandle;
   runtime: AsciiBoxCompanionRuntime;
   boxId: string;
+  staged: Awaited<ReturnType<AsciiBoxCompanionRuntime["stageExistingBox"]>>;
 }> {
   const server = createBoxSimServer({
     apiKey: input.apiKey,
+    ...(input.agentPort === undefined ? {} : { agentPort: input.agentPort }),
     ...(input.piScenario ? { defaults: { piScenario: input.piScenario } } : {}),
   });
   await server.listen();
@@ -181,6 +218,7 @@ async function provision(input: {
     COMPANION_BOX_POLL_INTERVAL_MS: "1",
     COMPANION_BOX_READY_TIMEOUT_MS: "5000",
     COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS: "5000",
+    ...input.env,
   };
   const lifecycle = new AsciiBoxMaintenanceClient(env);
   const runtime = new AsciiBoxCompanionRuntime(env);
@@ -208,7 +246,7 @@ async function provision(input: {
     if (Date.now() >= deadlineAt) throw new Error("simulated Box did not become ready");
     await new Promise((resolve) => setTimeout(resolve, 1));
   }
-  await runtime.stageExistingBox({
+  const staged = await runtime.stageExistingBox({
     companionId: input.companionId,
     runtimeGeneration: input.generation,
     orgId: "22222222-2222-4222-8222-222222222222",
@@ -222,7 +260,7 @@ async function provision(input: {
     skills: [],
   });
   await runtime.startPiDaemon({ boxId });
-  return { server, runtime, boxId };
+  return { server, runtime, boxId, staged };
 }
 
 async function waitForBrokerEvent(

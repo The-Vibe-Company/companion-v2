@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  decryptOpaqueValue,
   encryptCompanionMcpRuntimeCredential,
 } from "@companion/core";
 import {
@@ -211,6 +212,7 @@ describe("runtime material provider and Box stager", () => {
       appliedSettingsRevision: 3n,
       appliedSkillsRevision: 4,
       materialExpiresAt: new Date("2027-01-01T02:00:00.000Z"),
+      agentEndpoint: null,
     });
     expect(stageExistingBox).toHaveBeenCalledWith(expect.objectContaining({
       boxId: "bx_23456789",
@@ -230,6 +232,78 @@ describe("runtime material provider and Box stager", () => {
       configCatalog: catalog,
       signal: expect.any(AbortSignal),
     }));
+  });
+
+  it("encrypts the staged agent endpoint tokens and surfaces only ciphertext", async () => {
+    const nowMs = Date.parse("2027-01-01T00:00:00.000Z");
+    const material = workMaterial(null);
+    const store = fakeStore({
+      getMaterial: vi.fn(async () => material),
+      getConfigCatalog: vi.fn(async () => null),
+      mintHubToken: vi.fn(async () => ({
+        token: "cmp_pat_hubtokenfixture000000000000000000000000",
+        expiresAt: new Date(nowMs + 6 * 60 * 60 * 1_000),
+      })),
+      mintMcpBrokerToken: vi.fn(async () => ({
+        token: `cmp_mcp_${"e".repeat(48)}`,
+        expiresAt: new Date(nowMs + 6 * 60 * 60 * 1_000),
+      })),
+    });
+    const proxyToken = "c".repeat(64);
+    const bearerToken = "d".repeat(64);
+    const stageExistingBox = vi.fn(async () => ({
+      boxId: "bx_23456789",
+      diskLayoutVersion: 14 as const,
+      agentEndpoint: {
+        hostedUrl: "https://abc-8790.on.ascii.dev",
+        proxyToken,
+        bearerToken,
+      },
+    }));
+    const pipeline = createRuntimeMaterialPipeline({
+      masterKey,
+      apiUrl: "https://api.example.test",
+      bundledSkill: {
+        slug: "companion",
+        version: "1.0.0",
+        checksum: `sha256:${"1".repeat(64)}`,
+        archive: Buffer.from("bundled"),
+      },
+      runtime: () => fakeRuntime(stageExistingBox),
+      loadSkillArchive: vi.fn(),
+      loadAttachment: vi.fn(),
+      storeAttachment: vi.fn(),
+      now: () => nowMs,
+    });
+
+    await expect(pipeline.materialProvider.getMaterial({ store, fence })).resolves.toBe(material);
+    const staged = await pipeline.resourceStager.stageExistingBox({
+      orgId,
+      companionId,
+      boxId: "bx_23456789",
+      allowBoxCreate: false,
+      authorization: {
+        ...authorization,
+        mcpRefs: [{ account_id: accountId, credential_generation: generation }],
+      },
+      material,
+      clientSurface: "web",
+      targetSettingsRevision: 3n,
+      targetSkillsRevision: 4,
+      signal: new AbortController().signal,
+    });
+    expect(staged.agentEndpoint?.hostedUrl).toBe("https://abc-8790.on.ascii.dev");
+    const ciphertext = staged.agentEndpoint?.tokenCiphertext ?? "";
+    // Plaintext must never appear in what companion-runtime persists.
+    expect(ciphertext).not.toContain(proxyToken);
+    expect(ciphertext).not.toContain(bearerToken);
+    const decrypted = decryptOpaqueValue({
+      orgId,
+      purpose: "companion_box_agent_endpoint",
+      subjectId: companionId,
+      ...JSON.parse(ciphertext),
+    }, masterKey);
+    expect(JSON.parse(decrypted)).toEqual({ proxyToken, bearerToken });
   });
 
   it.each([
