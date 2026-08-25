@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { RuntimeDatabaseRoleError, verifyRuntimeDatabaseRole } from "./database";
+import type { RuntimeServiceConfig } from "./config";
+import {
+  RUNTIME_DB_STATEMENT_TIMEOUT_MS,
+  RuntimeDatabaseRoleError,
+  runtimeDatabasePoolOptions,
+  verifyRuntimeDatabaseRole,
+} from "./database";
 
 const validProfile = {
   currentRole: "companion_runtime_v2",
@@ -20,6 +26,31 @@ const validProfile = {
   ownsRequiredFunctions: false,
   hasUnexpectedDefinerGrant: false,
 };
+
+describe("runtime database pool options", () => {
+  const configWithConcurrency = (concurrency: number): RuntimeServiceConfig =>
+    ({ concurrency } as unknown as RuntimeServiceConfig);
+
+  it("sizes the pool for concurrency * 2 + 4", () => {
+    expect(runtimeDatabasePoolOptions(configWithConcurrency(1)).max).toBe(6);
+    expect(runtimeDatabasePoolOptions(configWithConcurrency(4)).max).toBe(12);
+    expect(runtimeDatabasePoolOptions(configWithConcurrency(8)).max).toBe(20);
+  });
+
+  it("bounds statements and tags the connection", () => {
+    const options = runtimeDatabasePoolOptions(configWithConcurrency(4));
+    expect(options.connection?.statement_timeout).toBe(RUNTIME_DB_STATEMENT_TIMEOUT_MS);
+    expect(RUNTIME_DB_STATEMENT_TIMEOUT_MS).toBe(15_000);
+    expect(options.connection?.application_name).toBe("companion-runtime");
+  });
+
+  it("keeps the existing idle and connect timeouts", () => {
+    const options = runtimeDatabasePoolOptions(configWithConcurrency(4));
+    expect(options.idle_timeout).toBe(30);
+    expect(options.connect_timeout).toBe(10);
+    expect(options.prepare).toBe(false);
+  });
+});
 
 describe("runtime database role verification", () => {
   it("accepts only an isolated login with the exact narrow executor surface", async () => {

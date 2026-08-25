@@ -361,4 +361,68 @@ describe("RuntimeScheduler", () => {
       }),
     })]);
   });
+
+  it("backs off with a growing, jittered delay while the claim loop keeps failing", async () => {
+    const base = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(base) });
+    store.claimWork = async () => { throw new Error("database unavailable"); };
+
+    const recorded: number[] = [];
+    let resolveEnough!: () => void;
+    const enough = new Promise<void>((resolve) => { resolveEnough = resolve; });
+
+    class RecordingClock extends TestClock {
+      onLimit?: () => void;
+      override async sleep(milliseconds: number): Promise<void> {
+        recorded.push(milliseconds);
+        if (recorded.length >= 5) this.onLimit?.();
+      }
+    }
+    const clock = new RecordingClock();
+
+    const scheduler = new RuntimeScheduler({
+      store,
+      engine: new HoldingEngine(),
+      clock,
+      executorId: "scheduler-test",
+      claimsEnabled: true,
+      // Deterministic jitter: 0.5 -> a factor of exactly 1.0 (0.8 + 0.5 * 0.4).
+      jitter: () => 0.5,
+    });
+    clock.onLimit = () => { scheduler.stopClaims(); resolveEnough(); };
+
+    scheduler.start();
+    await enough;
+    await scheduler.shutdown();
+
+    // Base sweep interval is 2s. Each consecutive failure doubles it, capped at 10x (20s), so the
+    // loop backs off instead of hammering a failing database every 2s.
+    expect(recorded).toEqual([2_000, 4_000, 8_000, 16_000, 20_000]);
+  });
+
+  it("returns to the flat sweep cadence after the claim loop recovers", async () => {
+    const base = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(base) });
+    let calls = 0;
+    store.claimWork = async () => {
+      calls += 1;
+      if (calls === 1) throw new Error("transient blip");
+      return [];
+    };
+    const clock = new TestClock();
+    const scheduler = new RuntimeScheduler({
+      store,
+      engine: new HoldingEngine(),
+      clock,
+      executorId: "scheduler-test",
+      claimsEnabled: true,
+      jitter: () => 0.5,
+    });
+
+    // First sweep fails, arming the backoff streak.
+    await expect(scheduler.sweepOnce()).rejects.toThrow("transient blip");
+    // The next sweep succeeds and must clear the streak so the flat cadence resumes.
+    await scheduler.sweepOnce();
+    expect(scheduler.snapshot().claimLoopErrorAt).toBeNull();
+  });
 });

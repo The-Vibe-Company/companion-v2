@@ -16,7 +16,7 @@ import {
   LeaseRenewalError,
   LeaseSession,
 } from "./leaseSession";
-import { workFailureLogRecord } from "./logging";
+import { describeThrownError, workFailureLogRecord } from "./logging";
 import { handleOperation } from "./operations";
 import type { RuntimeEngineDependencies } from "./ports";
 import { handleSettings } from "./settings";
@@ -97,6 +97,17 @@ export class RuntimeEngine {
       claim,
       executorId: this.#deps.executorId,
       clock: this.#deps.clock,
+      onRenewalError: ({ fence, attempt, error }) => {
+        this.#deps.log?.warn({
+          ts: this.#deps.clock.now().toISOString(),
+          event: "lease.renew.failed",
+          companionId: fence.companionId,
+          workKind: fence.workKind,
+          workId: fence.workId,
+          attempt,
+          thrown: describeThrownError(error),
+        });
+      },
     });
     this.#sessions.set(claim.workId, session);
     try {

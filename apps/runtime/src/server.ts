@@ -10,7 +10,15 @@ import {
 } from "@companion/companion-runtime";
 
 const DEFAULT_BODY_LIMIT_BYTES = 4 * 1024;
-const DEFAULT_HEALTH_PING_TIMEOUT_MS = 1_000;
+// Widened from 1s so a single slow DB ping does not flap /healthz (and trip a restart) when the
+// connection is merely busy rather than down.
+const DEFAULT_HEALTH_PING_TIMEOUT_MS = 2_500;
+
+// The sweep-fresh window tolerates a few missed sweeps before declaring the claim loop stalled, so a
+// GC pause or a backed-off recovery sweep does not flip the endpoint unhealthy. A floor of 15s keeps
+// it stable even when the sweep interval is very short.
+const MIN_SWEEP_FRESH_WINDOW_MS = 15_000;
+const SWEEP_FRESH_WINDOW_MULTIPLE = 5;
 
 export interface RuntimeSchedulerHealthSnapshot {
   claimLoopAlive: boolean;
@@ -127,7 +135,11 @@ export function createRuntimeHttpServer(options: RuntimeHttpServerOptions): Runt
     const completedAt = validDate(snapshot.lastSweepCompletedAt);
     const errorAt = validDate(snapshot.claimLoopErrorAt);
     const elapsed = completedAt ? now() - completedAt.getTime() : Number.POSITIVE_INFINITY;
-    const sweepFresh = elapsed >= 0 && elapsed <= options.sweepIntervalMs * 2 + 1_000;
+    const sweepFreshWindow = Math.max(
+      options.sweepIntervalMs * SWEEP_FRESH_WINDOW_MULTIPLE,
+      MIN_SWEEP_FRESH_WINDOW_MS,
+    );
+    const sweepFresh = elapsed >= 0 && elapsed <= sweepFreshWindow;
     const unrecoveredClaimError = errorAt !== null
       && (completedAt === null || errorAt.getTime() >= completedAt.getTime());
     const activeCount = Number.isSafeInteger(snapshot.activeCount) && snapshot.activeCount >= 0

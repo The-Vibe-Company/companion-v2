@@ -5,6 +5,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import {
   COMPANION_ATTACHMENT_FILENAME_PATTERN,
   COMPANION_ATTACHMENT_MAX_BYTES,
+  COMPANION_BUDGETS_BASE,
   COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS,
   COMPANION_EXEC_TOOL_RUN_TIMEOUT_MS,
   COMPANION_OUTPUT_ATTACHMENT_MAX_COUNT,
@@ -1878,29 +1879,23 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
     }
   }
 
-  /**
-   * What ends one Box request: its own timeout, whatever the caller passed, and the running staging
-   * budget. The shared budget bounds the full multi-call layout transaction.
-   */
-  #requestSignal(
-    timeoutMs: number,
-    callerSignal?: AbortSignal | null,
-    budget?: AbortSignal | null,
-  ): AbortSignal {
-    const signals = [AbortSignal.timeout(timeoutMs)];
-    if (callerSignal) signals.push(callerSignal);
-    if (budget) signals.push(budget);
-    return signals.length === 1 ? signals[0]! : AbortSignal.any(signals);
-  }
-
   async #request<T>(
     path: string,
     init?: RequestInit,
-    timeoutMs = 30_000,
+    timeoutMs: number = COMPANION_BUDGETS_BASE.boxRequestTimeoutMs,
     budget: AbortSignal | null = this.#stagingSignal ?? null,
     operation: BoxProviderCallOperation = "execute_command",
   ): Promise<T> {
     const startedAt = Date.now();
+    // Keep references to the individual abort sources so a transport rejection can be attributed to
+    // the caller (cancellation), a timeout/budget deadline, or a plain network failure — the
+    // maintenance client makes the same distinction so `isRetryableProviderError` can act on it.
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
+    const callerSignal = init?.signal ?? null;
+    const signals: AbortSignal[] = [timeoutSignal];
+    if (callerSignal) signals.push(callerSignal);
+    if (budget) signals.push(budget);
+    const signal = signals.length === 1 ? signals[0]! : AbortSignal.any(signals);
     try {
       const headers: BoxRequestHeaders = {
         Authorization: `Bearer ${this.#apiKey}`,
@@ -1910,7 +1905,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
       const response = await fetch(`${this.#baseUrl}${path}`, {
         ...init,
         headers,
-        signal: this.#requestSignal(timeoutMs, init?.signal, budget),
+        signal,
       });
       if (!response.ok) {
         const errorBodySchema = z.object({
@@ -1920,6 +1915,12 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
         });
         const bodyResult = errorBodySchema.safeParse(await response.json().catch(() => null));
         const body = bodyResult.success ? bodyResult.data : null;
+        this.#onTiming?.({
+          operation,
+          durationMs: Date.now() - startedAt,
+          ok: false,
+          status: response.status,
+        });
         throw new BoxRuntimeProviderError(
           body?.message || body?.error?.message || `Box API request failed with ${response.status}`,
           response.status,
@@ -1929,11 +1930,51 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
       // SAFETY: Every call supplies its response type and validates external envelopes before use;
       // generic requests that cannot validate here are parsed at their immediate caller.
       const result = await response.json() as T;
-      this.#onTiming?.({ operation, durationMs: Date.now() - startedAt, ok: true });
+      this.#onTiming?.({
+        operation,
+        durationMs: Date.now() - startedAt,
+        ok: true,
+        status: response.status,
+      });
       return result;
     } catch (error) {
+      // A BoxRuntimeProviderError from the `!response.ok` branch above already carries a status and
+      // reported its timing; re-raise it untouched.
+      if (error instanceof BoxRuntimeProviderError) throw error;
       this.#onTiming?.({ operation, durationMs: Date.now() - startedAt, ok: false });
-      throw error;
+      // A raw `fetch` rejection is a TypeError (network) or an AbortError/TimeoutError. Map it to a
+      // BoxRuntimeProviderError carrying a status so `isRetryableProviderError` can decide: a
+      // caller-driven cancellation is non-retryable (499-class), while a timeout/budget deadline
+      // (504) or a plain network failure (503) is retryable. Idempotent lifecycle calls may then be
+      // replayed; create/prompt/decision are excluded from that retry union and their dispatch
+      // paths convert any post-start throw into an AmbiguousExternalEffectError regardless of status.
+      if (callerSignal?.aborted === true) {
+        // Preserve the caller's abort reason (e.g. a lease handoff/shutdown/fence-lost control
+        // error, or a session kill-switch signal) so the runtime layer still recognises it as a
+        // control outcome that must abandon execution — never a retryable or ambiguous provider I/O
+        // error. A bare abort with no reason degrades to a non-retryable cancellation.
+        throw callerSignal.reason ?? new BoxRuntimeProviderError(
+          "The Box request was cancelled",
+          499,
+          "box_request_cancelled",
+        );
+      }
+      // A deadline: either an internal request/budget signal fired, or `fetch` rejected with the
+      // AbortSignal.timeout shape (a TimeoutError/AbortError DOMException).
+      const abortLike = error instanceof Error
+        && (error.name === "TimeoutError" || error.name === "AbortError");
+      if (timeoutSignal.aborted || budget?.aborted === true || abortLike) {
+        throw new BoxRuntimeProviderError(
+          "The Box request deadline elapsed",
+          504,
+          "box_request_deadline_exceeded",
+        );
+      }
+      throw new BoxRuntimeProviderError(
+        "The Box provider could not be reached",
+        503,
+        "box_network_error",
+      );
     }
   }
 

@@ -16,7 +16,7 @@ import {
 } from "./piEvents";
 import type { RuntimeEngineDependencies, StagedRuntimeAttachment } from "./ports";
 import type { RuntimeVisibleTextRedactor } from "./projectionRedaction";
-import { COMPANION_BUDGETS_BASE, isCompanionAttachmentImage } from "@companion/contracts";
+import { isCompanionAttachmentImage } from "@companion/contracts";
 import { retryIdempotentLifecycle } from "./retry";
 import { RuntimeStoreIndeterminateError } from "./store";
 import { refreshWarmCompanionLayout } from "./layoutRefresh";
@@ -661,12 +661,11 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
           eventCursor: initialCursor,
           activityAt: providerReturnedAt,
         });
-        // The send transaction fixes cold_start_deadline_at to turn.created_at + three minutes and
-        // never moves it. Subtracting that immutable contract recovers the exact durable send time
-        // without a second timestamp or query on the dispatch path.
-        const sentAt = auth.coldStartDeadlineAt
-          ? auth.coldStartDeadlineAt.getTime() - COMPANION_BUDGETS_BASE.coldStartDeadlineMs
-          : null;
+        // cold_start_deadline_at is re-stamped to (claim time + three minutes) when the queued turn
+        // is claimed for a start (migration 0110), so it no longer equals turn.created_at + three
+        // minutes. Subtracting the constant would recover the claim time, not the durable send time,
+        // making a `sendToPromptAckMs` derived from it wrong. Log the raw deadline instead until a
+        // real send timestamp is threaded onto the dispatch path.
         context.deps.log?.info({
           ts: providerReturnedAt.toISOString(),
           event: "runtime.prompt.ack",
@@ -675,9 +674,9 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
           boxId: dispatchRuntime.boxId,
           invocationId: outcome.invocationId,
           initialCursor: initialCursor.toString(),
-          ...(sentAt === null
+          ...(auth.coldStartDeadlineAt === null || auth.coldStartDeadlineAt === undefined
             ? {}
-            : { sendToPromptAckMs: Math.max(0, providerReturnedAt.getTime() - sentAt) }),
+            : { coldStartDeadlineAt: auth.coldStartDeadlineAt.toISOString() }),
         });
         await refreshWarmTtl(context);
         break;

@@ -213,8 +213,12 @@ describe("RuntimeEngine attempts", () => {
     expect(records).toContainEqual(expect.objectContaining({
       event: "runtime.prompt.ack",
       ts: "2026-08-16T12:00:00.000Z",
-      sendToPromptAckMs: 0,
+      coldStartDeadlineAt: "2026-08-16T12:03:00.000Z",
     }));
+    // The wrong send-time-derived metric is gone: cold_start_deadline_at is re-stamped at claim
+    // time (migration 0110), so it no longer recovers the durable send time.
+    expect(records.find((record) => record.event === "runtime.prompt.ack"))
+      .not.toHaveProperty("sendToPromptAckMs");
   });
 
   it("recycles Pi after an overlay layout refresh before dispatch", async () => {
@@ -1641,6 +1645,9 @@ describe("RuntimeEngine health observation", () => {
       }),
     });
     const ports = fakePorts(store);
+    // A stale broker layout is the only thing that authorizes a health-time Pi recycle.
+    const baseBrokerState = ports.pi.brokerState;
+    ports.pi.brokerState = async (input) => ({ ...(await baseBrokerState(input)), layoutCurrent: false });
     ports.resourceStager.refreshLayout = async () => ({ applied: "overlay" });
     ports.pi.restartPiDaemon = async () => ({ state: "idle", invocationId: "health-overlay-pi" });
 
@@ -1653,6 +1660,44 @@ describe("RuntimeEngine health observation", () => {
       piState: "idle",
       piInvocationId: "health-overlay-pi",
     });
+  });
+
+  it("does not recycle Pi when the broker layout is already current", async () => {
+    const claim = healthClaim();
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(attemptClaim(), {
+        authorizationActorId: null,
+        clientSurface: null,
+        workCheckpoint: "observing",
+        workCheckpointSequence: 0n,
+        turnId: null,
+        turnStatus: null,
+        attemptStatus: null,
+        dispatchState: null,
+        eventCursor: null,
+        unknownEventCount: null,
+        malformedEventCount: null,
+        oversizedEventCount: null,
+        coldStartDeadlineAt: null,
+        inactivityDeadlineAt: null,
+        absoluteDeadlineAt: null,
+        operationKind: null,
+        boxState: "ready",
+        piState: "idle",
+      }),
+    });
+    const ports = fakePorts(store);
+    // Default broker reports layoutCurrent: true. A warm, recently-active Pi must not be restarted
+    // as "healing"; only an explicit user action or a genuinely stale layout may recycle it.
+    const restartPiDaemon = vi.fn(async () => ({ state: "idle" as const, invocationId: "should-not-run" }));
+    ports.pi.restartPiDaemon = restartPiDaemon;
+    const priorInvocationId = store.authorization.piInvocationId;
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(restartPiDaemon).not.toHaveBeenCalled();
+    expect(store.authorization.piInvocationId).toBe(priorInvocationId);
   });
 
   it("persists the live idle Pi identity on the health tick after a crashed Pi start", async () => {

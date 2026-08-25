@@ -376,7 +376,7 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
-    })).rejects.toThrow("control apply transport failed");
+    })).rejects.toThrow("The Box provider could not be reached");
 
     expect(commands.filter((command) => command.includes("COMPANION_CONTROL_APPLY"))).toHaveLength(2);
     expect(commands.some((command) =>
@@ -661,6 +661,69 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
     controller.abort(stopped);
 
     await expect(status).rejects.toBe(stopped);
+  });
+
+  it("maps a network transport failure to a retryable 503 provider error", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      if (url.endsWith("/boxes/bx_23456789/resume") && init?.method === "POST") {
+        throw new TypeError("fetch failed");
+      }
+      throw new Error(`unexpected Box request: ${init?.method ?? "GET"} ${url}`);
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    const error = await runtime.resumeExistingBox({ boxId: "bx_23456789" }).catch((caught) => caught);
+    expect(error).toBeInstanceOf(BoxRuntimeProviderError);
+    expect(error.status).toBe(503);
+    // status >= 500 makes isRetryableProviderError(retry.ts) true, so an idempotent lifecycle call
+    // (resume/get_status/apply_settings/...) will now be retried instead of failing immediately.
+    expect(error.status).toBeGreaterThanOrEqual(500);
+  });
+
+  it("maps a request timeout to a retryable 504 provider error", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      if (url.endsWith("/boxes/bx_23456789/resume") && init?.method === "POST") {
+        // The shape AbortSignal.timeout() produces when it aborts an in-flight fetch.
+        throw new DOMException("The operation timed out", "TimeoutError");
+      }
+      throw new Error(`unexpected Box request: ${init?.method ?? "GET"} ${url}`);
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    const error = await runtime.resumeExistingBox({ boxId: "bx_23456789" }).catch((caught) => caught);
+    expect(error).toBeInstanceOf(BoxRuntimeProviderError);
+    expect(error.status).toBe(504);
+    expect(error.status).toBeGreaterThanOrEqual(500);
+  });
+
+  it("keeps a caller abort non-retryable and preserves its control reason", async () => {
+    const controller = new AbortController();
+    let commandStarted!: () => void;
+    const started = new Promise<void>((resolve) => { commandStarted = resolve; });
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      if (url.endsWith("/boxes/bx_23456789/resume") && init?.method === "POST") {
+        commandStarted();
+        return await new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+        });
+      }
+      throw new Error(`unexpected Box request: ${init?.method ?? "GET"} ${url}`);
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    const observation = runtime.resumeExistingBox({ boxId: "bx_23456789", signal: controller.signal });
+    await started;
+    const handoff = new Error("runtime handoff");
+    controller.abort(handoff);
+
+    // The raw control reason propagates unchanged — never wrapped as a retryable/ambiguous provider
+    // error — so the runtime layer still recognises a lease handoff/shutdown as a must-abandon outcome.
+    const error = await observation.catch((caught) => caught);
+    expect(error).toBe(handoff);
+    expect(error).not.toBeInstanceOf(BoxRuntimeProviderError);
   });
 });
 

@@ -164,6 +164,7 @@ export async function buildProductionRuntimeService(
           operation: sample.operation,
           durationMs: sample.durationMs,
           ok: sample.ok,
+          ...(sample.status === undefined ? {} : { status: sample.status }),
         });
       },
     });
@@ -178,6 +179,7 @@ export async function buildProductionRuntimeService(
           operation: sample.operation,
           durationMs: sample.durationMs,
           ok: sample.ok,
+          ...(sample.status === undefined ? {} : { status: sample.status }),
         });
       },
       onStageTiming: (sample: {

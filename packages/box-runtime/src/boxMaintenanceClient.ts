@@ -595,6 +595,13 @@ export interface BoxProviderCallTiming {
   operation: BoxProviderCallOperation;
   durationMs: number;
   ok: boolean;
+  /**
+   * The HTTP status of the underlying provider call when one is known (a non-2xx response, or a
+   * mapped transport failure carrying a synthetic 499/503/504). Makes 429s and other status classes
+   * a countable observability dimension. Absent when no single status applies (e.g. a plain network
+   * failure with no response, or a multi-call operation that succeeded).
+   */
+  status?: number;
 }
 
 export interface AsciiBoxMaintenanceClientOptions {
@@ -632,7 +639,13 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
       this.#onTiming({ operation, durationMs: Date.now() - startedAt, ok: true });
       return result;
     } catch (error) {
-      this.#onTiming({ operation, durationMs: Date.now() - startedAt, ok: false });
+      const status = error instanceof BoxRuntimeProviderError ? error.status : undefined;
+      this.#onTiming({
+        operation,
+        durationMs: Date.now() - startedAt,
+        ok: false,
+        ...(status === undefined ? {} : { status }),
+      });
       throw error;
     }
   }

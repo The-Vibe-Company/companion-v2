@@ -104,6 +104,25 @@ describe("private runtime HTTP server", () => {
       release_id: "production-2026-08-17.3",
     });
 
+    // Flap damping: a sweep completed 6s ago (older than the previous 2*sweep+1s = 5s window) is
+    // still fresh under the widened max(5*sweep, 15s) window, so a brief pause does not flip 503.
+    handle.setSnapshot({
+      ...healthySnapshot(),
+      lastSweepCompletedAt: new Date(nowMs - 6_000),
+    });
+    const stillFresh = await fetch(`${handle.server.baseUrl}/healthz`);
+    expect(stillFresh.status).toBe(200);
+    expect(await stillFresh.json()).toMatchObject({ checks: { sweep_fresh: true } });
+
+    // Only a sweep older than the full widened window is stale.
+    handle.setSnapshot({
+      ...healthySnapshot(),
+      lastSweepCompletedAt: new Date(nowMs - 16_000),
+    });
+    const staleSweep = await fetch(`${handle.server.baseUrl}/healthz`);
+    expect(staleSweep.status).toBe(503);
+    expect(await staleSweep.json()).toMatchObject({ checks: { sweep_fresh: false } });
+
     handle.setSnapshot({
       ...healthySnapshot(),
       lastSweepCompletedAt: new Date(nowMs - 5_001),

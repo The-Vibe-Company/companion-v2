@@ -17,6 +17,21 @@ import type {
 
 export const RUNTIME_RENEW_INTERVAL_MS = COMPANION_BUDGETS.renewIntervalMs;
 
+/**
+ * Short retry cadence after a *transient* background renewal failure (a network/DB throw, not an
+ * authoritative denial). The lease still has runway, so retry quickly rather than waiting a full
+ * renew interval. Bounded by the renew interval so a slow lease never widens its own gap.
+ */
+export const RUNTIME_RENEW_RETRY_MS = 2_000;
+
+/** Structured, PII-free description of a transient renewal failure for the process log. */
+export interface LeaseRenewalErrorInfo {
+  fence: LeaseFence;
+  /** Consecutive transient failures in the current burst; resets on any success. */
+  attempt: number;
+  error: unknown;
+}
+
 export class LeaseFenceLostError extends Error {
   constructor() {
     super("Runtime lease fence was lost");
@@ -68,6 +83,9 @@ export class LeaseSession {
   #renewalFailed = false;
   #handoffRequested = false;
   #shutdownRequested = false;
+  #lastRenewSuccessAt: Date | null = null;
+  #renewFailureStreak = 0;
+  readonly #onRenewalError: ((info: LeaseRenewalErrorInfo) => void) | undefined;
 
   constructor(input: {
     store: RuntimeStore;
@@ -75,12 +93,18 @@ export class LeaseSession {
     executorId: string;
     clock: RuntimeClock;
     renewIntervalMs?: number;
+    /**
+     * Notified when a background lease renewal fails transiently (before any short retry). The
+     * composition layer wires this to the runtime process log; LeaseSession stays logger-free.
+     */
+    onRenewalError?: (info: LeaseRenewalErrorInfo) => void;
   }) {
     this.#store = input.store;
     this.#clock = input.clock;
     this.#renewIntervalMs = input.renewIntervalMs ?? RUNTIME_RENEW_INTERVAL_MS;
     this.#sequence = input.claim.checkpointSequence;
     this.fence = claimFence(input.claim, input.executorId);
+    this.#onRenewalError = input.onRenewalError;
   }
 
   get signal(): AbortSignal {
@@ -153,12 +177,64 @@ export class LeaseSession {
       }
       this.#sequence = authorization.workCheckpointSequence;
       this.#authorization = authorization;
+      this.#lastRenewSuccessAt = this.#clock.now();
+      this.#renewFailureStreak = 0;
       if (!authorization.authorized) {
         this.#denialCode = authorization.denialCode ?? "runtime_authorization_denied";
         this.#abort(new LeaseAuthorizationDeniedError(this.#denialCode));
         if (!allowDenied) throw new LeaseAuthorizationDeniedError(this.#denialCode);
       }
       return authorization;
+    });
+  }
+
+  /**
+   * Background renewal tick. Unlike the mandatory pre-effect {@link reauthorize}, a *transient*
+   * store/network throw here is not authoritative: the lease keeps its remaining runway, so the
+   * failure is reported to the caller to log and retry rather than abandoning the session.
+   * Authoritative outcomes (fence lost, sequence regression, authorization denial) abort exactly as
+   * {@link reauthorize} does and report `"stopped"`.
+   */
+  async #renewInBackground(): Promise<
+    | { outcome: "authorized" }
+    | { outcome: "transient"; error: unknown }
+    | { outcome: "stopped" }
+  > {
+    return await this.#enqueue(async () => {
+      if (
+        this.#handoffRequested
+        || this.#shutdownRequested
+        || this.#lost
+        || this.#denialCode
+        || this.#renewalFailed
+      ) return { outcome: "stopped" } as const;
+      let authorization: RuntimeAuthorization | null;
+      try {
+        authorization = await this.#store.renewAndAuthorize(this.fence, RUNTIME_LEASE_SECONDS);
+      } catch (error) {
+        // Transient: do not set #renewalFailed or abort. The lease still has runway; the caller
+        // decides whether to retry or, once runway is exhausted, fail closed.
+        return { outcome: "transient", error } as const;
+      }
+      if (!authorization) {
+        this.#lost = true;
+        this.#abort(new LeaseFenceLostError());
+        return { outcome: "stopped" } as const;
+      }
+      if (authorization.workCheckpointSequence < this.#sequence) {
+        this.#renewalFailed = true;
+        this.#abort(new LeaseRenewalError());
+        return { outcome: "stopped" } as const;
+      }
+      this.#sequence = authorization.workCheckpointSequence;
+      this.#authorization = authorization;
+      this.#lastRenewSuccessAt = this.#clock.now();
+      if (!authorization.authorized) {
+        this.#denialCode = authorization.denialCode ?? "runtime_authorization_denied";
+        this.#abort(new LeaseAuthorizationDeniedError(this.#denialCode));
+        return { outcome: "stopped" } as const;
+      }
+      return { outcome: "authorized" } as const;
     });
   }
 
@@ -322,10 +398,67 @@ export class LeaseSession {
     ) return;
     this.#timer = this.#clock.setTimeout(() => {
       this.#timer = undefined;
-      void this.reauthorize()
-        .then(() => this.#scheduleRenewal())
-        .catch(() => undefined);
+      this.#runScheduledRenewal();
     }, this.#renewIntervalMs);
+  }
+
+  /**
+   * One background renewal attempt. A success re-arms the normal cadence; a transient failure logs
+   * and schedules a short retry while the lease has runway; an authoritative outcome has already
+   * aborted the session, so the loop simply stops.
+   */
+  #runScheduledRenewal(): void {
+    void this.#renewInBackground()
+      .then((result) => {
+        if (result.outcome === "authorized") {
+          this.#renewFailureStreak = 0;
+          this.#scheduleRenewal();
+          return;
+        }
+        if (result.outcome === "transient") {
+          this.#renewFailureStreak += 1;
+          this.#onRenewalError?.({
+            fence: this.fence,
+            attempt: this.#renewFailureStreak,
+            error: result.error,
+          });
+          this.#scheduleTransientRetry();
+        }
+        // "stopped": an authoritative outcome already aborted the session; never reschedule.
+      })
+      .catch(() => undefined);
+  }
+
+  /**
+   * Reschedule a short retry after a transient renewal failure, but only while the lease still has
+   * runway for another attempt to prove authority. Once the runway is spent, fail closed exactly as
+   * an authoritative renewal failure — abort so the engine settles the turn deterministically rather
+   * than leaving a silently dead heartbeat.
+   */
+  #scheduleTransientRetry(): void {
+    if (
+      !this.#running
+      || this.#handoffRequested
+      || this.#shutdownRequested
+      || this.#lost
+      || this.#denialCode
+      || this.#renewalFailed
+    ) return;
+    const leaseMs = RUNTIME_LEASE_SECONDS * 1_000;
+    const since = this.#lastRenewSuccessAt
+      ? this.#clock.now().getTime() - this.#lastRenewSuccessAt.getTime()
+      : leaseMs;
+    const remaining = leaseMs - since;
+    const retryMs = Math.min(RUNTIME_RENEW_RETRY_MS, this.#renewIntervalMs);
+    if (remaining <= retryMs) {
+      this.#renewalFailed = true;
+      this.#abort(new LeaseRenewalError());
+      return;
+    }
+    this.#timer = this.#clock.setTimeout(() => {
+      this.#timer = undefined;
+      this.#runScheduledRenewal();
+    }, retryMs);
   }
 
   #clearRenewal(): void {
