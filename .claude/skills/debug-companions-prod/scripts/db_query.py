@@ -290,6 +290,34 @@ def build_invocation(
     return argv, sql
 
 
+
+def _libpq_env_from_url(url: str) -> dict:
+    """Split a postgres:// URL into libpq PG* env vars (password out of argv)."""
+    import urllib.parse as _u
+
+    parsed = _u.urlparse(url)
+    if parsed.scheme not in ("postgres", "postgresql"):
+        raise prodlib.ProdToolError(
+            "PROD_DATABASE_READ_URL must be a postgres:// connection URL"
+        )
+    out = {}
+    if parsed.hostname:
+        out["PGHOST"] = parsed.hostname
+    if parsed.port:
+        out["PGPORT"] = str(parsed.port)
+    if parsed.username:
+        out["PGUSER"] = _u.unquote(parsed.username)
+    if parsed.password:
+        out["PGPASSWORD"] = _u.unquote(parsed.password)
+    dbname = parsed.path.lstrip("/")
+    if dbname:
+        out["PGDATABASE"] = _u.unquote(dbname)
+    query = _u.parse_qs(parsed.query)
+    sslmode = query.get("sslmode", [None])[0]
+    if sslmode:
+        out["PGSSLMODE"] = sslmode
+    return out
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run one named read-only query against the production database",
@@ -314,11 +342,13 @@ def main() -> None:
         prodlib.fail(str(error))
         return
 
-    # libpq expands a conninfo/URI-shaped PGDATABASE, so the URL (and its
-    # password) stays out of argv and process listings.
+    # Parse the connection URL into individual libpq environment variables.
+    # PGDATABASE is a literal database name (libpq does NOT expand a URI there),
+    # so a full URL must be split; the password travels via PGPASSWORD in the
+    # child environment, never in argv or a process listing.
     child_env = {
         **os.environ,
-        "PGDATABASE": url,
+        **_libpq_env_from_url(url),
         "PGCONNECT_TIMEOUT": "10",
         "PGAPPNAME": "debug-companions-prod",
     }

@@ -25,10 +25,12 @@ RAILWAY_GRAPHQL_URL = "https://backboard.railway.com/graphql/v2"
 
 SERVICES = ("api", "worker", "runtime", "web", "release")
 
-# UNVERIFIED schema: needs one live probe with a real token. See
-# references/railway-api.md for the probe procedure and both auth headers.
+# VERIFIED live 2026-08-25 against project companion-v2 (backboard v2, Bearer
+# auth). Service.deployments takes no `input` arg; the project has a single
+# `production` environment so no environment filter is needed. See
+# references/railway-api.md.
 STATUS_QUERY = """
-query CompanionDebugStatus($projectId: String!, $environmentId: String!, $first: Int!) {
+query CompanionDebugStatus($projectId: String!, $first: Int!) {
   project(id: $projectId) {
     name
     services {
@@ -36,7 +38,7 @@ query CompanionDebugStatus($projectId: String!, $environmentId: String!, $first:
         node {
           id
           name
-          deployments(first: $first, input: { environmentId: $environmentId }) {
+          deployments(first: $first) {
             edges {
               node {
                 id

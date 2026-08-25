@@ -230,7 +230,13 @@ def http_json(
     """
     method = method.upper()
     payload = None if body is None else json.dumps(body).encode("utf-8")
-    request_headers = {"Accept": "application/json", **(headers or {})}
+    # Railway/Cloudflare and some providers reject the default urllib User-Agent
+    # (HTTP 403), so always send an explicit one.
+    request_headers = {
+        "Accept": "application/json",
+        "User-Agent": "companion-debug-prod/1.0",
+        **(headers or {}),
+    }
     if payload is not None:
         request_headers["Content-Type"] = "application/json"
     open_fn = opener or urllib.request.urlopen

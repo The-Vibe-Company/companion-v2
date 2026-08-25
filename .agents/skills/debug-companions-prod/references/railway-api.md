@@ -122,3 +122,21 @@ From `deploy/railway/README.md`: `web` and `api` are public; `worker` and
 owner-migration job and must never be restarted (the restart script refuses
 it). Runtime `/healthz` is private — do not try to reach it over the public
 internet; use logs and `db_query.py health` instead.
+
+## Live verification (2026-08-25, project companion-v2, production)
+
+Verified against the real backboard v2 API with a Railway CLI session token:
+
+- **Auth**: `Authorization: Bearer <token>` works. A **non-default `User-Agent`
+  header is REQUIRED** — the default Python-urllib UA gets a bare `403` from
+  Railway's edge (Cloudflare). `prodlib.http_json` now always sends one.
+- **`Service.deployments` takes NO `input` argument** (the earlier
+  `input: { environmentId }` was rejected: *"Unknown argument input"*). The
+  project has a single `production` environment, so `deployments(first: N)` is
+  used without an environment filter. STATUS_QUERY updated accordingly — VERIFIED.
+- **`deploymentLogs(deploymentId, limit) { timestamp severity message }`** —
+  VERIFIED (returns real log lines; a structured `attributes { key value }`
+  set is also available, e.g. `level`). An idle service returns empty `message`
+  strings, which is not an error.
+- **`deploymentRestart`** (the mutation in railway_restart.py) remains
+  UNVERIFIED by design — it is a production mutation and is not probed casually.
