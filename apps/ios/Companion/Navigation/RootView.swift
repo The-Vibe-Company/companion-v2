@@ -12,6 +12,10 @@ struct RootView: View {
 #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("-glass-chat-demo") {
                 GlassChatDemoView()
+            } else if ProcessInfo.processInfo.arguments.contains("-companion-settings-demo") {
+                CompanionSettingsDemoView()
+            } else if ProcessInfo.processInfo.arguments.contains("-companion-roster-demo") {
+                CompanionRosterDemoView()
             } else if ProcessInfo.processInfo.arguments.contains("-glass-management-demo-plugins") {
                 GlassManagementDemoView(initialSurface: "Plugins")
             } else if ProcessInfo.processInfo.arguments.contains("-glass-management-demo") {
@@ -28,6 +32,8 @@ struct RootView: View {
 #if DEBUG
             let arguments = ProcessInfo.processInfo.arguments
             guard !arguments.contains("-glass-chat-demo"),
+                  !arguments.contains("-companion-settings-demo"),
+                  !arguments.contains("-companion-roster-demo"),
                   !arguments.contains("-glass-management-demo-plugins"),
                   !arguments.contains("-glass-management-demo") else { return }
 #endif

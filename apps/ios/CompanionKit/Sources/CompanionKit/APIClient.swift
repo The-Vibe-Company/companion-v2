@@ -41,6 +41,10 @@ public actor APIClient {
         let companion: CompanionSummary
     }
 
+    private struct OperationEnvelope: Decodable {
+        let operation: CompanionOperationSummary
+    }
+
     private struct ProviderConnectionEnvelope: Decodable {
         let connection: CompanionProviderConnection
     }
@@ -196,6 +200,34 @@ public actor APIClient {
             method: "POST",
             body: body
         ).companion
+    }
+
+    public func updateCompanion(
+        companionID: String,
+        input: UpdateCompanionInput
+    ) async throws -> CompanionSummary {
+        let id = companionID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? companionID
+        let body = try encoder.encode(input)
+        return try await decode(
+            CompanionEnvelope.self,
+            path: "/v1/companions/\(id)",
+            method: "PATCH",
+            body: body
+        ).companion
+    }
+
+    public func deleteCompanion(
+        companionID: String,
+        requestID: UUID
+    ) async throws -> CompanionOperationSummary {
+        let id = companionID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? companionID
+        return try await decode(
+            OperationEnvelope.self,
+            path: "/v1/companions/\(id)",
+            method: "DELETE",
+            body: nil,
+            additionalHeaders: ["Idempotency-Key": requestID.uuidString.lowercased()]
+        ).operation
     }
 
     public func listCompanionProviders() async throws -> CompanionProvidersResponse {

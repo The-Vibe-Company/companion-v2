@@ -5,6 +5,7 @@ struct ChatView: View {
     @Environment(SessionStore.self) private var sessionStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let companion: CompanionSummary
+    let onSettings: () -> Void
     @State private var currentCompanion: CompanionSummary
     @State private var thread: CompanionThread?
     @State private var draft = ""
@@ -14,8 +15,9 @@ struct ChatView: View {
     @State private var pendingMessages: [PendingMessage] = []
     @State private var reloadGeneration = 0
 
-    init(companion: CompanionSummary) {
+    init(companion: CompanionSummary, onSettings: @escaping () -> Void) {
         self.companion = companion
+        self.onSettings = onSettings
         _currentCompanion = State(initialValue: companion)
     }
 
@@ -91,6 +93,7 @@ struct ChatView: View {
                 if !Task.isCancelled { await reload(silently: true) }
             }
         }
+        .onChange(of: companion) { currentCompanion = companion }
     }
 
     @ToolbarContentBuilder
@@ -118,6 +121,15 @@ struct ChatView: View {
 
         ToolbarItem(placement: .topBarTrailing) {
             CompanionStatusBadge(runtime: currentCompanion.runtime, compact: true)
+        }
+
+        ToolbarItem(placement: .topBarTrailing) {
+            Button(action: onSettings) {
+                Image(systemName: "gearshape")
+                    .frame(width: 44, height: 44)
+            }
+            .accessibilityLabel("Settings for \(currentCompanion.name)")
+            .accessibilityIdentifier("chat.settings")
         }
     }
 

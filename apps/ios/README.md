@@ -13,7 +13,10 @@ The app target lives in `Companion/`. Models, networking, authentication, sessio
 belong in the zero-dependency `CompanionKit` Swift package. The committed Xcode project uses
 file-system-synchronized groups, so adding a Swift file does not require a project-file edit.
 
-The native roster can create Companions and manage their model providers and MCP plugins. Provider
+The native roster can create Companions, open their essential settings from chat or a long-press
+menu, and request Owner-only durable deletion. Essential settings cover the Companion icon, name,
+instructions, provider, and model; Editor access is editable and Viewer access is read-only. The
+roster also manages model providers and MCP plugins. Provider
 connections support encrypted API keys plus the shared Claude authorization-code and Codex device
 flows. The live server catalog includes Claude, Codex, Kimi, Moonshot, z.ai, OpenAI API, and Google
 Gemini; the app renders that catalog rather than maintaining a divergent mobile allowlist. Members
@@ -46,9 +49,13 @@ xcodebuildmcp swift-package test --package-path apps/ios/CompanionKit
 Release builds ignore launch arguments and environment variables and always use
 `https://api.thecompanion.sh`.
 
-The Debug-only `-glass-chat-demo`, `-glass-management-demo`, and
-`-glass-management-demo-plugins` launch arguments open interactive Liquid Glass showcases without
-requiring a server or account. They are excluded from Release behavior.
+The Debug-only `-glass-chat-demo`, `-glass-management-demo`,
+`-glass-management-demo-plugins`, `-companion-settings-demo`, and `-companion-roster-demo` launch
+arguments open interactive showcases without requiring a server or account. The settings demo accepts
+`COMPANION_SETTINGS_DEMO_ACCESS=owner|editor|viewer` for deterministic role and deletion UI tests.
+The roster demo accepts the equivalent `COMPANION_ROSTER_DEMO_ACCESS` value and simulates a lost
+first deletion response followed by a same-key `202` retry.
+These routes are excluded from Release behavior.
 
 ## TestFlight release
 

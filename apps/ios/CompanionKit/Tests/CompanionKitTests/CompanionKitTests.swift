@@ -25,6 +25,7 @@ private final class MockURLProtocol: URLProtocol, @unchecked Sendable {
 
 private final class ManagementMockURLProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+    nonisolated(unsafe) static var deleteAttempts = 0
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -101,6 +102,103 @@ func decodesCompanionIconCatalogIndexes() throws {
     """#.utf8)
     let companion = try JSONDecoder().decode(CompanionSummary.self, from: data)
     #expect(companion.icon == .init(shape: 6, mouth: 3, accessory: 5, color: 7))
+}
+
+@Test
+func decodesCompanionSettingsAuthorityAndDurableDeletion() throws {
+    let data = Data(#"""
+    {
+      "id":"companion-1",
+      "name":"Luna",
+      "persona":"Keep releases calm",
+      "model_id":"claude-sonnet",
+      "icon":{"shape":6,"mouth":3,"accessory":5,"color":7},
+      "access":"owner",
+      "hidden":false,
+      "unread":false,
+      "last_message":null,
+      "runtime":{
+        "state":"running",
+        "replying":false,
+        "last_error":null,
+        "provider_ids":["anthropic"],
+        "latest_operation":{
+          "id":"14757274-8d64-455c-a394-334665a258f0",
+          "source_turn_id":null,
+          "kind":"delete",
+          "status":"failed",
+          "error":{"code":"delete_failed","message":"Deletion could not complete.","action":"retry"}
+        }
+      }
+    }
+    """#.utf8)
+    let companion = try JSONDecoder().decode(CompanionSummary.self, from: data)
+    #expect(companion.access == .owner)
+    #expect(companion.access.canEditCompanionSettings)
+    #expect(companion.access.canDeleteCompanion)
+    #expect(companion.runtime.providerIDs == ["anthropic"])
+    #expect(companion.deletionOperation?.status == .failed)
+    #expect(companion.deletionOperation?.error?.message == "Deletion could not complete.")
+}
+
+@Test
+func companionAccessKeepsEditorsEditableAndViewersReadOnly() throws {
+    #expect(CompanionAccess.editor.canEditCompanionSettings)
+    #expect(!CompanionAccess.editor.canDeleteCompanion)
+    #expect(!CompanionAccess.viewer.canEditCompanionSettings)
+    #expect(!CompanionAccess.viewer.canDeleteCompanion)
+
+    let data = Data(#"""
+    {
+      "id":"companion-1",
+      "name":"Luna",
+      "persona":null,
+      "model_id":"claude-sonnet",
+      "access":"future_role",
+      "hidden":false,
+      "unread":false,
+      "last_message":null,
+      "runtime":{"state":"running","replying":false,"last_error":null}
+    }
+    """#.utf8)
+    let companion = try JSONDecoder().decode(CompanionSummary.self, from: data)
+    #expect(companion.access == .viewer)
+    #expect(!companion.access.canEditCompanionSettings)
+    #expect(!companion.access.canDeleteCompanion)
+}
+
+@Test
+func settingsUpdatePreservesTheRosterMessageProjection() throws {
+    let previous = try JSONDecoder().decode(CompanionSummary.self, from: Data(#"""
+    {
+      "id":"companion-1",
+      "name":"Luna",
+      "persona":"Keep releases calm",
+      "model_id":"claude-sonnet",
+      "access":"owner",
+      "hidden":false,
+      "unread":true,
+      "last_message":{"preview":"Release notes are ready.","role":"assistant","created_at":"2026-08-25T08:00:00.000Z"},
+      "runtime":{"state":"running","replying":false,"last_error":null,"provider_ids":["anthropic"]}
+    }
+    """#.utf8))
+    let response = try JSONDecoder().decode(CompanionSummary.self, from: Data(#"""
+    {
+      "id":"companion-1",
+      "name":"Luna Prime",
+      "persona":null,
+      "model_id":"claude-sonnet",
+      "access":"owner",
+      "hidden":false,
+      "unread":false,
+      "last_message":null,
+      "runtime":{"state":"running","replying":false,"last_error":null,"provider_ids":["anthropic"]}
+    }
+    """#.utf8))
+
+    let updated = response.preservingListProjection(from: previous)
+    #expect(updated.name == "Luna Prime")
+    #expect(updated.lastMessage == previous.lastMessage)
 }
 
 @Test
@@ -181,6 +279,7 @@ func buildsTheGoogleAuthorizationProxyWithExpoState() async throws {
 func usesRealCompanionManagementRoutesAndRetainsProviderOAuthAuthority() async throws {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [ManagementMockURLProtocol.self]
+    ManagementMockURLProtocol.deleteAttempts = 0
     ManagementMockURLProtocol.handler = { request in
         let requestURL = try #require(request.url)
         let response: HTTPURLResponse
@@ -201,6 +300,26 @@ func usesRealCompanionManagementRoutesAndRetainsProviderOAuthAuthority() async t
             #expect(json["selected_mcp_account_ids"] as? [String] == ["b4d8a690-32d2-4dff-b6e0-3f742c056f95"])
             response = try #require(HTTPURLResponse(url: requestURL, statusCode: 201, httpVersion: nil, headerFields: nil))
             data = Data(#"{"companion":{"id":"c96ab360-00f3-4497-a51a-51442db8add1","name":"Luna","persona":null,"model_id":"claude-sonnet","icon":{"shape":6,"mouth":1,"accessory":6,"color":2},"hidden":false,"unread":false,"last_message":null,"runtime":{"state":"not_created","replying":false,"last_error":null}}}"#.utf8)
+
+        case "/v1/companions/c96ab360-00f3-4497-a51a-51442db8add1":
+            if request.httpMethod == "PATCH" {
+                let body = try requestBody(request)
+                let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+                #expect(Set(json.keys) == Set(["name", "persona", "provider_id", "model_id", "icon"]))
+                #expect(json["name"] as? String == "Luna Prime")
+                #expect(json["persona"] is NSNull)
+                #expect(json["selected_skill_ids"] == nil)
+                #expect(json["selected_mcp_account_ids"] == nil)
+                response = try #require(HTTPURLResponse(url: requestURL, statusCode: 200, httpVersion: nil, headerFields: nil))
+                data = Data(#"{"companion":{"id":"c96ab360-00f3-4497-a51a-51442db8add1","name":"Luna Prime","persona":null,"model_id":"claude-sonnet","icon":{"shape":6,"mouth":1,"accessory":6,"color":2},"access":"owner","hidden":false,"unread":false,"last_message":null,"runtime":{"state":"running","replying":false,"last_error":null,"provider_ids":["anthropic"],"latest_operation":null}}}"#.utf8)
+            } else {
+                #expect(request.httpMethod == "DELETE")
+                #expect(request.value(forHTTPHeaderField: "Idempotency-Key") == "14f2690b-9e55-4d45-9d0c-3f9e20bc4888")
+                ManagementMockURLProtocol.deleteAttempts += 1
+                if ManagementMockURLProtocol.deleteAttempts == 1 { throw URLError(.networkConnectionLost) }
+                response = try #require(HTTPURLResponse(url: requestURL, statusCode: 202, httpVersion: nil, headerFields: nil))
+                data = Data(#"{"operation":{"id":"14757274-8d64-455c-a394-334665a258f0","kind":"delete","status":"pending","error":null}}"#.utf8)
+            }
 
         case "/v1/companion-plugins":
             #expect(request.httpMethod == "POST")
@@ -262,6 +381,40 @@ func usesRealCompanionManagementRoutesAndRetainsProviderOAuthAuthority() async t
         icon: .init(shape: 6, mouth: 1, accessory: 6, color: 2)
     ))
     #expect(companion.name == "Luna")
+    #expect(companion.access == .viewer)
+
+    let updated = try await client.updateCompanion(
+        companionID: companion.id,
+        input: .init(
+            name: "Luna Prime",
+            persona: nil,
+            providerID: "anthropic",
+            modelID: "claude-sonnet",
+            icon: .init(shape: 6, mouth: 1, accessory: 6, color: 2)
+        )
+    )
+    #expect(updated.name == "Luna Prime")
+    #expect(updated.runtime.providerIDs == ["anthropic"])
+
+    let deleteRequestID = try #require(UUID(uuidString: "14f2690b-9e55-4d45-9d0c-3f9e20bc4888"))
+    do {
+        _ = try await client.deleteCompanion(
+            companionID: companion.id,
+            requestID: deleteRequestID
+        )
+        Issue.record("Expected the first delete response to be lost")
+    } catch {
+        let apiError = try #require(error as? APIError)
+        #expect(apiError.status == 0)
+        #expect(apiError.code == "network_error")
+    }
+    let deleteOperation = try await client.deleteCompanion(
+        companionID: companion.id,
+        requestID: deleteRequestID
+    )
+    #expect(ManagementMockURLProtocol.deleteAttempts == 2)
+    #expect(deleteOperation.kind == .delete)
+    #expect(deleteOperation.status == .pending)
 
     let plugin = try await client.saveCompanionPlugin(.init(
         provider: "custom",
