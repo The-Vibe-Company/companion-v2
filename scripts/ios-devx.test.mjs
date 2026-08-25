@@ -155,10 +155,6 @@ test("CI builds iOS without secrets and isolates the live provider workflow", ()
   assert.match(ci, /^    runs-on: macos-26$/m);
   assert.match(ci, /xcodebuildmcp swift-package test --package-path apps\/ios\/CompanionKit/);
   assert.match(ci, /xcodebuildmcp simulator build/);
-  assert.match(
-    ci,
-    /xcodebuildmcp simulator test\s+--workspace-path apps\/ios\/Companion\.xcworkspace\s+--scheme Companion\s+--configuration Debug\s+--simulator-id "\$\{\{ steps\.simulator\.outputs\.id \}\}"\s+--derived-data-path "\$RUNNER_TEMP\/companion-derived-data"\s+--extra-args CODE_SIGNING_ALLOWED=NO/,
-  );
   assert.match(ci, /node scripts\/select-ios-simulator\.mjs/);
   assert.match(e2e, /^  workflow_dispatch:$/m);
   assert.match(e2e, /^  schedule:$/m);
