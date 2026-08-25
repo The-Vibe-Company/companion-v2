@@ -105,7 +105,7 @@ struct ChatView: View {
                     name: currentCompanion.name,
                     icon: currentCompanion.icon,
                     size: 32,
-                    isReplying: currentCompanion.runtime.replying
+                    state: currentCompanion.runtime.replying ? .thinking : .idle
                 )
                 VStack(alignment: .leading, spacing: 1) {
                     Text(currentCompanion.name)
@@ -169,7 +169,7 @@ struct ChatView: View {
 
     private var emptyState: some View {
         VStack(spacing: 18) {
-            CompanionAvatar(name: currentCompanion.name, icon: currentCompanion.icon, size: 76)
+            CompanionAvatar(name: currentCompanion.name, icon: currentCompanion.icon, size: 76, state: .idle)
             VStack(spacing: 6) {
                 Text("Start the conversation")
                     .font(.title3.weight(.semibold))
@@ -382,7 +382,7 @@ struct ChatMessageBubble: View {
             if kind == .mine { Spacer(minLength: 54) }
 
             if kind == .assistant {
-                CompanionAvatar(name: companionName, icon: icon, size: 30)
+                CompanionAvatar(name: companionName, icon: icon, size: 30, state: .still)
                     .accessibilityHidden(true)
             }
 

@@ -75,7 +75,7 @@ struct CreateCompanionView: View {
     private var identityCard: some View {
         CompanionManagementCard("Identity") {
             HStack(spacing: 18) {
-                CompanionAvatar(name: displayName, icon: icon, size: 86)
+                CompanionAvatar(name: displayName, icon: icon, size: 86, state: .thinking)
                     .accessibilityLabel("Preview for \(displayName)")
 
                 VStack(alignment: .leading, spacing: 10) {

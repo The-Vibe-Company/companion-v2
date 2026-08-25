@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 
 final class CompanionUITests: XCTestCase {
@@ -92,4 +93,128 @@ final class CompanionUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Knowledge MCP"].waitForExistence(timeout: 2))
     }
 
+    @MainActor
+    func testCompanionIconCatalogExposesEveryVariantAndState() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-icon-demo"]
+        app.launch()
+
+        XCTAssertTrue(app.navigationBars["Companion icon catalog"].waitForExistence(timeout: 5))
+        try captureScreenshot(named: "catalog-top.png")
+
+        for shape in 0..<8 {
+            let element = app.descendants(matching: .any)["demo.icon.shape.\(shape)"]
+            XCTAssertTrue(element.exists)
+            XCTAssertTrue(element.label.contains("Companion"), "Shape \(shape) should have a Companion VoiceOver label")
+        }
+        for mouth in 0..<5 {
+            let element = app.descendants(matching: .any)["demo.icon.mouth.\(mouth)"]
+            XCTAssertTrue(element.exists)
+            XCTAssertTrue(element.label.contains("Companion"), "Mouth \(mouth) should have a Companion VoiceOver label")
+        }
+        for accessory in 0..<7 {
+            let element = app.descendants(matching: .any)["demo.icon.accessory.\(accessory)"]
+            XCTAssertTrue(element.exists)
+            XCTAssertTrue(element.label.contains("Companion"), "Accessory \(accessory) should have a Companion VoiceOver label")
+        }
+
+        app.swipeUp()
+        app.swipeUp()
+        for color in 0..<11 {
+            let element = app.descendants(matching: .any)["demo.icon.color.\(color)"]
+            XCTAssertTrue(element.exists)
+            XCTAssertTrue(element.label.contains("Companion"), "Color \(color) should have a Companion VoiceOver label")
+        }
+        for (identifier, label) in [("idle", "Idle"), ("thinking", "Thinking"), ("still", "Still")] {
+            let element = app.descendants(matching: .any)["demo.icon.state.\(identifier)"]
+            XCTAssertTrue(element.exists)
+            XCTAssertTrue(element.label.contains(label))
+            XCTAssertTrue(element.label.contains("Companion"), "\(label) should have a Companion VoiceOver label")
+        }
+        for size in [30, 52, 86] {
+            let element = app.descendants(matching: .any)["demo.icon.size.\(size)"]
+            XCTAssertTrue(element.exists)
+            XCTAssertTrue(element.label.contains("Companion"), "Size \(size) should have a Companion VoiceOver label")
+        }
+
+        try captureScreenshot(named: "catalog-bottom.png")
+
+        app.terminate()
+
+        let reducedMotionApp = XCUIApplication()
+        reducedMotionApp.launchArguments = ["-companion-icon-demo", "-companion-reduce-motion"]
+        reducedMotionApp.launch()
+
+        XCTAssertTrue(reducedMotionApp.navigationBars["Companion icon catalog"].waitForExistence(timeout: 5))
+        let reduceMotionIndicator = reducedMotionApp.descendants(matching: .any)["demo.icon.reduce-motion"]
+        XCTAssertTrue(reduceMotionIndicator.waitForExistence(timeout: 2))
+        XCTAssertEqual(reduceMotionIndicator.label, "Reduce Motion")
+        XCTAssertEqual(reduceMotionIndicator.value as? String, "On")
+        try captureScreenshot(named: "catalog-reduce-motion.png")
+    }
+
+    @MainActor
+    func testCompanionAvatarScreenshotsAcrossDemos() throws {
+        let chat = XCUIApplication()
+        chat.launchArguments = ["-glass-chat-demo", "-companion-avatar-ui-evidence"]
+        chat.launch()
+
+        let composer = chat.descendants(matching: .any)["demo.composer"]
+        let send = chat.buttons["demo.send"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        XCTAssertTrue(send.exists)
+        composer.tap()
+        composer.typeText("Prépare une réponse.")
+        send.tap()
+
+        let replying = chat.descendants(matching: .any).matching(
+            NSPredicate(format: "label CONTAINS %@", "Companion écrit une réponse")
+        ).firstMatch
+        XCTAssertTrue(replying.waitForExistence(timeout: 2))
+        XCTAssertTrue(replying.label.contains("Companion"))
+        try captureScreenshot(named: "chat-thinking.png")
+
+        let rosterButton = chat.buttons["Ouvrir les conversations"]
+        XCTAssertTrue(rosterButton.waitForExistence(timeout: 2))
+        rosterButton.tap()
+        XCTAssertTrue(chat.navigationBars["Conversations"].waitForExistence(timeout: 2))
+        let rosterEntry = chat.buttons["Companion, En ligne, Direction iOS 26 validée"]
+        XCTAssertTrue(rosterEntry.waitForExistence(timeout: 2))
+        XCTAssertTrue(rosterEntry.label.contains("Companion"))
+        try captureScreenshot(named: "roster-idle.png")
+
+        chat.terminate()
+
+        let creation = XCUIApplication()
+        creation.launchArguments = ["-glass-management-demo"]
+        creation.launch()
+
+        XCTAssertTrue(creation.staticTexts["Create a Companion"].waitForExistence(timeout: 5))
+        let creationAvatar = creation.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "Nova, Companion")
+        ).firstMatch
+        XCTAssertTrue(creationAvatar.waitForExistence(timeout: 2))
+        XCTAssertTrue(creationAvatar.label.contains("Nova"))
+        XCTAssertTrue(creationAvatar.label.contains("Companion"))
+        try captureScreenshot(named: "creation-thinking.png")
+    }
+
+    @MainActor
+    private func captureScreenshot(named filename: String) throws {
+        let screenshot = XCUIScreen.main.screenshot()
+        let attachment = XCTAttachment(screenshot: screenshot)
+        attachment.name = filename
+        attachment.lifetime = .keepAlways
+        add(attachment)
+
+        guard let directoryPath = ProcessInfo.processInfo.environment["COMPANION_SCREENSHOT_DIR"],
+              !directoryPath.isEmpty else { return }
+
+        let directoryURL = URL(fileURLWithPath: directoryPath, isDirectory: true)
+        try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        try screenshot.pngRepresentation.write(
+            to: directoryURL.appendingPathComponent(filename),
+            options: .atomic
+        )
+    }
 }
