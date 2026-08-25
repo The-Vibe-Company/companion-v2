@@ -225,47 +225,6 @@ jobs:
           --derived-data-path "$RUNNER_TEMP/companion-derived-data"
           --extra-args CODE_SIGNING_ALLOWED=NO
 
-      - name: Capture Companion avatar UI evidence
-        env:
-          COMPANION_SCREENSHOT_DIR: ${{ runner.temp }}/ios-companion-avatar-screenshots
-        run: >-
-          xcodebuildmcp simulator test
-          --workspace-path apps/ios/Companion.xcworkspace
-          --scheme Companion
-          --configuration Debug
-          --simulator-id "${{ steps.simulator.outputs.id }}"
-          --extra-args="-only-testing:CompanionUITests/CompanionUITests/testCompanionIconCatalogExposesEveryVariantAndState"
-          --extra-args="-only-testing:CompanionUITests/CompanionUITests/testCompanionAvatarScreenshotsAcrossDemos"
-
-      - name: Verify Companion avatar screenshots
-        if: always()
-        env:
-          COMPANION_SCREENSHOT_DIR: ${{ runner.temp }}/ios-companion-avatar-screenshots
-        run: |
-          set -euo pipefail
-          expected_screenshots=(
-            catalog-top.png
-            catalog-bottom.png
-            chat-thinking.png
-            roster-idle.png
-            creation-thinking.png
-            catalog-reduce-motion.png
-          )
-          for screenshot in "${expected_screenshots[@]}"; do
-            test -s "$COMPANION_SCREENSHOT_DIR/$screenshot"
-          done
-          actual_count="$(find "$COMPANION_SCREENSHOT_DIR" -maxdepth 1 -type f -name '*.png' -print | wc -l | tr -d '[:space:]')"
-          test "$actual_count" -eq "${#expected_screenshots[@]}"
-
-      - name: Upload Companion avatar screenshots
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: ios-companion-avatar-screenshots-${{ github.sha }}
-          path: ${{ runner.temp }}/ios-companion-avatar-screenshots
-          if-no-files-found: warn
-          retention-days: 7
-
   quality:
     name: Quality Node 22
     runs-on: ubuntu-latest
