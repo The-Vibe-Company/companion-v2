@@ -229,6 +229,17 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    func testNotificationDemoOpensTheTargetConversationAfterRosterRestore() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-roster-demo", "-companion-notification-demo"]
+        app.launchEnvironment["COMPANION_API_URL"] = "http://127.0.0.1:9"
+        app.launch()
+
+        XCTAssertTrue(app.staticTexts["Conversation unavailable"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Companions"].exists)
+    }
+
+    @MainActor
     func testOwnerRosterRetriesAnAmbiguousDeleteWithTheRetainedRequest() throws {
         let app = launchCompanionRoster(access: "owner")
         let row = app.descendants(matching: .any)["companion.row.c96ab360-00f3-4497-a51a-51442db8add1"]

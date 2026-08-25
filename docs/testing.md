@@ -22,6 +22,7 @@ simulator; lifecycle commands must never execute against the CI host.
 | Agent Auth child PATs inherit only the active exact-workspace grant snapshot | PAT-to-PAT minting, caller-chosen scope/org, expired inheritance, target mismatch, or plaintext persistence | Contracts + Core + HTTP + PostgreSQL + bundled client | Remove provenance, target binding, pipe-only handoff, or redaction |
 | One accepted message creates exactly one durable turn | Duplicate message/turn after client or proxy retry | Contracts + HTTP + PostgreSQL | Remove `(companion_id, client_message_id)` uniqueness |
 | A due Companion routine fires exactly once per scheduled instant | Duplicate turn after worker retry, catch-up after flag-off, or pileup on an in-flight routine turn | Core + worker + PostgreSQL | Drop uuidv5 stamping, skip-missed grace, or the active-turn fence |
+| A Companion response notifies only its still-authorized durable author | Cross-user preview disclosure, duplicate push, stale-device delivery, or cancelled-turn alert | Contracts + HTTP + worker + PostgreSQL + iOS | Skip claim-time ACL revalidation or event uniqueness |
 | The API persists runtime intent but never contacts Box/Pi | Lost work after `202`, request-held lifecycle, or duplicate executor | HTTP + provider spy + PostgreSQL | Construct the Box adapter in an API route |
 | Only one attempt runs per Companion while later turns stay ordered | Concurrent prompts or queue reordering | Runtime unit + PostgreSQL + simulator | Remove running-attempt uniqueness or queue ordering |
 | Runtime lease epoch fences stale writers | A dead replica checkpoints or settles after takeover | Two runtime replicas + PostgreSQL | Remove epoch from checkpoint/settle predicate |
@@ -87,6 +88,9 @@ and takeover around the installed-tree checkpoint.
   cross-tenant ids, revoked actors, and no-admin-override personal data.
 - Use two real connections to race claim, renew, checkpoint, settlement, lease expiry/takeover, and
   stale epochs.
+- For APNs, cover author-only multi-device fan-out, repeated decisions, no cancellation delivery,
+  24-hour expiry, claim-time membership/access revocation, SKIP LOCKED concurrency, stale fences,
+  bounded previews, and strict API/worker/runtime role separation.
 - Race image-build claims, prove a worker cannot claim another digest/name, reject stale image
   outcomes and cleanup fences, prove epochs never repeat after settlement, verify
   30/60/120/300-second backoff and the four-attempt cap, and
@@ -111,6 +115,8 @@ Run API + worker + runtime + web + migrated PostgreSQL + Box/Pi simulator and pr
   prompt or Box;
 - two concurrent sends execute in order, one Pi attempt at a time;
 - `ask_user` persists a decision and resumes the same attempt;
+- a success and each new pending decision fan out once to the author's active devices, while a
+  queued cancellation creates no delivery;
 - `propose_routine` projects a card, approve creates the row, and deny/expiry leave none;
 - provider failure, Pi silence, crash loop, unknown event, and oversized line end visibly;
 - a vision model reads the checked-in image fixture and a text-only model fails explicitly;

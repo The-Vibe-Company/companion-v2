@@ -195,7 +195,7 @@ export const COMPANION_SQL_BUDGET_CONTRACT: Readonly<Record<string, readonly str
 
 /**
  * `companion%` functions that carry `interval` literals but belong to *other* subsystems (skill
- * runs, projects, GitHub mirrors, billing, tickets, tokens, desktop replay) — outside the
+ * runs, projects, GitHub mirrors, billing, notifications, tickets, tokens, desktop replay) — outside the
  * Companions-runtime budget contract. Listing them explicitly keeps the integration test's default
  * strict: a brand-new interval literal in any unlisted function fails until it is registered here
  * or in {@link COMPANION_SQL_BUDGET_CONTRACT}.
@@ -205,6 +205,7 @@ export const COMPANION_SQL_UNTRACKED_INTERVAL_FUNCTIONS: readonly string[] = [
   "companion_issue_public_skill_transfer_ticket",
   "companion_list_billing_sync_candidates",
   "companion_lock_api_token_for_refresh",
+  "companion_notification_enqueue",
   "companion_runtime_consume_desktop_request",
 ];
 

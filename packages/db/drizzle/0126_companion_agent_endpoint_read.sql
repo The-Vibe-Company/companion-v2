@@ -1,5 +1,5 @@
 -- Phase 2.1 direct transport (read path): let the runtime executor read the hosted Box agent
--- endpoint registered by staging (0124) on the claim path. companion_runtime_get_material gains
+-- endpoint registered by staging (0125) on the claim path. companion_runtime_get_material gains
 -- box_id plus the three agent endpoint columns so a claim can rebuild the direct event channel
 -- after a process restart. Adding output columns changes the function's return type, so the
 -- previous definition is dropped rather than replaced (latest-wins convention; body copied from
@@ -310,8 +310,8 @@ REVOKE ALL ON FUNCTION public.companion_runtime_get_material(
 ) FROM PUBLIC;
 --> statement-breakpoint
 
--- Mirror the runtime executor already trusted by the fenced material snapshot writer (0124),
--- exactly as 0124 mirrored from this function before it was dropped above. The migration never
+-- Mirror the runtime executor already trusted by the fenced material snapshot writer (0125),
+-- exactly as 0125 mirrored from this function before it was dropped above. The migration never
 -- grants the function to API/worker roles and fails closed if the split-role ACL is ambiguous.
 DO $companion_agent_endpoint_read_acl$
 DECLARE

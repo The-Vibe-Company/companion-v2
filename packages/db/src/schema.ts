@@ -51,6 +51,12 @@ export const companionTurnStatusEnum = pgEnum("companion_turn_status", [
   "queued", "starting", "dispatching", "running", "needs_input",
   "succeeded", "failed", "interrupted", "cancelled",
 ]);
+export const companionNotificationEnvironmentEnum = pgEnum("companion_notification_environment", [
+  "sandbox", "production",
+]);
+export const companionNotificationEventEnum = pgEnum("companion_notification_event", [
+  "reply", "input_required", "failed", "interrupted",
+]);
 export const companionAttemptStatusEnum = pgEnum("companion_attempt_status", [
   "starting", "dispatching", "running", "needs_input",
   "succeeded", "failed", "interrupted", "cancelled",
@@ -815,7 +821,7 @@ export const companionRuntimeInstances = pgTable(
     materialClientSurface: companionClientSurfaceEnum("material_client_surface"),
     materialPiInvocationId: text("material_pi_invocation_id"),
     materialExpiresAt: timestamp("material_expires_at", { withTimezone: true }),
-    // Hosted direct-transport agent endpoint (0124). The URL is token-free; every credential lives
+    // Hosted direct-transport agent endpoint (0125). The URL is token-free; every credential lives
     // in the masterKey ciphertext, and observed_at is the freshness bound a consumer must judge.
     agentHostedUrl: text("agent_hosted_url"),
     agentTokenCiphertext: text("agent_token_ciphertext"),
@@ -997,6 +1003,93 @@ export const companionTurns = pgTable(
     messageEvent: index("companion_turns_message_event_idx").on(t.companionId, t.messageEventId),
     routineOriginCheck: check("companion_turns_routine_origin_check", sql`(${t.routineId} is null or ${t.routineName} is not null) and (${t.routineName} is null or (char_length(${t.routineName}) between 1 and 80 and ${t.routineName} !~ E'[\\n\\r]'))`),
     triggerOriginCheck: check("companion_turns_trigger_origin_check", sql`(${t.triggerId} is null or ${t.triggerName} is not null) and (${t.triggerName} is null or (char_length(${t.triggerName}) between 1 and 80 and ${t.triggerName} !~ E'[\\n\\r]')) and not (${t.routineName} is not null and ${t.triggerName} is not null)`),
+  }),
+);
+
+/** One APNs installation owned by the currently authenticated member in one workspace. */
+export const companionNotificationDevices = pgTable(
+  "companion_notification_devices",
+  {
+    id: uuid("id").primaryKey().notNull().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    installationId: uuid("installation_id").notNull(),
+    userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    platform: text("platform").notNull().default("ios"),
+    deviceToken: text("device_token").notNull(),
+    environment: companionNotificationEnvironmentEnum("environment").notNull(),
+    bundleId: text("bundle_id").notNull(),
+    disabledAt: timestamp("disabled_at", { withTimezone: true }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    installationUnique: unique("companion_notification_devices_installation_uq").on(t.installationId),
+    tokenUnique: unique("companion_notification_devices_token_uq").on(
+      t.environment, t.bundleId, t.deviceToken,
+    ),
+    membershipFk: foreignKey({
+      columns: [t.orgId, t.userId],
+      foreignColumns: [memberships.orgId, memberships.userId],
+      name: "companion_notification_devices_membership_fk",
+    }).onDelete("cascade"),
+    platformCheck: check("companion_notification_devices_platform_check", sql`${t.platform} = 'ios'`),
+    tokenCheck: check(
+      "companion_notification_devices_token_check",
+      sql`char_length(${t.deviceToken}) between 64 and 512 and ${t.deviceToken} ~ '^[a-f0-9]+$'`,
+    ),
+    targetCheck: check(
+      "companion_notification_devices_target_check",
+      sql`(${t.environment} = 'sandbox' and ${t.bundleId} = 'dev.companion.mobile.dev') or (${t.environment} = 'production' and ${t.bundleId} = 'dev.companion.mobile')`,
+    ),
+  }),
+);
+
+/** Durable per-device APNs delivery intent, created with the transcript/turn state it reports. */
+export const companionNotificationDeliveries = pgTable(
+  "companion_notification_deliveries",
+  {
+    id: uuid("id").primaryKey().notNull().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    deviceId: uuid("device_id").notNull().references(() => companionNotificationDevices.id, { onDelete: "cascade" }),
+    companionId: uuid("companion_id").notNull().references(() => companions.id, { onDelete: "cascade" }),
+    recipientUserId: text("recipient_user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    eventKey: text("event_key").notNull(),
+    event: companionNotificationEventEnum("event").notNull(),
+    title: text("title").notNull(),
+    body: text("body").notNull(),
+    availableAt: timestamp("available_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    claimToken: uuid("claim_token"),
+    claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    deviceEventUnique: unique("companion_notification_deliveries_device_event_uq").on(
+      t.deviceId, t.eventKey,
+    ),
+    due: index("companion_notification_deliveries_due_idx").on(t.availableAt, t.createdAt),
+    expiry: index("companion_notification_deliveries_expiry_idx").on(t.expiresAt),
+    membershipFk: foreignKey({
+      columns: [t.orgId, t.recipientUserId],
+      foreignColumns: [memberships.orgId, memberships.userId],
+      name: "companion_notification_deliveries_membership_fk",
+    }).onDelete("cascade"),
+    companionOrgFk: foreignKey({
+      columns: [t.orgId, t.companionId],
+      foreignColumns: [companions.orgId, companions.id],
+      name: "companion_notification_deliveries_companion_fk",
+    }).onDelete("cascade"),
+    attemptCheck: check("companion_notification_deliveries_attempt_check", sql`${t.attemptCount} >= 0`),
+    contentCheck: check(
+      "companion_notification_deliveries_content_check",
+      sql`char_length(${t.title}) between 1 and 180 and char_length(${t.body}) between 1 and 180 and ${t.title} !~ E'[\\n\\r]' and ${t.body} !~ E'[\\n\\r]'`,
+    ),
+    claimCheck: check(
+      "companion_notification_deliveries_claim_check",
+      sql`(${t.claimToken} is null) = (${t.claimExpiresAt} is null)`,
+    ),
   }),
 );
 

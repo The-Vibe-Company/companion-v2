@@ -74,10 +74,16 @@ public final class SessionStore {
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
     private var restored = false
+    private var notificationInstallationID: UUID?
 
-    public init(apiURL: URL, storage: any SessionStorage = KeychainSessionStorage()) {
+    public init(
+        apiURL: URL,
+        storage: any SessionStorage = KeychainSessionStorage(),
+        notificationInstallationID: UUID? = nil
+    ) {
         self.client = APIClient(baseURL: apiURL)
         self.storage = storage
+        self.notificationInstallationID = notificationInstallationID
     }
 
     public func restore() async {
@@ -139,8 +145,28 @@ public final class SessionStore {
     }
 
     public func signOut() async {
+        if let notificationInstallationID {
+            try? await client.unregisterNotificationDevice(installationID: notificationInstallationID)
+        }
         await client.signOut()
         await clearLocalSession()
+    }
+
+    public func registerNotificationDevice(
+        installationID: UUID,
+        registration: NotificationDeviceRegistration
+    ) async throws {
+        notificationInstallationID = installationID
+        do {
+            try await client.registerNotificationDevice(
+                installationID: installationID,
+                registration: registration
+            )
+            await persistRollingAuthority()
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
     }
 
     public func listCompanions() async throws -> [CompanionSummary] {

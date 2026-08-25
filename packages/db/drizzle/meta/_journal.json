@@ -874,21 +874,28 @@
       "idx": 124,
       "version": "7",
       "when": 1790528800000,
-      "tag": "0124_companion_box_agent_endpoint",
+      "tag": "0124_companion_notifications",
       "breakpoints": true
     },
     {
       "idx": 125,
       "version": "7",
       "when": 1790615200000,
-      "tag": "0125_companion_agent_endpoint_read",
+      "tag": "0125_companion_box_agent_endpoint",
       "breakpoints": true
     },
     {
       "idx": 126,
       "version": "7",
       "when": 1790701600000,
-      "tag": "0126_companion_dispatch_resolution",
+      "tag": "0126_companion_agent_endpoint_read",
+      "breakpoints": true
+    },
+    {
+      "idx": 127,
+      "version": "7",
+      "when": 1790788000000,
+      "tag": "0127_companion_dispatch_resolution",
       "breakpoints": true
     }
   ]

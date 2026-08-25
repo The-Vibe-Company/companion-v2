@@ -9,6 +9,7 @@ struct CompanionListServices {
 
 struct CompanionListView: View {
     @Environment(SessionStore.self) private var sessionStore
+    @Environment(NotificationCoordinator.self) private var notifications
     let session: Session
     private let services: CompanionListServices?
     @State private var path: [CompanionRoute] = []
@@ -49,6 +50,9 @@ struct CompanionListView: View {
             }
             .navigationTitle("Companions")
             .navigationBarTitleDisplayMode(.large)
+            .navigationDestination(for: CompanionRoute.self) { route in
+                destination(for: route)
+            }
             .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search Companions")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -116,6 +120,9 @@ struct CompanionListView: View {
                     if !Task.isCancelled { await reload(silently: true) }
                 }
             }
+            .onChange(of: notifications.pendingDestination) { _, _ in
+                openPendingNotificationIfPossible()
+            }
             .tint(Color.companionInk)
         }
     }
@@ -180,9 +187,6 @@ struct CompanionListView: View {
         }
         .refreshable { await reload() }
         .scrollIndicators(.hidden)
-        .navigationDestination(for: CompanionRoute.self) { route in
-            destination(for: route)
-        }
     }
 
     private var loadingState: some View {
@@ -263,6 +267,8 @@ struct CompanionListView: View {
                 path.removeAll()
             }
             error = nil
+            loading = false
+            openPendingNotificationIfPossible()
         } catch let apiError as APIError where apiError.status == 403 || apiError.status == 404 {
             guard generation == reloadGeneration else { return }
             error = "Hosted Companions are not enabled for this workspace."
@@ -273,6 +279,20 @@ struct CompanionListView: View {
         if generation == reloadGeneration { loading = false }
     }
 
+    private func openPendingNotificationIfPossible() {
+        guard !loading, let destination = notifications.pendingDestination else { return }
+        guard destination.orgID == session.orgID else {
+            notifications.discardPendingDestination()
+            return
+        }
+        guard companions.contains(where: { $0.id == destination.companionID }) else {
+            notifications.discardPendingDestination()
+            return
+        }
+        path = [.chat(destination.companionID)]
+        notifications.consume(destination)
+    }
+
     @ViewBuilder
     private func destination(for route: CompanionRoute) -> some View {
         if let companion = companions.first(where: { $0.id == route.companionID }) {
@@ -280,6 +300,12 @@ struct CompanionListView: View {
             case .chat(let companionID):
                 ChatView(companion: companion) {
                     path.append(.settings(companionID))
+                }
+                .onAppear { notifications.activeCompanionID = companionID }
+                .onDisappear {
+                    if notifications.activeCompanionID == companionID {
+                        notifications.activeCompanionID = nil
+                    }
                 }
             case .settings:
                 CompanionSettingsView(

@@ -248,6 +248,32 @@ describe("Skills Hub runtime-role grants", () => {
     expect(triggerBlock).not.toContain("companion_runtime_functions :=");
   });
 
+  it("keeps APNs state private and splits registration from fenced delivery", async () => {
+    const sql = await readFile(await resolveRuntimeRoleGrantsFile(), "utf8");
+    expect(sql).toContain("'companion_notification_devices'");
+    expect(sql).toContain("'companion_notification_deliveries'");
+    const sentinel = sql.indexOf("'public.companion_api_register_notification_device");
+    const block = sql.slice(sentinel, sql.indexOf("-- A migration owner can carry arbitrary", sentinel));
+    expect(block).toContain(
+      "'public.companion_api_register_notification_device(uuid,uuid,text,text,public.companion_notification_environment,text)'::regprocedure",
+    );
+    expect(block).toContain(
+      "'public.companion_api_unregister_notification_device(uuid,uuid)'::regprocedure",
+    );
+    for (const signature of [
+      "companion_claim_notification_deliveries(text,integer,integer)",
+      "companion_validate_notification_delivery(uuid,uuid)",
+      "companion_complete_notification_delivery(uuid,uuid)",
+      "companion_defer_notification_delivery(uuid,uuid,integer)",
+      "companion_invalidate_notification_device(uuid,uuid)",
+    ]) {
+      expect(block).toContain(`'public.${signature}'::regprocedure`);
+    }
+    expect(block).toContain(
+      "'public.companion_notification_enqueue(uuid,uuid,text,text,public.companion_notification_event,text,text)'::regprocedure",
+    );
+  });
+
   it("keeps capability-managed Companion aggregates read-only for API and hidden from worker", async () => {
     const sql = await readFile(await resolveRuntimeRoleGrantsFile(), "utf8");
     const capabilityTables = [

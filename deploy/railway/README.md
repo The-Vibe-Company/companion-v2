@@ -7,7 +7,7 @@ dependencies:
 | --- | --- | --- | --- |
 | `web` | `web.railway.json` | Next.js UI | Public |
 | `api` | `api.railway.json` | Auth, REST/tRPC, durable runtime intent | Public |
-| `worker` | `worker.railway.json` | GitHub, billing, Skill Database cleanup, Companion routines | Private, no inbound route |
+| `worker` | `worker.railway.json` | GitHub, billing, cleanup, routines, APNs delivery | Private, no inbound route |
 | `runtime` | `runtime.railway.json` | Sole Box/Pi owner and Runtime v2 executor | Private, no public domain |
 | `release` | `release.railway.json` | Owner-only migrations and grant cutover, then exit | One-shot, no route |
 
@@ -28,7 +28,7 @@ deployments, so scope each secret deliberately:
 
 | Variable or credential | web | api | worker | runtime | release |
 | --- | :---: | :---: | :---: | :---: | :---: |
-| Companions flag and email allowlist | yes | yes | no | yes | no |
+| Companions flag and email allowlist | yes | yes | yes | yes | no |
 | API PostgreSQL URL | no | yes | no | no | no |
 | Worker PostgreSQL URL | no | no | yes | no | no |
 | Runtime PostgreSQL URL | no | no | no | yes | no |
@@ -39,6 +39,7 @@ deployments, so scope each secret deliberately:
 | S3 Skill archive access | no | read/write | cleanup as required | read-only | historical cutover only |
 | GitHub MCP OAuth client id/secret | no | yes | no | yes | no |
 | GitHub App private key / billing worker secrets | no | no | yes | no | no |
+| APNs key id, team id, and private key | no | no | yes | no | no |
 
 Use sealed values for provider, database, HMAC, envelope, OAuth, S3, email, and billing secrets.
 Generate `COMPANION_RUNTIME_DESKTOP_HMAC_SECRET` independently from
@@ -238,8 +239,8 @@ purge-capable staged release before deploying a release that removes the legacy 
 1. Back up PostgreSQL and record the deployed commit and Box account/environment.
 2. Set `COMPANION_COMPANIONS_ENABLED=false` on web, API, worker, and runtime. Deploy all four and
    wait for active work to reach an interrupted checkpoint. Verify the database runtime gate is
-   disabled. The worker reads the flag only to decide whether Companion routines may enqueue turns;
-   it never holds a Box credential.
+   disabled. The worker reads the flag only to decide whether Companion routines may enqueue turns
+   or APNs deliveries may be claimed; it never holds a Box credential.
 3. Run the [legacy purge](../../docs/runbooks/companions-runtime.md#legacy-purge) from an ephemeral,
    private maintenance execution of the **runtime image**. Give that command the migration-owner URL
    and Box key only for its lifetime; do not add the owner URL to the long-lived runtime service.
@@ -250,8 +251,9 @@ purge-capable staged release before deploying a release that removes the legacy 
 6. Configure the flag and allowlist on web, API, worker, and runtime. Runtime additionally receives
    Box/Pi, envelope master key, public API origin, and read-only Skill archive credentials. API and
    runtime receive the shared desktop HMAC. Deploy runtime first, then API, worker, and web, while
-   user traffic stays quiesced. Leaving the flag off the worker is a supported configuration: every
-   other Companion surface works and only scheduled routines stay dormant.
+   user traffic stays quiesced. Add the Apple token-authentication tuple only to worker after the
+   notification migration is present. Leaving the flag off the worker is a supported configuration:
+   every other Companion surface works while scheduled routines and APNs delivery stay dormant.
 7. Confirm runtime `/healthz` is healthy, inspect the disabled gate epoch, and have the database
    owner call `companion_runtime_enable(<observed_epoch>, '<change-id>')`. This compare-and-set is
    intentionally unavailable to the runtime role.

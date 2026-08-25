@@ -870,6 +870,48 @@ describe("Runtime v2 real-process control plane", () => {
     await expect(apiHealth.json()).resolves.toMatchObject({ release_id: releaseId });
     await expect(runtimeHealth.json()).resolves.toMatchObject({ release_id: releaseId });
 
+    for (const [installationId, tokenByte] of [
+      [randomUUID(), "ab"],
+      [randomUUID(), "cd"],
+    ] as const) {
+      const registration = await apiRequest(`/v1/notification-devices/${installationId}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          platform: "ios",
+          device_token: tokenByte.repeat(32),
+          environment: "sandbox",
+          bundle_id: "dev.companion.mobile.dev",
+        }),
+      });
+      const registrationBody = await registration.text();
+      expect(registration.status, registrationBody).toBe(204);
+      expect(registrationBody).toBe("");
+    }
+    const collaboratingUserId = `notification-collaborator-${suffix}`;
+    await databaseSql!`
+      insert into "user" (id, name, email, email_verified)
+      values (
+        ${collaboratingUserId}, 'Notification collaborator',
+        ${`${collaboratingUserId}@example.test`}, true
+      )
+    `;
+    await databaseSql!`
+      insert into memberships (org_id, user_id, org_role)
+      values (${orgId}::uuid, ${collaboratingUserId}, 'developer')
+    `;
+    await databaseSql!`
+      insert into companion_workspace_access (org_id, companion_id, owner_id, role, granted_by)
+      values (${orgId}::uuid, ${companionId}::uuid, ${userId}, 'editor', ${userId})
+    `;
+    await databaseSql!`
+      insert into companion_notification_devices (
+        org_id, installation_id, user_id, device_token, environment, bundle_id
+      ) values (
+        ${orgId}::uuid, ${randomUUID()}::uuid, ${collaboratingUserId}, ${"ef".repeat(32)},
+        'sandbox', 'dev.companion.mobile.dev'
+      )
+    `;
+
     const coldAcceptedAt = Date.now();
     const coldMessageId = randomUUID();
     const cold = await apiJson<{ turn: { id: string; status: string } }>(
@@ -906,6 +948,28 @@ describe("Runtime v2 real-process control plane", () => {
     const runtimeOutput = runtimeProcess?.output() ?? "";
     expect(runtimeOutput).toContain("\"phase\":\"agent_registration\"");
     expect(runtimeOutput).not.toContain("runtime.direct_transport.fallback");
+    const coldNotifications = await databaseSql!<Array<{
+      event: string;
+      title: string;
+      body: string;
+      expiresInHours: number;
+      recipientUserId: string;
+    }>>`
+      select delivery.event::text, delivery.title, delivery.body,
+        delivery.recipient_user_id as "recipientUserId",
+        extract(epoch from (delivery.expires_at - delivery.created_at)) / 3600 as "expiresInHours"
+      from companion_notification_deliveries delivery
+      where delivery.event_key like ${`turn:${cold.turn.id}:succeeded:%`}
+      order by delivery.created_at
+    `;
+    expect(coldNotifications).toHaveLength(2);
+    expect(coldNotifications.every((delivery) =>
+      delivery.event === "reply"
+      && delivery.title === "Runtime full stack replied"
+      && delivery.body.length > 0
+      && delivery.body.length <= 180
+      && delivery.recipientUserId === userId
+      && Number(delivery.expiresInHours) === 24)).toBe(true);
 
     apiProcess = startApi();
     await waitForHttp(`${apiBase}/health`, apiProcess);
@@ -939,6 +1003,222 @@ describe("Runtime v2 real-process control plane", () => {
       202,
     );
     await waitForTurn(decisionAccepted.turn.id, "needs_input", 30_000);
+    const decisionNotifications = await databaseSql!<Array<{
+      event: string;
+      title: string;
+      body: string;
+    }>>`
+      select event::text, title, body
+      from companion_notification_deliveries
+      where event_key like ${`decision:%`}
+      order by created_at
+    `;
+    expect(decisionNotifications).toHaveLength(2);
+    expect(decisionNotifications.every((delivery) =>
+      delivery.event === "input_required"
+      && delivery.title === "Runtime full stack needs your answer"
+      && delivery.body.length > 0
+      && delivery.body.length <= 180)).toBe(true);
+
+    const cancelled = await apiJson<{ turn: { id: string; status: string } }>(
+      `/v1/companions/${companionId}/messages`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          client_message_id: randomUUID(),
+          client_surface: "web",
+          content: "Cancel this queued notification fixture.",
+        }),
+      },
+      202,
+    );
+    const cancelledResult = await apiJson<{ turn: { status: string } }>(
+      `/v1/companions/${companionId}/turns/${cancelled.turn.id}/cancel`,
+      { method: "POST", body: JSON.stringify({}) },
+      202,
+    );
+    expect(cancelledResult.turn.status).toBe("cancelled");
+    const [cancelledDelivery] = await databaseSql!<Array<{ count: number }>>`
+      select count(*)::int as count from companion_notification_deliveries
+      where event_key like ${`turn:${cancelled.turn.id}:%`}
+    `;
+    expect(cancelledDelivery?.count).toBe(0);
+
+    const notificationWorkerA = postgres(workerUrl, { max: 1 });
+    const notificationWorkerB = postgres(workerUrl, { max: 1 });
+    const notificationApi = postgres(apiUrl, {
+      max: 1,
+      connection: { application_name: "notification-account-switch" },
+    });
+    try {
+      await expect(notificationWorkerA`select count(*) from companion_notification_deliveries`)
+        .rejects.toThrow(/permission denied/);
+
+      const revokedEventKey = `authorization-revoked:${randomUUID()}`;
+      await databaseSql!`
+        select public.companion_notification_enqueue(
+          ${orgId}::uuid, ${companionId}::uuid, ${collaboratingUserId}, ${revokedEventKey},
+          'reply', 'Must not escape', 'Revoked before claim'
+        )
+      `;
+      await databaseSql!`
+        delete from companion_workspace_access
+        where org_id = ${orgId}::uuid and companion_id = ${companionId}::uuid
+      `;
+
+      const expiredEventKey = `expired:${randomUUID()}`;
+      await databaseSql!`
+        select public.companion_notification_enqueue(
+          ${orgId}::uuid, ${companionId}::uuid, ${userId}, ${expiredEventKey},
+          'reply', 'Expired', 'Must not be delivered'
+        )
+      `;
+      await databaseSql!`
+        update companion_notification_deliveries
+        set expires_at = clock_timestamp() - interval '1 second'
+        where event_key = ${expiredEventKey}
+      `;
+
+      const duplicateEventKey = `idempotent:${randomUUID()}`;
+      const [firstFanout] = await databaseSql!<Array<{ inserted: number }>>`
+        select public.companion_notification_enqueue(
+          ${orgId}::uuid, ${companionId}::uuid, ${userId}, ${duplicateEventKey},
+          'reply', 'Bounded title', ${"x".repeat(300)}
+        ) as inserted
+      `;
+      const [secondFanout] = await databaseSql!<Array<{ inserted: number }>>`
+        select public.companion_notification_enqueue(
+          ${orgId}::uuid, ${companionId}::uuid, ${userId}, ${duplicateEventKey},
+          'reply', 'Bounded title', 'Duplicate'
+        ) as inserted
+      `;
+      expect(firstFanout?.inserted).toBe(2);
+      expect(secondFanout?.inserted).toBe(0);
+      const [boundedFanout] = await databaseSql!<Array<{ count: number; maxBody: number }>>`
+        select count(*)::int as count, max(char_length(body))::int as "maxBody"
+        from companion_notification_deliveries where event_key = ${duplicateEventKey}
+      `;
+      expect(boundedFanout).toEqual({ count: 2, maxBody: 180 });
+
+      const [claimsA, claimsB] = await Promise.all([
+        notificationWorkerA<Array<{ deliveryId: string; claimToken: string; eventKey: string }>>`
+          select "deliveryId"::text, "claimToken"::text, "eventKey"
+          from public.companion_claim_notification_deliveries('notification-worker-a', 3, 60)
+        `,
+        notificationWorkerB<Array<{ deliveryId: string; claimToken: string; eventKey: string }>>`
+          select "deliveryId"::text, "claimToken"::text, "eventKey"
+          from public.companion_claim_notification_deliveries('notification-worker-b', 3, 60)
+        `,
+      ]);
+      expect(claimsA.length).toBeGreaterThan(0);
+      expect(claimsB.length).toBeGreaterThan(0);
+      const claimedIds = [...claimsA, ...claimsB].map((claim) => claim.deliveryId);
+      expect(new Set(claimedIds).size).toBe(claimedIds.length);
+      expect([...claimsA, ...claimsB].map((claim) => claim.eventKey))
+        .not.toContain(revokedEventKey);
+      expect([...claimsA, ...claimsB].map((claim) => claim.eventKey))
+        .not.toContain(expiredEventKey);
+
+      const fencedClaim = claimsA[0]!;
+      const [wrongFence] = await notificationWorkerA<Array<{ completed: boolean }>>`
+        select public.companion_complete_notification_delivery(
+          ${fencedClaim.deliveryId}::uuid, ${randomUUID()}::uuid
+        ) as completed
+      `;
+      expect(wrongFence?.completed).toBe(false);
+      for (const claim of [...claimsA, ...claimsB]) {
+        const [settled] = await notificationWorkerA<Array<{ completed: boolean }>>`
+          select public.companion_complete_notification_delivery(
+            ${claim.deliveryId}::uuid, ${claim.claimToken}::uuid
+          ) as completed
+        `;
+        expect(settled?.completed).toBe(true);
+      }
+      const [discarded] = await databaseSql!<Array<{ count: number }>>`
+        select count(*)::int as count from companion_notification_deliveries
+        where event_key in (${revokedEventKey}, ${expiredEventKey})
+      `;
+      expect(discarded?.count).toBe(0);
+
+      const reassignedEventKey = `installation-reassigned:${randomUUID()}`;
+      await databaseSql!`
+        select public.companion_notification_enqueue(
+          ${orgId}::uuid, ${companionId}::uuid, ${userId}, ${reassignedEventKey},
+          'reply', 'Must remain private', 'Claimed before account switch'
+        )
+      `;
+      const [reassignedClaim] = await notificationWorkerA<Array<{
+        deliveryId: string;
+        claimToken: string;
+        deviceId: string;
+      }>>`
+        select "deliveryId"::text, "claimToken"::text, "deviceId"::text
+        from public.companion_claim_notification_deliveries('notification-worker-a', 1, 60)
+      `;
+      if (!reassignedClaim) throw new Error("account-switch fixture was not claimed");
+      const [claimedDevice] = await databaseSql!<Array<{ installationId: string }>>`
+        select installation_id::text as "installationId"
+        from companion_notification_devices where id = ${reassignedClaim.deviceId}::uuid
+      `;
+      if (!claimedDevice) throw new Error("account-switch fixture lost its device");
+      let releaseSend!: () => void;
+      const sendCanFinish = new Promise<void>((resolve) => { releaseSend = resolve; });
+      let markValidated!: () => void;
+      const sendValidated = new Promise<void>((resolve) => { markValidated = resolve; });
+      const heldSend = notificationWorkerA.begin(async (tx) => {
+        const [validation] = await tx<Array<{ valid: boolean }>>`
+          select public.companion_validate_notification_delivery(
+            ${reassignedClaim.deliveryId}::uuid, ${reassignedClaim.claimToken}::uuid
+          ) as valid
+        `;
+        expect(validation?.valid).toBe(true);
+        markValidated();
+        await sendCanFinish;
+        const [completion] = await tx<Array<{ completed: boolean }>>`
+          select public.companion_complete_notification_delivery(
+            ${reassignedClaim.deliveryId}::uuid, ${reassignedClaim.claimToken}::uuid
+          ) as completed
+        `;
+        expect(completion?.completed).toBe(true);
+      });
+      await sendValidated;
+      const accountSwitch = notificationApi.begin(async (tx) => {
+        await tx`select set_config('app.org_id', ${orgId}, true),
+                        set_config('app.user_id', ${collaboratingUserId}, true)`;
+        await tx`
+          select public.companion_api_register_notification_device(
+            ${orgId}::uuid, ${claimedDevice.installationId}::uuid, 'ios', ${"12".repeat(32)},
+            'sandbox', 'dev.companion.mobile.dev'
+          )
+        `;
+      });
+      try {
+        await waitFor("account switch to wait behind the APNs send", async () => {
+          const [waiting] = await databaseSql!<Array<{ waiting: boolean }>>`
+            select (wait_event_type = 'Lock' and wait_event = 'advisory') as waiting
+            from pg_stat_activity
+            where application_name = 'notification-account-switch'
+              and state = 'active'
+          `;
+          return waiting?.waiting === true;
+        });
+      } finally {
+        releaseSend();
+      }
+      await Promise.all([heldSend, accountSwitch]);
+      const [switchedDevice] = await databaseSql!<Array<{ userId: string; deliveryCount: number }>>`
+        select device.user_id as "userId", count(delivery.id)::int as "deliveryCount"
+        from companion_notification_devices device
+        left join companion_notification_deliveries delivery on delivery.device_id = device.id
+        where device.installation_id = ${claimedDevice.installationId}::uuid
+        group by device.user_id
+      `;
+      expect(switchedDevice).toEqual({ userId: collaboratingUserId, deliveryCount: 0 });
+    } finally {
+      await notificationWorkerA.end({ timeout: 1 });
+      await notificationWorkerB.end({ timeout: 1 });
+      await notificationApi.end({ timeout: 1 });
+    }
     const [decision] = await databaseSql!<Array<{ requestKey: string }>>`
       select request_key as "requestKey" from companion_decision_deliveries
       where turn_id = ${decisionAccepted.turn.id}::uuid and decision_status = 'pending'
