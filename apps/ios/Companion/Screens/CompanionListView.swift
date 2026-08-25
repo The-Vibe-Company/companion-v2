@@ -34,7 +34,7 @@ struct CompanionListView: View {
 
     var body: some View {
         NavigationStack(path: $path) {
-            CompanionBackdrop {
+            CompanionBackdrop(style: .neutral) {
                 Group {
                     if loading && companions.isEmpty {
                         loadingState
@@ -82,12 +82,15 @@ struct CompanionListView: View {
                     companions.insert(companion, at: 0)
                     Task { await reload(silently: true) }
                 }
+                .tint(Color.companionAccent)
             }
             .sheet(isPresented: $showingProviders) {
                 ProviderManagementView()
+                    .tint(Color.companionAccent)
             }
             .sheet(isPresented: $showingPlugins) {
                 PluginManagementView()
+                    .tint(Color.companionAccent)
             }
             .confirmationDialog(
                 "Delete \(companionToDelete?.name ?? "Companion")?",
@@ -113,6 +116,7 @@ struct CompanionListView: View {
                     if !Task.isCancelled { await reload(silently: true) }
                 }
             }
+            .tint(Color.companionInk)
         }
     }
 
@@ -507,7 +511,7 @@ private struct CompanionRow: View {
                     Spacer(minLength: 4)
                     if companion.unread {
                         Circle()
-                            .fill(Color.companionAccent)
+                            .fill(visualTheme.accent)
                             .frame(width: 8, height: 8)
                             .accessibilityLabel("Unread")
                     }
@@ -543,13 +547,17 @@ private struct CompanionRow: View {
     }
 
     private var statusColor: Color {
-        if companion.runtime.replying { return .companionAccent }
+        if companion.runtime.replying { return visualTheme.accent }
         switch companion.runtime.state {
         case .running: return .companionSuccess
         case .provisioning: return .companionWarning
         case .error: return .companionDanger
         case .notCreated, .stopped, .stopping, .unknown: return .companionMuted
         }
+    }
+
+    private var visualTheme: CompanionVisualTheme {
+        CompanionVisualTheme(icon: companion.icon)
     }
 
     private var timeLabel: String {
