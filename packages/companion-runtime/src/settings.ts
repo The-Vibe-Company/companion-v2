@@ -1,3 +1,6 @@
+/* oxlint-disable anti-slop/no-conditional-empty-object-spread, anti-slop/no-known-value-widening -- Predates the incremental anti-slop gate; file reawakened by an unrelated budget/reliability edit, existing debt not rewritten here. */
+import { COMPANION_BUDGETS } from "@companion/contracts";
+
 import { RuntimeInvariantError } from "./errors";
 import { runtimeSucceeded, type RuntimeWorkDisposition } from "./handler";
 import type { LeaseSession } from "./leaseSession";
@@ -6,7 +9,7 @@ import { retryIdempotentLifecycle, type IdempotentLifecycleCall } from "./retry"
 import { activateRuntimeSettings } from "./settingsActivation";
 import type { RuntimeAuthorization, SettingsRuntimeClaim } from "./types";
 
-const SETTINGS_ACTIVATION_DEADLINE_MS = 10 * 60 * 1_000;
+const SETTINGS_ACTIVATION_DEADLINE_MS = COMPANION_BUDGETS.settingsActivationDeadlineMs;
 
 interface SettingsContext {
   claim: SettingsRuntimeClaim;
@@ -126,6 +129,7 @@ export async function handleSettings(
             await context.deps.store.recordMaterialSnapshot(context.session.fence, {
               clientSurface: live.clientSurface,
               materialExpiresAt: staged.materialExpiresAt,
+              agentEndpoint: staged.agentEndpoint ?? null,
             }));
           return staged;
         });

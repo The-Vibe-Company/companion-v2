@@ -428,4 +428,57 @@ describe("image build worker", () => {
     const signal = new AbortController().signal;
     await expect(worker.source().waitForResolution(60_000, signal)).resolves.toBe("pending");
   });
+
+  it("honors a caller bound well beyond the old 3s clamp", async () => {
+    // The registry only publishes readiness on the fifth read (~5 simulated seconds). Under the
+    // former 3s clamp the wait returned `pending` at ~3 reads and every create cold-installed; the
+    // caller's 10s bound must now be honored so the snapshot is actually cloned.
+    let reads = 0;
+    const worker = createImageBuildWorker({
+      registry: {
+        async requestImage() { throw new Error("not used"); },
+        async claimImageBuild() { return null; },
+        async getByDigest() {
+          reads += 1;
+          return { digest: IDENTITY.imageMarker, status: reads >= 5 ? "ready" : "building" };
+        },
+        async recordBuildOutcome() { return "ready" as const; },
+      } as never,
+      identity: IDENTITY,
+      lifecycle: {} as never,
+      runtime: () => ({}) as never,
+      executorId: "executor-1",
+      log: capturingLog(),
+      sleep: vi.fn(async () => undefined),
+      now: (() => {
+        let tick = 0;
+        return () => (tick += 1_000);
+      })(),
+    });
+    const signal = new AbortController().signal;
+    await expect(worker.source().waitForResolution(10_000, signal)).resolves.toBe("ready");
+    expect(reads).toBeGreaterThan(3);
+  });
+
+  it("short-circuits a terminal status even at a zero bound", async () => {
+    const worker = createImageBuildWorker({
+      registry: {
+        async requestImage() { throw new Error("not used"); },
+        async claimImageBuild() { return null; },
+        async getByDigest() {
+          return { digest: IDENTITY.imageMarker, status: "failed" };
+        },
+        async recordBuildOutcome() { return "ready" as const; },
+      } as never,
+      identity: IDENTITY,
+      lifecycle: {} as never,
+      runtime: () => ({}) as never,
+      executorId: "executor-1",
+      log: capturingLog(),
+      sleep: vi.fn(async () => undefined),
+      now: () => 5_000,
+    });
+    const signal = new AbortController().signal;
+    await expect(worker.source().waitForResolution(0, signal)).resolves.toBe("failed");
+  });
 });

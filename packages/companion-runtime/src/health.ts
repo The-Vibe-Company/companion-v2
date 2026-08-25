@@ -1,3 +1,4 @@
+/* oxlint-disable anti-slop/no-conditional-empty-object-spread, anti-slop/no-known-value-widening, anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/require-safety-comment-for-type-assertion -- Predates the incremental anti-slop gate; file reawakened by an unrelated budget/reliability edit, existing debt not rewritten here. */
 import { RuntimeInvariantError } from "./errors";
 import { mustAbandonRuntimeExecution } from "./executionControl";
 import { runtimeSucceeded, type RuntimeWorkDisposition } from "./handler";
@@ -86,11 +87,23 @@ export async function handleHealth(
     && piObservation.piState === "idle"
   ) {
     try {
+      // Only recycle Pi when the running broker actually reports a stale layout. Restarting a warm
+      // Pi that already runs the current layout would interrupt a Companion that was recently active,
+      // so healing must never do it — full Box restart stays an explicit user action. When the broker
+      // cannot be read we assume the layout is current and do not force a restart on an unknown state.
+      let layoutCurrent = true;
+      try {
+        const broker = await context.session.external(async (signal) =>
+          await context.deps.pi.brokerState({ boxId, signal }));
+        layoutCurrent = broker.layoutCurrent;
+      } catch (error) {
+        if (mustAbandonRuntimeExecution(error)) throw error;
+      }
       const refreshed = await refreshWarmCompanionLayout({
         session: context.session,
         deps: context.deps,
         authorization: requiredAuthorization(context),
-        restartPi: true,
+        restartPi: !layoutCurrent,
       });
       if (refreshed.restartedPi && refreshed.piInvocationId) {
         piObservation = { piState: "idle", piInvocationId: refreshed.piInvocationId };
@@ -193,7 +206,9 @@ export class RuntimeHealth {
 
   #sweepFresh(snapshot: RuntimeSchedulerSnapshot): boolean {
     if (!snapshot.lastSweepCompletedAt) return false;
-    const maximumAge = (2 * snapshot.sweepIntervalMs) + 1_000;
+    // Kept consistent with the /healthz window in apps/runtime/src/server.ts: tolerate a few missed
+    // sweeps (max(5 * interval, 15s)) so a GC pause or recovery backoff does not flap the endpoint.
+    const maximumAge = Math.max(5 * snapshot.sweepIntervalMs, 15_000);
     const age = this.input.clock.now().getTime() - snapshot.lastSweepCompletedAt.getTime();
     return age >= 0 && age <= maximumAge;
   }

@@ -92,6 +92,28 @@ endpoint are both required.
 `COMPANION_API_URL` on runtime must be the API's public HTTPS origin. It is staged into the Box for
 Skills Hub access, so a `*.railway.internal` address is not usable there.
 
+Set `COMPANION_PI_BUNDLE_ENABLED=true` on the runtime service to have each Box download and
+checksum-verify the pinned Pi bundle (`packages/box-runtime/src/piBundle.ts`) instead of installing
+Pi from npm at boot. The artifact lives in the existing skill-archives bucket
+(`S3_BUCKET_SKILL_ARCHIVES`) under the `pi-bundles/` prefix — no extra bucket and never a public
+one. The runtime service already holds the `S3_*` credentials, so it mints a short-lived presigned
+GET URL for every layout script it stages; the Box receives only that URL, and only the pinned
+checksum, never the URL, is trusted. Leaving the flag unset (or the S3 configuration incomplete)
+keeps the escape-hatch `COMPANION_PI_INSTALL_COMMAND` install path. Publishing new bundle artifacts
+(the `.github/workflows/pi-bundle.yml` job) uses separate write credentials (`PI_BUNDLE_S3_*`
+secrets and the optional `PI_BUNDLE_S3_BUCKET` dedicated-bucket override) that the runtime service
+never has.
+
+`COMPANION_DIRECT_TRANSPORT` (`off` | `shadow` | `on`, empty means `off`) is the Phase 2
+direct-transport rollout gate on the runtime service. `shadow` and `on` make every staging register
+the on-box Companion agent's hosted proxy endpoint (`host 8790` via the provider) and store it
+encrypted. `on` routes the event path — broker state, long-poll event reads, acknowledgements, and
+the daemon probe — over that channel with automatic per-call fallback to the exec transport, which
+retires the 500 ms exec polling during active turns; `shadow` routes nothing and only logs one
+throttled direct-vs-exec comparison per Box. In `shadow` a registration failure never fails a wake;
+in `on` it fails closed. Start with `shadow` when rolling out, then move to `on` once
+`runtime.direct_transport.shadow` reports matches.
+
 ## PostgreSQL roles
 
 Create four credentials:

@@ -132,6 +132,10 @@ describe("PostgresRuntimeStore", () => {
         position: 0,
       }],
       credential_snapshot_matches: true,
+      box_id: "bx_2345678a",
+      agent_hosted_url: null,
+      agent_token_ciphertext: null,
+      agent_observed_at: null,
     }];
     const store = new PostgresRuntimeStore(sql);
 
@@ -142,11 +146,69 @@ describe("PostgresRuntimeStore", () => {
       attemptId: ATTEMPT_ID,
       hasVisibleOutput: true,
       attachments: [{ filename: "chart.png", contentType: "image/png", position: 0 }],
+      boxId: "bx_2345678a",
+      agentEndpoint: null,
     });
     expect(sql.calls[0]?.query).toContain("public.companion_runtime_get_material(");
     expect(sql.calls[0]?.query).toContain("attempt_id");
     expect(sql.calls[0]?.query).toContain("has_visible_output");
     expect(sql.calls[0]?.query).toContain("attachments");
+    expect(sql.calls[0]?.query).toContain("box_id");
+    expect(sql.calls[0]?.query).toContain("agent_hosted_url");
+    expect(sql.calls[0]?.query).toContain("agent_token_ciphertext");
+    expect(sql.calls[0]?.query).toContain("agent_observed_at");
+  });
+
+  it("decodes a complete agent endpoint and refuses a partial or malformed one", async () => {
+    const base = {
+      turn_id: TURN_ID,
+      attempt_id: ATTEMPT_ID,
+      message_event_id: MESSAGE_EVENT_ID,
+      prompt_text: "hello",
+      decision_request_kind: null,
+      decision_response_payload: null,
+      provider_material: [],
+      skill_material: [],
+      mcp_material: [],
+      model_input: null,
+      has_visible_output: true,
+      attachments: [],
+      credential_snapshot_matches: true,
+      box_id: "bx_2345678a",
+      agent_hosted_url: "https://abc-8790.on.ascii.dev/boxes/bx_2345678a",
+      agent_token_ciphertext: "ciphertext-envelope",
+      agent_observed_at: new Date("2026-08-18T12:00:00.000Z"),
+    };
+    const complete = new RecordingSql();
+    complete.rows = [base];
+    await expect(
+      new PostgresRuntimeStore(complete)
+        .getMaterial({ ...fence, workKind: "attempt", workId: ATTEMPT_ID }, 30),
+    ).resolves.toMatchObject({
+      boxId: "bx_2345678a",
+      agentEndpoint: {
+        hostedUrl: "https://abc-8790.on.ascii.dev/boxes/bx_2345678a",
+        tokenCiphertext: "ciphertext-envelope",
+        observedAt: new Date("2026-08-18T12:00:00.000Z"),
+      },
+    });
+
+    for (const drifted of [
+      // Half an endpoint is a contract violation, exactly as the database CHECK says.
+      { ...base, agent_token_ciphertext: null },
+      { ...base, agent_hosted_url: null },
+      { ...base, agent_observed_at: null },
+      { ...base, agent_observed_at: "2026-08-18T12:00:00.000Z" },
+      { ...base, agent_hosted_url: "x".repeat(2_049) },
+      { ...base, box_id: "not-a-box" },
+    ]) {
+      const sql = new RecordingSql();
+      sql.rows = [drifted];
+      await expect(
+        new PostgresRuntimeStore(sql)
+          .getMaterial({ ...fence, workKind: "attempt", workId: ATTEMPT_ID }, 30),
+      ).rejects.toThrow();
+    }
   });
 
   it("refuses staging material whose names, digests, or ordering drifted from the contract", async () => {
@@ -163,6 +225,10 @@ describe("PostgresRuntimeStore", () => {
       model_input: null,
       has_visible_output: true,
       credential_snapshot_matches: true,
+      box_id: "bx_2345678a",
+      agent_hosted_url: null,
+      agent_token_ciphertext: null,
+      agent_observed_at: null,
     };
     const attachment = {
       id: "3f1d8a52-0c47-4e3b-9a19-7bd0c5e4a611",
@@ -248,6 +314,10 @@ describe("PostgresRuntimeStore", () => {
       model_input: null,
       has_visible_output: true,
       credential_snapshot_matches: true,
+      box_id: "bx_2345678a",
+      agent_hosted_url: null,
+      agent_token_ciphertext: null,
+      agent_observed_at: null,
       attachments: [],
     }];
     const store = new PostgresRuntimeStore(sql);
@@ -279,6 +349,10 @@ describe("PostgresRuntimeStore", () => {
       model_input: null,
       has_visible_output: true,
       credential_snapshot_matches: true,
+      box_id: "bx_2345678a",
+      agent_hosted_url: null,
+      agent_token_ciphertext: null,
+      agent_observed_at: null,
       attachments: [],
     }];
     const store = new PostgresRuntimeStore(sql);
@@ -310,6 +384,10 @@ describe("PostgresRuntimeStore", () => {
       model_input: null,
       has_visible_output: true,
       credential_snapshot_matches: true,
+      box_id: "bx_2345678a",
+      agent_hosted_url: null,
+      agent_token_ciphertext: null,
+      agent_observed_at: null,
       attachments: [],
     }];
     const store = new PostgresRuntimeStore(sql);
@@ -402,9 +480,15 @@ describe("PostgresRuntimeStore", () => {
     await expect(store.recordMaterialSnapshot(fence, {
       clientSurface: "web",
       materialExpiresAt,
+      agentEndpoint: { hostedUrl: "https://abc-8790.on.ascii.dev", tokenCiphertext: "ct" },
     })).resolves.toBe(true);
     expect(sql.calls[0]?.query).toContain("public.companion_runtime_record_material_snapshot(");
-    expect(sql.calls[0]?.parameters.slice(-2)).toEqual(["web", materialExpiresAt]);
+    expect(sql.calls[0]?.parameters.slice(-4)).toEqual([
+      "web",
+      materialExpiresAt,
+      "https://abc-8790.on.ascii.dev",
+      "ct",
+    ]);
 
     sql.rows = [{ published: true }];
     await expect(store.publishMaterialSnapshot(fence, {

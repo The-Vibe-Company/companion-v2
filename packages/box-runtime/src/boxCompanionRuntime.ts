@@ -1,10 +1,11 @@
 /* oxlint-disable anti-slop/no-conditional-empty-object-spread, anti-slop/no-known-value-widening, anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Existing Box wire decoders predate the incremental anti-slop gate. */
 
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   COMPANION_ATTACHMENT_FILENAME_PATTERN,
   COMPANION_ATTACHMENT_MAX_BYTES,
+  COMPANION_BUDGETS_BASE,
   COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS,
   COMPANION_EXEC_TOOL_RUN_TIMEOUT_MS,
   COMPANION_OUTPUT_ATTACHMENT_MAX_COUNT,
@@ -50,12 +51,26 @@ import {
   type PiJsonObject,
 } from "./companionPiBroker";
 import {
+  COMPANION_BOX_AGENT_AUTH_PATH,
+  COMPANION_BOX_AGENT_DEFAULT_PORT,
+  COMPANION_BOX_AGENT_HOST_TITLE,
+  COMPANION_BOX_AGENT_SCRIPT_PATH,
+  COMPANION_BOX_AGENT_SOURCE,
+  COMPANION_BOX_AGENT_UNIT_NAME,
+} from "./companionBoxAgent";
+import {
   COMPANION_PI_LAYOUT_REFRESH_LABEL,
   companionPiLayoutIdentity,
   parseCompanionPiLayoutRefresh,
   type CompanionPiLayoutIdentity,
   type CompanionPiLayoutRefresh,
 } from "./companionRuntimeImage";
+import {
+  companionPiBundlePlan,
+  companionPiBundleShaShort,
+  piBundleFailureCodeFromOutput,
+  type CompanionPiBundlePlan,
+} from "./piBundle";
 import type { BoxProviderCallOperation, BoxProviderCallTiming } from "./boxMaintenanceClient";
 
 export type CompanionRuntimeStagePhase =
@@ -65,7 +80,28 @@ export type CompanionRuntimeStagePhase =
   | "resource_preflight"
   | "control_bundle"
   | "skill_transfer"
-  | "skill_apply";
+  | "skill_apply"
+  | "agent_registration";
+
+/**
+ * Phase 2 direct-transport rollout gate. `off` skips agent registration entirely; `shadow` and `on`
+ * register the hosted endpoint at staging. In `on`, apps/runtime consumes the direct channel for
+ * the event path (broker state, event reads/acks, daemon probe) with per-call exec fallback; in
+ * `shadow` the endpoint only feeds a logged comparison and no real call is routed.
+ */
+export type CompanionDirectTransportMode = "off" | "shadow" | "on";
+
+/**
+ * The hosted inbound endpoint of the on-box Companion agent, registered through the provider's
+ * `host <port>` proxy at staging. Both tokens are credentials: the proxy token gates the provider
+ * proxy and the bearer authenticates inbound runtime requests at the agent itself. Neither may be
+ * logged or persisted in plaintext.
+ */
+export interface CompanionBoxAgentEndpoint {
+  hostedUrl: string;
+  proxyToken: string;
+  bearerToken: string;
+}
 
 export interface CompanionRuntimeStageTiming {
   phase: CompanionRuntimeStagePhase;
@@ -339,6 +375,7 @@ interface CompanionPiLayoutInput {
   qmdPackage: string;
   minimumPiVersion: string;
   companionSkillChecksum?: string;
+  bundleSha?: string;
   imageIdentitySalt?: string;
 }
 
@@ -855,6 +892,7 @@ export interface CompanionBoxRuntimeV2 {
     stagingMode: "refresh" | "skills";
     skillBytesTransferred: number;
     skillsDigest: string;
+    agentEndpoint: CompanionBoxAgentEndpoint | null;
   }>;
   /** Replace only the installed Skills tree; no provider, MCP, Hub or credential inputs exist. */
   stageSkillTree(input: {
@@ -915,6 +953,7 @@ export interface CompanionBoxRuntimeV2 {
   dispatchPrompt(input: {
     boxId: string;
     attemptId: string;
+    expectedInvocationId?: string;
     message: string;
     requestId?: string;
     signal?: AbortSignal;
@@ -965,14 +1004,15 @@ export class BoxRuntimeConfigurationError extends Error {
 export class BoxRuntimeProviderError extends Error {
   readonly status: number;
   readonly code?: string;
-  readonly stableCode: string = "box_provider_error";
+  readonly stableCode: string;
   readonly action = "retry" as const;
 
-  constructor(message: string, status: number, code?: string) {
+  constructor(message: string, status: number, code?: string, stableCode = "box_provider_error") {
     super(message);
     this.name = "BoxRuntimeProviderError";
     this.status = status;
     this.code = code;
+    this.stableCode = stableCode;
   }
 }
 
@@ -1087,6 +1127,32 @@ function labeledDiagnosticLines(stdout: string, label: string): string[] {
     .filter((line) => line.startsWith(`${label} `))
     .map((line) => line.slice(label.length + 1).trim())
     .filter(Boolean);
+}
+
+const AGENT_PROXY_TOKEN_PATTERN = /^[A-Za-z0-9._-]{16,256}$/;
+
+/**
+ * Split the provider's hosted URL into a token-free locator plus the proxy token credential.
+ * The plain-HTTP form exists only for the deterministic Box simulator; ascii.dev always mints
+ * HTTPS. Anything unparseable yields null so a mangled URL is a stable failure, never stored.
+ */
+export function parseHostedAgentEndpoint(
+  value: string | undefined,
+): { hostedUrl: string; proxyToken: string } | null {
+  if (!value || value.length > 2_048) return null;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+  if (url.username || url.password || url.hash) return null;
+  const proxyToken = url.searchParams.get("_token") ?? "";
+  if (!AGENT_PROXY_TOKEN_PATTERN.test(proxyToken)) return null;
+  url.search = "";
+  url.hash = "";
+  return { hostedUrl: url.toString().replace(/\/+$/, ""), proxyToken };
 }
 
 /**
@@ -1267,6 +1333,113 @@ function parseBrokerJournalRecord<T>(value: T): CompanionPiJournalRecord | null 
   };
 }
 
+/**
+ * Validate one broker `runtime_state` payload into the durable broker-state contract. Shared by the
+ * exec transport and the direct agent client so both surface byte-identical failures: anything but
+ * a complete, well-typed payload is the same stable 502, never a partial state.
+ */
+export function parseCompanionPiBrokerStateData(data: unknown): CompanionPiBrokerState {
+  const record = isJsonObject(data) ? data : null;
+  const layoutMarkerText = stringValue(record?.layoutMarker);
+  const layoutMarker = layoutMarkerText !== null && layoutMarkerText.length <= 1024
+    ? layoutMarkerText
+    : null;
+  const counters = parseBrokerCounters(record?.counters);
+  const modelInputValues: Array<"text" | "image"> = [];
+  if (Array.isArray(record?.modelInput)) {
+    for (const item of record.modelInput) {
+      const text = stringValue(item);
+      if (text !== "text" && text !== "image") {
+        modelInputValues.length = 0;
+        break;
+      }
+      modelInputValues.push(text);
+    }
+  }
+  const modelInput = modelInputValues.length > 0
+    ? [...new Set(modelInputValues)]
+    : null;
+  if (
+    !record
+    || !opaqueBrokerId(record.invocationId)
+    || (record.activeAttemptId !== null && !opaqueBrokerId(record.activeAttemptId))
+    || !nonNegativeSafeInteger(record.tailCursor)
+    || !nonNegativeSafeInteger(record.acknowledgedCursor)
+    || record.acknowledgedCursor > record.tailCursor
+    || !counters
+    || !modelInput
+  ) {
+    throw new BoxRuntimeProviderError("Pi broker state is unavailable", 502);
+  }
+  return {
+    invocationId: record.invocationId,
+    layoutMarker,
+    activeAttemptId: record.activeAttemptId,
+    tailCursor: record.tailCursor,
+    acknowledgedCursor: record.acknowledgedCursor,
+    counters,
+    modelInput,
+  };
+}
+
+/**
+ * Validate one broker `read_events` payload into a monotonic journal page. Shared by the exec
+ * transport and the direct agent client; the monotonicity proof is part of the transport contract,
+ * so a direct-served page that would fail it here fails exactly as an exec-served page would.
+ */
+export function parseCompanionPiBrokerEventPageData(
+  data: unknown,
+  after: number,
+): CompanionPiBrokerEventPage {
+  const record = isJsonObject(data) ? data : null;
+  const parsedEvents = Array.isArray(record?.events)
+    ? record.events.map(parseBrokerJournalRecord)
+    : null;
+  const hasMore = z.boolean().safeParse(record?.hasMore);
+  if (
+    !record
+    || !parsedEvents
+    || parsedEvents.some((event) => event === null)
+    || !nonNegativeSafeInteger(record.nextCursor)
+    || !nonNegativeSafeInteger(record.acknowledgedCursor)
+    || !hasMore.success
+  ) {
+    throw new BoxRuntimeProviderError("Pi broker event journal could not be read", 502);
+  }
+  const events: CompanionPiJournalRecord[] = [];
+  for (const event of parsedEvents) {
+    if (event === null) {
+      throw new BoxRuntimeProviderError("Pi broker event journal could not be read", 502);
+    }
+    events.push(event);
+  }
+  let prior = Math.max(after, record.acknowledgedCursor);
+  for (const event of events) {
+    if (event.sequence <= prior || event.sequence > record.nextCursor) {
+      throw new BoxRuntimeProviderError("Pi broker event journal is not monotonic", 502);
+    }
+    prior = event.sequence;
+  }
+  if (events.length > 0 && prior !== record.nextCursor) {
+    throw new BoxRuntimeProviderError("Pi broker event cursor does not match its page", 502);
+  }
+  return {
+    events,
+    nextCursor: record.nextCursor,
+    acknowledgedCursor: record.acknowledgedCursor,
+    hasMore: hasMore.data,
+  };
+}
+
+/** Validate one broker `ack_events` payload. Shared by the exec transport and the direct client. */
+export function parseCompanionPiAckEventsData(data: unknown): { acknowledgedCursor: number } {
+  const record = isJsonObject(data) ? data : null;
+  if (!record || !nonNegativeSafeInteger(record.acknowledgedCursor)) {
+    throw new BoxRuntimeProviderError("Pi broker event acknowledgement failed", 502);
+  }
+  return { acknowledgedCursor: record.acknowledgedCursor };
+}
+
 /** Where the layout script is staged on the Box disk so it runs as a file, never as a command. */
 const PI_LAYOUT_SCRIPT_PATH = ".companion/bin/ensure-pi-layout.sh";
 
@@ -1296,14 +1469,41 @@ function validPackageSpec(spec: string, variable: string): string {
   return spec;
 }
 
+/** Fail loud on a misspelled rollout value rather than silently staying on the exec transport. */
+export function companionDirectTransportMode(
+  env: NodeJS.ProcessEnv = process.env,
+): CompanionDirectTransportMode {
+  const raw = env.COMPANION_DIRECT_TRANSPORT?.trim().toLowerCase();
+  if (!raw || raw === "off") return "off";
+  if (raw === "shadow" || raw === "on") return raw;
+  throw new BoxRuntimeConfigurationError("COMPANION_DIRECT_TRANSPORT must be off, shadow, or on");
+}
+
+/**
+ * One bundle staging: the env-derived plan plus the presigned download URL minted for exactly this
+ * script generation. The URL is short-lived transport, so it is an input here and never folds into
+ * any layout identity — only the pinned sha does.
+ */
+interface CompanionPiStagedBundle {
+  readonly plan: CompanionPiBundlePlan;
+  readonly url: string;
+}
+
 function setupScript(
   installCommand: string | undefined,
   piPackages: readonly string[],
   qmdPackage: string,
   layoutIdentity: CompanionPiLayoutIdentity,
+  bundle: CompanionPiStagedBundle | null = null,
 ): string {
-  const configuredInstall = installCommand?.trim();
+  // Bundle mode wins over the install command: when a bundle is configured, the install command is
+  // ignored so the two never both run. With no bundle, behavior is exactly today's.
+  const configuredInstall = bundle ? undefined : installCommand?.trim();
+  const bundleDistDir = bundle
+    ? `$HOME/.companion/dist/${companionPiBundleShaShort(bundle.plan.manifest.sha256)}`
+    : null;
   const encodedBrokerSource = Buffer.from(COMPANION_PI_BROKER_SOURCE, "utf8").toString("base64");
+  const encodedAgentSource = Buffer.from(COMPANION_BOX_AGENT_SOURCE, "utf8").toString("base64");
   const encodedBoxIgnore = Buffer.from(RUNTIME_IMAGE_BOXIGNORE, "utf8").toString("base64");
   const encodedInstallScript = configuredInstall
     ? Buffer.from(`#!/usr/bin/env bash
@@ -1312,7 +1512,67 @@ ${configuredInstall}
 printf '%s' "$PATH" > "$COMPANION_PI_INSTALL_PATH_FILE"
 `).toString("base64")
     : undefined;
-  const ensureInstalled = configuredInstall
+  const bundleEnsureBlock = bundle
+    ? `# The self-hosted Pi bundle replaces the npm-at-boot install. One immutable, content-addressed
+# tarball is downloaded through a short-lived presigned URL, checksum-verified against the pin, and
+# extracted; nothing is fetched from a public registry and the bucket is never public. Each failure
+# prints a fixed marker as its LAST stderr line so the control plane maps it to a stable code, and
+# it exits before the layout marker is written so the Box relayouts.
+bundle_url=${shellQuote(bundle.url)}
+bundle_sha=${shellQuote(bundle.plan.manifest.sha256)}
+bundle_node_major=${shellQuote(bundle.plan.manifest.nodeMajor.toString(10))}
+bundle_dir="${bundleDistDir!}"
+bundle_archive="$(mktemp)"
+companion_bundle_cleanup() { rm -f "$bundle_archive"; }
+trap companion_bundle_cleanup EXIT
+if command -v curl >/dev/null 2>&1; then
+  if ! curl -fsSL --retry 3 -o "$bundle_archive" "$bundle_url"; then
+    echo 'companion-bundle-download-failed' >&2
+    exit 1
+  fi
+elif command -v node >/dev/null 2>&1; then
+  if ! COMPANION_BUNDLE_URL="$bundle_url" COMPANION_BUNDLE_OUT="$bundle_archive" node <<'COMPANION_BUNDLE_FETCH'
+const fs = require("node:fs");
+const url = process.env.COMPANION_BUNDLE_URL;
+const out = process.env.COMPANION_BUNDLE_OUT;
+fetch(url)
+  .then((response) => { if (!response.ok) process.exit(1); return response.arrayBuffer(); })
+  .then((body) => fs.writeFileSync(out, Buffer.from(body)))
+  .catch(() => process.exit(1));
+COMPANION_BUNDLE_FETCH
+  then
+    echo 'companion-bundle-download-failed' >&2
+    exit 1
+  fi
+else
+  echo 'companion-bundle-download-failed' >&2
+  exit 1
+fi
+if ! printf '%s  %s\\n' "$bundle_sha" "$bundle_archive" | sha256sum -c - >/dev/null 2>&1; then
+  echo 'companion-bundle-checksum-mismatch' >&2
+  exit 1
+fi
+rm -rf "$bundle_dir"
+mkdir -p "$bundle_dir"
+tar -xzf "$bundle_archive" -C "$bundle_dir"
+rm -f "$bundle_archive"
+trap - EXIT
+# The pinned Pi wins over any Box image copy: its bin directory goes first on PATH.
+PATH="$bundle_dir/pi/bin:$PATH"
+export PATH
+bundle_node_bin="$(command -v node 2>/dev/null || true)"
+if [ -z "$bundle_node_bin" ]; then
+  echo 'companion-bundle-node-mismatch' >&2
+  exit 1
+fi
+bundle_actual_node_major="$("$bundle_node_bin" -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)"
+if [ "$bundle_actual_node_major" != "$bundle_node_major" ]; then
+  echo 'companion-bundle-node-mismatch' >&2
+  exit 1
+fi`
+    : undefined;
+  const ensureInstalled = bundleEnsureBlock
+    ?? (configuredInstall
     ? `pi_install_log="$(mktemp)"
 pi_install_script="$(mktemp)"
 pi_install_path_file="$(mktemp)"
@@ -1349,6 +1609,32 @@ trap - EXIT`
     : `if ! command -v pi >/dev/null 2>&1; then
   echo 'Pi is not installed; configure COMPANION_PI_INSTALL_COMMAND or preinstall pi in the Box image' >&2
   exit 1
+fi`);
+  const packageInstallBlock = bundle
+    ? `# The bundle already carries every pinned Pi package and the semantic-search binary, so no npm
+# install and no \`pi install\` runs on the Box. Place the baked agent extensions and tools into the
+# persistent layout the daemon wrapper resolves at runtime.
+cp -a "$bundle_dir/pi-agent-dir/." "$HOME/.companion/pi/"
+if [ -d "$bundle_dir/tools" ]; then
+  cp -a "$bundle_dir/tools/." "$HOME/.companion/tools/"
+fi`
+    : `${piPackages
+    .map((spec) => `PI_CODING_AGENT_DIR="$HOME/.companion/pi" "$pi_bin" install ${shellQuote(spec)}`)
+    .join("\n")}
+# Semantic memory search is an optimization: pi-memory recalls without it, so a Box that cannot
+# install it is still a working Box. Nothing in this block may end a staging, which is why it runs
+# outside errexit and why the reported line is a fixed shape rather than npm's own words: the
+# control plane falls back to the last stdout line when a later step fails without stderr, and a
+# registry's output is not something to persist there. The full log stays on the Box for an operator.
+# The marker below is written either way: a Box that missed this keeps plain recall until a pin
+# changes, which is cheaper than re-running the whole layout on every wake to retry an optimization.
+qmd_log="$HOME/.companion/runtime/logs/qmd-install.log"
+set +e
+npm install --global --prefix "$HOME/.companion/tools" ${shellQuote(qmdPackage)} >"$qmd_log" 2>&1
+qmd_status=$?
+set -e
+if [ "$qmd_status" -ne 0 ]; then
+  printf 'Memory search binary %s did not install (exit %s); see runtime/logs/qmd-install.log\\n' ${shellQuote(qmdPackage)} "$qmd_status"
 fi`;
   return `#!/usr/bin/env bash
 set -euo pipefail
@@ -1462,6 +1748,50 @@ KillMode=control-group
 WantedBy=default.target
 COMPANION_PI_SERVICE_TAIL
   } > "$HOME/.config/systemd/user/companion-pi-daemon.service"
+  # The Box agent is the dark-shipped network front-end for the direct transport: a second daemon
+  # speaking the broker's owner-only socket protocol behind the provider's hosted proxy. It is
+  # installed and enabled on every Box but stays unreachable until a staging registers its port.
+  printf '%s' ${shellQuote(encodedAgentSource)} | base64 --decode > "$HOME/${COMPANION_BOX_AGENT_SCRIPT_PATH}"
+  chmod 700 "$HOME/${COMPANION_BOX_AGENT_SCRIPT_PATH}"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'set -euo pipefail'
+    printf 'NODE_BIN=%q\n' "$node_bin"
+    printf 'PATH=%q:"$PATH"\n' "$pi_bin_dir"
+    printf '%s\n' 'export PATH'
+    cat <<'COMPANION_BOX_AGENT_DAEMON'
+# A Box restore may remount the image with Node at a different absolute path than the baker used.
+if [ ! -x "$NODE_BIN" ]; then
+  NODE_BIN="$(command -v node 2>/dev/null || true)"
+fi
+if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
+  echo 'box-agent: node is unavailable after Box restore' >&2
+  exit 1
+fi
+exec "$NODE_BIN" "$HOME/${COMPANION_BOX_AGENT_SCRIPT_PATH}"
+COMPANION_BOX_AGENT_DAEMON
+  } > "$HOME/.companion/bin/box-agent-daemon"
+  chmod 700 "$HOME/.companion/bin/box-agent-daemon"
+  cat <<'COMPANION_BOX_AGENT_SERVICE' > "$HOME/.config/systemd/user/${COMPANION_BOX_AGENT_UNIT_NAME}"
+[Unit]
+Description=Companion Box agent
+After=network-online.target
+
+[Service]
+Type=simple
+UMask=0077
+ExecStart=%h/.companion/bin/box-agent-daemon
+Restart=on-failure
+RestartSec=2
+KillMode=control-group
+
+[Install]
+WantedBy=default.target
+COMPANION_BOX_AGENT_SERVICE
+  # 'systemctl --user enable' needs a user bus that a create-time Box does not have yet; the wants
+  # symlink is what enable would write, and it is what revives the listener after stop/resume.
+  mkdir -p "$HOME/.config/systemd/user/default.target.wants"
+  ln -sf "../${COMPANION_BOX_AGENT_UNIT_NAME}" "$HOME/.config/systemd/user/default.target.wants/${COMPANION_BOX_AGENT_UNIT_NAME}"
   # Populate Jiti's source-hashed extension cache before the image is snapshotted. The cache is an
   # optimization only: a failure leaves Pi's normal compilation path intact and never blocks layout.
   startup_cache_marker="$HOME/.companion/runtime/state/pi-startup-cache.version"
@@ -1486,7 +1816,9 @@ if [ -f "$layout_marker" ] \
   && [ "$recorded" = "$expected_layout" ] \
   && [ -x "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}" ] \
   && [ -x "$HOME/.companion/bin/pi-daemon" ] \
-  && [ -f "$HOME/.config/systemd/user/companion-pi-daemon.service" ]; then
+  && [ -f "$HOME/.config/systemd/user/companion-pi-daemon.service" ] \\
+  && [ -x "$HOME/${COMPANION_BOX_AGENT_SCRIPT_PATH}" ] \\
+  && [ -f "$HOME/.config/systemd/user/${COMPANION_BOX_AGENT_UNIT_NAME}" ]; then
   printf '%s\\n' ${shellQuote(COMPANION_PI_LAYOUT_REFRESH_LABEL.none)}
   exit 0
 fi
@@ -1536,24 +1868,7 @@ if (!currentEnough) {
 }
 COMPANION_PI_VERSION
 pi_bin_dir="$(dirname "$pi_bin")"
-${piPackages
-    .map((spec) => `PI_CODING_AGENT_DIR="$HOME/.companion/pi" "$pi_bin" install ${shellQuote(spec)}`)
-    .join("\n")}
-# Semantic memory search is an optimization: pi-memory recalls without it, so a Box that cannot
-# install it is still a working Box. Nothing in this block may end a staging, which is why it runs
-# outside errexit and why the reported line is a fixed shape rather than npm's own words: the
-# control plane falls back to the last stdout line when a later step fails without stderr, and a
-# registry's output is not something to persist there. The full log stays on the Box for an operator.
-# The marker below is written either way: a Box that missed this keeps plain recall until a pin
-# changes, which is cheaper than re-running the whole layout on every wake to retry an optimization.
-qmd_log="$HOME/.companion/runtime/logs/qmd-install.log"
-set +e
-npm install --global --prefix "$HOME/.companion/tools" ${shellQuote(qmdPackage)} >"$qmd_log" 2>&1
-qmd_status=$?
-set -e
-if [ "$qmd_status" -ne 0 ]; then
-  printf 'Memory search binary %s did not install (exit %s); see runtime/logs/qmd-install.log\\n' ${shellQuote(qmdPackage)} "$qmd_status"
-fi
+${packageInstallBlock}
 companion_layout_apply_overlay
 # A Box running its create setupScript has no user D-Bus session yet, so no user-manager command
 # belongs here: it would fail with "Failed to connect to bus" and mark the whole setup failed even
@@ -1806,10 +2121,15 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
   readonly #installCommand: string | undefined;
   readonly #piPackages: readonly string[];
   readonly #qmdPackage: string;
+  /** The self-hosted Pi bundle plan, or null when bundle mode is off (install-command mode). */
+  readonly #bundle: CompanionPiBundlePlan | null;
+  /** Mints a fresh presigned GET URL for the bundle object each time a layout script is generated. */
+  readonly #bundleUrlProvider: (() => Promise<string>) | undefined;
   readonly #onTiming: ((sample: BoxProviderCallTiming) => void) | undefined;
   readonly #onStageTiming: ((sample: CompanionRuntimeStageTiming) => void) | undefined;
   readonly #companionSkillChecksum: string | undefined;
   readonly #imageIdentitySalt: string | undefined;
+  readonly #directTransport: CompanionDirectTransportMode;
   /**
    * The current staging call's budget. Private file/command helpers share it so cancellation covers
    * the whole layout transaction without leaking into a later adapter call.
@@ -1824,6 +2144,14 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
       companionSkillChecksum?: string;
       /** Isolates disposable research snapshots without changing the production disk marker. */
       imageIdentitySalt?: string;
+      /**
+       * Mints the presigned bundle download URL. Staging calls can be hours apart, so every layout
+       * script generation asks for a fresh URL rather than caching one. Bundle mode requires both
+       * `COMPANION_PI_BUNDLE_ENABLED=true` and this provider: without it (S3 credentials absent),
+       * the runtime falls back to the install-command escape hatch and the layout identity carries
+       * no bundle segment, so the marker always describes what the script actually installs.
+       */
+      bundleUrlProvider?: () => Promise<string>;
     },
   ) {
     const apiKey = env.COMPANION_BOX_API_KEY?.trim();
@@ -1848,10 +2176,18 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
     this.#installCommand = env.COMPANION_PI_INSTALL_COMMAND;
     this.#piPackages = resolvePiPackages(env);
     this.#qmdPackage = validPackageSpec(QMD_PACKAGE, "QMD_PACKAGE");
+    // Bundle mode wins over the install command when both are configured; the install command stays
+    // the dev and emergency escape hatch when bundle mode is off. Both the enabled flag and a URL
+    // provider are required: a deployment that enables the flag without S3 credentials degrades to
+    // the escape hatch instead of generating a script that cannot download anything.
+    const bundlePlan = companionPiBundlePlan(env);
+    this.#bundle = bundlePlan && options?.bundleUrlProvider ? bundlePlan : null;
+    this.#bundleUrlProvider = this.#bundle ? options?.bundleUrlProvider : undefined;
     this.#onTiming = options?.onTiming;
     this.#onStageTiming = options?.onStageTiming;
     this.#companionSkillChecksum = options?.companionSkillChecksum;
     this.#imageIdentitySalt = options?.imageIdentitySalt;
+    this.#directTransport = companionDirectTransportMode(env);
   }
 
   layoutIdentity() {
@@ -1862,6 +2198,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
       minimumPiVersion: MINIMUM_IMAGE_SAFE_PI_VERSION,
     };
     if (this.#companionSkillChecksum) layoutInput.companionSkillChecksum = this.#companionSkillChecksum;
+    if (this.#bundle) layoutInput.bundleSha = this.#bundle.manifest.sha256;
     if (this.#imageIdentitySalt) layoutInput.imageIdentitySalt = this.#imageIdentitySalt;
     return companionPiLayoutIdentity(layoutInput);
   }
@@ -1878,29 +2215,23 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
     }
   }
 
-  /**
-   * What ends one Box request: its own timeout, whatever the caller passed, and the running staging
-   * budget. The shared budget bounds the full multi-call layout transaction.
-   */
-  #requestSignal(
-    timeoutMs: number,
-    callerSignal?: AbortSignal | null,
-    budget?: AbortSignal | null,
-  ): AbortSignal {
-    const signals = [AbortSignal.timeout(timeoutMs)];
-    if (callerSignal) signals.push(callerSignal);
-    if (budget) signals.push(budget);
-    return signals.length === 1 ? signals[0]! : AbortSignal.any(signals);
-  }
-
   async #request<T>(
     path: string,
     init?: RequestInit,
-    timeoutMs = 30_000,
+    timeoutMs: number = COMPANION_BUDGETS_BASE.boxRequestTimeoutMs,
     budget: AbortSignal | null = this.#stagingSignal ?? null,
     operation: BoxProviderCallOperation = "execute_command",
   ): Promise<T> {
     const startedAt = Date.now();
+    // Keep references to the individual abort sources so a transport rejection can be attributed to
+    // the caller (cancellation), a timeout/budget deadline, or a plain network failure — the
+    // maintenance client makes the same distinction so `isRetryableProviderError` can act on it.
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
+    const callerSignal = init?.signal ?? null;
+    const signals: AbortSignal[] = [timeoutSignal];
+    if (callerSignal) signals.push(callerSignal);
+    if (budget) signals.push(budget);
+    const signal = signals.length === 1 ? signals[0]! : AbortSignal.any(signals);
     try {
       const headers: BoxRequestHeaders = {
         Authorization: `Bearer ${this.#apiKey}`,
@@ -1910,7 +2241,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
       const response = await fetch(`${this.#baseUrl}${path}`, {
         ...init,
         headers,
-        signal: this.#requestSignal(timeoutMs, init?.signal, budget),
+        signal,
       });
       if (!response.ok) {
         const errorBodySchema = z.object({
@@ -1920,6 +2251,12 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
         });
         const bodyResult = errorBodySchema.safeParse(await response.json().catch(() => null));
         const body = bodyResult.success ? bodyResult.data : null;
+        this.#onTiming?.({
+          operation,
+          durationMs: Date.now() - startedAt,
+          ok: false,
+          status: response.status,
+        });
         throw new BoxRuntimeProviderError(
           body?.message || body?.error?.message || `Box API request failed with ${response.status}`,
           response.status,
@@ -1929,11 +2266,51 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
       // SAFETY: Every call supplies its response type and validates external envelopes before use;
       // generic requests that cannot validate here are parsed at their immediate caller.
       const result = await response.json() as T;
-      this.#onTiming?.({ operation, durationMs: Date.now() - startedAt, ok: true });
+      this.#onTiming?.({
+        operation,
+        durationMs: Date.now() - startedAt,
+        ok: true,
+        status: response.status,
+      });
       return result;
     } catch (error) {
+      // A BoxRuntimeProviderError from the `!response.ok` branch above already carries a status and
+      // reported its timing; re-raise it untouched.
+      if (error instanceof BoxRuntimeProviderError) throw error;
       this.#onTiming?.({ operation, durationMs: Date.now() - startedAt, ok: false });
-      throw error;
+      // A raw `fetch` rejection is a TypeError (network) or an AbortError/TimeoutError. Map it to a
+      // BoxRuntimeProviderError carrying a status so `isRetryableProviderError` can decide: a
+      // caller-driven cancellation is non-retryable (499-class), while a timeout/budget deadline
+      // (504) or a plain network failure (503) is retryable. Idempotent lifecycle calls may then be
+      // replayed; create/prompt/decision are excluded from that retry union and their dispatch
+      // paths convert any post-start throw into an AmbiguousExternalEffectError regardless of status.
+      if (callerSignal?.aborted === true) {
+        // Preserve the caller's abort reason (e.g. a lease handoff/shutdown/fence-lost control
+        // error, or a session kill-switch signal) so the runtime layer still recognises it as a
+        // control outcome that must abandon execution — never a retryable or ambiguous provider I/O
+        // error. A bare abort with no reason degrades to a non-retryable cancellation.
+        throw callerSignal.reason ?? new BoxRuntimeProviderError(
+          "The Box request was cancelled",
+          499,
+          "box_request_cancelled",
+        );
+      }
+      // A deadline: either an internal request/budget signal fired, or `fetch` rejected with the
+      // AbortSignal.timeout shape (a TimeoutError/AbortError DOMException).
+      const abortLike = error instanceof Error
+        && (error.name === "TimeoutError" || error.name === "AbortError");
+      if (timeoutSignal.aborted || budget?.aborted === true || abortLike) {
+        throw new BoxRuntimeProviderError(
+          "The Box request deadline elapsed",
+          504,
+          "box_request_deadline_exceeded",
+        );
+      }
+      throw new BoxRuntimeProviderError(
+        "The Box provider could not be reached",
+        503,
+        "box_network_error",
+      );
     }
   }
 
@@ -2256,6 +2633,7 @@ done`,
       ".companion/runtime/state/instructions.txt",
       ".companion/runtime/state/model.txt",
       ".companion/runtime/state/providers.env",
+      COMPANION_BOX_AGENT_AUTH_PATH,
       COMPANION_GIT_CREDENTIAL_HELPER_PATH,
       COMPANION_GH_WRAPPER_PATH,
     ]);
@@ -2497,6 +2875,12 @@ done`,
         502,
       );
     }
+    // A fresh presigned URL per generation: refreshes and stagings can be hours apart, and an
+    // expired URL baked into a reused script would fail every later download.
+    const stagedBundle: CompanionPiStagedBundle | null =
+      this.#bundle && this.#bundleUrlProvider
+        ? { plan: this.#bundle, url: await this.#bundleUrlProvider() }
+        : null;
     await this.#writeFile(
       boxId,
       PI_LAYOUT_SCRIPT_PATH,
@@ -2505,6 +2889,7 @@ done`,
         this.#piPackages,
         this.#qmdPackage,
         this.layoutIdentity(),
+        stagedBundle,
       ),
     );
     // A Box whose marker already matches exits in milliseconds. The budget is for the run that does
@@ -2515,6 +2900,22 @@ done`,
     // for is kept and the member's next message short-circuits.
     const result = await this.#command(boxId, `bash "$HOME/${PI_LAYOUT_SCRIPT_PATH}"`, 300);
     if (!result.success) {
+      // The bundle branch prints a fixed marker as its last stderr line for the three failures it can
+      // attribute — download, checksum, Node major — so the operator gets a stable code instead of a
+      // generic provider error. The marker is never written on failure, so the Box relayouts cleanly.
+      const bundleCode = piBundleFailureCodeFromOutput(result.stderr) ?? piBundleFailureCodeFromOutput(result.stdout);
+      if (bundleCode) {
+        throw new BoxRuntimeProviderError(
+          bundleCode === "pi_bundle_checksum_mismatch"
+            ? "The pinned Pi bundle failed its checksum verification."
+            : bundleCode === "pi_bundle_node_mismatch"
+              ? "The Box Node version does not match the pinned Pi bundle."
+              : "The pinned Pi bundle could not be downloaded.",
+          502,
+          undefined,
+          bundleCode,
+        );
+      }
       // The bare message cost a production probe to diagnose, so the failing line travels with it.
       throw new BoxRuntimeProviderError(
         `Pi runtime layout failed to install${commandFailureDetail(result)}`,
@@ -2554,7 +2955,9 @@ done`,
       + ` if [ "$recorded" = ${shellQuote(this.layoutIdentity().fullMarker)} ] \\
   && [ -x "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}" ] \\
   && [ -x "$HOME/.companion/bin/pi-daemon" ] \\
-  && [ -f "$HOME/.config/systemd/user/companion-pi-daemon.service" ]; then
+  && [ -f "$HOME/.config/systemd/user/companion-pi-daemon.service" ] \\
+  && [ -x "$HOME/${COMPANION_BOX_AGENT_SCRIPT_PATH}" ] \\
+  && [ -f "$HOME/.config/systemd/user/${COMPANION_BOX_AGENT_UNIT_NAME}" ]; then
   printf '%s\\n' ${shellQuote(COMPANION_PI_LAYOUT_REFRESH_LABEL.none)}
 fi;`
       + (input.preserveSkills
@@ -2589,7 +2992,9 @@ fi;`
 if [ "$recorded" = ${shellQuote(expected)} ] \\
   && [ -x "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}" ] \\
   && [ -x "$HOME/.companion/bin/pi-daemon" ] \\
-  && [ -f "$HOME/.config/systemd/user/companion-pi-daemon.service" ]; then
+  && [ -f "$HOME/.config/systemd/user/companion-pi-daemon.service" ] \\
+  && [ -x "$HOME/${COMPANION_BOX_AGENT_SCRIPT_PATH}" ] \\
+  && [ -f "$HOME/.config/systemd/user/${COMPANION_BOX_AGENT_UNIT_NAME}" ]; then
   printf '%s\\n' ${shellQuote(COMPANION_PI_LAYOUT_REFRESH_LABEL.none)}
 fi`,
         15,
@@ -2733,6 +3138,8 @@ fi`,
     preserveSkills: boolean;
     hubEnv?: Record<string, string>;
     configCatalog?: CompanionConfigCatalog | null;
+    /** SHA-256 of this staging's freshly minted agent bearer; the plaintext never lands on disk. */
+    agentAuthTokenSha256?: string | null;
     probe: { layoutCurrent: boolean; stdout: string };
   }): Promise<{ stagingMode: "refresh" | "skills"; skillBytesTransferred: number; skillsDigest: string }> {
     const injectedSkills = injectedSkillsFor(input);
@@ -2818,6 +3225,15 @@ fi`,
         mode: 0o600,
       },
     );
+    if (input.agentAuthTokenSha256) {
+      // Every staging rotates the agent bearer: only the digest reaches the Box, and the agent
+      // re-reads it per request, so rotation needs no agent restart.
+      controlFiles.push({
+        path: COMPANION_BOX_AGENT_AUTH_PATH,
+        content: `${JSON.stringify({ tokenSha256: input.agentAuthTokenSha256 })}\n`,
+        mode: 0o600,
+      });
+    }
     if (mcp.gatewayAccounts.some((account) => account.github)) {
       controlFiles.push({
         path: COMPANION_GIT_CREDENTIAL_HELPER_PATH,
@@ -3307,6 +3723,7 @@ exit 1`;
     stagingMode: "refresh" | "skills";
     skillBytesTransferred: number;
     skillsDigest: string;
+    agentEndpoint: CompanionBoxAgentEndpoint | null;
   }> {
     companionBoxName(input.companionId, input.runtimeGeneration);
     this.#stagingSignal = input.signal;
@@ -3340,6 +3757,9 @@ exit 1`;
         await this.#stageTimed("interaction_extension", async () =>
           await this.#stageCompanionInteractionExtension(box.id));
       }
+      const agentBearerToken = this.#directTransport === "off"
+        ? null
+        : randomBytes(32).toString("hex");
       const staged = await this.#injectPiResources({
         boxId: box.id,
         clientSurface: input.clientSurface,
@@ -3354,16 +3774,90 @@ exit 1`;
         preserveSkills: input.preserveSkills === true,
         hubEnv: input.hubEnv,
         configCatalog: input.configCatalog,
+        agentAuthTokenSha256: agentBearerToken
+          ? createHash("sha256").update(agentBearerToken, "utf8").digest("hex")
+          : null,
         probe: probed,
       });
+      const agentEndpoint = agentBearerToken
+        ? await this.#stageTimed("agent_registration", async () =>
+          await this.#registerBoxAgent(box.id, agentBearerToken, input.signal))
+        : null;
       return {
         boxId: box.id,
         diskLayoutVersion: COMPANION_PI_DISK_LAYOUT_VERSION,
+        agentEndpoint,
         ...staged,
       };
     } finally {
       this.#stagingSignal = undefined;
     }
+  }
+
+  /**
+   * Bring the dark-shipped agent daemon up and register its hosted proxy endpoint. The provider's
+   * `host` mapping is sticky per port but must be re-run after stop/resume, and staging is the one
+   * moment the runtime is already paying provider commands, so every staging re-registers. In
+   * `shadow` mode a registration failure never fails the wake: nothing consumes the channel yet, so
+   * the miss is telemetry (`agent_registration` stage failure), not an outage. In `on` mode it
+   * fails closed.
+   */
+  async #registerBoxAgent(
+    boxId: string,
+    bearerToken: string,
+    signal?: AbortSignal,
+  ): Promise<CompanionBoxAgentEndpoint | null> {
+    const port = COMPANION_BOX_AGENT_DEFAULT_PORT;
+    let result: CommandEnvelope;
+    try {
+      result = await this.#command(
+        boxId,
+        `set -euo pipefail
+${PREPARE_USER_BUS}
+systemctl --user daemon-reload
+systemctl --user reset-failed ${COMPANION_BOX_AGENT_UNIT_NAME} >/dev/null 2>&1 || true
+systemctl --user enable ${COMPANION_BOX_AGENT_UNIT_NAME} >/dev/null 2>&1 || true
+systemctl --user start ${COMPANION_BOX_AGENT_UNIT_NAME}
+companion_agent_state=unknown
+for companion_agent_probe in $(seq 1 50); do
+  companion_agent_state="$(systemctl --user is-active ${COMPANION_BOX_AGENT_UNIT_NAME} 2>/dev/null || true)"
+  if [ "$companion_agent_state" = active ]; then break; fi
+  sleep 0.1
+done
+if [ "$companion_agent_state" != active ]; then
+  echo 'Companion box agent failed to start' >&2
+  exit 1
+fi
+# \`host\` is the provider's sticky per-port service registration; its URL and query token are
+# minted by the provider. They are parsed from the marker line below and never echoed elsewhere.
+host ${port.toString(10)} --title ${COMPANION_BOX_AGENT_HOST_TITLE} >/dev/null 2>&1 || true
+companion_agent_url="$(host url ${port.toString(10)} 2>/dev/null | grep -Eo 'https?://[^[:space:]]+' | tail -n 1)"
+if [ -z "$companion_agent_url" ]; then
+  echo 'Companion box agent hosted endpoint is unavailable' >&2
+  exit 1
+fi
+printf 'companion-agent-endpoint %s\\n' "$companion_agent_url"`,
+        90,
+        signal,
+      );
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason ?? error;
+      if (this.#directTransport === "shadow") return null;
+      throw error;
+    }
+    const endpoint = result.success
+      ? parseHostedAgentEndpoint(labeledDiagnosticLines(result.stdout, "companion-agent-endpoint")[0])
+      : null;
+    if (!endpoint) {
+      if (this.#directTransport === "shadow") return null;
+      throw new BoxRuntimeProviderError(
+        result.success
+          ? "Companion box agent endpoint registration returned an invalid URL"
+          : `Companion box agent registration failed${commandFailureDetail(result)}`,
+        502,
+      );
+    }
+    return { ...endpoint, bearerToken };
   }
 
   async stageSkillTree(input: {
@@ -3680,6 +4174,7 @@ done`,
   async dispatchPrompt(input: {
     boxId: string;
     attemptId: string;
+    expectedInvocationId?: string;
     message: string;
     requestId?: string;
     signal?: AbortSignal;
@@ -3693,6 +4188,9 @@ done`,
           id: input.requestId ?? `companion-dispatch:${randomUUID()}`,
           type: "prompt",
           attemptId: input.attemptId,
+          ...(input.expectedInvocationId === undefined
+            ? {}
+            : { expectedInvocationId: input.expectedInvocationId }),
           message: input.message,
           requiredInput: ["text"],
           clearOutbox: true,
@@ -3823,47 +4321,7 @@ done`,
       signal: input.signal,
       operation: "broker_state",
     });
-    const data = response?.success === true && isJsonObject(response.data) ? response.data : null;
-    const layoutMarkerText = stringValue(data?.layoutMarker);
-    const layoutMarker = layoutMarkerText !== null && layoutMarkerText.length <= 1024
-      ? layoutMarkerText
-      : null;
-    const counters = parseBrokerCounters(data?.counters);
-    const modelInputValues: Array<"text" | "image"> = [];
-    if (Array.isArray(data?.modelInput)) {
-      for (const item of data.modelInput) {
-        const text = stringValue(item);
-        if (text !== "text" && text !== "image") {
-          modelInputValues.length = 0;
-          break;
-        }
-        modelInputValues.push(text);
-      }
-    }
-    const modelInput = modelInputValues.length > 0
-      ? [...new Set(modelInputValues)]
-      : null;
-    if (
-      !data
-      || !opaqueBrokerId(data.invocationId)
-      || (data.activeAttemptId !== null && !opaqueBrokerId(data.activeAttemptId))
-      || !nonNegativeSafeInteger(data.tailCursor)
-      || !nonNegativeSafeInteger(data.acknowledgedCursor)
-      || data.acknowledgedCursor > data.tailCursor
-      || !counters
-      || !modelInput
-    ) {
-      throw new BoxRuntimeProviderError("Pi broker state is unavailable", 502);
-    }
-    return {
-      invocationId: data.invocationId,
-      layoutMarker,
-      activeAttemptId: data.activeAttemptId,
-      tailCursor: data.tailCursor,
-      acknowledgedCursor: data.acknowledgedCursor,
-      counters,
-      modelInput,
-    };
+    return parseCompanionPiBrokerStateData(response?.success === true ? response.data : null);
   }
 
   async dispatchExtensionUi(input: {
@@ -3970,11 +4428,7 @@ done`,
       },
       signal: input.signal,
     });
-    const data = response?.success === true && isJsonObject(response.data) ? response.data : null;
-    if (!data || !nonNegativeSafeInteger(data.acknowledgedCursor)) {
-      throw new BoxRuntimeProviderError("Pi broker event acknowledgement failed", 502);
-    }
-    return { acknowledgedCursor: data.acknowledgedCursor };
+    return parseCompanionPiAckEventsData(response?.success === true ? response.data : null);
   }
 
   async readEvents(input: {
@@ -3995,44 +4449,10 @@ done`,
       command,
       signal: input.signal,
     });
-    const data = response?.success === true && isJsonObject(response.data) ? response.data : null;
-    const parsedEvents = Array.isArray(data?.events)
-      ? data.events.map(parseBrokerJournalRecord)
-      : null;
-    const hasMore = z.boolean().safeParse(data?.hasMore);
-    if (
-      !data
-      || !parsedEvents
-      || parsedEvents.some((event) => event === null)
-      || !nonNegativeSafeInteger(data.nextCursor)
-      || !nonNegativeSafeInteger(data.acknowledgedCursor)
-      || !hasMore.success
-    ) {
-      throw new BoxRuntimeProviderError("Pi broker event journal could not be read", 502);
-    }
-    const events: CompanionPiJournalRecord[] = [];
-    for (const event of parsedEvents) {
-      if (event === null) {
-        throw new BoxRuntimeProviderError("Pi broker event journal could not be read", 502);
-      }
-      events.push(event);
-    }
-    let prior = Math.max(input.after, data.acknowledgedCursor);
-    for (const event of events) {
-      if (event.sequence <= prior || event.sequence > data.nextCursor) {
-        throw new BoxRuntimeProviderError("Pi broker event journal is not monotonic", 502);
-      }
-      prior = event.sequence;
-    }
-    if (events.length > 0 && prior !== data.nextCursor) {
-      throw new BoxRuntimeProviderError("Pi broker event cursor does not match its page", 502);
-    }
-    return {
-      events,
-      nextCursor: data.nextCursor,
-      acknowledgedCursor: data.acknowledgedCursor,
-      hasMore: hasMore.data,
-    };
+    return parseCompanionPiBrokerEventPageData(
+      response?.success === true ? response.data : null,
+      input.after,
+    );
   }
 
 

@@ -40,7 +40,7 @@ export interface CreateRuntimeKernelInput {
   executorId: string;
   concurrency?: number;
   sweepIntervalMs?: number;
-  eventPollIntervalMs?: number;
+  eventPollIntervalMs?: number | ((input: { boxId: string }) => number);
   claimsEnabled: boolean;
   log?: RuntimeProcessLog;
 }

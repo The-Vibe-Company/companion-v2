@@ -48,6 +48,7 @@
     "verify:change": "node scripts/verify-change.mjs",
     "browser:smoke": "bash scripts/agent-browser-smoke.sh",
     "e2e:box-runtime-change": "pnpm --filter @companion/api exec tsx \"$PWD/scripts/box-runtime-change-e2e.ts\"",
+    "pi-bundle:check": "pnpm --filter @companion/api exec tsx \"$PWD/scripts/check-pi-bundle-artifact.ts\"",
     "smoke:api": "bash scripts/ci-api-smoke.sh",
     "smoke:rsc": "bash scripts/ci-rsc-smoke.sh",
     "cli": "pnpm --filter @companion/cli exec companion",

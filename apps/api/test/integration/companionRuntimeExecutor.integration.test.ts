@@ -544,7 +544,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
             'public.companion_runtime_get_config_catalog(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)',
             'public.companion_runtime_mint_hub_token(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)',
             'public.companion_runtime_mint_mcp_broker_token(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)',
-            'public.companion_runtime_record_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,public.companion_client_surface,timestamp with time zone)',
+            'public.companion_runtime_record_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,public.companion_client_surface,timestamp with time zone,text,text)',
             'public.companion_runtime_publish_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text)',
             'public.companion_runtime_get_attempt_terminal_projection(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)',
             'public.companion_runtime_register_duplicate_cleanups(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text[])',
@@ -575,7 +575,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       .rejects.toThrow(/permission denied/i);
 
     const runtimeOnlySignatures = [
-      "public.companion_runtime_record_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,public.companion_client_surface,timestamp with time zone)",
+      "public.companion_runtime_record_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,public.companion_client_surface,timestamp with time zone,text,text)",
       "public.companion_runtime_publish_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text)",
       "public.companion_runtime_claim_work(text,integer,integer,bigint,integer,integer)",
       "public.companion_runtime_defer_delete(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)",
@@ -2789,7 +2789,8 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         select public.companion_runtime_record_material_snapshot(
           ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
           ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
-          ${claim.workKind}, ${claim.workId}::uuid, 'web', ${expiresAt}
+          ${claim.workKind}, ${claim.workId}::uuid, 'web', ${expiresAt},
+          'https://abc-8790.on.ascii.dev', 'agent-ciphertext'
         ) as recorded
       `);
       expect(recorded).toEqual({ recorded: true });
@@ -2798,6 +2799,22 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         from companion_runtime_instances where companion_id = ${companionId}::uuid
       `;
       expect(beforePi).toEqual({ surface: null, expiresAt: null });
+      // The hosted agent endpoint publishes with the fenced record itself: it is per-Box state,
+      // deliberately not gated on the Pi invocation the material snapshot waits for.
+      const [agentEndpoint] = await sql<Array<{
+        hostedUrl: string | null;
+        tokenCiphertext: string | null;
+        observed: boolean;
+      }>>`
+        select agent_hosted_url as "hostedUrl", agent_token_ciphertext as "tokenCiphertext",
+          agent_observed_at is not null as observed
+        from companion_runtime_instances where companion_id = ${companionId}::uuid
+      `;
+      expect(agentEndpoint).toEqual({
+        hostedUrl: "https://abc-8790.on.ascii.dev",
+        tokenCiphertext: "agent-ciphertext",
+        observed: true,
+      });
 
       const publish = (piInvocationId: string) => asRuntime((tx) => tx<Array<{
         published: boolean;
@@ -2950,7 +2967,8 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         select public.companion_runtime_record_material_snapshot(
           ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
           ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
-          ${claim.workKind}, ${claim.workId}::uuid, 'web', ${expiresAt}
+          ${claim.workKind}, ${claim.workId}::uuid, 'web', ${expiresAt},
+          null, null
         ) as recorded
       `);
       expect(await record(firstClaim)).toEqual([{ recorded: true }]);
@@ -3402,6 +3420,32 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       claimed = await claimWork();
       expect(claimed.workKind).toBe("attempt");
       expect(claimed.workId).toBe(fixture.attemptId);
+      const lease = claimed;
+      const acceptedCommandId = randomUUID();
+      const acceptedPiInvocationId = "pi-invocation-write-intent";
+      await sql`
+        update companion_turn_attempts set
+          command_id = ${acceptedCommandId}::uuid,
+          pi_invocation_id = ${acceptedPiInvocationId}
+        where id = ${fixture.attemptId}::uuid
+      `;
+      const [resolvableAttempt] = await asRuntime((tx) => tx<Array<{
+        commandId: string | null;
+        commandPiInvocationId: string | null;
+      }>>`
+        select command_id::text as "commandId",
+               command_pi_invocation_id as "commandPiInvocationId"
+        from public.companion_runtime_renew_and_authorize_v2(
+          ${lease.orgId}::uuid, ${lease.companionId}::uuid,
+          ${lease.claimToken}::uuid, ${lease.claimEpoch}::bigint,
+          ${lease.gateEpoch}::bigint, ${executorId},
+          ${lease.workKind}::companion_runtime_work_kind, ${lease.workId}::uuid, 30
+        )
+      `);
+      expect(resolvableAttempt).toEqual({
+        commandId: acceptedCommandId,
+        commandPiInvocationId: acceptedPiInvocationId,
+      });
 
       const [stopped] = await asApi({
         orgId: ids.orgA,
@@ -3423,7 +3467,6 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       expect(requested?.status).toBe("running");
       expect(requested?.cancelRequestedAt).toBeInstanceOf(Date);
 
-      const lease = claimed;
       const [renewal] = await asRuntime((tx) => tx<Array<{
         authorized: boolean;
         denialCode: string | null;
@@ -3441,6 +3484,25 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         authorized: false,
         denialCode: "turn_cancel_requested",
         boxId: "bx_23456789",
+      });
+      const [resolvedCancellation] = await asRuntime((tx) => tx<Array<{
+        authorized: boolean;
+        commandId: string | null;
+        commandPiInvocationId: string | null;
+      }>>`
+        select authorized, command_id::text as "commandId",
+               command_pi_invocation_id as "commandPiInvocationId"
+        from public.companion_runtime_renew_and_authorize_v2(
+          ${lease.orgId}::uuid, ${lease.companionId}::uuid,
+          ${lease.claimToken}::uuid, ${lease.claimEpoch}::bigint,
+          ${lease.gateEpoch}::bigint, ${executorId},
+          ${lease.workKind}::companion_runtime_work_kind, ${lease.workId}::uuid, 30
+        )
+      `);
+      expect(resolvedCancellation).toEqual({
+        authorized: false,
+        commandId: null,
+        commandPiInvocationId: null,
       });
     } finally {
       if (claimed) await release(claimed);
@@ -4617,14 +4679,36 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     try {
       const claim = await claimWork();
       expect(claim.workKind).toBe("attempt");
+      // Phase 2.1 read path: the fenced material read carries the instance's Box id and the
+      // registered hosted agent endpoint, so an executor can rebuild the direct event channel
+      // after a process restart. Seeded directly because registration itself is covered by the
+      // record_material_snapshot proof above.
+      await sql`
+        update companion_runtime_instances
+        set agent_hosted_url = 'https://abc-8790.on.ascii.dev',
+            agent_token_ciphertext = 'agent-ciphertext',
+            agent_observed_at = now()
+        where companion_id = ${claim.companionId}::uuid
+      `;
+      const [instanceBox] = await sql<Array<{ boxId: string | null }>>`
+        select box_id as "boxId" from companion_runtime_instances
+        where companion_id = ${claim.companionId}::uuid
+      `;
       const material = await asRuntime((tx) => tx<Array<{
         promptText: string;
         providerMaterial: Array<IntegrationJsonObject>;
         skillMaterial: Array<IntegrationJsonObject>;
         mcpMaterial: Array<IntegrationJsonObject>;
+        boxId: string | null;
+        agentHostedUrl: string | null;
+        agentTokenCiphertext: string | null;
+        agentObserved: boolean;
       }>>`
         select prompt_text as "promptText", provider_material as "providerMaterial",
-          skill_material as "skillMaterial", mcp_material as "mcpMaterial"
+          skill_material as "skillMaterial", mcp_material as "mcpMaterial",
+          box_id as "boxId", agent_hosted_url as "agentHostedUrl",
+          agent_token_ciphertext as "agentTokenCiphertext",
+          agent_observed_at is not null as "agentObserved"
         from public.companion_runtime_get_material(
           ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
           ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
@@ -4633,6 +4717,12 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       `);
       expect(material).toHaveLength(1);
       expect(material[0]?.promptText).toBe(fixture.prompt);
+      expect(material[0]).toMatchObject({
+        boxId: instanceBox?.boxId ?? null,
+        agentHostedUrl: "https://abc-8790.on.ascii.dev",
+        agentTokenCiphertext: "agent-ciphertext",
+        agentObserved: true,
+      });
       expect(material[0]?.providerMaterial).toMatchObject([{
         provider_id: providerId,
         credential_generation: providerGeneration,
@@ -4923,6 +5013,16 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         )::text as sequence
       `);
       expect(intent?.sequence).toBe("1");
+      const [resolvedIntent] = await asRuntime((tx) => tx<Array<{ commandId: string | null }>>`
+        select command_id::text as "commandId"
+        from public.companion_runtime_renew_and_authorize_v2(
+          ${decisionClaim.orgId}::uuid, ${decisionClaim.companionId}::uuid,
+          ${decisionClaim.claimToken}::uuid, ${decisionClaim.claimEpoch}::bigint,
+          ${decisionClaim.gateEpoch}::bigint, ${executorId}, 'decision',
+          ${decisionClaim.workId}::uuid, 30
+        )
+      `);
+      expect(resolvedIntent?.commandId).toBe(commandId);
       const [settled] = await asRuntime((tx) => tx<Array<{ settled: boolean }>>`
         select public.companion_runtime_settle(
           ${decisionClaim.orgId}::uuid, ${decisionClaim.companionId}::uuid,

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { COMPANION_BOX_AGENT_SOURCE } from "./companionBoxAgentSource";
 import { COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE } from "./companionPermissionBroker";
 import { COMPANION_PI_BROKER_SOURCE } from "./companionPiBrokerSource";
 
@@ -7,7 +8,7 @@ import { COMPANION_PI_BROKER_SOURCE } from "./companionPiBrokerSource";
  * Bump when the daemon wrapper or systemd unit changes without a broker/extension source change.
  * Overlay writes are the cheap in-place path for companions that are already running.
  */
-export const COMPANION_PI_OVERLAY_REVISION = 6;
+export const COMPANION_PI_OVERLAY_REVISION = 8;
 /** Bump when the archive/resume warmup profile changes without changing the runtime layout. */
 export const COMPANION_RUNTIME_BOOT_PROFILE_REVISION = 1;
 
@@ -64,6 +65,8 @@ export function companionPiOverlayMarker(overlayRevision = COMPANION_PI_OVERLAY_
     .update(COMPANION_PI_BROKER_SOURCE)
     .update("\n")
     .update(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE)
+    .update("\n")
+    .update(COMPANION_BOX_AGENT_SOURCE)
     .digest("hex")
     .slice(0, 16);
 }
@@ -73,9 +76,17 @@ export function companionPiBaseLayoutMarker(input: {
   packages: readonly string[];
   qmdPackage: string;
   minimumPiVersion: string;
+  /**
+   * The active Pi bundle's sha256, present only in bundle mode. Folding its short digest into the
+   * base marker makes a new bundle a new base identity: warm Boxes relayout once at their next health
+   * tick and the registry re-bakes, all without a `disk_layout_version` bump. Escape-hatch installs
+   * omit it, so a bundle identity and an install identity never collide.
+   */
+  bundleSha?: string;
 }): string {
-  return `${input.layoutVersion.toString(10)}:${input.packages.join(",")}`
+  const base = `${input.layoutVersion.toString(10)}:${input.packages.join(",")}`
     + `:qmd=${input.qmdPackage}:pi>=${input.minimumPiVersion}`;
+  return input.bundleSha ? `${base}:bundle=${input.bundleSha.slice(0, 12)}` : base;
 }
 
 export function companionPiLayoutIdentity(input: {
@@ -86,6 +97,8 @@ export function companionPiLayoutIdentity(input: {
   overlayRevision?: number;
   companionSkillChecksum?: string;
   bootProfileRevision?: number;
+  /** The active Pi bundle sha256; present only in bundle mode. Folded into the base marker. */
+  bundleSha?: string;
   /** Development-only salt used to isolate disposable research snapshots. */
   imageIdentitySalt?: string;
 }): CompanionPiLayoutIdentity {

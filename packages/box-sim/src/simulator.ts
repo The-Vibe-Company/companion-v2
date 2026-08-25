@@ -199,6 +199,7 @@ export class BoxSimulator {
   readonly #deletions = new Map<string, DeletionRecord>();
   readonly #faults = new Map<string, BoxSimFaultRule>();
   readonly #requests: BoxSimRequestJournalEntry[] = [];
+  #hostedUrlFactory: ((port: number) => string) | undefined;
   #tick = 0;
   #boxSequence = 0;
   #deletionSequence = 0;
@@ -245,6 +246,16 @@ export class BoxSimulator {
       );
     }
     return record;
+  }
+
+  /**
+   * Wire the base URL a `host <port>` registration mints. The server owns the agent listener and
+   * only knows its address after listen(), so the factory is late-bound here and copied onto every
+   * machine, including ones created before the server attached to a caller-supplied simulator.
+   */
+  setHostedUrlFactory(factory: ((port: number) => string) | undefined): void {
+    this.#hostedUrlFactory = factory;
+    for (const { machine } of this.#boxes.values()) machine.hostedUrlFactory = factory;
   }
 
   configureDefaults(patch: Partial<BoxSimDefaults>): BoxSimDefaults {
@@ -310,6 +321,7 @@ export class BoxSimulator {
     this.#boxSequence += 1;
     const tick = this.#nextTick();
     const machine = createBoxSimCommandMachine({ boxId: id, scenario: this.#defaults.piScenario });
+    machine.hostedUrlFactory = this.#hostedUrlFactory;
     if (cloned) {
       machine.persistentFiles = cloneFileMap(cloned.files);
       machine.layoutInstalled = cloned.layoutInstalled;

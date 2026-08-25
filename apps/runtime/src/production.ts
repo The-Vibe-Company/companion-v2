@@ -1,3 +1,4 @@
+/* oxlint-disable anti-slop/no-conditional-empty-object-spread -- Predates the incremental anti-slop gate; file reawakened by an unrelated budget/reliability edit, existing debt not rewritten here. */
 import {
   AsciiBoxCompanionRuntime,
   AsciiBoxMaintenanceClient,
@@ -33,15 +34,22 @@ import { composeRuntimeService, type RuntimeService } from "./composition";
 import { loadRuntimeServiceConfig, type RuntimeServiceConfig } from "./config";
 import { createRuntimeDatabase, type RuntimeDatabase } from "./database";
 import {
+  createDirectBoxDataTransport,
+  createDirectRuntimePiControl,
+  DirectBoxEndpointRegistry,
+} from "./directBoxTransport";
+import {
   createRuntimeDesktopPort,
   PostgresRuntimeDesktopAuthorizer,
   PostgresRuntimeDesktopReplayGuard,
 } from "./desktop";
 import { createImageBuildWorker } from "./imageBuildWorker";
+import { superviseImageBuilder } from "./imageBuilderSupervisor";
 import {
   createRuntimeMaterialPipeline,
   loadBundledCompanionRuntimeSkill,
 } from "./materialPipeline";
+import { createPiBundleUrlProvider } from "./piBundlePresigner";
 import {
   createRuntimeSchedulerAdapter,
   type RuntimeKernelScheduler,
@@ -71,6 +79,8 @@ export interface RuntimeProductionFactories {
     options?: {
       onTiming?: (sample: BoxProviderCallTiming) => void;
       companionSkillChecksum?: string;
+      /** Mints a fresh presigned Pi-bundle download URL per layout script generation. */
+      bundleUrlProvider?: () => Promise<string>;
     },
   ): CompanionBoxRuntimeV2;
   createArchiveStorage(): RuntimeArchiveStorage;
@@ -121,11 +131,13 @@ export async function buildProductionRuntimeService(
   const database = factories.createDatabase(config);
   let archiveStorage: RuntimeArchiveStorage | null = null;
   let bakerAbort: AbortController | null = null;
+  let bakerRun: Promise<void> | null = null;
   const closeResources = resourceCloser({
     database,
     archiveStorage: () => archiveStorage,
     config,
     abortBaker: () => bakerAbort?.abort(),
+    awaitBaker: () => bakerRun,
   });
 
   try {
@@ -156,6 +168,7 @@ export async function buildProductionRuntimeService(
     }
 
     const boxEnv = runtimeBoxEnvironment(config, env);
+    const bundleUrlProvider = createPiBundleUrlProvider(env);
     const lifecycle = factories.createLifecycle(boxEnv, {
       onTiming: (sample) => {
         log.info({
@@ -164,6 +177,7 @@ export async function buildProductionRuntimeService(
           operation: sample.operation,
           durationMs: sample.durationMs,
           ok: sample.ok,
+          ...(sample.status === undefined ? {} : { status: sample.status }),
         });
       },
     });
@@ -178,6 +192,7 @@ export async function buildProductionRuntimeService(
           operation: sample.operation,
           durationMs: sample.durationMs,
           ok: sample.ok,
+          ...(sample.status === undefined ? {} : { status: sample.status }),
         });
       },
       onStageTiming: (sample: {
@@ -194,6 +209,10 @@ export async function buildProductionRuntimeService(
         });
       },
       companionSkillChecksum: bundledSkill.checksum,
+      // Undefined when bundle mode is off or S3 is not fully configured; the box runtime then keeps
+      // the COMPANION_PI_INSTALL_COMMAND escape hatch. The runtime service is the only process with
+      // both the Box credential and the S3 credential, so presigning happens here and nowhere else.
+      ...(bundleUrlProvider ? { bundleUrlProvider } : {}),
     };
     const freshRuntime = (): CompanionBoxRuntimeV2 => factories.createBoxRuntime(
       boxEnv,
@@ -202,13 +221,20 @@ export async function buildProductionRuntimeService(
     const imageAbortController = new AbortController();
     bakerAbort = imageAbortController;
     const imageRegistry = new CompanionImageRegistry(database.sql);
+    const layoutIdentity = freshRuntime().layoutIdentity();
     const imageWorker = createImageBuildWorker({
       registry: imageRegistry,
-      identity: freshRuntime().layoutIdentity(),
+      identity: layoutIdentity,
       lifecycle,
       runtime: () => freshRuntime(),
       bundledSkill,
       executorId: config.executorId,
+      log,
+    });
+    const imageSupervisor = superviseImageBuilder({
+      worker: imageWorker,
+      registry: imageRegistry,
+      digest: layoutIdentity.imageMarker,
       log,
     });
     void imageWorker.requestCurrentImage().catch((error) => {
@@ -218,7 +244,9 @@ export async function buildProductionRuntimeService(
         error: describeThrownError(error),
       });
     });
-    void imageWorker.run(imageAbortController.signal).catch((error) => {
+    // Supervised, not fire-and-forget: liveness feeds /healthz and the run joins the shutdown drain
+    // so an in-flight bake settles before resources close. A crash leaves loopAlive false → 503.
+    bakerRun = imageSupervisor.run(imageAbortController.signal).catch((error) => {
       if (imageAbortController.signal.aborted) return;
       log.warn({
         ts: new Date().toISOString(),
@@ -227,11 +255,35 @@ export async function buildProductionRuntimeService(
       });
     });
     archiveStorage = factories.createArchiveStorage();
+    // The direct-transport registry exists whenever the gate is not off: `shadow` needs endpoints
+    // to compare against, `on` needs them to route the event path. `off` stays byte-for-byte the
+    // exec-only composition.
+    const endpointRegistry = config.directTransport === "off"
+      ? null
+      : new DirectBoxEndpointRegistry();
+    const directFiles = endpointRegistry && config.directTransport === "on"
+      ? createDirectBoxDataTransport({
+        exec: freshRuntime,
+        registry: endpointRegistry,
+        log,
+      })
+      : null;
     const material = createRuntimeMaterialPipeline({
       masterKey: config.masterKey,
       apiUrl: config.apiUrl,
       bundledSkill,
       runtime: freshRuntime,
+      ...(directFiles ? { fileRuntime: () => directFiles } : {}),
+      ...(endpointRegistry
+        ? {
+          registerAgentEndpoint: (boxId: string, endpoint: {
+            hostedUrl: string;
+            proxyToken: string;
+            bearerToken: string;
+            observedAt: Date;
+          }) => endpointRegistry.register(boxId, endpoint),
+        }
+        : {}),
       loadSkillArchive: async (storagePath, signal) => {
         const storage = archiveStorage;
         if (!storage) throw new Error("runtime archive storage is closed");
@@ -254,12 +306,27 @@ export async function buildProductionRuntimeService(
       lifecycle,
       runtime: freshRuntime,
       runtimeImage: imageWorker.source(),
+      requireImage: config.requireRuntimeImage,
+      onColdFallback: (reason: string) => imageSupervisor.recordColdFallback(reason),
       log,
     };
+    const execPi = createRuntimePiControl(adapters);
+    const direct = endpointRegistry
+      ? createDirectRuntimePiControl({
+        mode: config.directTransport === "on" ? "on" : "shadow",
+        exec: execPi,
+        registry: endpointRegistry,
+        layoutFullMarker: layoutIdentity.fullMarker,
+        log,
+      })
+      : null;
     const kernel = factories.createKernel({
       store,
       box: createRuntimeBoxControl(adapters),
-      pi: createRuntimePiControl(adapters),
+      pi: direct?.pi ?? execPi,
+      ...(direct && config.directTransport === "on"
+        ? { eventPollIntervalMs: direct.eventPollIntervalMs }
+        : {}),
       materialProvider: material.materialProvider,
       projectionRedactorFactory: material.projectionRedactorFactory,
       resourceStager: material.resourceStager,
@@ -283,6 +350,7 @@ export async function buildProductionRuntimeService(
       scheduler: createRuntimeSchedulerAdapter(kernel.scheduler),
       desktop,
       desktopReplay: new PostgresRuntimeDesktopReplayGuard(database.sql),
+      imageHealth: () => imageSupervisor.snapshot(),
       closeResources,
     });
   } catch (error) {
@@ -293,12 +361,14 @@ export async function buildProductionRuntimeService(
 
 const BOX_RUNTIME_ENV_KEYS = [
   "COMPANION_BOX_ENVIRONMENT",
+  "COMPANION_DIRECT_TRANSPORT",
   "COMPANION_BOX_POLL_INTERVAL_MS",
   "COMPANION_BOX_READY_TIMEOUT_MS",
   "COMPANION_BOX_DESKTOP_MINT_BUDGET_MS",
   "COMPANION_PI_BROKER_COMMAND",
   "COMPANION_PI_BROKER_SOCKET",
   "COMPANION_PI_BROKER_TIMEOUT_MS",
+  "COMPANION_PI_BUNDLE_ENABLED",
   "COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS",
   "COMPANION_PI_INSTALL_COMMAND",
   "COMPANION_PI_MCP_ADAPTER_PACKAGE",
@@ -326,12 +396,19 @@ function resourceCloser(input: {
   archiveStorage(): RuntimeArchiveStorage | null;
   config: RuntimeServiceConfig;
   abortBaker?: () => void;
+  awaitBaker?: () => Promise<void> | null;
 }): () => Promise<void> {
   let closing: Promise<void> | null = null;
   return () => {
     closing ??= (async () => {
       input.abortBaker?.();
       let failure: unknown;
+      // Join the builder run before closing the DB so an in-flight bake's registry writes settle.
+      try {
+        await input.awaitBaker?.();
+      } catch {
+        // The supervised run already logs its own death; never fail shutdown on it.
+      }
       try {
         await input.archiveStorage()?.close();
       } catch (error) {

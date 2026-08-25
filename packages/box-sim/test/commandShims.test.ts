@@ -55,6 +55,15 @@ describe("semantic Box command shims", () => {
       ],
       ["cat '.part0' > '.target'; rm -f '.part0'", "join-file-parts"],
       ["skills.next base64 --decode tar --extract", "prepare-skills"],
+      [
+        // The registration script also runs daemon-reload, so its endpoint marker must win over the
+        // credential/daemon-reload family regardless of classification order drift.
+        "systemctl --user daemon-reload\nsystemctl --user start companion-box-agent.service\n"
+          + "host 8790 --title companion-agent >/dev/null 2>&1 || true\n"
+          + "companion_agent_url=\"$(host url 8790 2>/dev/null | grep -Eo 'https?://[^[:space:]]+' | tail -n 1)\"\n"
+          + "printf 'companion-agent-endpoint %s\\n' \"$companion_agent_url\"",
+        "agent-register",
+      ],
       ["staged_credential_file=x; systemctl --user daemon-reload", "start-or-restart-daemon"],
       [
         "staged_credential_file=x; systemctl --user daemon-reload; companion-pi-broker-ready companion-pi-broker-unready",
@@ -181,6 +190,43 @@ describe("semantic Box command shims", () => {
     );
     expect(await executeBoxCommand(machine, 'bash "$HOME/.companion/bin/ensure-pi-layout.sh"'))
       .toMatchObject({ success: true, stdout: "companion-layout-overlay\n" });
+  });
+
+  it("fails a bundle-mode layout with a fixed marker and writes no layout file on an injected fault", async () => {
+    const bundleScript = [
+      "#!/usr/bin/env bash",
+      "base_layout='14:npm:pi-mcp-adapter@2.12.1:qmd=@tobilu/qmd@2.8.3:pi>=0.84.2:bundle=abcdef012345'",
+      "expected_layout='14:npm:pi-mcp-adapter@2.12.1:qmd=@tobilu/qmd@2.8.3:pi>=0.84.2:bundle=abcdef012345:overlay=aaaaaaaaaaaaaaaa'",
+      "bundle_url='https://skill-archives.example/pi-bundles/companion-pi-bundle-abcdef012345.tar.gz?X-Amz-Expires=3600&X-Amz-Signature=deadbeef'",
+    ].join("\n");
+    const cases: Array<["download" | "checksum" | "node", string]> = [
+      ["download", "companion-bundle-download-failed"],
+      ["checksum", "companion-bundle-checksum-mismatch"],
+      ["node", "companion-bundle-node-mismatch"],
+    ];
+    for (const [fault, marker] of cases) {
+      const machine = createBoxSimCommandMachine({ boxId: "bx_23456789", scenario: "normal" });
+      machine.bundleDownloadFault = fault;
+      putBoxFile(machine, ".companion/bin/ensure-pi-layout.sh", Buffer.from(bundleScript));
+      const result = await executeBoxCommand(machine, 'bash "$HOME/.companion/bin/ensure-pi-layout.sh"');
+      expect(result.success).toBe(false);
+      expect(result.stderr.trim().split(/\r?\n/).at(-1)).toBe(marker);
+      expect(machine.persistentFiles.has(".companion/runtime/state/pi-layout.version")).toBe(false);
+    }
+  });
+
+  it("installs a bundle-mode layout normally when no download fault is injected", async () => {
+    const machine = createBoxSimCommandMachine({ boxId: "bx_23456789", scenario: "normal" });
+    const bundleScript = [
+      "#!/usr/bin/env bash",
+      "base_layout='14:npm:pi-mcp-adapter@2.12.1:qmd=@tobilu/qmd@2.8.3:pi>=0.84.2:bundle=abcdef012345'",
+      "expected_layout='14:npm:pi-mcp-adapter@2.12.1:qmd=@tobilu/qmd@2.8.3:pi>=0.84.2:bundle=abcdef012345:overlay=aaaaaaaaaaaaaaaa'",
+      "bundle_url='https://skill-archives.example/pi-bundles/companion-pi-bundle-abcdef012345.tar.gz?X-Amz-Expires=3600&X-Amz-Signature=deadbeef'",
+    ].join("\n");
+    putBoxFile(machine, ".companion/bin/ensure-pi-layout.sh", Buffer.from(bundleScript));
+    expect(await executeBoxCommand(machine, 'bash "$HOME/.companion/bin/ensure-pi-layout.sh"'))
+      .toMatchObject({ success: true, stdout: "companion-layout-base\n" });
+    expect(machine.persistentFiles.has(".companion/runtime/state/pi-layout.version")).toBe(true);
   });
 
   it("round-trips the adapter's POSIX quoting, including apostrophes", () => {

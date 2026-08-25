@@ -1,18 +1,20 @@
+/* oxlint-disable anti-slop/no-known-value-widening, anti-slop/require-safety-comment-for-type-assertion -- Predates the incremental anti-slop gate; file reawakened by an unrelated budget/reliability edit, existing debt not rewritten here. */
 import { randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 
+import { COMPANION_BUDGETS, COMPANION_BUDGETS_BASE } from "@companion/contracts";
 import { DESKTOP_REQUEST_MAX_SKEW_SECONDS } from "@companion/companion-runtime";
 import { companionsEnabled, deploymentReleaseId } from "@companion/core";
 
 const DEFAULT_BOX_API_BASE = "https://ascii.dev/api/box/v1";
-const BOX_TTL_SECONDS = 6 * 60 * 60;
+const BOX_TTL_SECONDS = COMPANION_BUDGETS_BASE.boxWarmTtlSeconds;
 const DEFAULT_CONCURRENCY = 8;
-const DEFAULT_SWEEP_INTERVAL_MS = 2_000;
-const DEFAULT_LEASE_SECONDS = 30;
-const DEFAULT_RENEW_INTERVAL_MS = 10_000;
+const DEFAULT_SWEEP_INTERVAL_MS = COMPANION_BUDGETS_BASE.sweepIntervalMs;
+const DEFAULT_LEASE_SECONDS = COMPANION_BUDGETS_BASE.leaseSeconds;
+const DEFAULT_RENEW_INTERVAL_MS = COMPANION_BUDGETS.renewIntervalMs;
 const DEFAULT_LISTEN_HOST = "127.0.0.1";
 const DEFAULT_LISTEN_PORT = 3_007;
-const DEFAULT_SHUTDOWN_DRAIN_MS = 25_000;
+const DEFAULT_SHUTDOWN_DRAIN_MS = COMPANION_BUDGETS.shutdownDrainMs;
 
 interface RuntimeServiceConfigBase {
   databaseUrl: string;
@@ -23,13 +25,26 @@ interface RuntimeServiceConfigBase {
   executorId: string;
   concurrency: number;
   sweepIntervalMs: number;
-  leaseSeconds: 30;
-  renewIntervalMs: 10_000;
+  leaseSeconds: typeof DEFAULT_LEASE_SECONDS;
+  renewIntervalMs: typeof DEFAULT_RENEW_INTERVAL_MS;
   listenHost: string;
   listenPort: number;
   desktopMaxSkewSeconds: number;
   shutdownDrainMs: number;
   releaseId: string;
+  /**
+   * Strict launch: refuse the cold-install fallback and fail a start with `runtime_image_unavailable`
+   * when no ready runtime image can be cloned. Default false — the loud fallback stays nominal.
+   */
+  requireRuntimeImage: boolean;
+  /**
+   * Phase 2 direct-transport rollout gate. `off` (default) skips Box agent endpoint registration
+   * and keeps the exec-only composition byte-for-byte. `shadow` registers the hosted endpoint at
+   * staging and logs one throttled direct-vs-exec comparison per Box without routing any real
+   * call. `on` additionally routes the event path — broker state, event reads/acks, and the
+   * daemon probe — over the direct channel with per-call fallback to exec.
+   */
+  directTransport: "off" | "shadow" | "on";
 }
 
 export type RuntimeServiceConfig = RuntimeServiceConfigBase & (
@@ -131,6 +146,11 @@ export function loadRuntimeServiceConfig(
     desktopMaxSkewSeconds: DESKTOP_REQUEST_MAX_SKEW_SECONDS,
     shutdownDrainMs,
     releaseId: deploymentReleaseId(env),
+    requireRuntimeImage: booleanEnv(
+      env.COMPANION_RUNTIME_REQUIRE_IMAGE,
+      "COMPANION_RUNTIME_REQUIRE_IMAGE",
+    ),
+    directTransport: directTransportEnv(env.COMPANION_DIRECT_TRANSPORT),
   };
   if (!enabled) {
     return {
@@ -263,6 +283,21 @@ function integerEnv(
     throw new RuntimeServiceConfigError(`${name} must be an integer from ${minimum} to ${maximum}`);
   }
   return value;
+}
+
+function directTransportEnv(raw: string | undefined): "off" | "shadow" | "on" {
+  if (raw === undefined || raw.trim() === "") return "off";
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "off" || normalized === "shadow" || normalized === "on") return normalized;
+  throw new RuntimeServiceConfigError("COMPANION_DIRECT_TRANSPORT must be off, shadow, or on");
+}
+
+function booleanEnv(raw: string | undefined, name: string): boolean {
+  if (raw === undefined || raw.trim() === "") return false;
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "true" || normalized === "1") return true;
+  if (normalized === "false" || normalized === "0") return false;
+  throw new RuntimeServiceConfigError(`${name} must be true or false`);
 }
 
 function privateListenHost(host: string): string {

@@ -112,16 +112,64 @@ migration 0123 and granted to the dedicated runtime role only; the role verifier
 ### What changes for creation
 
 - `createGenerationBox` waits on the registry row's published status with progression
-  (`requested → building → ready`), bounded well inside the claim-latency budget: a ready
-  image resolves on the first read; an in-flight build is never allowed to delay creation —
-  it falls back to a persisted, logged cold install while the builder keeps baking for the
-  next Companion.
-- Cold install remains as an explicit last resort behind a persisted decision (logged
-  reason), never a default triggered by timing luck.
+  (`requested → building → ready`). The snapshot clone is the nominal launch path, so the
+  wait is bounded by the room the operation's own cold-start deadline leaves after a reserve
+  for the create POST (`imageWaitBoundMs`, capped at `RUNTIME_IMAGE_WAIT_MS`), not by a hidden
+  3-second clamp. A ready image resolves on the first read and clones immediately; a `building`
+  or `requested` image is waited for up to that bound (cloning a pre-baked snapshot then skips
+  the 300s install, so the wait beats cold-installing, which blows the deadline regardless); a
+  `failed` build falls back immediately; and a wait that exhausts its bound cold-installs.
+- Cold install remains the last-resort fallback, but it is now loud, never silent: every create
+  that cold-installs despite a snapshot source is logged with a `fallbackReason`
+  (`image_build_failed`, `image_wait_exhausted`, `unknown_snapshot_fallback`, or `no_snapshot`)
+  and counted so `/healthz` (`image.cold_fallback_count`) surfaces a degraded launch path. The
+  registry-driven builder is supervised: a dead builder loop fails `/healthz` (`checks.image_builder`),
+  and a `failed` digest is reported (`image.status`) without flipping health, since creates still
+  succeed via the fallback. `COMPANION_RUNTIME_REQUIRE_IMAGE=true` makes creation strict — it
+  refuses the fallback and fails the start with the stable code `runtime_image_unavailable`
+  (action `retry`) so the ordered queue retries once a snapshot is ready.
 - The in-process baker class is retired: its infinite retry loop and sticky-resolution
   heuristics are deleted; only the single-attempt `bakeCompanionRuntimeImageOnce` unit
   remains, executed by the registry-driven builder under its lease. The diagnostic
   startup-autoresearch harness (`scripts/box-startup-research`) was removed with it.
+
+## Self-hosted Pi bundle (Phase 1-B)
+
+The cold-install path — `npm i -g @earendil-works/pi-coding-agent`, four `pi install`
+runs, and a qmd install — is the dominant contributor to the ~300 s install, and its
+duration and success depend on whatever a public npm registry serves at boot. Phase 1-B
+replaces it with a self-hosted, content-addressed artifact.
+
+- `packages/box-runtime/src/piBundle.ts` holds the single-source pins (`COMPANION_PI_BUNDLE`:
+  `piVersion`, the four extension `packages`, `qmdPackage`, `nodeMajor`, `sha256`, `bundleFormat`).
+  The artifact is `pi-bundles/companion-pi-bundle-<sha12>.tar.gz`, a tarball carrying `pi/` (the Pi
+  prefix tree), `pi-agent-dir/` (the four installed extensions), and `tools/` (the qmd prefix tree),
+  stored in the existing skill-archives bucket — no dedicated bucket and never a public one.
+- Bundle mode turns on when `COMPANION_PI_BUNDLE_ENABLED=true` and the runtime's `S3_*`
+  configuration is complete. At staging time `apps/runtime/src/piBundlePresigner.ts` mints a
+  presigned GET URL (1 h expiry, fresh per layout script generation, since stagings can be hours
+  apart) and injects it into the script. The layout script then
+  `curl`s that URL (retrying, with a `node` fetch fallback), verifies it with `sha256sum -c`
+  against the pin, `tar`-extracts it into `~/.companion/dist/<sha12>/`, checks the Box's Node major
+  against `nodeMajor`, and wires PATH (`dist/<sha12>/pi/bin` first, `pi-agent-dir` → `~/.companion/pi`,
+  `tools` → `~/.companion/tools`). Nothing is fetched from npm.
+- The three failure points print a fixed marker as their last stderr line —
+  `companion-bundle-download-failed`, `companion-bundle-checksum-mismatch`,
+  `companion-bundle-node-mismatch` — which `#applyPiLayout` maps to the stable codes
+  `pi_bundle_download_failed`, `pi_bundle_checksum_mismatch`, `pi_bundle_node_mismatch`. The layout
+  marker is never written on failure, so the Box relayouts cleanly on its next wake.
+- `COMPANION_PI_INSTALL_COMMAND` stays the dev/emergency escape hatch and behaves exactly as before
+  when no bundle is configured. When both are set, the bundle wins. Bundle identity is folded into
+  the base layout marker as `:bundle=<sha12>`; the escape-hatch marker omits it, so identities never
+  collide. The presigned URL never reaches any identity or marker — only the sha does. A new bundle
+  sha is a new base marker: warm Boxes relayout once at their next health tick
+  and the registry re-bakes. `disk_layout_version` stays 14 — no migration.
+- Build and publish: `scripts/build-pi-bundle.sh` (reads the pins from `piBundle.ts`, builds the
+  three trees, smoke-tests, tars, prints the sha256) and `.github/workflows/pi-bundle.yml` (builds on
+  the pinned Node major, uploads to S3 at the content-addressed key with `scripts/upload-pi-bundle.mjs`).
+  A CI guard (`pnpm pi-bundle:check`) HEADs the object derived from the pin with the S3 SDK (the
+  bucket is not public) so a pin cannot merge before its artifact exists; it skips gracefully while
+  the sha is still the placeholder or the S3 credentials are not configured.
 
 ## Phase 2 — staged, proven checkpoints
 

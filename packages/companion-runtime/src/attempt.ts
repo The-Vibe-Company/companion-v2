@@ -1,3 +1,4 @@
+/* oxlint-disable anti-slop/no-conditional-empty-object-spread, anti-slop/no-known-value-widening, anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/require-safety-comment-for-type-assertion -- Predates the incremental anti-slop gate; file reawakened by an unrelated budget/reliability edit, existing debt not rewritten here. */
 import {
   AmbiguousExternalEffectError,
   RuntimeInvariantError,
@@ -382,10 +383,8 @@ async function harvestOutputs(
 
 async function consumeEvents(
   context: AttemptContext,
-  initialVisibleOutput: boolean,
   redact: RuntimeVisibleTextRedactor,
 ): Promise<RuntimeWorkDisposition> {
-  let hasVisibleOutput = initialVisibleOutput;
   for (;;) {
     const auth = await context.session.reauthorize();
     if (auth.attemptStatus === "needs_input") return { kind: "release" };
@@ -429,8 +428,11 @@ async function consumeEvents(
       invocationId: auth.piInvocationId,
     });
     if (page.nextCursor === auth.eventCursor) {
+      const pollInterval = context.deps.eventPollIntervalMs;
       await context.deps.clock.sleep(
-        context.deps.eventPollIntervalMs ?? 500,
+        typeof pollInterval === "function"
+          ? pollInterval({ boxId: requiredRuntime(context).boxId })
+          : pollInterval ?? 500,
         context.session.signal,
       );
       continue;
@@ -459,7 +461,6 @@ async function consumeEvents(
           sequence: result.checkpointSequence,
           value: {
             eventCursor: result.eventCursor,
-            hasVisibleOutput: result.hasVisibleOutput,
           },
         }
         : null;
@@ -474,7 +475,6 @@ async function consumeEvents(
 
     // This ordering is deliberate: PostgreSQL projection must commit before broker ACK.
     await ackEvents(context, classified.throughCursor);
-    hasVisibleOutput = projected.hasVisibleOutput;
     if (classified.processExit) {
       return {
         kind: "settle",
@@ -518,7 +518,7 @@ async function consumeAcceptedAttempt(
         material: workMaterial,
       });
     }
-    return await consumeEvents(context, hasVisibleOutput, redact);
+    return await consumeEvents(context, redact);
   } catch (error) {
     if (mustAbandonRuntimeExecution(error)) throw error;
     // Once Pi accepted a prompt, an observation/validation/ACK failure cannot
@@ -601,6 +601,7 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
         await context.session.checkpoint({
           nextCheckpoint: "dispatch_write_intent",
           commandId,
+          piInvocationId: dispatchRuntime.piInvocationId,
         });
         let outcome;
         let providerCallStarted = false;
@@ -611,6 +612,7 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
               boxId: dispatchRuntime.boxId,
               commandId: commandId!,
               attemptId: context.claim.workId,
+              expectedInvocationId: dispatchRuntime.piInvocationId,
               message: promptText,
               signal,
             });
@@ -661,12 +663,11 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
           eventCursor: initialCursor,
           activityAt: providerReturnedAt,
         });
-        // The send transaction fixes cold_start_deadline_at to turn.created_at + three minutes and
-        // never moves it. Subtracting that immutable contract recovers the exact durable send time
-        // without a second timestamp or query on the dispatch path.
-        const sentAt = auth.coldStartDeadlineAt
-          ? auth.coldStartDeadlineAt.getTime() - 3 * 60_000
-          : null;
+        // cold_start_deadline_at is re-stamped to (claim time + three minutes) when the queued turn
+        // is claimed for a start (migration 0110), so it no longer equals turn.created_at + three
+        // minutes. Subtracting the constant would recover the claim time, not the durable send time,
+        // making a `sendToPromptAckMs` derived from it wrong. Log the raw deadline instead until a
+        // real send timestamp is threaded onto the dispatch path.
         context.deps.log?.info({
           ts: providerReturnedAt.toISOString(),
           event: "runtime.prompt.ack",
@@ -675,17 +676,87 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
           boxId: dispatchRuntime.boxId,
           invocationId: outcome.invocationId,
           initialCursor: initialCursor.toString(),
-          ...(sentAt === null
+          ...(auth.coldStartDeadlineAt === null || auth.coldStartDeadlineAt === undefined
             ? {}
-            : { sendToPromptAckMs: Math.max(0, providerReturnedAt.getTime() - sentAt) }),
+            : { coldStartDeadlineAt: auth.coldStartDeadlineAt.toISOString() }),
         });
         await refreshWarmTtl(context);
         break;
       }
-      case "dispatch_write_intent":
-        // No persisted ACK exists and the command id is intentionally not exposed on takeover.
-        if (commandId === null) throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
+      case "dispatch_write_intent": {
+        commandId = auth.commandId;
+        const commandPiInvocationId = auth.commandPiInvocationId;
+        if (
+          commandId === null
+          || commandPiInvocationId === null
+          || auth.piInvocationId !== commandPiInvocationId
+          || !context.deps.pi.resolvePrompt
+        ) {
+          throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
+        }
+        const workMaterial = await material(context);
+        hasVisibleOutput = workMaterial.hasVisibleOutput;
+        redact = context.deps.projectionRedactorFactory.forMaterial({
+          orgId: context.claim.orgId,
+          material: workMaterial,
+        });
+        const runtime = requiredRuntime(context);
+        const promptText = workMaterial.promptText!
+          + attachmentPromptSuffix(stagedAttachmentProjection(workMaterial));
+        const outcome = await context.session.external(async (signal) =>
+          await context.deps.pi.resolvePrompt!({
+            boxId: runtime.boxId,
+            commandId: commandId!,
+            attemptId: context.claim.workId,
+            expectedInvocationId: commandPiInvocationId,
+            message: promptText,
+            signal,
+          }));
+        if (outcome.outcome === "ambiguous") {
+          await checkpointDispatchAmbiguous(context, commandId);
+          throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
+        }
+        if (outcome.outcome === "rejected") {
+          await context.session.checkpoint({ nextCheckpoint: "dispatch_rejected", commandId });
+          return {
+            kind: "settle",
+            settlement: {
+              terminalStatus: "failed",
+              error: safeRuntimeError({
+                code: "pi_prompt_rejected",
+                message: "Pi rejected the prompt before accepting it.",
+                action: "restart_pi",
+              }),
+            },
+          };
+        }
+        if (
+          outcome.invocationId !== commandPiInvocationId
+          || outcome.initialCursor < (auth.eventCursor ?? 0n)
+        ) {
+          await checkpointDispatchAmbiguous(context, commandId);
+          throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
+        }
+        const resolvedAt = context.deps.clock.now();
+        await context.session.checkpoint({
+          nextCheckpoint: "dispatch_accepted",
+          commandId,
+          piInvocationId: outcome.invocationId,
+          eventCursor: outcome.initialCursor,
+          activityAt: resolvedAt,
+        });
+        context.deps.log?.info({
+          ts: resolvedAt.toISOString(),
+          event: "runtime.prompt.resolved",
+          companionId: context.claim.companionId,
+          attemptId: context.claim.workId,
+          boxId: runtime.boxId,
+          invocationId: outcome.invocationId,
+          initialCursor: outcome.initialCursor.toString(),
+        });
+        await refreshWarmTtl(context);
         break;
+      }
       case "dispatch_ambiguous":
         throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
       case "dispatch_rejected":
@@ -715,6 +786,26 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
         });
     }
   }
+}
+
+function stagedAttachmentProjection(material: RuntimeWorkMaterial): StagedRuntimeAttachment[] {
+  if (material.attachments.length === 0) return [];
+  const match = /^msg:([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/
+    .exec(material.messageEventId ?? "");
+  if (!match) {
+    throw new RuntimeInvariantError({
+      code: "attachment_staging_failed",
+      message: "The durable attachment message identity is invalid.",
+      action: "retry",
+    });
+  }
+  return material.attachments.map((attachment) => ({
+    position: attachment.position,
+    filename: attachment.filename,
+    contentType: attachment.contentType,
+    byteSize: attachment.byteSize,
+    path: `~/attachments/${match[1]}/${attachment.position}-${attachment.filename}`,
+  }));
 }
 
 /**

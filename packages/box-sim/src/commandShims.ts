@@ -1,6 +1,6 @@
 /* oxlint-disable anti-slop/no-known-value-widening, anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Existing simulator command parsing predates the incremental anti-slop gate. */
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { z } from "zod";
 
 import type { BoxSimCommandResult, BoxSimPiController } from "./protocol";
@@ -15,6 +15,7 @@ const CONTROL_BUNDLE_ALLOWED_PATHS = new Set([
   ".companion/runtime/state/instructions.txt",
   ".companion/runtime/state/model.txt",
   ".companion/runtime/state/providers.env",
+  ".companion/runtime/state/agent-auth.json",
   ".companion/bin/git-credential-github",
   ".companion/bin/gh",
 ]);
@@ -70,6 +71,7 @@ export type BoxSimCommandKind =
   | "match-skills-revision"
   | "join-file-parts"
   | "prepare-skills"
+  | "agent-register"
   | "start-or-restart-daemon"
   | "daemon-state"
   | "rpc-command"
@@ -116,6 +118,12 @@ export interface BoxSimDaemonMachine {
   invocationCounter: number;
   rpcReady: boolean;
   activeAttemptId: string | null;
+  brokerDispatchLedger: Map<string, {
+    commandId: string;
+    invocationId: string;
+    initialCursor: number;
+    fingerprint: string;
+  }>;
   brokerJournal: BoxSimBrokerJournalRecord[];
   brokerAcknowledgedCursor: number;
   brokerCounters: BoxSimBrokerCounters;
@@ -138,8 +146,26 @@ export interface BoxSimCommandMachine {
    * transport's demonstrated habit of mangling large bodies. Null leaves the transport honest.
    */
   mangleOutboxChunkBytes: number | null;
+  /**
+   * Injects a self-hosted Pi bundle failure into the layout install: the download or its checksum
+   * (or the Node major) fails so the bundle branch of the setup script prints its fixed marker and
+   * writes no layout file. Null leaves the bundle download honest.
+   */
+  bundleDownloadFault: "download" | "checksum" | "node" | null;
   /** Directories whose write bit was cleared; their entries can no longer be unlinked. */
   readOnlyDirectories: Set<string>;
+  /**
+   * The provider's `host <port>` registrations. Sticky per port on purpose: ascii.dev keeps one
+   * stable hosted URL and `_token` per port across re-registrations, and the adapter relies on it.
+   */
+  hostedPorts: Map<number, { title: string; url: string }>;
+  /**
+   * Mints the token-free base of a hosted URL. The server wires this to its agent listener so the
+   * minted endpoint is actually reachable; without it the URL points at an unroutable port.
+   */
+  hostedUrlFactory?: (port: number) => string;
+  /** True once the agent registration command enabled and started the agent user unit. */
+  agentUnitEnabled: boolean;
   piController?: BoxSimPiController;
 }
 
@@ -157,6 +183,7 @@ export function createBoxSimCommandMachine(input: {
       invocationCounter: 0,
       rpcReady: false,
       activeAttemptId: null,
+      brokerDispatchLedger: new Map(),
       brokerJournal: [],
       brokerAcknowledgedCursor: 0,
       brokerCounters: emptyBrokerCounters(),
@@ -168,7 +195,10 @@ export function createBoxSimCommandMachine(input: {
     extensionDirectoryCreated: false,
     unknownCommandDigests: [],
     mangleOutboxChunkBytes: null,
+    bundleDownloadFault: null,
     readOnlyDirectories: new Set<string>(),
+    hostedPorts: new Map(),
+    agentUnitEnabled: false,
   };
 }
 
@@ -348,6 +378,7 @@ export function appendPiProcessExit(
     exit,
   });
   machine.daemon.activeAttemptId = null;
+  machine.daemon.brokerDispatchLedger.clear();
 }
 
 /** Classify only known adapter commands. Unknown strings are never delegated to a host shell. */
@@ -357,6 +388,11 @@ export function classifyBoxCommand(command: string): BoxSimCommandKind {
   if (brokerCommand) return "rpc-command";
   if (command.includes("companion-pi-journal") && command.includes("companion-pi-restarts")) {
     return "daemon-diagnostics";
+  }
+  // The agent registration script also runs `systemctl --user daemon-reload`, so it must be
+  // recognized by its own endpoint marker before the daemon-reload family below can claim it.
+  if (command.includes("companion-agent-endpoint") && command.includes("host url")) {
+    return "agent-register";
   }
   // Activation now waits for the ready/unready marker inside the same Box command. Match its
   // credential and daemon-reload side effects before the narrower read-only status probe.
@@ -458,6 +494,13 @@ function failed(stderr: string, exitCode = 1, stdout = ""): BoxSimCommandResult 
   return { success: false, exitCode, stdout, stderr };
 }
 
+/** Marker the layout script prints as its last stderr line for each injected bundle fault. */
+const BUNDLE_FAULT_MARKER: Record<NonNullable<BoxSimCommandMachine["bundleDownloadFault"]>, string> = {
+  download: "companion-bundle-download-failed",
+  checksum: "companion-bundle-checksum-mismatch",
+  node: "companion-bundle-node-mismatch",
+};
+
 function installedLayout(machine: BoxSimCommandMachine): BoxSimCommandResult {
   const script = machine.persistentFiles.get(".companion/bin/ensure-pi-layout.sh")?.toString("utf8");
   if (!script) return failed("staged Pi layout script is missing");
@@ -471,6 +514,14 @@ function installedLayout(machine: BoxSimCommandMachine): BoxSimCommandResult {
   machine.layoutInstalled = true;
   if (expected && recorded === expected && brokerReady) {
     return ok("companion-layout-unchanged\n");
+  }
+  // A bundle-mode layout script downloads one immutable tarball through its injected presigned URL
+  // and verifies it before it writes anything. The injected fault fails that step: it prints the
+  // fixed marker as its last stderr line and returns before any layout file is written, exactly as
+  // the real script's `exit 1` does.
+  const bundleMode = /(?:^|\n)bundle_url='[^']*'/.test(script);
+  if (bundleMode && machine.bundleDownloadFault) {
+    return failed(`${BUNDLE_FAULT_MARKER[machine.bundleDownloadFault]}\n`);
   }
   writeSimulatedLayoutFiles(machine, expected);
   if (expected && base && recorded.split(":overlay=")[0] === base) {
@@ -647,6 +698,7 @@ async function startDaemon(machine: BoxSimCommandMachine, restart: boolean): Pro
   machine.daemon.brokerAcknowledgedCursor = brokerTailCursor(machine);
   machine.daemon.rpcReady = true;
   machine.daemon.activeAttemptId = null;
+  machine.daemon.brokerDispatchLedger.clear();
   try {
     if (restart) await machine.piController?.restart();
     else await machine.piController?.start();
@@ -700,7 +752,36 @@ function objectRecord(value: BoxSimJsonValue | undefined): BoxSimJsonObject | nu
   return parsed.success ? parsed.data : null;
 }
 
-async function executeBrokerControl(
+/**
+ * Registers the Companion box agent's hosted endpoint. The provider keeps one URL and `_token` per
+ * port for the lifetime of the Box, so a re-registration after stop/resume must answer with the
+ * same endpoint the first registration minted.
+ */
+function registeredAgentEndpoint(
+  machine: BoxSimCommandMachine,
+  command: string,
+): BoxSimCommandResult {
+  const port = Number(/\bhost url (\d+)\b/.exec(command)?.[1]);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+    return failed("simulated agent registration names no hosted port");
+  }
+  machine.agentUnitEnabled = true;
+  let hosted = machine.hostedPorts.get(port);
+  if (!hosted) {
+    // The factory only knows where the shared agent listener is; the per-box path and the proxy
+    // `_token` are minted here. Port 0 makes the factory-less default unroutable on purpose.
+    const origin = machine.hostedUrlFactory?.(port) ?? "http://127.0.0.1:0";
+    hosted = {
+      title: /--title (\S+)/.exec(command)?.[1] ?? "companion-agent",
+      url: `${origin}/boxes/${machine.boxId}?_token=${randomBytes(32).toString("hex")}`,
+    };
+    machine.hostedPorts.set(port, hosted);
+  }
+  return ok(`companion-agent-endpoint ${hosted.url}\n`);
+}
+
+/** Answer the layout-14 broker's control commands. Both transports must serve identical bytes. */
+export async function executeBrokerControl(
   machine: BoxSimCommandMachine,
   command: BoxSimJsonObject,
 ): Promise<BoxSimCommandResult | null> {
@@ -756,6 +837,39 @@ async function executeBrokerControl(
         acknowledgedCursor: machine.daemon.brokerAcknowledgedCursor,
         counters: { ...machine.daemon.brokerCounters },
         modelInput,
+      }))}\n`);
+    }
+    case "dispatch_status": {
+      const attemptId = typeof command.attemptId === "string" ? command.attemptId : null;
+      const commandId = typeof command.commandId === "string" ? command.commandId : null;
+      if (!attemptId || !commandId) {
+        return ok(`${JSON.stringify(brokerFailureFor(
+          command,
+          "invalid_command",
+          "dispatch identity is required",
+        ))}\n`);
+      }
+      const recorded = machine.daemon.brokerDispatchLedger.get(attemptId);
+      if (!recorded) {
+        return ok(`${JSON.stringify(responseFor(command, { status: "absent", attemptId, commandId }))}\n`);
+      }
+      if (recorded.commandId !== commandId) {
+        return ok(`${JSON.stringify(brokerFailureFor(
+          command,
+          "dispatch_conflict",
+          "attempt dispatch identity does not match",
+        ))}\n`);
+      }
+      return ok(`${JSON.stringify(responseFor(command, {
+        status: "accepted",
+        attemptId,
+        commandId,
+        invocationId: recorded.invocationId,
+        fingerprint: recorded.fingerprint,
+        piAcknowledged: true,
+        initialCursor: recorded.initialCursor,
+        requiredInput: ["text"],
+        clearOutbox: true,
       }))}\n`);
     }
     case "read_events": {
@@ -825,8 +939,65 @@ async function executeRpc(
   }
   const brokerCommand = extractBrokerJson(commandText);
   if (!brokerCommand) return failed("Pi broker command was not valid JSON");
+  return await executeBrokerCommand(machine, brokerCommand);
+}
+
+async function executeBrokerCommand(
+  machine: BoxSimCommandMachine,
+  brokerCommand: BoxSimJsonObject,
+): Promise<BoxSimCommandResult> {
   const brokerControl = await executeBrokerControl(machine, brokerCommand);
   if (brokerControl) return brokerControl;
+  const promptAttemptIdResult = z.string().safeParse(brokerCommand.attemptId);
+  const promptAttemptId = brokerCommand.type === "prompt" && promptAttemptIdResult.success
+    ? promptAttemptIdResult.data
+    : null;
+  const promptCommandId = brokerCommand.type === "prompt" && typeof brokerCommand.id === "string"
+    ? brokerCommand.id
+    : null;
+  const promptFingerprint = promptAttemptId && promptCommandId
+    ? createHash("sha256").update(JSON.stringify({
+      attemptId: promptAttemptId,
+      expectedInvocationId: typeof brokerCommand.expectedInvocationId === "string"
+        ? brokerCommand.expectedInvocationId
+        : null,
+      message: brokerCommand.message,
+      requiredInput: brokerCommand.requiredInput,
+      clearOutbox: brokerCommand.clearOutbox === true,
+    })).digest("hex")
+    : null;
+  if (
+    brokerCommand.type === "prompt"
+    && typeof brokerCommand.expectedInvocationId === "string"
+    && brokerCommand.expectedInvocationId !== machine.daemon.invocationId
+  ) {
+    return ok(`${JSON.stringify(brokerFailureFor(
+      brokerCommand,
+      "invocation_mismatch",
+      "prompt does not match the current Pi invocation",
+    ))}\n`);
+  }
+  const recorded = promptAttemptId
+    ? machine.daemon.brokerDispatchLedger.get(promptAttemptId)
+    : undefined;
+  if (recorded) {
+    if (recorded.commandId !== promptCommandId || recorded.fingerprint !== promptFingerprint) {
+      return ok(`${JSON.stringify(brokerFailureFor(
+        brokerCommand,
+        "dispatch_conflict",
+        "attempt dispatch identity does not match",
+      ))}\n`);
+    }
+    return ok(`${JSON.stringify(responseFor(brokerCommand, {
+      attemptId: promptAttemptId,
+      commandId: recorded.commandId,
+      invocationId: recorded.invocationId,
+      piAcknowledged: true,
+      initialCursor: recorded.initialCursor,
+      requiredInput: brokerCommand.requiredInput ?? ["text"],
+      clearOutbox: true,
+    }))}\n`);
+  }
   if (brokerCommand.type === "prompt" && machine.daemon.activeAttemptId) {
     return ok(`${JSON.stringify(brokerFailureFor(
       brokerCommand,
@@ -834,10 +1005,21 @@ async function executeRpc(
       "another Pi attempt is already active",
     ))}\n`);
   }
-  const promptAttemptIdResult = z.string().safeParse(brokerCommand.attemptId);
-  const promptAttemptId = brokerCommand.type === "prompt" && promptAttemptIdResult.success
-    ? promptAttemptIdResult.data
-    : null;
+  const abortAttemptId = brokerCommand.type === "abort" ? machine.daemon.activeAttemptId : null;
+  if (brokerCommand.type === "abort" && typeof brokerCommand.attemptId === "string"
+    && abortAttemptId && brokerCommand.attemptId !== abortAttemptId) {
+    return ok(`${JSON.stringify(brokerFailureFor(
+      brokerCommand,
+      "attempt_mismatch",
+      "abort does not match the active Pi attempt",
+    ))}\n`);
+  }
+  if (brokerCommand.type === "abort" && !abortAttemptId) {
+    return ok(`${JSON.stringify(responseFor(brokerCommand, {
+      aborted: false,
+      invocationId: machine.daemon.invocationId,
+    }))}\n`);
+  }
   const initialCursor = brokerCommand.type === "prompt" ? brokerTailCursor(machine) : null;
   if (brokerCommand.type === "prompt" && brokerCommand.clearOutbox === true) {
     for (const path of machine.persistentFiles.keys()) {
@@ -889,12 +1071,44 @@ async function executeRpc(
           },
         };
     if (
+      response.success === true
+      && promptAttemptId
+      && promptCommandId
+      && promptFingerprint
+      && machine.daemon.invocationId
+      && initialCursor !== null
+    ) {
+      machine.daemon.brokerDispatchLedger.set(promptAttemptId, {
+        commandId: promptCommandId,
+        invocationId: machine.daemon.invocationId,
+        initialCursor,
+        fingerprint: promptFingerprint,
+      });
+    }
+    if (
       response.success !== true
       && promptAttemptId
       && machine.daemon.activeAttemptId === promptAttemptId
     ) {
       machine.daemon.activeAttemptId = null;
     }
+  } else if (brokerCommand.type === "abort") {
+    if (response.success === true) machine.daemon.activeAttemptId = null;
+    response = response.success === true
+      ? responseFor(brokerCommand, {
+        aborted: true,
+        attemptId: abortAttemptId,
+        invocationId: machine.daemon.invocationId,
+      })
+      : {
+          ...responseFor(brokerCommand),
+          success: false,
+          error: {
+            code: "pi_abort_refused",
+            message: "Pi refused the abort",
+            ambiguous: false,
+          },
+        };
   }
   return ok(`${JSON.stringify(response)}\n`);
 }
@@ -908,6 +1122,13 @@ async function executeExtensionResponse(
   }
   const brokerCommand = extractBrokerJson(commandText);
   if (!brokerCommand) return failed("Pi extension response was not valid JSON");
+  return await executeExtensionResponseCommand(machine, brokerCommand);
+}
+
+async function executeExtensionResponseCommand(
+  machine: BoxSimCommandMachine,
+  brokerCommand: BoxSimJsonObject,
+): Promise<BoxSimCommandResult> {
   const requestedAttemptIdResult = z.string().safeParse(brokerCommand.attemptId);
   const requestedAttemptId = requestedAttemptIdResult.success
     ? requestedAttemptIdResult.data
@@ -953,6 +1174,21 @@ async function executeExtensionResponse(
     invocationId: machine.daemon.invocationId,
     delivered: true,
   }))}\n`);
+}
+
+/** Direct-agent entrypoint: the same broker semantics as an exec-transport socket command. */
+export async function executeBrokerAgentCommand(
+  machine: BoxSimCommandMachine,
+  command: Record<string, unknown>,
+): Promise<BoxSimCommandResult> {
+  if (machine.daemon.status !== "active" || !machine.daemon.rpcReady) {
+    return failed("Pi RPC is not ready");
+  }
+  const parsed = boxSimJsonObjectSchema.safeParse(command);
+  if (!parsed.success) return failed("Pi broker command was not valid JSON");
+  return parsed.data.type === "extension_ui_response"
+    ? await executeExtensionResponseCommand(machine, parsed.data)
+    : await executeBrokerCommand(machine, parsed.data);
 }
 
 function joinedFileCommand(machine: BoxSimCommandMachine, command: string): BoxSimCommandResult {
@@ -1155,6 +1391,8 @@ export async function executeBoxCommand(
         }
       }
       return ok();
+    case "agent-register":
+      return registeredAgentEndpoint(machine, command);
     case "start-or-restart-daemon":
       return startDaemon(machine, command.includes("systemctl --user restart"));
     case "daemon-state": {

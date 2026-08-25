@@ -1,0 +1,16 @@
+# Gitleaks configuration for the Hygiene CI scan.
+# Extends the default ruleset; do not add broad allowlists here.
+
+[extend]
+useDefault = true
+
+# The debug-companions-prod operator skill ships redaction unit tests whose
+# fixtures are deliberately secret-shaped but fully synthetic (documentation
+# JWT, base64 of "BoxKeySecret...", ghp_abcdefgh12345, ...). They exist to
+# prove prodlib.redact() masks those shapes and never contain real values.
+[allowlist]
+description = "Synthetic fixtures of the operator-skill redaction tests"
+paths = [
+  '''\.claude/skills/debug-companions-prod/scripts/test_prodlib\.py''',
+  '''\.agents/skills/debug-companions-prod/scripts/test_prodlib\.py''',
+]

@@ -1,5 +1,7 @@
+/* oxlint-disable anti-slop/no-conditional-empty-object-spread, anti-slop/no-known-value-widening, anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Predates the incremental anti-slop gate; file reawakened by an unrelated budget/reliability edit, existing debt not rewritten here. */
 import { createHash } from "node:crypto";
 import {
+  COMPANION_BUDGETS_BASE,
   companionConfigProposalMessageSchema,
   companionRoutineProposalMessageSchema,
   companionToolRunKind,
@@ -268,7 +270,7 @@ const MAX_SUBAGENT_DETAIL = 8_000;
 /** One line naming the child agent. Anything longer is a payload, not a name. */
 const MAX_SUBAGENT_AGENT = 120;
 const MAX_TITLE = 300;
-const DEFAULT_DECISION_TIMEOUT_MS = 5 * 60 * 1_000;
+const DEFAULT_DECISION_TIMEOUT_MS = COMPANION_BUDGETS_BASE.decisionTimeoutMs;
 
 /**
  * Every cut here lands on a JavaScript code unit, and an emoji is two of them. Half a surrogate pair

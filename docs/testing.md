@@ -126,8 +126,11 @@ Run API + worker + runtime + web + migrated PostgreSQL + Box/Pi simulator and pr
   leaves no runtime slot occupied during 5/15/30/60-second PostgreSQL backoff, survives runtime
   takeover with the same provider operation id, and removes the aggregate once on `completed` or
   provider `404` without an Owner clicking Retry;
-- missing prompt ACK yields `interrupted`, blocks later turns, and Retry/Cancel each release it by
-  their documented path;
+- a prompt response lost after Pi ACK is recovered from the fsynced ledger with the same
+  `command_id`, including after executor takeover, and produces exactly one Pi prompt; missing,
+  conflicting, or invocation-mismatched ledger proof yields `interrupted`, blocks later turns, and
+  proves the replacement Pi received no prompt before that mismatch was classified;
+  Retry/Cancel each release it by their documented path;
 - Viewer, list, thread, and cross-tenant requests produce zero Box calls.
 
 Inject failure before and after create, Box ready, Pi ready, prompt write, ACK, event projection,
@@ -150,7 +153,8 @@ newest eligible failed delete with a retained provider operation id.
 - `/healthz` fails when PostgreSQL, the claim loop, or the most recent sweep is unhealthy.
 
 Deterministic fault tests cover every boundary around list, create, resume, bundle upload/apply,
-pre-execution cleanup, activation, durable checkpoint, prompt write, and ACK. Regression coverage
+pre-execution cleanup, activation, durable checkpoint, direct prompt write, ledger fsync, HTTP
+response loss, dispatch-status resolution, raw attachment/outbox transfer, and ACK. Regression coverage
 also proves pre-ACK events remain visible, known Box ids are identity-checked without listing, a
 stale broker is recycled after the disk-marker crash gap, and a bundled-skill checksum change
 defeats tree reuse. Runtime-image warmup succeeds only when resume has produced a non-empty

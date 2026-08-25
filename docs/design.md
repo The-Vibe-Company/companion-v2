@@ -170,10 +170,17 @@ attempt count. Invalid responses and non-retryable errors retain the normal expu
 failure. The protocol-versioned claim entrypoint prevents an older runtime from claiming these rows
 during a rolling deploy.
 
-After a prompt may have been written, loss of acknowledgement is ambiguous: the attempt becomes
-`interrupted`, no automatic replay occurs, and later turns remain blocked. A proven negative ACK may
-be retried. Retry warns that an earlier external effect may have succeeded; Cancel explicitly
-accepts that uncertainty and releases the queue.
+Every prompt write carries the attempt's durable `command_id`. The on-Box broker fsyncs its positive
+Pi acknowledgement before answering and serves that exact result through `dispatch_status`. If the
+direct HTTP response is lost, runtime spends at most 30 seconds resolving the same command id and
+may repeat only that idempotent broker command; an executor takeover performs the same lookup. This
+command is durably bound to the Pi invocation observed idle at its write intent, and takeover
+refuses a changed instance before network I/O while the broker refuses a stale invocation before
+any Pi call. This is resolution of a proven broker fact, not replay of an
+ambiguous external effect. If no matching
+ledger fact can be recovered, the attempt becomes `interrupted`, no exec fallback or new prompt is
+sent, and later turns remain blocked. Retry warns that an earlier external effect may have succeeded;
+Cancel explicitly accepts that uncertainty and releases the queue.
 
 Disabling the existing Companions flag blocks new claims. Active work reaches a safe checkpoint and
 becomes interrupted. This kill switch is the operational rollback after v2 data exists; a legacy

@@ -1,5 +1,7 @@
 /* oxlint-disable anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Existing runtime boundary decoders predate the incremental anti-slop gate. */
 
+import { COMPANION_BUDGETS } from "@companion/contracts";
+
 export const WORK_KINDS = ["operation", "decision", "attempt", "settings", "health"] as const;
 export type WorkKind = (typeof WORK_KINDS)[number];
 
@@ -7,7 +9,7 @@ export const CLIENT_SURFACES = ["web", "mobile_web", "native_mobile"] as const;
 export type ClientSurface = (typeof CLIENT_SURFACES)[number];
 
 /** Maximum two-hour turn deadline plus five minutes of staging/dispatch reserve. */
-export const COMPANION_RUNTIME_MATERIAL_MIN_TTL_MS = 125 * 60 * 1_000;
+export const COMPANION_RUNTIME_MATERIAL_MIN_TTL_MS = COMPANION_BUDGETS.materialMinTtlMs;
 
 export const TURN_STATUSES = [
   "queued",
@@ -278,6 +280,10 @@ export interface RuntimeAuthorization {
   decisionDeliveryState: DecisionDeliveryState | null;
   decisionRequestKey: string | null;
   decisionResponseText: string | null;
+  /** Persisted prompt/decision write identity, exposed so takeover can resolve broker state. */
+  commandId: string | null;
+  /** Pi invocation pinned atomically with the prompt write intent. */
+  commandPiInvocationId: string | null;
 }
 
 export interface RuntimeCheckpointInput {
@@ -388,6 +394,19 @@ export interface RuntimeWorkMaterial {
   attachments: RuntimeAttachment[];
   /** Credential-free snapshot of what this Companion could select, or null when it is not staged. */
   configCatalog: RuntimeConfigCatalog | null;
+  /** The instance's current Box, when one exists. Read-only companion to {@link agentEndpoint}. */
+  boxId: string | null;
+  /**
+   * The hosted direct-transport agent endpoint staging registered for this Box, or null when none
+   * was registered. Only ciphertext crosses this boundary: the proxy and bearer tokens are
+   * masterKey-encrypted by apps/runtime, and `observedAt` carries the freshness the runtime judges
+   * before trusting the URL for a direct call.
+   */
+  agentEndpoint: {
+    hostedUrl: string;
+    tokenCiphertext: string;
+    observedAt: Date;
+  } | null;
 }
 
 /** Credential-free immutable Skill snapshot captured by a user Pi-shutdown operation. */
@@ -757,6 +776,8 @@ export function decodeRuntimeAuthorizationRow(
     decisionDeliveryState: nullableEnumeration(row, "decision_delivery_state", DECISION_DELIVERY_STATES),
     decisionRequestKey: nullableString(row, "decision_request_key"),
     decisionResponseText: nullableString(row, "decision_response_text"),
+    commandId: nullableUuid(row, "command_id"),
+    commandPiInvocationId: nullableString(row, "command_pi_invocation_id"),
   };
 
   if (authorization.boxId !== null && !BOX_ID.test(authorization.boxId)) {

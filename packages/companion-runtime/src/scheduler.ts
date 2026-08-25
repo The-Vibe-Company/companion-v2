@@ -1,3 +1,5 @@
+import { COMPANION_BUDGETS } from "@companion/contracts";
+
 import type { RuntimeClock } from "./clock";
 import type { RuntimeExecutionResult } from "./engine";
 import { describeThrownError, type RuntimeProcessLog } from "./logging";
@@ -5,9 +7,9 @@ import type { RuntimeClaim } from "./types";
 import { claimFence } from "./leaseSession";
 import { RUNTIME_LEASE_SECONDS, type RuntimeStore } from "./store";
 
-export const DEFAULT_RUNTIME_SWEEP_INTERVAL_MS = 2_000;
+export const DEFAULT_RUNTIME_SWEEP_INTERVAL_MS = COMPANION_BUDGETS.sweepIntervalMs;
 export const DEFAULT_RUNTIME_CONCURRENCY = 8;
-export const DEFAULT_RUNTIME_DRAIN_TIMEOUT_MS = 25_000;
+export const DEFAULT_RUNTIME_DRAIN_TIMEOUT_MS = COMPANION_BUDGETS.shutdownDrainMs;
 
 export interface RuntimeSchedulerSnapshot {
   claimLoopAlive: boolean;
@@ -50,8 +52,10 @@ export class RuntimeScheduler {
   #lastSweepStartedAt: Date | null = null;
   #lastSweepCompletedAt: Date | null = null;
   #claimLoopErrorAt: Date | null = null;
+  #claimLoopErrorStreak = 0;
   #disableApplied = false;
   #gateInterruptionApplied = false;
+  readonly #jitter: () => number;
 
   constructor(input: {
     store: RuntimeStore;
@@ -62,6 +66,8 @@ export class RuntimeScheduler {
     sweepIntervalMs?: number;
     claimsEnabled: boolean;
     log?: RuntimeProcessLog;
+    /** Injectable 0..1 source for backoff jitter; defaults to Math.random. Deterministic in tests. */
+    jitter?: () => number;
   }) {
     this.#store = input.store;
     this.#engine = input.engine;
@@ -71,6 +77,7 @@ export class RuntimeScheduler {
     this.#sweepIntervalMs = input.sweepIntervalMs ?? DEFAULT_RUNTIME_SWEEP_INTERVAL_MS;
     this.#claimsEnabled = input.claimsEnabled;
     this.#log = input.log;
+    this.#jitter = input.jitter ?? Math.random;
     if (!Number.isInteger(this.#concurrency) || this.#concurrency < 1 || this.#concurrency > 100) {
       throw new TypeError("Runtime concurrency must be between 1 and 100");
     }
@@ -100,7 +107,7 @@ export class RuntimeScheduler {
     this.#engine.handoffActive();
     const drain = (async () => {
       await this.#loopTask?.catch(() => undefined);
-      await Promise.allSettled([...this.#active.values()]);
+      await Promise.allSettled(this.#active.values());
       await this.#engine.drain();
     })();
     let timeoutHandle: unknown;
@@ -141,6 +148,7 @@ export class RuntimeScheduler {
           this.#engine.requestShutdown();
         }
         this.#claimLoopErrorAt = null;
+        this.#claimLoopErrorStreak = 0;
         this.#lastSweepCompletedAt = this.#clock.now();
         return;
       }
@@ -150,6 +158,7 @@ export class RuntimeScheduler {
           this.#engine.interruptActive();
         }
         this.#claimLoopErrorAt = null;
+        this.#claimLoopErrorStreak = 0;
         this.#lastSweepCompletedAt = this.#clock.now();
         return;
       }
@@ -180,16 +189,33 @@ export class RuntimeScheduler {
         }
       }
       this.#claimLoopErrorAt = null;
+      this.#claimLoopErrorStreak = 0;
       this.#lastSweepCompletedAt = this.#clock.now();
     } catch (error) {
       this.#claimLoopErrorAt = this.#clock.now();
+      this.#claimLoopErrorStreak += 1;
       this.#log?.error({
         ts: this.#clock.now().toISOString(),
         event: "runtime.claim_loop.error",
+        streak: this.#claimLoopErrorStreak,
         thrown: describeThrownError(error),
       });
       throw error;
     }
+  }
+
+  /**
+   * Sleep before the next sweep. After a claim-loop error, back off from the base sweep interval so
+   * a persistently failing DB is not hammered every `sweepIntervalMs`: the base doubles per
+   * consecutive error up to a cap of ten sweep intervals, then a ±20% jitter de-synchronizes
+   * concurrent executors. A healthy loop keeps the flat sweep cadence.
+   */
+  #nextSweepDelayMs(): number {
+    if (this.#claimLoopErrorStreak === 0) return this.#sweepIntervalMs;
+    const growth = Math.min(this.#claimLoopErrorStreak - 1, 10);
+    const capped = Math.min(this.#sweepIntervalMs * 2 ** growth, this.#sweepIntervalMs * 10);
+    const sample = Math.min(1, Math.max(0, this.#jitter()));
+    return Math.max(1, Math.round(capped * (0.8 + sample * 0.4)));
   }
 
   async #runLoop(): Promise<void> {
@@ -210,7 +236,7 @@ export class RuntimeScheduler {
         this.#sleepAbort = sleepAbort;
         try {
           await this.#clock.sleep(
-            this.#sweepIntervalMs,
+            this.#nextSweepDelayMs(),
             AbortSignal.any([this.#loopAbort.signal, sleepAbort.signal]),
           );
         } catch {

@@ -56,6 +56,12 @@ export interface RuntimeBoxControl {
     generation: bigint;
     ttlSeconds: number;
     deadlineAt?: Date;
+    /**
+     * The operation's cold-start/work deadline. Bounds how long the create may wait for a ready
+     * runtime image before cold-installing. Distinct from `deadlineAt`, which caps a single provider
+     * call; the snapshot wait is scoped to the whole operation budget, not one HTTP call.
+     */
+    imageWaitDeadlineAt?: Date;
     signal: AbortSignal;
   }): Promise<BoxCreateResult>;
   applyGenerationBoxSettings(input: {
@@ -125,6 +131,21 @@ export interface RuntimePiControl {
     boxId: string;
     commandId: string;
     attemptId: string;
+    /** Pi invocation observed idle immediately before the durable write intent. */
+    expectedInvocationId: string;
+    message: string;
+    signal: AbortSignal;
+  }): Promise<BrokerPromptWriteOutcome>;
+  /**
+   * Resolve a persisted prompt write-intent through the broker's durable dispatch ledger. Present
+   * only when the direct transport is enabled; the exec-only path keeps the conservative
+   * interruption behavior because it has no bounded status channel.
+   */
+  resolvePrompt?(input: {
+    boxId: string;
+    commandId: string;
+    attemptId: string;
+    expectedInvocationId: string;
     message: string;
     signal: AbortSignal;
   }): Promise<BrokerPromptWriteOutcome>;
@@ -192,6 +213,12 @@ export interface RuntimeResourceStager {
     skillsDigest?: string;
     /** Earliest expiry among the bounded credentials written into this snapshot. */
     materialExpiresAt: Date | null;
+    /**
+     * Hosted direct-transport agent endpoint registered by this staging, when the rollout gate
+     * enables it. The ciphertext is minted by apps/runtime under the master key; agent token
+     * plaintext never enters companion-runtime or PostgreSQL.
+     */
+    agentEndpoint?: { hostedUrl: string; tokenCiphertext: string } | null;
   }>;
   /** Atomically replace only the Skills tree. This surface never receives runtime credentials. */
   stageSkillTree(input: {
@@ -308,7 +335,12 @@ export interface RuntimeEngineDependencies {
   clock: RuntimeClock;
   jitter: () => number;
   executorId: string;
-  eventPollIntervalMs?: number;
+  /**
+   * Delay after an empty event page before the next read. A function form lets the transport
+   * composition answer per Box: the direct long-poll channel already waited server-side, so its
+   * empty pages re-poll immediately, while the exec transport keeps the flat cadence.
+   */
+  eventPollIntervalMs?: number | ((input: { boxId: string }) => number);
   /** Process logs for failures. Absent in unit tests unless a test captures them. */
   log?: RuntimeProcessLog;
 }

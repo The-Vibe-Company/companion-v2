@@ -1,5 +1,7 @@
 /* oxlint-disable anti-slop/no-conditional-empty-object-spread, anti-slop/no-known-value-widening, anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Existing lifecycle orchestration predates the incremental anti-slop gate. */
 
+import { COMPANION_BUDGETS_BASE } from "@companion/contracts";
+
 import { AmbiguousExternalEffectError, RuntimeInvariantError } from "./errors";
 import { mustAbandonRuntimeExecution } from "./executionControl";
 import { runtimeSucceeded, type RuntimeWorkDisposition } from "./handler";
@@ -26,15 +28,15 @@ import type {
   RuntimeAuthorization,
 } from "./types";
 
-export const BOX_WARM_TTL_SECONDS = 21_600;
+export const BOX_WARM_TTL_SECONDS = COMPANION_BUDGETS_BASE.boxWarmTtlSeconds;
 const PROVIDER_POLL_INTERVAL_MS = 1_000;
 // Waiting for a Box to leave provisioning is the one poll where every interval lands directly on
 // the member's send-to-ack latency, and a ready GET is cheap, so this loop polls four times as
 // often as the conservative default used for absence confirmation and archival waits.
 const READY_POLL_INTERVAL_MS = 250;
 const ABSENCE_CONFIRMATION_INTERVAL_MS = 30_000;
-const PROVIDER_CALL_DEADLINE_MS = 30_000;
-const OPERATION_DEADLINE_MS = 10 * 60 * 1_000;
+const PROVIDER_CALL_DEADLINE_MS = COMPANION_BUDGETS_BASE.boxRequestTimeoutMs;
+const OPERATION_DEADLINE_MS = COMPANION_BUDGETS_BASE.operationDeadlineMs;
 
 interface OperationContext {
   claim: OperationRuntimeClaim;
@@ -402,6 +404,7 @@ async function stageCapturedResources(
     await context.deps.store.recordMaterialSnapshot(context.session.fence, {
       clientSurface,
       materialExpiresAt: staged.materialExpiresAt,
+      agentEndpoint: staged.agentEndpoint ?? null,
     }));
   logStageTiming(context, "installing_layout", startedAt, {
     stagingMode: staged.stagingMode ?? "skills",
@@ -576,11 +579,21 @@ async function handleStart(context: OperationContext): Promise<RuntimeWorkDispos
               generation: context.claim.runtimeGeneration,
               ttlSeconds: BOX_WARM_TTL_SECONDS,
               deadlineAt,
+              // The snapshot wait is bounded by the whole operation's cold-start budget, not the
+              // single-call `deadlineAt`, so a ready image is worth waiting for before cold install.
+              imageWaitDeadlineAt: workDeadline(context),
               signal,
             });
           });
         } catch (error) {
-          if (!providerCallStarted || mustAbandonRuntimeExecution(error)) throw error;
+          // A RuntimeInvariantError here is a deliberate pre-POST refusal (strict-image mode), never
+          // an ambiguous provider effect, so it must surface with its own stable code, not as
+          // box_create_ambiguous.
+          if (
+            !providerCallStarted
+            || mustAbandonRuntimeExecution(error)
+            || error instanceof RuntimeInvariantError
+          ) throw error;
           throw new AmbiguousExternalEffectError("box_create_ambiguous");
         }
         let boxId = result.boxId;

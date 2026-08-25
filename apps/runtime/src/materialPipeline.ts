@@ -26,9 +26,11 @@ import {
   sanitizeCompanionAttachmentFilename,
   sniffCompanionAttachmentMime,
 } from "@companion/contracts";
+import { encryptOpaqueValue } from "@companion/core";
 import { packDir } from "@companion/skills";
 import { companionAttachmentKey } from "@companion/storage";
 
+import { decryptCompanionAgentEndpointTokens } from "./directBoxTransport";
 import {
   assertRuntimeMaterialSnapshot,
   collectRuntimeCredentialSensitiveValues,
@@ -60,6 +62,9 @@ export function createRuntimeMaterialPipeline(input: {
   apiUrl: string;
   bundledSkill: CompanionRuntimeSkill;
   runtime(): CompanionBoxRuntimeV2;
+  /** Direct hosted-agent data path for chat files/outbox; lifecycle and staging stay on runtime(). */
+  fileRuntime?: () => Pick<CompanionBoxRuntimeV2,
+    "stageAttachments" | "clearOutbox" | "listOutbox" | "readOutboxFile">;
   loadSkillArchive(storagePath: string, signal: AbortSignal): Promise<Buffer>;
   /** Object-storage read for one chat attachment. Same bucket, deliberately a separate seam. */
   loadAttachment(storageKey: string, signal: AbortSignal): Promise<Buffer>;
@@ -70,6 +75,17 @@ export function createRuntimeMaterialPipeline(input: {
     contentType: string;
     signal: AbortSignal;
   }): Promise<void>;
+  /**
+   * Direct-transport endpoint sink, present only when the rollout gate enables the direct channel.
+   * Receives the decrypted hosted agent endpoint at staging time and on every fenced material read
+   * that carries one, so the event path can go direct without waiting for a fresh staging.
+   */
+  registerAgentEndpoint?: (boxId: string, endpoint: {
+    hostedUrl: string;
+    proxyToken: string;
+    bearerToken: string;
+    observedAt: Date;
+  }) => void;
   now?: () => number;
 }): RuntimeMaterialPipeline {
   const now = input.now ?? Date.now;
@@ -102,6 +118,24 @@ export function createRuntimeMaterialPipeline(input: {
         // an unusable capability, but it is never staged or included in material expiry.
         const mcpBrokerToken = await store.mintMcpBrokerToken(fence, RUNTIME_LEASE_SECONDS);
         if (hasOauth && mcpBrokerToken) mcpBrokerTokensByMaterial.set(material, mcpBrokerToken);
+      }
+      if (input.registerAgentEndpoint && material.boxId && material.agentEndpoint) {
+        try {
+          const tokens = decryptCompanionAgentEndpointTokens({
+            orgId: fence.orgId,
+            companionId: fence.companionId,
+            tokenCiphertext: material.agentEndpoint.tokenCiphertext,
+            masterKey: input.masterKey,
+          });
+          input.registerAgentEndpoint(material.boxId, {
+            hostedUrl: material.agentEndpoint.hostedUrl,
+            proxyToken: tokens.proxyToken,
+            bearerToken: tokens.bearerToken,
+            observedAt: material.agentEndpoint.observedAt,
+          });
+        } catch {
+          // An undecryptable endpoint only keeps this Box on the exec transport; the claim proceeds.
+        }
       }
       return material;
     },
@@ -198,6 +232,16 @@ export function createRuntimeMaterialPipeline(input: {
         configCatalog: nativeMobile ? null : stage.material.configCatalog,
         signal: stage.signal,
       });
+      // A live staging holds the endpoint in plaintext for exactly this moment: hand it to the
+      // direct-transport registry now so the very next turn on this Box can go direct.
+      if (input.registerAgentEndpoint && observed.agentEndpoint) {
+        input.registerAgentEndpoint(stage.boxId, {
+          hostedUrl: observed.agentEndpoint.hostedUrl,
+          proxyToken: observed.agentEndpoint.proxyToken,
+          bearerToken: observed.agentEndpoint.bearerToken,
+          observedAt: new Date(now()),
+        });
+      }
       return {
         diskLayoutVersion: observed.diskLayoutVersion,
         appliedSettingsRevision: stage.targetSettingsRevision,
@@ -210,6 +254,25 @@ export function createRuntimeMaterialPipeline(input: {
         skillBytesTransferred: observed.skillBytesTransferred,
         skillsDigest: observed.skillsDigest,
         materialExpiresAt,
+        // Both hosted-endpoint tokens are credentials; only masterKey ciphertext crosses into the
+        // durable store, so companion-runtime and PostgreSQL never see agent plaintext.
+        agentEndpoint: observed.agentEndpoint
+          ? {
+            hostedUrl: observed.agentEndpoint.hostedUrl,
+            tokenCiphertext: JSON.stringify(encryptOpaqueValue(
+              {
+                orgId: stage.orgId,
+                purpose: "companion_box_agent_endpoint",
+                subjectId: stage.companionId,
+                value: JSON.stringify({
+                  proxyToken: observed.agentEndpoint.proxyToken,
+                  bearerToken: observed.agentEndpoint.bearerToken,
+                }),
+              },
+              input.masterKey,
+            )),
+          }
+          : null,
       };
     },
     async stageSkillTree(stage) {
@@ -282,7 +345,7 @@ export function createRuntimeMaterialPipeline(input: {
         material: stage.material,
         authorization: stage.authorization,
       });
-      return await input.runtime().stageAttachments({
+      return await (input.fileRuntime?.() ?? input.runtime()).stageAttachments({
         boxId: stage.boxId,
         messageId: messageIdFromEventId(stage.messageEventId),
         files,
@@ -292,10 +355,10 @@ export function createRuntimeMaterialPipeline(input: {
   };
   const outboxHarvester: RuntimeOutboxHarvester = {
     async clearOutbox({ boxId, signal }) {
-      await input.runtime().clearOutbox({ boxId, signal });
+      await (input.fileRuntime?.() ?? input.runtime()).clearOutbox({ boxId, signal });
     },
     async harvestOutbox(harvest) {
-      const listed = await input.runtime().listOutbox({
+      const listed = await (input.fileRuntime?.() ?? input.runtime()).listOutbox({
         boxId: harvest.boxId,
         deadlineAt: harvest.deadlineAt,
         signal: harvest.signal,
@@ -324,7 +387,7 @@ export function createRuntimeMaterialPipeline(input: {
         // in either costs exactly one image: the harvest keeps whatever it has already stored and
         // reports the shortfall, rather than discarding a partial set and orphaning its objects.
         try {
-          const file = await input.runtime().readOutboxFile({
+          const file = await (input.fileRuntime?.() ?? input.runtime()).readOutboxFile({
             boxId: harvest.boxId,
             entry,
             deadlineAt: harvest.deadlineAt,

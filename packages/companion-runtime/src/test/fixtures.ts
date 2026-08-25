@@ -182,6 +182,10 @@ export function attemptAuthorization(
     decisionDeliveryState: null,
     decisionRequestKey: null,
     decisionResponseText: null,
+    commandId: null,
+    commandPiInvocationId: claim.checkpoint === "dispatch_write_intent"
+      ? PI_INVOCATION_ID
+      : null,
     ...overrides,
   };
 }
@@ -264,6 +268,8 @@ export function attemptMaterial(overrides: Partial<RuntimeWorkMaterial> = {}): R
     hasVisibleOutput: false,
     attachments: [],
     configCatalog: null,
+    boxId: null,
+    agentEndpoint: null,
     ...overrides,
   };
 }
@@ -341,7 +347,13 @@ export class MemoryRuntimeStore implements RuntimeStore {
     if (input.providerOperationId) {
       this.authorization.providerOperationId = input.providerOperationId;
     }
-    if (input.piInvocationId) this.authorization.piInvocationId = input.piInvocationId;
+    if (input.commandId) this.authorization.commandId = input.commandId;
+    if (input.piInvocationId) {
+      this.authorization.piInvocationId = input.piInvocationId;
+      if (input.nextCheckpoint === "dispatch_write_intent") {
+        this.authorization.commandPiInvocationId = input.piInvocationId;
+      }
+    }
     if (input.eventCursor !== undefined) this.authorization.eventCursor = input.eventCursor;
     if (input.activityAt) {
       this.authorization.inactivityDeadlineAt = new Date(input.activityAt.getTime() + 10 * 60_000);

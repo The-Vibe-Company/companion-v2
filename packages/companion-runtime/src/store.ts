@@ -25,11 +25,12 @@ import {
   COMPANION_ATTACHMENT_FILENAME_PATTERN,
   COMPANION_ATTACHMENT_MAX_BYTES,
   COMPANION_ATTACHMENT_MIME_TYPES,
+  COMPANION_BUDGETS_BASE,
   COMPANION_MESSAGE_ATTACHMENT_MAX_COUNT,
 } from "@companion/contracts";
 import type { RuntimePiProjection } from "./piEvents";
 
-export const RUNTIME_LEASE_SECONDS = 30 as const;
+export const RUNTIME_LEASE_SECONDS = COMPANION_BUDGETS_BASE.leaseSeconds;
 
 export interface RuntimeStore {
   ping(): Promise<void>;
@@ -77,6 +78,8 @@ export interface RuntimeStore {
   recordMaterialSnapshot(fence: LeaseFence, input: {
     clientSurface: ClientSurface;
     materialExpiresAt: Date | null;
+    /** Ciphertext-only hosted agent endpoint; absent while the direct-transport gate is off. */
+    agentEndpoint?: { hostedUrl: string; tokenCiphertext: string } | null;
   }): Promise<true | null>;
   publishMaterialSnapshot(fence: LeaseFence, input: {
     piInvocationId: string;
@@ -340,6 +343,28 @@ function decodeAttachments(row: RuntimeSqlRow): RuntimeAttachment[] {
   });
 }
 
+/**
+ * Decode the hosted agent endpoint columns, enforcing the database's all-or-nothing CHECK on this
+ * side of the boundary too: half an endpoint is a contract violation, never a partial credential.
+ */
+function decodeAgentEndpoint(row: RuntimeSqlRow): RuntimeWorkMaterial["agentEndpoint"] {
+  const hostedUrl = nullableText(row, "agent_hosted_url");
+  const tokenCiphertext = nullableText(row, "agent_token_ciphertext");
+  const observedAt = row.agent_observed_at;
+  if (hostedUrl === null && tokenCiphertext === null && observedAt === null) return null;
+  if (
+    hostedUrl === null
+    || hostedUrl.length > 2_048
+    || tokenCiphertext === null
+    || tokenCiphertext.length > 8_192
+    || !(observedAt instanceof Date)
+    || !Number.isFinite(observedAt.getTime())
+  ) {
+    throw new RuntimeStoreContractError();
+  }
+  return { hostedUrl, tokenCiphertext, observedAt };
+}
+
 function decodeMaterial(row: RuntimeSqlRow): RuntimeWorkMaterial {
   const credentialSnapshotMatches = booleanValue(row.credential_snapshot_matches);
   if (credentialSnapshotMatches === null) {
@@ -398,7 +423,15 @@ function decodeMaterial(row: RuntimeSqlRow): RuntimeWorkMaterial {
     hasVisibleOutput,
     attachments: decodeAttachments(row),
     configCatalog: null,
+    boxId: decodeMaterialBoxId(row),
+    agentEndpoint: decodeAgentEndpoint(row),
   };
+}
+
+function decodeMaterialBoxId(row: RuntimeSqlRow): string | null {
+  const boxId = nullableText(row, "box_id");
+  if (boxId !== null && !BOX_ID_PATTERN.test(boxId)) throw new RuntimeStoreContractError();
+  return boxId;
 }
 
 function decodeSkillUpdateMaterial(row: RuntimeSqlRow): RuntimeSkillUpdateMaterial {
@@ -644,7 +677,9 @@ const AUTHORIZATION_COLUMNS = `
   decision_status,
   decision_delivery_state,
   decision_request_key,
-  decision_response_text`;
+  decision_response_text,
+  command_id,
+  command_pi_invocation_id`;
 
 /** PostgreSQL implementation whose SQL surface consists only of Runtime v2 definer functions. */
 export class PostgresRuntimeStore implements RuntimeStore {
@@ -698,7 +733,7 @@ export class PostgresRuntimeStore implements RuntimeStore {
     return await mapped(async () => {
       const rows = await this.sql.unsafe<RuntimeSqlRow[]>(`
         SELECT ${AUTHORIZATION_COLUMNS}
-        FROM public.companion_runtime_renew_and_authorize(
+        FROM public.companion_runtime_renew_and_authorize_v2(
           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
           $6::text, $7::public.companion_runtime_work_kind, $8::uuid, $9::integer
         )
@@ -770,7 +805,8 @@ export class PostgresRuntimeStore implements RuntimeStore {
       const rows = await this.sql.unsafe<RuntimeSqlRow[]>(`
         SELECT turn_id, attempt_id, message_event_id, prompt_text, decision_request_kind,
                decision_response_payload, provider_material, skill_material, mcp_material,
-               model_input, has_visible_output, attachments, credential_snapshot_matches
+               model_input, has_visible_output, attachments, credential_snapshot_matches,
+               box_id, agent_hosted_url, agent_token_ciphertext, agent_observed_at
         FROM public.companion_runtime_get_material(
           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
           $6::text, $7::public.companion_runtime_work_kind, $8::uuid, $9::integer
@@ -899,15 +935,23 @@ export class PostgresRuntimeStore implements RuntimeStore {
   async recordMaterialSnapshot(fence: LeaseFence, input: {
     clientSurface: ClientSurface;
     materialExpiresAt: Date | null;
+    agentEndpoint?: { hostedUrl: string; tokenCiphertext: string } | null;
   }): Promise<true | null> {
     return await mapped(async () => {
       const rows = await this.sql.unsafe<RuntimeSqlRow[]>(`
         SELECT public.companion_runtime_record_material_snapshot(
           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
           $6::text, $7::public.companion_runtime_work_kind, $8::uuid,
-          $9::public.companion_client_surface, $10::timestamptz
+          $9::public.companion_client_surface, $10::timestamptz,
+          $11::text, $12::text
         ) AS recorded
-      `, [...fenceParameters(fence), input.clientSurface, input.materialExpiresAt]);
+      `, [
+        ...fenceParameters(fence),
+        input.clientSurface,
+        input.materialExpiresAt,
+        input.agentEndpoint?.hostedUrl ?? null,
+        input.agentEndpoint?.tokenCiphertext ?? null,
+      ]);
       const recorded = one(rows, "record material snapshot").recorded;
       const recordedValue = booleanValue(recorded);
       if (recordedValue === null) throw new RuntimeStoreContractError();

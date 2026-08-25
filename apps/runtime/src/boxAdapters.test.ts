@@ -6,6 +6,8 @@ import type { RuntimeProcessLog } from "@companion/companion-runtime";
 import {
   createRuntimeBoxControl,
   createRuntimePiControl,
+  imageWaitBoundMs,
+  IMAGE_WAIT_RESERVE_MS,
   RUNTIME_IMAGE_WAIT_MS,
   type RuntimeImageSource,
 } from "./boxAdapters";
@@ -219,7 +221,7 @@ describe("runtime Box/Pi port adapters", () => {
         generation: 4,
         expectedImage: "companion-l14-aaaaaaaaaaaa",
         fromImage: null,
-        fallbackReason: "image_build_pending",
+        fallbackReason: "image_wait_exhausted",
         imageWaitMs: RUNTIME_IMAGE_WAIT_MS,
         outcome: "created",
       })]);
@@ -287,6 +289,166 @@ describe("runtime Box/Pi port adapters", () => {
       signal,
     })).resolves.toMatchObject({ outcome: "created", boxId: "bx_23456789" });
 
+    expect(createOrRecoverGenerationBox).toHaveBeenCalledWith(expect.objectContaining({
+      from: "companion-l14-aaaaaaaaaaaa",
+    }));
+  });
+
+  it("derives the wait bound from the operation deadline, minus the create reserve", () => {
+    const now = 1_000_000;
+    // Plenty of room: bound is capped at RUNTIME_IMAGE_WAIT_MS.
+    expect(imageWaitBoundMs(new Date(now + 300_000), now)).toBe(RUNTIME_IMAGE_WAIT_MS);
+    // Tighter deadline: bound is the room left after the reserve.
+    expect(imageWaitBoundMs(new Date(now + 45_000), now)).toBe(45_000 - IMAGE_WAIT_RESERVE_MS);
+    // Deadline already inside the reserve: no time to wait at all.
+    expect(imageWaitBoundMs(new Date(now + IMAGE_WAIT_RESERVE_MS), now)).toBe(0);
+    expect(imageWaitBoundMs(new Date(now - 1), now)).toBe(0);
+    // Absent deadline (delete/health work): the flat cap.
+    expect(imageWaitBoundMs(undefined, now)).toBe(RUNTIME_IMAGE_WAIT_MS);
+  });
+
+  it("passes the deadline-derived bound to the registry wait", async () => {
+    const now = 1_000_000;
+    let seenBound: number | undefined;
+    const createOrRecoverGenerationBox = vi.fn(async () => ({
+      outcome: "created" as const,
+      boxId: "bx_23456789",
+      name: "canonical",
+    }));
+    const control = createRuntimeBoxControl({
+      lifecycle: lifecycle({ createOrRecoverGenerationBox }),
+      runtime: () => boxRuntime(),
+      runtimeImage: runtimeImage({
+        waitForResolution: async (boundMs) => {
+          seenBound = boundMs;
+          return "ready";
+        },
+      }),
+      now: () => now,
+    });
+
+    await control.createGenerationBox({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      generation: 4n,
+      ttlSeconds: 21_600,
+      deadlineAt: new Date(now + 30_000),
+      imageWaitDeadlineAt: new Date(now + 50_000),
+      signal,
+    });
+
+    expect(seenBound).toBe(50_000 - IMAGE_WAIT_RESERVE_MS);
+  });
+
+  it("cold-installs immediately without waiting once the deadline is exhausted", async () => {
+    const now = 1_000_000;
+    const fallbacks: string[] = [];
+    const waitForResolution = vi.fn(async () => "pending" as const);
+    const createOrRecoverGenerationBox = vi.fn(async () => ({
+      outcome: "created" as const,
+      boxId: "bx_23456789",
+      name: "canonical",
+    }));
+    const captured = capturingLog();
+    const control = createRuntimeBoxControl({
+      lifecycle: lifecycle({ createOrRecoverGenerationBox }),
+      runtime: () => boxRuntime(),
+      runtimeImage: runtimeImage({ waitForResolution }),
+      onColdFallback: (reason) => fallbacks.push(reason),
+      log: captured.log,
+      now: () => now,
+    });
+
+    await control.createGenerationBox({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      generation: 4n,
+      ttlSeconds: 21_600,
+      deadlineAt: new Date(now + 30_000),
+      imageWaitDeadlineAt: new Date(now), // no room left
+      signal,
+    });
+
+    expect(waitForResolution).not.toHaveBeenCalled();
+    expect(fallbacks).toEqual(["image_wait_exhausted"]);
+    expect(createOrRecoverGenerationBox).toHaveBeenCalledWith(expect.not.objectContaining({
+      from: expect.anything(),
+    }));
+    expect(captured.records).toEqual([expect.objectContaining({
+      fallbackReason: "image_wait_exhausted",
+      imageWaitMs: 0,
+    })]);
+  });
+
+  it("counts a cold-install fallback when the build failed", async () => {
+    const fallbacks: string[] = [];
+    const createOrRecoverGenerationBox = vi.fn(async () => ({
+      outcome: "created" as const,
+      boxId: "bx_23456789",
+      name: "canonical",
+    }));
+    const control = createRuntimeBoxControl({
+      lifecycle: lifecycle({ createOrRecoverGenerationBox }),
+      runtime: () => boxRuntime(),
+      runtimeImage: runtimeImage({ waitForResolution: async () => "failed" }),
+      onColdFallback: (reason) => fallbacks.push(reason),
+      now: () => 1_000_000,
+    });
+
+    await control.createGenerationBox({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      generation: 4n,
+      ttlSeconds: 21_600,
+      deadlineAt,
+      signal,
+    });
+
+    expect(fallbacks).toEqual(["image_build_failed"]);
+  });
+
+  it("refuses the cold-install fallback in strict mode", async () => {
+    const createOrRecoverGenerationBox = vi.fn();
+    const fallbacks: string[] = [];
+    const control = createRuntimeBoxControl({
+      lifecycle: lifecycle({ createOrRecoverGenerationBox }),
+      runtime: () => boxRuntime(),
+      runtimeImage: runtimeImage({ waitForResolution: async () => "failed" }),
+      requireImage: true,
+      onColdFallback: (reason) => fallbacks.push(reason),
+      now: () => 1_000_000,
+    });
+
+    await expect(control.createGenerationBox({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      generation: 4n,
+      ttlSeconds: 21_600,
+      deadlineAt,
+      signal,
+    })).rejects.toMatchObject({ stableCode: "runtime_image_unavailable", action: "retry" });
+
+    expect(createOrRecoverGenerationBox).not.toHaveBeenCalled();
+    expect(fallbacks).toEqual([]);
+  });
+
+  it("clones normally in strict mode when a ready snapshot exists", async () => {
+    const createOrRecoverGenerationBox = vi.fn(async () => ({
+      outcome: "created" as const,
+      boxId: "bx_23456789",
+      name: "canonical",
+    }));
+    const control = createRuntimeBoxControl({
+      lifecycle: lifecycle({ createOrRecoverGenerationBox }),
+      runtime: () => boxRuntime(),
+      runtimeImage: runtimeImage({ waitForResolution: async () => "ready" }),
+      requireImage: true,
+      now: () => 1_000_000,
+    });
+
+    await expect(control.createGenerationBox({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      generation: 4n,
+      ttlSeconds: 21_600,
+      deadlineAt,
+      signal,
+    })).resolves.toMatchObject({ outcome: "created" });
     expect(createOrRecoverGenerationBox).toHaveBeenCalledWith(expect.objectContaining({
       from: "companion-l14-aaaaaaaaaaaa",
     }));
@@ -422,6 +584,7 @@ describe("runtime Box/Pi port adapters", () => {
       boxId: "bx_23456789",
       commandId: "command-1",
       attemptId: "attempt-1",
+      expectedInvocationId: "invocation-1",
       message: "hello",
       signal,
     })).resolves.toEqual({
@@ -434,6 +597,7 @@ describe("runtime Box/Pi port adapters", () => {
       boxId: "bx_23456789",
       requestId: "command-1",
       attemptId: "attempt-1",
+      expectedInvocationId: "invocation-1",
       message: "hello",
       signal,
     });
@@ -485,6 +649,7 @@ describe("runtime Box/Pi port adapters", () => {
       boxId: "bx_23456789",
       commandId: "command-1",
       attemptId: "attempt-1",
+      expectedInvocationId: "invocation-1",
       message: "hello",
       signal,
     };
