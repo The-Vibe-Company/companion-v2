@@ -40,6 +40,103 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    func testLiquidGlassDemoRendersCompanionMarkdownSafely() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-glass-chat-demo"]
+        app.launch()
+
+        let reply = app.descendants(matching: .any)["demo.markdown.reply"]
+        XCTAssertTrue(reply.waitForExistence(timeout: 5))
+
+        let heading = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "markdown.heading.")
+        ).firstMatch
+        let list = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "markdown.list.")
+        ).firstMatch
+        let quote = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "markdown.quote.")
+        ).firstMatch
+        let code = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "markdown.code-block.")
+        ).firstMatch
+        let table = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "markdown.table.")
+        ).firstMatch
+
+        XCTAssertTrue(heading.exists)
+        XCTAssertTrue(list.exists)
+        XCTAssertTrue(quote.exists)
+        XCTAssertTrue(code.exists)
+        XCTAssertTrue(table.exists)
+        XCTAssertTrue(app.staticTexts["Rapport d’incident"].exists)
+        XCTAssertTrue(app.staticTexts["[image: preuve distante]"].exists)
+        XCTAssertTrue(app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "<img src=x onerror=alert(1)>")
+        ).firstMatch.exists)
+
+        XCTAssertTrue(app.links["Documentation sûre"].exists)
+        XCTAssertFalse(app.links["Lien refusé"].exists)
+        XCTAssertTrue(app.staticTexts["Lien refusé"].exists)
+        XCTAssertFalse(app.images["preuve distante"].exists)
+
+        let composer = app.descendants(matching: .any)["demo.composer"]
+        let send = app.buttons["demo.send"]
+        composer.tap()
+        composer.typeText("**Message membre littéral**")
+        send.tap()
+        XCTAssertTrue(app.staticTexts["**Message membre littéral**"].waitForExistence(timeout: 3))
+    }
+
+    @MainActor
+    func testCompanionMarkdownSupportsAccessibilityTextInLandscape() throws {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-glass-chat-demo",
+            "-UIPreferredContentSizeCategoryName",
+            "UICTContentSizeCategoryAccessibilityExtraExtraExtraLarge",
+        ]
+        app.launch()
+        defer {
+            XCUIDevice.shared.orientation = .portrait
+            app.terminate()
+        }
+
+        XCUIDevice.shared.orientation = .landscapeLeft
+
+        let reply = app.descendants(matching: .any)["demo.markdown.reply"]
+        let code = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "markdown.code-block.")
+        ).firstMatch
+        let table = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "markdown.table.")
+        ).firstMatch
+
+        XCTAssertTrue(reply.waitForExistence(timeout: 5))
+        XCTAssertTrue(code.exists)
+        XCTAssertTrue(table.exists)
+        try captureScreenshot(named: "chat-markdown-accessibility-landscape.png")
+    }
+
+    @MainActor
+    func testCompanionMarkdownCacheInvalidatesChangedEventContent() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-glass-chat-demo", "-markdown-cache-ui-test"]
+        app.launch()
+
+        XCTAssertTrue(app.staticTexts["Rapport d’incident"].waitForExistence(timeout: 5))
+
+        app.buttons["Options de la conversation"].tap()
+        let refresh = app.buttons["demo.markdown.refresh-cache"]
+        XCTAssertTrue(refresh.waitForExistence(timeout: 2))
+        refresh.tap()
+
+        XCTAssertTrue(app.staticTexts["Rapport actualisé"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["Rapport d’incident"].exists)
+        XCTAssertTrue(app.staticTexts["Le même événement affiche maintenant un contenu renouvelé."].exists)
+    }
+
+    @MainActor
     func testManagementDemoCoversCreationProvidersAndPlugins() throws {
         let app = XCUIApplication()
         app.launchArguments = ["-glass-management-demo"]

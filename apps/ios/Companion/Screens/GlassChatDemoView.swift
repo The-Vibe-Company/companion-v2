@@ -9,11 +9,15 @@ struct GlassChatDemoView: View {
     @State private var messages = DemoMessage.samples
     @State private var showRoster = false
     @State private var showDesignInfo = false
+    @State private var markdownByEventID: [String: CachedMarkdownDocument] = [:]
 
     private let companionName = "Companion"
     private let icon = CompanionSummary.Icon(shape: 1, mouth: 1, accessory: 6, color: 7)
     private let holdsReplyingForEvidence = ProcessInfo.processInfo.arguments.contains(
         "-companion-avatar-ui-evidence"
+    )
+    private let exposesMarkdownCacheTest = ProcessInfo.processInfo.arguments.contains(
+        "-markdown-cache-ui-test"
     )
 
     private var visualTheme: CompanionVisualTheme {
@@ -41,8 +45,10 @@ struct GlassChatDemoView: View {
                                     timestamp: message.timestamp,
                                     companionName: companionName,
                                     icon: icon,
-                                    accent: visualTheme.accent
+                                    accent: visualTheme.accent,
+                                    markdown: markdownByEventID[message.eventID]?.document
                                 )
+                                .accessibilityIdentifier(message.accessibilityIdentifier)
                                 .id(message.id)
                             }
 
@@ -114,6 +120,12 @@ struct GlassChatDemoView: View {
                             draft = ""
                             replying = false
                         }
+                        if exposesMarkdownCacheTest {
+                            Button("Actualiser le Markdown", systemImage: "arrow.triangle.2.circlepath") {
+                                refreshMarkdownFixture()
+                            }
+                            .accessibilityIdentifier("demo.markdown.refresh-cache")
+                        }
                     } label: {
                         Image(systemName: "ellipsis")
                     }
@@ -130,7 +142,31 @@ struct GlassChatDemoView: View {
             } message: {
                 Text("Les contrôles utilisent le Liquid Glass natif d’iOS 26. Les messages restent sur des matériaux système pour préserver le contraste et la lecture.")
             }
+            .task(id: markdownSources) {
+                let rendered = await MarkdownDocumentRenderer.render(
+                    sources: markdownSources,
+                    reusing: markdownByEventID
+                )
+                guard !Task.isCancelled else { return }
+                markdownByEventID = rendered
+            }
         }
+    }
+
+    private var markdownSources: [MarkdownDocumentSource] {
+        messages.compactMap { message in
+            guard message.kind == .assistant else { return nil }
+            return MarkdownDocumentSource(eventID: message.eventID, content: message.content)
+        }
+    }
+
+    private func refreshMarkdownFixture() {
+        guard let index = messages.firstIndex(where: { $0.isMarkdownFixture }) else { return }
+        messages[index].content = """
+        ## Rapport actualisé
+
+        Le même événement affiche maintenant un **contenu renouvelé**.
+        """
     }
 
     private var replyingBubble: some View {
@@ -299,10 +335,32 @@ private struct DemoRosterEntry: Identifiable {
 
 private struct DemoMessage: Identifiable {
     let id = UUID()
-    let content: String
+    var content: String
     let kind: ChatMessageBubble.Kind
     var author: String?
     var timestamp: String?
+
+    var eventID: String { id.uuidString }
+
+    var isMarkdownFixture: Bool {
+        content.hasPrefix("## Rapport")
+    }
+
+    var accessibilityIdentifier: String {
+        isMarkdownFixture ? "demo.markdown.reply" : "demo.message.\(id)"
+    }
+
+    init(
+        content: String,
+        kind: ChatMessageBubble.Kind,
+        author: String? = nil,
+        timestamp: String? = nil
+    ) {
+        self.content = content
+        self.kind = kind
+        self.author = author
+        self.timestamp = timestamp
+    }
 
     static let samples: [DemoMessage] = [
         .init(
@@ -328,7 +386,36 @@ private struct DemoMessage: Identifiable {
             timestamp: "09:43"
         ),
         .init(
-            content: "Oui. La conversation repose sur une pile paresseuse, les animations respectent Réduire les animations, et toute l’interface suit Dynamic Type et VoiceOver.",
+            content: """
+            ## Rapport d’incident
+
+            Le rendu garde **la hiérarchie**, l’*emphase*, le ~~contenu obsolète~~ et le `code inline`.
+
+            - La réponse reste lisible avec Dynamic Type.
+            - Les messages des membres restent littéraux.
+
+            > Les contenus distants restent non fiables et ne sont jamais chargés automatiquement.
+
+            [Documentation sûre](https://example.com/runbook)
+
+            ```swift
+            let status = "ok"
+            print(status)
+            ```
+
+            | Contrôle | Résultat |
+            | :-- | --: |
+            | Markdown | Rendu |
+            | Images distantes | Bloquées |
+
+            ---
+
+            ![preuve distante](https://example.invalid/beacon?secret=thread)
+
+            <img src=x onerror=alert(1)>
+
+            [Lien refusé](javascript:alert(1))
+            """,
             kind: .assistant,
             author: "Companion",
             timestamp: "09:43"

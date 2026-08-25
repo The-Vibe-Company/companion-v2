@@ -13,6 +13,7 @@ struct ChatView: View {
     @State private var sending = false
     @State private var error: String?
     @State private var pendingMessages: [PendingMessage] = []
+    @State private var markdownByEventID: [String: CachedMarkdownDocument] = [:]
     @State private var reloadGeneration = 0
 
     init(companion: CompanionSummary, onSettings: @escaping () -> Void) {
@@ -46,7 +47,8 @@ struct ChatView: View {
                                     entry: entry,
                                     own: entry.role == "user" && entry.authorID == thread?.viewerID,
                                     companion: currentCompanion,
-                                    accent: visualTheme.accent
+                                    accent: visualTheme.accent,
+                                    markdown: markdownByEventID[entry.eventID]?.document
                                 )
                                 .id(entry.id)
                             }
@@ -276,7 +278,9 @@ struct ChatView: View {
         if !silently { loading = true }
         do {
             let next = try await sessionStore.thread(companionID: companion.id)
+            let renderedMarkdown = await renderedMarkdown(for: next.entries)
             guard generation == reloadGeneration else { return }
+            markdownByEventID = renderedMarkdown
             thread = next
             let persistedEventIDs = Set(next.entries.map(\.eventID))
             pendingMessages.removeAll { pending in
@@ -293,6 +297,18 @@ struct ChatView: View {
             currentCompanion = refreshed
         }
         if generation == reloadGeneration { loading = false }
+    }
+
+    private func renderedMarkdown(
+        for entries: [TranscriptEntry]
+    ) async -> [String: CachedMarkdownDocument] {
+        let sources = entries.lazy
+            .filter { $0.role == "assistant" }
+            .map { MarkdownDocumentSource(eventID: $0.eventID, content: $0.content) }
+        return await MarkdownDocumentRenderer.render(
+            sources: Array(sources),
+            reusing: markdownByEventID
+        )
     }
 
     private var entries: [TranscriptEntry] {
@@ -388,9 +404,19 @@ struct ChatMessageBubble: View {
     var companionName = "Companion"
     var icon: CompanionSummary.Icon?
     var accent = Color.companionAccent
+    var markdown: MarkdownDocument?
 
+    @ViewBuilder
     var body: some View {
-        HStack(alignment: .bottom, spacing: 9) {
+        if kind == .assistant {
+            row.accessibilityElement(children: .contain)
+        } else {
+            row.accessibilityElement(children: .combine)
+        }
+    }
+
+    private var row: some View {
+        HStack(alignment: kind == .assistant ? .top : .bottom, spacing: 9) {
             if kind == .mine { Spacer(minLength: 54) }
 
             if kind == .assistant {
@@ -400,10 +426,9 @@ struct ChatMessageBubble: View {
 
             bubble
 
-            if kind != .mine { Spacer(minLength: 36) }
+            if kind != .mine { Spacer(minLength: kind == .assistant ? 12 : 36) }
         }
         .frame(maxWidth: .infinity)
-        .accessibilityElement(children: .combine)
     }
 
     @ViewBuilder
@@ -415,10 +440,14 @@ struct ChatMessageBubble: View {
                     .foregroundStyle(Color.companionMuted)
             }
 
-            Text(content)
-                .font(.body)
-                .foregroundStyle(Color.companionInk)
-                .textSelection(.enabled)
+            if kind == .assistant, let markdown {
+                MarkdownMessageView(document: markdown, accent: accent)
+            } else {
+                Text(content)
+                    .font(.body)
+                    .foregroundStyle(Color.companionInk)
+                    .textSelection(.enabled)
+            }
 
             if queued || timestamp != nil {
                 HStack(spacing: 6) {
@@ -433,15 +462,22 @@ struct ChatMessageBubble: View {
                 .foregroundStyle(Color.companionMuted)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 11)
-        .frame(maxWidth: 340, alignment: .leading)
 
         if kind == .mine {
             contentView
+                .padding(.horizontal, 14)
+                .padding(.vertical, 11)
+                .frame(maxWidth: 340, alignment: .leading)
                 .companionGlass(radius: 18, tint: accent.opacity(0.10))
+        } else if kind == .assistant {
+            contentView
+                .padding(.vertical, 3)
+                .frame(maxWidth: 680, alignment: .leading)
         } else {
             contentView
+                .padding(.horizontal, 14)
+                .padding(.vertical, 11)
+                .frame(maxWidth: 340, alignment: .leading)
                 .companionMaterial(radius: 18)
         }
     }
@@ -452,6 +488,7 @@ private struct MessageEntryView: View {
     let own: Bool
     let companion: CompanionSummary
     let accent: Color
+    let markdown: MarkdownDocument?
 
     var body: some View {
         ChatMessageBubble(
@@ -462,7 +499,8 @@ private struct MessageEntryView: View {
             queued: entry.queued,
             companionName: companion.name,
             icon: companion.icon,
-            accent: accent
+            accent: accent,
+            markdown: entry.role == "assistant" ? markdown : nil
         )
     }
 
