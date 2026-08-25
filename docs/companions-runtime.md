@@ -414,13 +414,15 @@ Before publishing, it writes a `.boxignore` that excludes only regenerable logs,
 archives, credentials, attachments, and outbox data; embeds the static Companion-skill archive;
 archives and resumes the baker Box; warms Node/Pi; and requires a stable `.ascii/playbook.json`. A
 failed warmup or non-ready snapshot never publishes the candidate. Creation reads the registry for
-up to three seconds: `ready` clones the exact expected snapshot, while `building`, `requested`, or
-`failed` takes the explicit logged cold-install path and leaves the builder running for later
-Companions. An unknown snapshot response retries creation once without `from` and records that
-fallback. Running Companions keep their disk: health (every 30 seconds while idle) and the next warm
-send apply overlay or base in place and recycle **Pi only**. If that recycle fails, runtime writes
-the package-base marker so the next health or send retries the overlay instead of treating the disk
-as current. Full Box restart remains an explicit Owner/Editor action.
+up to 60 seconds within the cold-start deadline: `ready` clones the exact expected snapshot,
+`failed` takes the explicit logged cold-install path immediately, and an unresolved `building` or
+`requested` state takes that fallback after the bound. The provider-call deadline for the create
+POST is minted only after this optional wait, so waiting for an image cannot expire the request
+before it is sent. An unknown snapshot response retries creation once without `from` and records
+that fallback. Running Companions keep their disk: health (every 30 seconds while idle) and the next
+warm send apply overlay or base in place and recycle **Pi only**. If that recycle fails, runtime
+writes the package-base marker so the next health or send retries the overlay instead of treating
+the disk as current. Full Box restart remains an explicit Owner/Editor action.
 
 Phase 1 retains every registry-backed provider snapshot: pruning a snapshot while its row remains
 `ready` would make PostgreSQL publish a clone source that no longer exists. Registry-aware provider
@@ -465,9 +467,12 @@ Dispatch has three relevant outcomes:
 The ambiguous case is never automatically replayed, including after lease takeover, Pi restart,
 runtime restart, or a new user message. Later turns stay queued.
 
-`POST /v1/companions/:id/turns/:turnId/retry` requires a unique `retry_id`, recycles Pi, creates a new
-attempt on the same turn, and shows a warning that earlier external effects may already have
-succeeded. Repeating the same retry request resolves to that attempt.
+`POST /v1/companions/:id/turns/:turnId/retry` requires a unique `retry_id` and creates a new attempt
+on the same turn. When a usable Box is projected, retry recycles Pi first. When no usable Box is
+projected, the explicit user retry authorizes the ordinary start path, including reconciliation by
+the deterministic generation name before at most one Box creation. The UI warns that earlier
+external effects may already have succeeded. Repeating the same retry request resolves to the same
+lifecycle operation and attempt.
 
 `POST /v1/companions/:id/turns/:turnId/cancel` is the Owner/Editor stop and dequeue path. A
 queued follow-up, an interrupted turn, or an active turn that has not yet written a prompt to Pi

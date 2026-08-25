@@ -230,6 +230,45 @@ describe("runtime Box/Pi port adapters", () => {
     }
   });
 
+  it("refreshes the provider deadline after waiting for the runtime image", async () => {
+    vi.useFakeTimers();
+    try {
+      const now = Date.now();
+      const createOrRecoverGenerationBox = vi.fn(async () => ({
+        outcome: "created" as const,
+        boxId: "bx_23456789",
+        name: "canonical",
+      }));
+      const control = createRuntimeBoxControl({
+        lifecycle: lifecycle({ createOrRecoverGenerationBox }),
+        runtime: () => boxRuntime(),
+        runtimeImage: runtimeImage({
+          waitForResolution: (boundMs) => new Promise((resolve) => {
+            setTimeout(() => resolve("pending" as const), boundMs);
+          }),
+        }),
+        now: () => Date.now(),
+      });
+
+      const pending = control.createGenerationBox({
+        companionId: "11111111-1111-4111-8111-111111111111",
+        generation: 4n,
+        ttlSeconds: 21_600,
+        deadlineAt: new Date(now + 30_000),
+        imageWaitDeadlineAt: new Date(now + 180_000),
+        signal,
+      });
+      await vi.advanceTimersByTimeAsync(RUNTIME_IMAGE_WAIT_MS);
+      await pending;
+
+      expect(createOrRecoverGenerationBox).toHaveBeenCalledWith(expect.objectContaining({
+        deadlineAt: new Date(now + RUNTIME_IMAGE_WAIT_MS + 30_000),
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("skips the wait entirely when the registry already reports a failed build", async () => {
     const createOrRecoverGenerationBox = vi.fn(async () => ({
       outcome: "created" as const,

@@ -3147,7 +3147,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     }
   });
 
-  it("hands an explicit retry through restart_pi, preserves the later queue, and cancels safely", async () => {
+  it("starts an absent Box for an explicit retry, preserves the later queue, and cancels safely", async () => {
     if (!sql) throw new Error("runtime executor database is not initialized");
     let companionId = "";
     let claimed: Claim | undefined;
@@ -3175,7 +3175,8 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           )
         `,
       });
-      const [first] = await enqueue(randomUUID(), "First ambiguous turn");
+      const firstClientMessageId = randomUUID();
+      const [first] = await enqueue(firstClientMessageId, "First ambiguous turn");
       const [later] = await enqueue(randomUUID(), "Later ordered turn");
       const firstTurnId = stringValue(first?.turn.id);
       const laterTurnId = stringValue(later?.turn.id);
@@ -3190,12 +3191,26 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       `;
       await sql`
         update companion_turns
-        set status = 'interrupted', absolute_deadline_at = now(), settled_at = now(),
+        set status = 'interrupted', inactivity_deadline_at = null,
+          absolute_deadline_at = now(), settled_at = now(),
+          created_at = now() - interval '10 minutes',
+          cold_start_deadline_at = now() - interval '7 minutes',
           state_changed_at = now(), last_error_code = 'dispatch_ambiguous',
           last_error_message = 'Pi acceptance could not be proven.',
           last_error_action = 'retry', updated_at = now()
         where id = ${firstTurnId}::uuid
       `;
+
+      await expect(asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx: Tx) => tx`
+          select * from public.companion_api_retry_turn(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${firstTurnId}::uuid,
+            ${firstClientMessageId}::uuid, 'web'
+          )
+        `,
+      })).rejects.toMatchObject({ code: "22023" });
 
       const retryId = randomUUID();
       const retry = () => asApi({
@@ -3221,7 +3236,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         operation: expect.objectContaining({
           request_id: retryId,
           source_turn_id: firstTurnId,
-          kind: "restart_pi",
+          kind: "start",
           trigger: "user",
           status: "pending",
           queue_sequence: 3,
@@ -3229,6 +3244,19 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         replayed: false,
       }]);
       expect(await retry()).toEqual([{ ...firstRetry[0], replayed: true }]);
+      const [retryDeadline] = await sql<Array<{
+        status: string;
+        hasFreshColdStartDeadline: boolean;
+      }>>`
+        select status::text as status,
+          cold_start_deadline_at > now() + interval '2 minutes'
+            as "hasFreshColdStartDeadline"
+        from companion_turns where id = ${firstTurnId}::uuid
+      `;
+      expect(retryDeadline).toEqual({
+        status: "interrupted",
+        hasFreshColdStartDeadline: true,
+      });
 
       claimed = await claimWork();
       expect(claimed).toMatchObject({
@@ -3289,7 +3317,8 @@ describe("Companion runtime executor PostgreSQL surface", () => {
 
       await sql`
         update companion_turns
-        set status = 'interrupted', absolute_deadline_at = now(), settled_at = now(),
+        set status = 'interrupted', inactivity_deadline_at = null,
+          absolute_deadline_at = now(), settled_at = now(),
           state_changed_at = now(), last_error_code = 'dispatch_ambiguous',
           last_error_message = 'The later turn also needs an explicit choice.',
           last_error_action = 'retry', updated_at = now()
@@ -3345,6 +3374,77 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     } finally {
       if (claimed) await release(claimed);
       if (companionId) await removeCompanion(companionId);
+    }
+  });
+
+  it("recycles Pi for an explicit retry when the Box remains usable", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const fixture = await createCompanion({ boxReady: true });
+    try {
+      await sql`
+        update companion_turn_attempts
+        set status = 'interrupted', checkpoint = 'dispatch_ambiguous', settled_at = now(),
+          last_error_code = 'dispatch_ambiguous',
+          last_error_message = 'Pi acceptance could not be proven.',
+          last_error_action = 'retry', updated_at = now()
+        where id = ${fixture.attemptId}::uuid
+      `;
+      await sql`
+        update companion_turns
+        set status = 'interrupted', inactivity_deadline_at = null,
+          absolute_deadline_at = now(), settled_at = now(),
+          state_changed_at = now(), last_error_code = 'dispatch_ambiguous',
+          last_error_message = 'Pi acceptance could not be proven.',
+          last_error_action = 'retry', updated_at = now()
+        where id = ${fixture.turnId}::uuid
+      `;
+
+      const retryId = randomUUID();
+      const [retried] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ operation: {
+          id: string;
+          kind: string;
+          trigger: string;
+          source_turn_id: string;
+          status: string;
+        }; replayed: boolean }>>`
+          select * from public.companion_api_retry_turn(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid, ${fixture.turnId}::uuid,
+            ${retryId}::uuid, 'web'
+          )
+        `,
+      });
+      expect(retried).toEqual({
+        operation: expect.objectContaining({
+          kind: "restart_pi",
+          trigger: "user",
+          source_turn_id: fixture.turnId,
+          status: "pending",
+        }),
+        replayed: false,
+      });
+
+      const [cancelled] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ turn: { status: string } }>>`
+          select * from public.companion_api_cancel_turn(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid, ${fixture.turnId}::uuid
+          )
+        `,
+      });
+      expect(cancelled?.turn.status).toBe("cancelled");
+      const retryOperationId = stringValue(retried?.operation.id);
+      if (retryOperationId === null) throw new Error("expected a retry operation id");
+      const [operation] = await sql<Array<{ status: string }>>`
+        select status::text as status from companion_operations
+        where id = ${retryOperationId}::uuid
+      `;
+      expect(operation?.status).toBe("cancelled");
+    } finally {
+      await removeCompanion(fixture.companionId);
     }
   });
 
