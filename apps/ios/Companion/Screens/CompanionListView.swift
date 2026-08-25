@@ -196,7 +196,7 @@ private struct CompanionRow: View {
                     name: companion.name,
                     icon: companion.icon,
                     size: 52,
-                    isReplying: companion.runtime.replying
+                    state: companion.runtime.replying ? .thinking : .idle
                 )
                 Circle()
                     .fill(statusColor)

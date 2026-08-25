@@ -10,7 +10,14 @@ struct RootView: View {
     var body: some View {
         Group {
 #if DEBUG
-            if ProcessInfo.processInfo.arguments.contains("-glass-chat-demo") {
+            if ProcessInfo.processInfo.arguments.contains("-companion-icon-demo") {
+                if ProcessInfo.processInfo.arguments.contains("-companion-reduce-motion") {
+                    CompanionIconCatalogDemoView()
+                        .environment(\.accessibilityReduceMotion, true)
+                } else {
+                    CompanionIconCatalogDemoView()
+                }
+            } else if ProcessInfo.processInfo.arguments.contains("-glass-chat-demo") {
                 GlassChatDemoView()
             } else if ProcessInfo.processInfo.arguments.contains("-glass-management-demo-plugins") {
                 GlassManagementDemoView(initialSurface: "Plugins")
@@ -27,7 +34,8 @@ struct RootView: View {
         .task {
 #if DEBUG
             let arguments = ProcessInfo.processInfo.arguments
-            guard !arguments.contains("-glass-chat-demo"),
+            guard !arguments.contains("-companion-icon-demo"),
+                  !arguments.contains("-glass-chat-demo"),
                   !arguments.contains("-glass-management-demo-plugins"),
                   !arguments.contains("-glass-management-demo") else { return }
 #endif

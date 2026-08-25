@@ -46,9 +46,11 @@ xcodebuildmcp swift-package test --package-path apps/ios/CompanionKit
 Release builds ignore launch arguments and environment variables and always use
 `https://api.thecompanion.sh`.
 
-The Debug-only `-glass-chat-demo`, `-glass-management-demo`, and
-`-glass-management-demo-plugins` launch arguments open interactive Liquid Glass showcases without
-requiring a server or account. They are excluded from Release behavior.
+The Debug-only `-glass-chat-demo`, `-glass-management-demo`,
+`-glass-management-demo-plugins`, and `-companion-icon-demo` launch arguments open deterministic
+visual showcases without requiring a server or account. Add `-companion-reduce-motion` alongside
+`-companion-icon-demo` to force the gallery's Reduce Motion path for deterministic checks. These
+arguments are excluded from Release behavior.
 
 ## TestFlight release
 

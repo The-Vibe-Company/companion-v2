@@ -86,7 +86,7 @@ struct GlassManagementDemoView: View {
 
             CompanionManagementCard("Identity") {
                 HStack(spacing: 18) {
-                    CompanionAvatar(name: companionName, icon: icon, size: 84)
+                    CompanionAvatar(name: companionName, icon: icon, size: 84, state: .thinking)
                     VStack(alignment: .leading, spacing: 10) {
                         TextField("Companion name", text: $companionName)
                             .font(.title3.weight(.semibold))
