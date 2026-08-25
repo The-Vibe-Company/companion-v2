@@ -269,6 +269,7 @@ AS $$
 DECLARE
   v_title text := left(btrim(regexp_replace(COALESCE(p_title, ''), E'[\\s]+', ' ', 'g')), 180);
   v_body text := left(btrim(regexp_replace(COALESCE(p_body, ''), E'[\\s]+', ' ', 'g')), 180);
+  v_now timestamp with time zone := clock_timestamp();
   v_inserted integer;
 BEGIN
   IF p_event_key IS NULL OR char_length(p_event_key) NOT BETWEEN 1 AND 500 THEN
@@ -282,8 +283,7 @@ BEGIN
     title, body, available_at, expires_at, created_at, updated_at
   )
   SELECT device.org_id, device.id, p_companion_id, p_recipient_user_id, p_event_key,
-         p_event, v_title, v_body, clock_timestamp(), clock_timestamp() + interval '24 hours',
-         clock_timestamp(), clock_timestamp()
+         p_event, v_title, v_body, v_now, v_now + interval '24 hours', v_now, v_now
   FROM public.companion_notification_devices device
   WHERE device.org_id = p_org_id
     AND device.user_id = p_recipient_user_id
