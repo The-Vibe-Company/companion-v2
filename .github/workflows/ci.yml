@@ -225,6 +225,16 @@ jobs:
           --derived-data-path "$RUNNER_TEMP/companion-derived-data"
           --extra-args CODE_SIGNING_ALLOWED=NO
 
+      - name: Test the simulator application
+        run: >-
+          xcodebuildmcp simulator test
+          --workspace-path apps/ios/Companion.xcworkspace
+          --scheme Companion
+          --configuration Debug
+          --simulator-id "${{ steps.simulator.outputs.id }}"
+          --derived-data-path "$RUNNER_TEMP/companion-derived-data"
+          --extra-args CODE_SIGNING_ALLOWED=NO
+
   quality:
     name: Quality Node 22
     runs-on: ubuntu-latest
