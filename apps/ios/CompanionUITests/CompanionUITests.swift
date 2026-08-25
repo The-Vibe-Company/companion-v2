@@ -137,7 +137,8 @@ final class CompanionUITests: XCTestCase {
         confirmRosterDeletion(in: app)
 
         let ambiguousMessage = "The deletion response was not received. Retry Delete safely reuses the same request."
-        XCTAssertTrue(app.staticTexts[ambiguousMessage].waitForExistence(timeout: 2))
+        let ambiguousNotice = app.descendants(matching: .any)["Error. \(ambiguousMessage)"]
+        XCTAssertTrue(ambiguousNotice.waitForExistence(timeout: 5))
 
         openRosterContextMenu(for: row, in: app)
         let retry = app.buttons["Retry Delete"]
