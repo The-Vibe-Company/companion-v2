@@ -117,6 +117,7 @@ export const COMPANION_BUDGETS: CompanionBudgets = deriveCompanionBudgets(COMPAN
  * registered deliberately.
  */
 export function sqlIntervalToMs(literal: string): number {
+  // oxlint-disable-next-line anti-slop/no-known-value-widening -- Fixed unit->ms conversion table indexed by a parsed interval unit; an explicit Record is the domain contract here, not widened I/O input.
   const UNIT_MS: Record<string, number> = {
     second: 1_000,
     seconds: 1_000,
@@ -151,6 +152,7 @@ export function sqlIntervalToMs(literal: string): number {
  * test compares this map against `pg_get_functiondef` output in both directions, so adding,
  * removing, or changing a SQL timeout without updating this map fails the build.
  */
+// oxlint-disable-next-line anti-slop/no-known-value-widening -- Named SQL-interval contract indexed by pg function name at test time; the explicit Record IS the owner contract.
 export const COMPANION_SQL_BUDGET_CONTRACT: Readonly<Record<string, readonly string[]>> = {
   // turnAbsoluteDeadlineMs.
   companion_runtime_claim_work_without_material_guard: ["2 hours"],

@@ -107,7 +107,7 @@ export class RuntimeScheduler {
     this.#engine.handoffActive();
     const drain = (async () => {
       await this.#loopTask?.catch(() => undefined);
-      await Promise.allSettled([...this.#active.values()]);
+      await Promise.allSettled(this.#active.values());
       await this.#engine.drain();
     })();
     let timeoutHandle: unknown;

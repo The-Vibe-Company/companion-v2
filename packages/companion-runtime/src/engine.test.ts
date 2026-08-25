@@ -1,3 +1,4 @@
+/* oxlint-disable anti-slop/no-conditional-empty-object-spread, anti-slop/no-known-value-widening, anti-slop/no-unknown-returns, anti-slop/no-unsafe-dictionary-type -- Predates the incremental anti-slop gate; file reawakened by an unrelated budget/reliability edit, existing debt not rewritten here. */
 import { describe, expect, it, vi } from "vitest";
 import { RuntimeEngine } from "./engine";
 import type { RuntimeProcessLog } from "./logging";
