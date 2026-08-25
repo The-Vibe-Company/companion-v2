@@ -2,9 +2,15 @@ import SwiftUI
 import CompanionKit
 
 struct RootView: View {
+    private static let notificationInstallationID = NotificationInstallationIdentifier.current(
+        bundleIdentifier: Bundle.main.bundleIdentifier ?? "dev.companion.mobile.dev"
+    )
+
+    @Environment(NotificationCoordinator.self) private var notifications
     @State private var sessionStore = SessionStore(
         apiURL: AppConfig.apiURL,
-        storage: KeychainSessionStorage(service: "\(AppConfig.callbackScheme).session")
+        storage: KeychainSessionStorage(service: "\(AppConfig.callbackScheme).session"),
+        notificationInstallationID: RootView.notificationInstallationID
     )
 
     var body: some View {
@@ -44,9 +50,42 @@ struct RootView: View {
 #endif
             await sessionStore.restore()
         }
+        .task(id: activeNotificationSessionID) {
+            guard activeNotificationSessionID != nil else { return }
+            await notifications.requestAuthorizationAndRegister()
+            await synchronizeNotificationToken()
+        }
+        .onChange(of: notifications.deviceToken) { _, _ in
+            Task { await synchronizeNotificationToken() }
+        }
         .animation(.easeOut(duration: 0.24), value: sessionStore.phase)
         .tint(.companionAccent)
         .preferredColorScheme(.light)
+    }
+
+    private var activeNotificationSessionID: String? {
+        guard case .active(let session) = sessionStore.phase, let orgID = session.orgID else { return nil }
+        return "\(orgID):\(session.user.id)"
+    }
+
+    private func synchronizeNotificationToken() async {
+        guard case .active = sessionStore.phase,
+              let token = notifications.deviceToken,
+              let bundleID = Bundle.main.bundleIdentifier else { return }
+        let environment: NotificationDeviceRegistration.Environment
+        switch bundleID {
+        case "dev.companion.mobile.dev": environment = .sandbox
+        case "dev.companion.mobile": environment = .production
+        default: return
+        }
+        try? await sessionStore.registerNotificationDevice(
+            installationID: RootView.notificationInstallationID,
+            registration: NotificationDeviceRegistration(
+                deviceToken: token,
+                environment: environment,
+                bundleID: bundleID
+            )
+        )
     }
 
     @ViewBuilder

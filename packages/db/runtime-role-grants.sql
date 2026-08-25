@@ -84,7 +84,9 @@ DECLARE
     'companion_legacy_purge_targets',
     'companion_message_attachments',
     'companion_routines',
-    'companion_triggers'
+    'companion_triggers',
+    'companion_notification_devices',
+    'companion_notification_deliveries'
   ];
   api_capability_managed_tables regclass[] := ARRAY[
     'public.companions'::regclass,
@@ -672,6 +674,29 @@ BEGIN
         'public.companion_api_answer_routine_decision(uuid,uuid,text,text,uuid,timestamp with time zone)'::regprocedure
       ];
     END IF;
+
+    -- 0124 adds the API-owned device registry and the worker-only APNs delivery queue. The
+    -- transition triggers remain owner-only helpers: neither API nor runtime can forge a push.
+    IF pg_catalog.to_regprocedure(
+      'public.companion_api_register_notification_device(uuid,uuid,text,text,public.companion_notification_environment,text)'
+    ) IS NOT NULL THEN
+      companion_api_functions := companion_api_functions || ARRAY[
+        'public.companion_api_register_notification_device(uuid,uuid,text,text,public.companion_notification_environment,text)'::regprocedure,
+        'public.companion_api_unregister_notification_device(uuid,uuid)'::regprocedure
+      ];
+      worker_functions := worker_functions || ARRAY[
+        'public.companion_claim_notification_deliveries(text,integer,integer)'::regprocedure,
+        'public.companion_validate_notification_delivery(uuid,uuid)'::regprocedure,
+        'public.companion_complete_notification_delivery(uuid,uuid)'::regprocedure,
+        'public.companion_defer_notification_delivery(uuid,uuid,integer)'::regprocedure,
+        'public.companion_invalidate_notification_device(uuid,uuid)'::regprocedure
+      ];
+      internal_runtime_functions := internal_runtime_functions || ARRAY[
+        'public.companion_notification_enqueue(uuid,uuid,text,text,public.companion_notification_event,text,text)'::regprocedure,
+        'public.companion_notification_terminal_turn()'::regprocedure,
+        'public.companion_notification_pending_decision()'::regprocedure
+      ];
+    END IF;
     -- 0110 adds webhook-fired Companion triggers. They are API-only: the webhook fires
     -- synchronously in the API request through the Owner-impersonating enqueue, so the worker
     -- receives no trigger capability at all.
@@ -713,6 +738,7 @@ BEGIN
         'public.companion_api_answer_trigger_decision(uuid,uuid,text,text,uuid,text)'::regprocedure
       ];
     END IF;
+
     -- A migration owner can carry arbitrary ALTER DEFAULT PRIVILEGES grants installed by an
     -- earlier operator. Runtime v2 never relies on default function EXECUTE: erase every named
     -- non-owner grantee and PUBLIC before granting the exact executor surface below.

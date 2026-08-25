@@ -26,7 +26,7 @@ into hosted Companions or launch them as a runtime harness.
 ```text
 apps/web                    Next.js Skills workspace and Companion threads
 apps/api                    REST/tRPC authorization and durable control-plane intent
-apps/worker                 GitHub, billing, Skill Database maintenance, and Companion routines
+apps/worker                 GitHub, billing, database cleanup, routines, and APNs delivery
 apps/runtime                sole Box/Pi lifecycle and durable-turn executor
 cli                         Companion skill CLI
 packages/box-runtime        ascii.dev transport and layout-14 Pi broker
@@ -98,8 +98,8 @@ COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS=example.com
 ```
 
 With either value missing, Companion routes and navigation stay absent, runtime claims stay off, and
-the worker fires no Companion routine. The flag is also the operational kill switch after Runtime v2
-data exists; rollback never sends v2 rows to a legacy executor.
+the worker fires no Companion routine or notification. The flag is also the operational kill switch
+after Runtime v2 data exists; rollback never sends v2 rows to a legacy executor.
 
 Runtime needs its dedicated database URL, the public API origin reachable from Box, and the sole
 copy of the Box key. API reaches only the runtime's private desktop endpoint. The two services share
@@ -118,6 +118,11 @@ COMPANION_RUNTIME_DESKTOP_HMAC_SECRET=...
 
 # API only
 COMPANION_RUNTIME_PRIVATE_URL=http://127.0.0.1:3007
+
+# worker only; omit all three to disable iOS push delivery
+COMPANION_APNS_KEY_ID=...
+COMPANION_APNS_TEAM_ID=...
+COMPANION_APNS_PRIVATE_KEY_BASE64=...
 ```
 
 Runtime also needs the envelope master key and read access to selected Skill archives. Prefer a Box

@@ -24,3 +24,4 @@ export * from "./companionPluginOAuth";
 export * from "./companionRuntimeErrors";
 export * from "./companionRuntimeCredentials";
 export * from "./companionMcpBroker";
+export * from "./companionNotifications";

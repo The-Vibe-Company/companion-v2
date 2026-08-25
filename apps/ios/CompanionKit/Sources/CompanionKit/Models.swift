@@ -63,6 +63,71 @@ public struct Session: Codable, Equatable, Sendable {
     }
 }
 
+public enum CompanionNotificationEvent: String, Codable, Equatable, Sendable {
+    case reply
+    case inputRequired = "input_required"
+    case failed
+    case interrupted
+}
+
+public struct CompanionNotificationPayload: Codable, Equatable, Sendable {
+    public let version: Int
+    public let orgID: String
+    public let companionID: String
+    public let event: CompanionNotificationEvent
+
+    public init(version: Int, orgID: String, companionID: String, event: CompanionNotificationEvent) {
+        self.version = version
+        self.orgID = orgID
+        self.companionID = companionID
+        self.event = event
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case version
+        case orgID = "org_id"
+        case companionID = "companion_id"
+        case event
+    }
+}
+
+public struct NotificationDeviceRegistration: Codable, Equatable, Sendable {
+    public enum Environment: String, Codable, Equatable, Sendable {
+        case sandbox
+        case production
+    }
+
+    public let platform = "ios"
+    public let deviceToken: String
+    public let environment: Environment
+    public let bundleID: String
+
+    public init(deviceToken: String, environment: Environment, bundleID: String) {
+        self.deviceToken = deviceToken
+        self.environment = environment
+        self.bundleID = bundleID
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case platform
+        case deviceToken = "device_token"
+        case environment
+        case bundleID = "bundle_id"
+    }
+}
+
+public enum NotificationInstallationIdentifier {
+    public static func current(bundleIdentifier: String) -> UUID {
+        let key = "dev.companion.notification-installation.\(bundleIdentifier)"
+        if let value = UserDefaults.standard.string(forKey: key), let identifier = UUID(uuidString: value) {
+            return identifier
+        }
+        let identifier = UUID()
+        UserDefaults.standard.set(identifier.uuidString.lowercased(), forKey: key)
+        return identifier
+    }
+}
+
 public enum CompanionRuntimeState: String, Codable, Hashable, Sendable {
     case notCreated = "not_created"
     case provisioning

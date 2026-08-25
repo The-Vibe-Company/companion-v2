@@ -4,11 +4,11 @@ import { closeDb } from "@companion/db";
 import { keepWorkerProcessAliveWhenIdle, startWorkerSupervisors } from "./supervisors";
 
 async function main(): Promise<void> {
-  const { billing, github, skillDatabases, routines } = await startWorkerSupervisors();
-  if (!billing && !github && !skillDatabases && !routines) {
+  const { billing, github, skillDatabases, routines, apns } = await startWorkerSupervisors();
+  if (!billing && !github && !skillDatabases && !routines && !apns) {
     console.info("worker idle: no supervisor is configured");
   }
-  const idleKeepAlive = keepWorkerProcessAliveWhenIdle({ billing, github, skillDatabases, routines });
+  const idleKeepAlive = keepWorkerProcessAliveWhenIdle({ billing, github, skillDatabases, routines, apns });
 
   await new Promise<void>((resolve) => {
     let stopping = false;
@@ -21,6 +21,7 @@ async function main(): Promise<void> {
         github?.stop(),
         skillDatabases?.stop(),
         routines?.stop(),
+        apns?.stop(),
       ]);
       await closeDb();
       resolve();
@@ -30,7 +31,7 @@ async function main(): Promise<void> {
   });
 }
 
-main().catch(async (error: unknown) => {
+main().catch(async (error: Error) => {
   Sentry.captureException(error);
   console.error("worker failed to start");
   await Sentry.flush(2000);

@@ -11,7 +11,7 @@ removed the legacy executor surface; it must not be reintroduced.
 ```text
 apps/web       Next.js Skills workspace, Companion threads, and settings
 apps/api       REST/tRPC authorization and transactional intent persistence
-apps/worker    GitHub sync, billing, Skill Database object cleanup, and Companion routines
+apps/worker    GitHub sync, billing, object cleanup, Companion routines, and APNs delivery
 apps/runtime   sole Box/Pi executor; durable claims, health, and lifecycle
 cli            REST client for Skills Hub workflows
 
@@ -30,7 +30,7 @@ packages/companion-skill   bundled delegated Skills Hub workflow
 The API never contacts Box or Pi. It authorizes, persists a message/turn, decision, settings change,
 or lifecycle operation, and responds. `apps/runtime` is the only process with the Box service key
 and the only owner of runtime leases or external lifecycle side effects. The worker remains limited
-to billing, GitHub, and Skill Database cleanup.
+to billing, GitHub, Skill Database cleanup, Companion routines, and APNs delivery.
 
 ## Tenancy and authorization
 
@@ -107,7 +107,18 @@ narrow worker-style `SECURITY DEFINER` functions; it receives no general auth or
 The API keeps RLS-scoped `SELECT` on `companions`, workspace access, member state, threads, and
 transcript projections, but their `INSERT`, `UPDATE`, and `DELETE` paths exist only behind the
 tenant- and actor-scoped `companion_api_*` capability functions. The worker has no hosted Companion
-table access, including provider-connection or member-MCP metadata.
+table access, including provider-connection or member-MCP metadata; it receives only narrow routine
+and notification claim/settlement functions.
+
+Companion terminal transitions and new pending decisions fan out durable APNs deliveries inside the
+same PostgreSQL transaction. Only active iOS installations belonging to the turn's durable author
+are selected. The API registers or removes the current member's installation but never contacts
+Apple; runtime only settles turns and never formats or sends a push. The worker revalidates current
+membership and Companion access while claiming, leases each delivery, and sends it over persistent
+HTTP/2 with an Apple ES256 provider token. Deliveries expire after 24 hours. Success deletes the
+row, revoked tokens disable the installation, and transient Apple responses clear the lease with
+bounded backoff. The payload contains only a bounded expurgated preview and the versioned
+organization/Companion/event navigation tuple.
 
 One `(companion_id, client_message_id)` produces exactly one turn. The transaction that stores the
 user message also stores that turn. A duplicate POST resolves to the same row. A retry names a new

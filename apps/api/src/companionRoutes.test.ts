@@ -20,6 +20,7 @@ const MESSAGE_ID = "33333333-3333-4333-8333-333333333333";
 const RETRY_ID = "44444444-4444-4444-8444-444444444444";
 const OPERATION_ID = "55555555-5555-4555-8555-555555555555";
 const ORG_ID = "66666666-6666-4666-8666-666666666666";
+const INSTALLATION_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const TRIGGER_ID = "99999999-9999-4999-8999-999999999999";
 const TRIGGER_SECRET = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const NOW = "2026-08-17T00:00:00.000Z";
@@ -69,6 +70,8 @@ const coreMocks = {
   updateCompanionV2: vi.fn<typeof coreModule.updateCompanionV2>(),
   resolveCompanionMcpBrokerAuthorization: vi.fn<typeof coreModule.resolveCompanionMcpBrokerAuthorization>(),
   issueCompanionMcpAccessToken: vi.fn<typeof coreModule.issueCompanionMcpAccessToken>(),
+  registerCompanionNotificationDevice: vi.fn<typeof coreModule.registerCompanionNotificationDevice>(),
+  unregisterCompanionNotificationDevice: vi.fn<typeof coreModule.unregisterCompanionNotificationDevice>(),
 };
 
 const desktopMocks = {
@@ -262,6 +265,14 @@ function jsonPost(path: string, body: TestJsonValue): Request {
   });
 }
 
+function jsonPut(path: string, body: TestJsonValue): Request {
+  return new Request(`http://localhost${path}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 describe("Companions Runtime v2 API", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -333,6 +344,87 @@ describe("Companions Runtime v2 API", () => {
       expires_at: "2026-08-17T00:15:00.000Z",
       credential_version: 4,
     });
+  });
+
+  it("registers and unregisters an iOS notification installation without returning its token", async () => {
+    const app = appWithRoutes();
+    const deviceToken = "ab".repeat(32);
+    const registration = {
+      platform: "ios" as const,
+      device_token: deviceToken,
+      environment: "sandbox" as const,
+      bundle_id: "dev.companion.mobile.dev" as const,
+    };
+    const put = await app.request(jsonPut(
+      `/v1/notification-devices/${INSTALLATION_ID}`,
+      registration,
+    ));
+    expect(put.status).toBe(204);
+    expect(await put.text()).toBe("");
+    expect(coreMocks.registerCompanionNotificationDevice).toHaveBeenCalledWith(expect.objectContaining({
+      orgId: ORG_ID,
+      installationId: INSTALLATION_ID,
+      registration,
+    }));
+
+    const deleted = await app.request(new Request(
+      `http://localhost/v1/notification-devices/${INSTALLATION_ID}`,
+      { method: "DELETE" },
+    ));
+    expect(deleted.status).toBe(204);
+    expect(coreMocks.unregisterCompanionNotificationDevice).toHaveBeenCalledWith(expect.objectContaining({
+      orgId: ORG_ID,
+      installationId: INSTALLATION_ID,
+    }));
+  });
+
+  it("rejects invalid tokens and mismatched APNs targets", async () => {
+    const app = appWithRoutes();
+    const invalidToken = await app.request(jsonPut(
+      `/v1/notification-devices/${INSTALLATION_ID}`,
+      {
+        platform: "ios",
+        device_token: "secret-token",
+        environment: "sandbox",
+        bundle_id: "dev.companion.mobile.dev",
+      },
+    ));
+    expect(invalidToken.status).toBe(400);
+
+    const mismatchedTarget = await app.request(jsonPut(
+      `/v1/notification-devices/${INSTALLATION_ID}`,
+      {
+        platform: "ios",
+        device_token: "cd".repeat(32),
+        environment: "production",
+        bundle_id: "dev.companion.mobile.dev",
+      },
+    ));
+    expect(mismatchedTarget.status).toBe(400);
+    expect(coreMocks.registerCompanionNotificationDevice).not.toHaveBeenCalled();
+  });
+
+  it("never reflects a notification token from a persistence failure", async () => {
+    const deviceToken = "ef".repeat(32);
+    coreMocks.registerCompanionNotificationDevice.mockRejectedValueOnce(
+      new Error(`database rejected bound parameter ${deviceToken}`),
+    );
+
+    const response = await appWithRoutes().request(jsonPut(
+      `/v1/notification-devices/${INSTALLATION_ID}`,
+      {
+        platform: "ios",
+        device_token: deviceToken,
+        environment: "sandbox",
+        bundle_id: "dev.companion.mobile.dev",
+      },
+    ));
+    const body = await response.text();
+
+    expect(response.status).toBe(400);
+    expect(body).toBe('{"error":"Notification device request failed"}');
+    expect(body).not.toContain(deviceToken);
+    expect(contextMocks.jsonError).not.toHaveBeenCalled();
   });
 
   it("vends MCP access only to the dedicated runtime capability and never to sessions or ordinary tokens", async () => {
@@ -411,10 +503,12 @@ describe("Companions Runtime v2 API", () => {
     const flagOff = new Hono<{ Variables: ApiVariables }>();
     registerCompanionRoutes(flagOff, {});
     expect((await flagOff.request("/v1/companions")).status).toBe(404);
+    expect((await flagOff.request(`/v1/notification-devices/${INSTALLATION_ID}`)).status).toBe(404);
 
     const noAllowlist = new Hono<{ Variables: ApiVariables }>();
     registerCompanionRoutesImpl(noAllowlist, { COMPANION_COMPANIONS_ENABLED: "true" });
     expect((await noAllowlist.request("/v1/companions")).status).toBe(404);
+    expect((await noAllowlist.request(`/v1/notification-devices/${INSTALLATION_ID}`)).status).toBe(404);
     expect(contextMocks.actorFromContext).not.toHaveBeenCalled();
   });
 
