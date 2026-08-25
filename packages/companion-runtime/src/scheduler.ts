@@ -1,3 +1,5 @@
+import { COMPANION_BUDGETS } from "@companion/contracts";
+
 import type { RuntimeClock } from "./clock";
 import type { RuntimeExecutionResult } from "./engine";
 import { describeThrownError, type RuntimeProcessLog } from "./logging";
@@ -5,9 +7,9 @@ import type { RuntimeClaim } from "./types";
 import { claimFence } from "./leaseSession";
 import { RUNTIME_LEASE_SECONDS, type RuntimeStore } from "./store";
 
-export const DEFAULT_RUNTIME_SWEEP_INTERVAL_MS = 2_000;
+export const DEFAULT_RUNTIME_SWEEP_INTERVAL_MS = COMPANION_BUDGETS.sweepIntervalMs;
 export const DEFAULT_RUNTIME_CONCURRENCY = 8;
-export const DEFAULT_RUNTIME_DRAIN_TIMEOUT_MS = 25_000;
+export const DEFAULT_RUNTIME_DRAIN_TIMEOUT_MS = COMPANION_BUDGETS.shutdownDrainMs;
 
 export interface RuntimeSchedulerSnapshot {
   claimLoopAlive: boolean;

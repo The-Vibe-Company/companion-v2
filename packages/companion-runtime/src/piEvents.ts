@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  COMPANION_BUDGETS_BASE,
   companionConfigProposalMessageSchema,
   companionRoutineProposalMessageSchema,
   companionToolRunKind,
@@ -268,7 +269,7 @@ const MAX_SUBAGENT_DETAIL = 8_000;
 /** One line naming the child agent. Anything longer is a payload, not a name. */
 const MAX_SUBAGENT_AGENT = 120;
 const MAX_TITLE = 300;
-const DEFAULT_DECISION_TIMEOUT_MS = 5 * 60 * 1_000;
+const DEFAULT_DECISION_TIMEOUT_MS = COMPANION_BUDGETS_BASE.decisionTimeoutMs;
 
 /**
  * Every cut here lands on a JavaScript code unit, and an emoji is two of them. Half a surrogate pair

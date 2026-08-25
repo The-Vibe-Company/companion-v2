@@ -6,6 +6,7 @@
  */
 
 import {
+  COMPANION_BUDGETS_BASE,
   COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS,
   COMPANION_CONFIG_PROPOSAL_MAX_IDS,
   COMPANION_CONFIG_PROPOSAL_SUMMARY_MAX_CHARACTERS,
@@ -17,7 +18,7 @@ import {
 } from "@companion/contracts";
 
 /** Fail closed with the Box extension's own question timeout (5 minutes). Timeout → cancelled. */
-export const COMPANION_DECISION_TIMEOUT_MS = 5 * 60 * 1000;
+export const COMPANION_DECISION_TIMEOUT_MS = COMPANION_BUDGETS_BASE.decisionTimeoutMs;
 
 /**
  * On-disk name under `$PI_CODING_AGENT_DIR/extensions/`.

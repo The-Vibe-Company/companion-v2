@@ -1,5 +1,6 @@
 export * from "./scope";
 export * from "./frontmatter";
+export * from "./companionBudgets";
 export * from "./companionManifest";
 export * from "./companionManifestJsonSchema";
 export * from "./validation";

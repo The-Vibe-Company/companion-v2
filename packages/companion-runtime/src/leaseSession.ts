@@ -1,3 +1,5 @@
+import { COMPANION_BUDGETS } from "@companion/contracts";
+
 import type { RuntimeClock } from "./clock";
 import { RuntimeHandoffError, RuntimeShutdownError } from "./errors";
 import {
@@ -13,7 +15,7 @@ import type {
   RuntimeSettlementInput,
 } from "./types";
 
-export const RUNTIME_RENEW_INTERVAL_MS = 10_000;
+export const RUNTIME_RENEW_INTERVAL_MS = COMPANION_BUDGETS.renewIntervalMs;
 
 export class LeaseFenceLostError extends Error {
   constructor() {

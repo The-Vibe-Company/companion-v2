@@ -25,11 +25,12 @@ import {
   COMPANION_ATTACHMENT_FILENAME_PATTERN,
   COMPANION_ATTACHMENT_MAX_BYTES,
   COMPANION_ATTACHMENT_MIME_TYPES,
+  COMPANION_BUDGETS_BASE,
   COMPANION_MESSAGE_ATTACHMENT_MAX_COUNT,
 } from "@companion/contracts";
 import type { RuntimePiProjection } from "./piEvents";
 
-export const RUNTIME_LEASE_SECONDS = 30 as const;
+export const RUNTIME_LEASE_SECONDS = COMPANION_BUDGETS_BASE.leaseSeconds;
 
 export interface RuntimeStore {
   ping(): Promise<void>;

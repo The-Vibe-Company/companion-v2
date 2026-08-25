@@ -1,3 +1,5 @@
+import { COMPANION_BUDGETS } from "@companion/contracts";
+
 import { RuntimeInvariantError } from "./errors";
 import { runtimeSucceeded, type RuntimeWorkDisposition } from "./handler";
 import type { LeaseSession } from "./leaseSession";
@@ -6,7 +8,7 @@ import { retryIdempotentLifecycle, type IdempotentLifecycleCall } from "./retry"
 import { activateRuntimeSettings } from "./settingsActivation";
 import type { RuntimeAuthorization, SettingsRuntimeClaim } from "./types";
 
-const SETTINGS_ACTIVATION_DEADLINE_MS = 10 * 60 * 1_000;
+const SETTINGS_ACTIVATION_DEADLINE_MS = COMPANION_BUDGETS.settingsActivationDeadlineMs;
 
 interface SettingsContext {
   claim: SettingsRuntimeClaim;

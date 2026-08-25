@@ -6,6 +6,7 @@ import {
   type CompanionBoxRuntimeV2,
   type BoxState,
 } from "@companion/box-runtime";
+import { COMPANION_BUDGETS_BASE } from "@companion/contracts";
 import type {
   BrokerWriteOutcome,
   BrokerPromptWriteOutcome,
@@ -312,7 +313,7 @@ function isUnknownSnapshot(error: unknown): boolean {
   return error.providerCode === "unknown_snapshot" || error.stableCode === "box_not_found";
 }
 
-const DEFAULT_PROVIDER_DEADLINE_MS = 30_000;
+const DEFAULT_PROVIDER_DEADLINE_MS = COMPANION_BUDGETS_BASE.boxRequestTimeoutMs;
 
 function providerDeadlineFactory(options: RuntimeBoxAdapterOptions): (value?: Date) => Date {
   const now = options.now ?? Date.now;

@@ -1,5 +1,7 @@
 /* oxlint-disable anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Existing runtime boundary decoders predate the incremental anti-slop gate. */
 
+import { COMPANION_BUDGETS } from "@companion/contracts";
+
 export const WORK_KINDS = ["operation", "decision", "attempt", "settings", "health"] as const;
 export type WorkKind = (typeof WORK_KINDS)[number];
 
@@ -7,7 +9,7 @@ export const CLIENT_SURFACES = ["web", "mobile_web", "native_mobile"] as const;
 export type ClientSurface = (typeof CLIENT_SURFACES)[number];
 
 /** Maximum two-hour turn deadline plus five minutes of staging/dispatch reserve. */
-export const COMPANION_RUNTIME_MATERIAL_MIN_TTL_MS = 125 * 60 * 1_000;
+export const COMPANION_RUNTIME_MATERIAL_MIN_TTL_MS = COMPANION_BUDGETS.materialMinTtlMs;
 
 export const TURN_STATUSES = [
   "queued",

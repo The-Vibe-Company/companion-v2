@@ -16,7 +16,7 @@ import {
 } from "./piEvents";
 import type { RuntimeEngineDependencies, StagedRuntimeAttachment } from "./ports";
 import type { RuntimeVisibleTextRedactor } from "./projectionRedaction";
-import { isCompanionAttachmentImage } from "@companion/contracts";
+import { COMPANION_BUDGETS_BASE, isCompanionAttachmentImage } from "@companion/contracts";
 import { retryIdempotentLifecycle } from "./retry";
 import { RuntimeStoreIndeterminateError } from "./store";
 import { refreshWarmCompanionLayout } from "./layoutRefresh";
@@ -665,7 +665,7 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
         // never moves it. Subtracting that immutable contract recovers the exact durable send time
         // without a second timestamp or query on the dispatch path.
         const sentAt = auth.coldStartDeadlineAt
-          ? auth.coldStartDeadlineAt.getTime() - 3 * 60_000
+          ? auth.coldStartDeadlineAt.getTime() - COMPANION_BUDGETS_BASE.coldStartDeadlineMs
           : null;
         context.deps.log?.info({
           ts: providerReturnedAt.toISOString(),

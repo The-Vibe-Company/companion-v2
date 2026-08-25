@@ -1,18 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 
+import { COMPANION_BUDGETS, COMPANION_BUDGETS_BASE } from "@companion/contracts";
 import { DESKTOP_REQUEST_MAX_SKEW_SECONDS } from "@companion/companion-runtime";
 import { companionsEnabled, deploymentReleaseId } from "@companion/core";
 
 const DEFAULT_BOX_API_BASE = "https://ascii.dev/api/box/v1";
-const BOX_TTL_SECONDS = 6 * 60 * 60;
+const BOX_TTL_SECONDS = COMPANION_BUDGETS_BASE.boxWarmTtlSeconds;
 const DEFAULT_CONCURRENCY = 8;
-const DEFAULT_SWEEP_INTERVAL_MS = 2_000;
-const DEFAULT_LEASE_SECONDS = 30;
-const DEFAULT_RENEW_INTERVAL_MS = 10_000;
+const DEFAULT_SWEEP_INTERVAL_MS = COMPANION_BUDGETS_BASE.sweepIntervalMs;
+const DEFAULT_LEASE_SECONDS = COMPANION_BUDGETS_BASE.leaseSeconds;
+const DEFAULT_RENEW_INTERVAL_MS = COMPANION_BUDGETS.renewIntervalMs;
 const DEFAULT_LISTEN_HOST = "127.0.0.1";
 const DEFAULT_LISTEN_PORT = 3_007;
-const DEFAULT_SHUTDOWN_DRAIN_MS = 25_000;
+const DEFAULT_SHUTDOWN_DRAIN_MS = COMPANION_BUDGETS.shutdownDrainMs;
 
 interface RuntimeServiceConfigBase {
   databaseUrl: string;
@@ -23,8 +24,8 @@ interface RuntimeServiceConfigBase {
   executorId: string;
   concurrency: number;
   sweepIntervalMs: number;
-  leaseSeconds: 30;
-  renewIntervalMs: 10_000;
+  leaseSeconds: typeof DEFAULT_LEASE_SECONDS;
+  renewIntervalMs: typeof DEFAULT_RENEW_INTERVAL_MS;
   listenHost: string;
   listenPort: number;
   desktopMaxSkewSeconds: number;

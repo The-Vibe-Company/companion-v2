@@ -1,4 +1,6 @@
 /* oxlint-disable anti-slop/no-unknown-parameters, anti-slop/no-conditional-empty-object-spread -- Cleanup callbacks receive unknown thrown values by design; optional bake inputs are conditionally spread. */
+import { COMPANION_BUDGETS_BASE } from "@companion/contracts";
+
 import { BoxRuntimeAdapterError, type BoxRuntimeLifecycleClient } from "./boxMaintenanceClient";
 import type { CompanionBoxRuntimeV2 } from "./boxCompanionRuntime";
 import type { CompanionRuntimeSkill } from "./companionPiInjection";
@@ -8,7 +10,7 @@ import {
 } from "./companionRuntimeImage";
 
 // Create stays at the unnamed-orphan bound. The bake itself is longer: ready wait, layout, snapshot.
-const BAKER_CREATE_TTL_SECONDS = 300;
+const BAKER_CREATE_TTL_SECONDS = COMPANION_BUDGETS_BASE.provisionalCreateTtlSeconds;
 const BAKER_WORK_TTL_SECONDS = 3_600;
 const READY_POLL_INTERVAL_MS = 1_000;
 const SNAPSHOT_POLL_INTERVAL_MS = 2_000;

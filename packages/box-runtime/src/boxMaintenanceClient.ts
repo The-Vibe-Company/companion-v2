@@ -1,3 +1,4 @@
+import { COMPANION_BUDGETS_BASE } from "@companion/contracts";
 import { z } from "zod";
 import {
   BoxRuntimeConfigurationError,
@@ -7,12 +8,12 @@ import {
 } from "./boxCompanionRuntime";
 
 const DEFAULT_BOX_API_BASE = "https://ascii.dev/api/box/v1";
-const BOX_REQUEST_TIMEOUT_MS = 30_000;
+const BOX_REQUEST_TIMEOUT_MS = COMPANION_BUDGETS_BASE.boxRequestTimeoutMs;
 const BOX_LIST_PAGE_LIMIT = 200;
 const BOX_TTL_MAX_SECONDS = 2_592_000;
 // Create has no idempotency key and cannot set the generation name. Keep the irreducible
 // POST-response/process-crash orphan bounded until runtime durably records the returned Box id.
-const BOX_UNASSIGNED_CREATE_TTL_SECONDS = 300;
+const BOX_UNASSIGNED_CREATE_TTL_SECONDS = COMPANION_BUDGETS_BASE.provisionalCreateTtlSeconds;
 const DEFAULT_DELETION_POLL_INTERVAL_MS = 1_000;
 const MAX_GENERATION = 2_147_483_647;
 const SAFE_PROVIDER_CODES = new Set([

@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { COMPANION_BUDGETS_BASE } from "./companionBudgets";
+
 import {
   companionActiveTurnSchema,
   companionInterruptedTurnSchema,
@@ -425,7 +427,7 @@ export type CompanionToolRunStatus = z.infer<typeof companionToolRunStatusSchema
  * deliberately shorter than the two-minute failure seen in production: the staged Pi extension
  * aborts the active turn while the control plane closes the chip without changing Box lifecycle.
  */
-export const COMPANION_TOOL_RUN_TIMEOUT_MS = 90_000;
+export const COMPANION_TOOL_RUN_TIMEOUT_MS = COMPANION_BUDGETS_BASE.toolRunTimeoutMs;
 
 /**
  * Shell runs and delegated subagent runs get their own ceiling: a legitimate build, install, or test
@@ -433,7 +435,7 @@ export const COMPANION_TOOL_RUN_TIMEOUT_MS = 90_000;
  * always does, and killing either mid-flight loses real work. Both the staged Pi extension and the
  * control-plane settlement classify by the run's `kind`, so the two deadlines agree.
  */
-export const COMPANION_EXEC_TOOL_RUN_TIMEOUT_MS = 600_000;
+export const COMPANION_EXEC_TOOL_RUN_TIMEOUT_MS = COMPANION_BUDGETS_BASE.execToolRunTimeoutMs;
 
 /**
  * How much of a Box frame a transcript will carry. One downscaled JPEG per visual run stays inside
