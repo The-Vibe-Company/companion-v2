@@ -1,3 +1,4 @@
+/* oxlint-disable anti-slop/no-conditional-empty-object-spread, anti-slop/no-known-value-widening, anti-slop/no-shape-in-symbol-names -- Broker tests deliberately inject malformed protocol records and selectively compose optional persistence seams. */
 import {
   appendFileSync,
   mkdirSync,
@@ -6,15 +7,17 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   CompanionPiBroker,
+  CompanionPiDispatchLedger,
   SegmentedCompanionPiJournal,
   StrictLfJsonlDecoder,
   createCompanionPiOutputDecoder,
@@ -358,6 +361,170 @@ describe("CompanionPiBroker", () => {
     expect(journal.read(0).events).toEqual([
       expect.objectContaining({ attemptId: "attempt-racing-ack", event: { type: "agent_start" } }),
     ]);
+  });
+
+  it("durably resolves a repeated prompt by attempt and command without writing Pi twice", async () => {
+    const harness = brokerHarness({}, { dispatchLedger: true });
+    const command = {
+      id: "dispatch-command-1",
+      type: "prompt",
+      attemptId: "attempt-ledger-1",
+      message: "Run exactly once",
+      clearOutbox: true,
+    };
+    const first = await harness.broker.command(command);
+    const repeated = await harness.broker.command(command);
+    const status = await harness.broker.command({
+      id: "status-command-1",
+      type: "dispatch_status",
+      attemptId: "attempt-ledger-1",
+      commandId: "dispatch-command-1",
+    });
+
+    expect(first).toMatchObject({ success: true, data: { piAcknowledged: true } });
+    expect(repeated).toEqual(first);
+    expect(status).toMatchObject({
+      success: true,
+      data: { status: "accepted", attemptId: "attempt-ledger-1", commandId: "dispatch-command-1" },
+    });
+    expect(harness.transport.requests.filter((request) => request.type === "prompt")).toHaveLength(1);
+  });
+
+  it("recovers accepted dispatch proof after the broker object is reconstructed", async () => {
+    const directory = temporaryDirectory("pi-dispatch-ledger-restart-");
+    const ledgerPath = join(directory, "dispatch-ledger.json");
+    const journal = new SegmentedCompanionPiJournal({ directory: join(directory, "events") });
+    const firstTransport = new FakePiTransport({
+      isStreaming: false,
+      isCompacting: false,
+      pendingMessageCount: 0,
+      model: { input: ["text"] },
+    });
+    const first = new CompanionPiBroker({
+      invocationId: "invocation-ledger",
+      journal,
+      transport: firstTransport,
+      dispatchLedger: new CompanionPiDispatchLedger({ path: ledgerPath, invocationId: "invocation-ledger" }),
+    });
+    await first.command({
+      id: "dispatch-command-restart",
+      type: "prompt",
+      attemptId: "attempt-ledger-restart",
+      message: "Persist proof",
+      clearOutbox: true,
+    });
+
+    const secondTransport = new FakePiTransport({});
+    const second = new CompanionPiBroker({
+      invocationId: "invocation-ledger",
+      journal,
+      transport: secondTransport,
+      dispatchLedger: new CompanionPiDispatchLedger({ path: ledgerPath, invocationId: "invocation-ledger" }),
+    });
+    const status = await second.command({
+      id: "status-command-restart",
+      type: "dispatch_status",
+      attemptId: "attempt-ledger-restart",
+      commandId: "dispatch-command-restart",
+    });
+    expect(status).toMatchObject({ success: true, data: { status: "accepted", initialCursor: 0 } });
+    expect(secondTransport.requests).toEqual([]);
+  });
+
+  it("returns ambiguity and never replays Pi when ledger persistence fails", async () => {
+    const harness = brokerHarness({}, { dispatchLedger: true });
+    if (!harness.dispatchLedger) throw new Error("dispatch ledger fixture is missing");
+    vi.spyOn(harness.dispatchLedger, "record").mockImplementation(() => {
+      throw new Error("synthetic fsync failure");
+    });
+    const command = {
+      id: "dispatch-command-fsync",
+      type: "prompt",
+      attemptId: "attempt-ledger-fsync",
+      message: "Do not publish volatile proof",
+      clearOutbox: true,
+    };
+    const first = await harness.broker.command(command);
+    const status = await harness.broker.command({
+      id: "status-command-fsync",
+      type: "dispatch_status",
+      attemptId: "attempt-ledger-fsync",
+      commandId: "dispatch-command-fsync",
+    });
+    const repeated = await harness.broker.command(command);
+    expect(first).toMatchObject({
+      success: false,
+      error: { code: "dispatch_ledger_unavailable", ambiguous: true },
+    });
+    expect(status).toMatchObject({ success: true, data: { status: "absent" } });
+    expect(repeated).toMatchObject({ success: false, error: { code: "attempt_active" } });
+    expect(harness.transport.requests.filter((request) => request.type === "prompt")).toHaveLength(1);
+  });
+
+  it("rolls back a volatile record when its atomic persistence fails", () => {
+    const directory = temporaryDirectory("pi-dispatch-ledger-failure-");
+    const ledgerDirectory = join(directory, "ledger");
+    const ledger = new CompanionPiDispatchLedger({
+      path: join(ledgerDirectory, "dispatch-ledger.json"),
+      invocationId: "invocation-ledger-failure",
+    });
+    rmSync(ledgerDirectory, { recursive: true });
+    writeFileSync(ledgerDirectory, "blocks the ledger directory");
+
+    expect(() => ledger.record({
+      attemptId: "attempt-ledger-failure",
+      commandId: "command-ledger-failure",
+      invocationId: "invocation-ledger-failure",
+      initialCursor: 0,
+      fingerprint: "f".repeat(64),
+    })).toThrow();
+    expect(ledger.lookup("attempt-ledger-failure")).toBeNull();
+  });
+
+  it("refuses a changed payload or command id for an already accepted attempt", async () => {
+    const harness = brokerHarness({}, { dispatchLedger: true });
+    await harness.broker.command({
+      id: "dispatch-command-conflict",
+      type: "prompt",
+      attemptId: "attempt-ledger-conflict",
+      message: "Original",
+      clearOutbox: true,
+    });
+    const conflict = await harness.broker.command({
+      id: "dispatch-command-conflict",
+      type: "prompt",
+      attemptId: "attempt-ledger-conflict",
+      message: "Changed",
+      clearOutbox: true,
+    });
+    const wrongCommand = await harness.broker.command({
+      id: "status-conflict",
+      type: "dispatch_status",
+      attemptId: "attempt-ledger-conflict",
+      commandId: "other-command",
+    });
+    expect(conflict).toMatchObject({ success: false, error: { code: "dispatch_conflict" } });
+    expect(wrongCommand).toMatchObject({ success: false, error: { code: "dispatch_conflict" } });
+    expect(harness.transport.requests.filter((request) => request.type === "prompt")).toHaveLength(1);
+  });
+
+  it("refuses a stale invocation before probing or writing to Pi", async () => {
+    const harness = brokerHarness({}, { dispatchLedger: true });
+    const response = await harness.broker.command({
+      id: "dispatch-command-stale-invocation",
+      type: "prompt",
+      attemptId: "attempt-stale-invocation",
+      expectedInvocationId: "previous-invocation",
+      message: "Must never reach the replacement Pi",
+      clearOutbox: true,
+    });
+
+    expect(response).toMatchObject({
+      success: false,
+      error: { code: "invocation_mismatch", ambiguous: false },
+    });
+    expect(harness.transport.requests).toEqual([]);
+    expect(harness.dispatchLedger?.lookup("attempt-stale-invocation")).toBeNull();
   });
 
   it("refuses a busy or queued Pi before writing a prompt", async () => {
@@ -729,11 +896,15 @@ class FakePiTransport implements CompanionPiRpcTransport {
   }
 }
 
-function brokerHarness(state: Partial<PiJsonObject> = {}): {
+function brokerHarness(
+  state: Partial<PiJsonObject> = {},
+  options: { dispatchLedger?: boolean } = {},
+): {
   directory: string;
   journal: SegmentedCompanionPiJournal;
   transport: FakePiTransport;
   broker: CompanionPiBroker;
+  dispatchLedger: CompanionPiDispatchLedger | null;
 } {
   const directory = temporaryDirectory("pi-broker-");
   const journal = new SegmentedCompanionPiJournal({ directory, segmentBytes: 512 });
@@ -744,12 +915,19 @@ function brokerHarness(state: Partial<PiJsonObject> = {}): {
     model: { id: "model-1", input: ["text", "image"] },
     ...state,
   });
+  const dispatchLedger = options.dispatchLedger
+    ? new CompanionPiDispatchLedger({
+      path: join(directory, "dispatch-ledger.json"),
+      invocationId: "invocation-1",
+    })
+    : null;
   const broker = new CompanionPiBroker({
     invocationId: "invocation-1",
     journal,
     transport,
+    ...(dispatchLedger ? { dispatchLedger } : {}),
   });
-  return { directory, journal, transport, broker };
+  return { directory, journal, transport, broker, dispatchLedger };
 }
 
 function temporaryDirectory(prefix: string): string {

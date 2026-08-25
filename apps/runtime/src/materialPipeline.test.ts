@@ -140,6 +140,8 @@ const authorization: RuntimeAuthorization = {
   decisionDeliveryState: null,
   decisionRequestKey: null,
   decisionResponseText: null,
+  commandId: null,
+  commandPiInvocationId: null,
 };
 
 describe("runtime material provider and Box stager", () => {

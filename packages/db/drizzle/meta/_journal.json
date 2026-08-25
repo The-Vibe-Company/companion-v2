@@ -883,6 +883,13 @@
       "when": 1790615200000,
       "tag": "0125_companion_agent_endpoint_read",
       "breakpoints": true
+    },
+    {
+      "idx": 126,
+      "version": "7",
+      "when": 1790701600000,
+      "tag": "0126_companion_dispatch_resolution",
+      "breakpoints": true
     }
   ]
 }

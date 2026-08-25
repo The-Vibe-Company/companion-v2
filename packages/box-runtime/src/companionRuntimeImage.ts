@@ -8,7 +8,7 @@ import { COMPANION_PI_BROKER_SOURCE } from "./companionPiBrokerSource";
  * Bump when the daemon wrapper or systemd unit changes without a broker/extension source change.
  * Overlay writes are the cheap in-place path for companions that are already running.
  */
-export const COMPANION_PI_OVERLAY_REVISION = 7;
+export const COMPANION_PI_OVERLAY_REVISION = 8;
 /** Bump when the archive/resume warmup profile changes without changing the runtime layout. */
 export const COMPANION_RUNTIME_BOOT_PROFILE_REVISION = 1;
 

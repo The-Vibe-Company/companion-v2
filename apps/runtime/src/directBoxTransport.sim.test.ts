@@ -1,9 +1,8 @@
 /* oxlint-disable anti-slop/require-safety-comment-for-type-assertion -- Simulator contract fixtures narrow live HTTP bodies and broker pages the same way the adapter contract test does. */
 /**
- * Direct-transport event path against the deterministic Box/Pi simulator: a full dispatch→
- * consume→settle cycle where broker state, event reads, and acknowledgements travel over the
- * hosted agent listener (long-poll), with per-call fallback to the real exec transport under
- * injected faults. The exec command counter proves the 500 ms polling is gone while direct serves.
+ * Direct transport against the deterministic Box/Pi simulator: full dispatch→consume→settle and
+ * bounded file cycles travel over the hosted agent listener, with safe per-call exec fallback under
+ * injected faults. The provider command counter proves the hot path no longer shells through exec.
  */
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -18,6 +17,7 @@ import type { RuntimeLogRecord } from "@companion/companion-runtime";
 
 import { createRuntimePiControl } from "./boxAdapters";
 import {
+  createDirectBoxDataTransport,
   createDirectRuntimePiControl,
   DIRECT_SUSPECT_REPROBE_COOLDOWN_MS,
   DirectBoxEndpointRegistry,
@@ -105,6 +105,12 @@ async function provision() {
     log,
     now,
   });
+  const files = createDirectBoxDataTransport({
+    exec: () => runtime,
+    registry,
+    log,
+    now,
+  });
   const execCommandCount = () => server.simulator.snapshot().requests
     .filter((request) => request.method === "POST" && request.path.endsWith("/commands"))
     .length;
@@ -114,6 +120,7 @@ async function provision() {
     endpoint,
     registry,
     facade,
+    files,
     records,
     execCommandCount,
     advanceClock: (ms: number) => {
@@ -157,7 +164,7 @@ async function consumeUntilSettled(input: {
 }
 
 describe("direct transport against the Box simulator", () => {
-  it("runs a full turn's event path over the hosted agent with zero exec read/ack commands", async () => {
+  it("runs a full turn over the hosted agent with zero exec broker commands", async () => {
     const { facade, boxId, execCommandCount } = await provision();
 
     // The direct probe answers with layout parity and idle broker state.
@@ -170,17 +177,17 @@ describe("direct transport against the Box simulator", () => {
       invocationId: "00000000000000000000000000000001",
     });
 
-    // Dispatch stays on the exec transport by construction.
     const beforeDispatch = execCommandCount();
     await expect(facade.pi.prompt({
       boxId,
       commandId: "dispatch-direct-1",
       attemptId: "attempt-direct-1",
+      expectedInvocationId: "00000000000000000000000000000001",
       message: "Hello over the direct event channel.",
       signal: signal(),
     })).resolves.toMatchObject({ outcome: "accepted" });
     const afterDispatch = execCommandCount();
-    expect(afterDispatch).toBeGreaterThan(beforeDispatch);
+    expect(afterDispatch).toBe(beforeDispatch);
 
     // Consume the whole turn over the direct channel: events arrive via long-poll and the exec
     // command counter must not move — this is the 500 ms polling the direct path retires.
@@ -195,6 +202,63 @@ describe("direct transport against the Box simulator", () => {
     expect(execCommandCount()).toBe(afterDispatch);
   }, 30_000);
 
+  it("resolves a response lost after Pi accepted the prompt from the same command ledger", async () => {
+    const { server, facade, boxId, execCommandCount } = await provision();
+    server.simulator.addFault({
+      point: "agent.prompt.after",
+      action: { kind: "disconnect" },
+    });
+    const before = execCommandCount();
+    await expect(facade.pi.prompt({
+      boxId,
+      commandId: "dispatch-lost-response-1",
+      attemptId: "attempt-lost-response-1",
+      expectedInvocationId: "00000000000000000000000000000001",
+      message: "Accept once, resolve durably.",
+      signal: signal(),
+    })).resolves.toMatchObject({ outcome: "accepted" });
+    expect(execCommandCount()).toBe(before);
+    await expect(facade.pi.resolvePrompt?.({
+      boxId,
+      commandId: "dispatch-lost-response-1",
+      attemptId: "attempt-lost-response-1",
+      expectedInvocationId: "00000000000000000000000000000001",
+      message: "Accept once, resolve durably.",
+      signal: signal(),
+    })).resolves.toMatchObject({ outcome: "accepted" });
+  }, 30_000);
+
+  it("stages attachments and harvests the outbox direct without base64 exec chunks", async () => {
+    const { server, files, boxId, execCommandCount } = await provision();
+    const messageId = "11111111-1111-4111-8111-111111111111";
+    const before = execCommandCount();
+    await expect(files.stageAttachments({
+      boxId,
+      messageId,
+      files: [{
+        position: 0,
+        filename: "notes.txt",
+        contentType: "text/plain",
+        bytes: Buffer.from("direct attachment"),
+      }],
+      signal: signal(),
+    })).resolves.toMatchObject([{
+      path: `~/attachments/${messageId}/0-notes.txt`,
+    }]);
+    const machine = server.simulator.commandMachine(boxId);
+    expect(machine.persistentFiles.get(`attachments/${messageId}/0-notes.txt`)?.toString("utf8"))
+      .toBe("direct attachment");
+
+    machine.persistentFiles.set("outbox/answer.txt", Buffer.from("direct answer"));
+    const entries = await files.listOutbox({ boxId, signal: signal() });
+    expect(entries).toHaveLength(1);
+    await expect(files.readOutboxFile({ boxId, entry: entries[0]!, signal: signal() }))
+      .resolves.toMatchObject({ bytes: Buffer.from("direct answer") });
+    await files.clearOutbox({ boxId, signal: signal() });
+    await expect(files.listOutbox({ boxId, signal: signal() })).resolves.toEqual([]);
+    expect(execCommandCount()).toBe(before);
+  }, 30_000);
+
   it("falls back per call when the agent drops, then recovers on the next state probe", async () => {
     const { server, facade, boxId, records, execCommandCount, advanceClock } = await provision();
     // Seed the journal with one settled turn so no read below has to ride out an empty long-poll.
@@ -202,6 +266,7 @@ describe("direct transport against the Box simulator", () => {
       boxId,
       commandId: "dispatch-fault-1",
       attemptId: "attempt-fault-1",
+      expectedInvocationId: "00000000000000000000000000000001",
       message: "Seed events before the fault.",
       signal: signal(),
     });

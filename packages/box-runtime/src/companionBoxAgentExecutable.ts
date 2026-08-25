@@ -10,6 +10,7 @@ import {
 
 const PI_LAYOUT_MARKER_PATH = ".companion/runtime/state/pi-layout.version";
 const PI_BROKER_SOCKET_PATH = ".companion/runtime/state/pi-broker.sock";
+const ATTACHMENT_UPLOADS_PATH = ".companion/runtime/tmp/agent-attachments";
 
 const home = requiredAbsolutePath("HOME");
 const port = optionalPort("COMPANION_AGENT_PORT") ?? COMPANION_BOX_AGENT_DEFAULT_PORT;
@@ -21,7 +22,14 @@ const layoutMarkerPath = join(home, PI_LAYOUT_MARKER_PATH);
 
 async function main(): Promise<void> {
   const core = new CompanionBoxAgentCore(
-    companionBoxAgentSeams({ brokerSocketPath, authFilePath, layoutMarkerPath }),
+    companionBoxAgentSeams({
+      brokerSocketPath,
+      authFilePath,
+      layoutMarkerPath,
+      attachmentsPath: join(home, "attachments"),
+      attachmentUploadsPath: join(home, ATTACHMENT_UPLOADS_PATH),
+      outboxPath: join(home, "outbox"),
+    }),
   );
   // The hosted proxy is the only inbound channel and reaches the box on 0.0.0.0 exclusively.
   const server = await startCompanionBoxAgentServer({ core, port, host: "0.0.0.0" });

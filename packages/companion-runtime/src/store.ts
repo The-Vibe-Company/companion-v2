@@ -677,7 +677,9 @@ const AUTHORIZATION_COLUMNS = `
   decision_status,
   decision_delivery_state,
   decision_request_key,
-  decision_response_text`;
+  decision_response_text,
+  command_id,
+  command_pi_invocation_id`;
 
 /** PostgreSQL implementation whose SQL surface consists only of Runtime v2 definer functions. */
 export class PostgresRuntimeStore implements RuntimeStore {
@@ -731,7 +733,7 @@ export class PostgresRuntimeStore implements RuntimeStore {
     return await mapped(async () => {
       const rows = await this.sql.unsafe<RuntimeSqlRow[]>(`
         SELECT ${AUTHORIZATION_COLUMNS}
-        FROM public.companion_runtime_renew_and_authorize(
+        FROM public.companion_runtime_renew_and_authorize_v2(
           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
           $6::text, $7::public.companion_runtime_work_kind, $8::uuid, $9::integer
         )

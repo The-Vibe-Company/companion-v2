@@ -1,13 +1,12 @@
-/* oxlint-disable anti-slop/no-runtime-typeof, anti-slop/no-unsafe-dictionary-type -- The endpoint-token decryptor sits on a JSON wire boundary: the encrypted envelope and its decrypted plaintext arrive untyped and are narrowed here before use. */
+/* oxlint-disable anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type -- The endpoint-token decryptor and direct transport are I/O boundaries: encrypted payloads and transport failures arrive untyped and are narrowed here before use. */
 /**
- * Phase 2.1 direct transport: the runtime consumes the hosted Box agent channel for the EVENT
- * path only — broker state, event reads, event acknowledgements, and the daemon/health probe.
- * Prompt, abort, decision, file, and outbox traffic never routes through here.
+ * Phase 2.2 direct transport: the runtime consumes the hosted Box agent channel for broker state,
+ * events, prompt/abort/decision delivery, and bounded attachment/outbox traffic.
  *
- * The facade is the single ambiguity-safety point: every direct call is a read the exec transport
- * can idempotently repeat, so any direct failure falls back to the exec implementation per call,
- * with one structured `runtime.direct_transport.fallback` log carrying only the operation and a
- * stable code. The hosted URL and both tokens never appear in any log or error.
+ * The facade is the single ambiguity-safety point. Idempotent reads and file operations may fall
+ * back to exec per call. A possibly-written prompt is instead resolved against the broker's
+ * durable command ledger with the same command id; abort and decision failures remain ambiguous.
+ * Logs carry only the operation and a stable code—never the hosted URL or either token.
  */
 import {
   CompanionBoxAgentClient,
@@ -15,6 +14,11 @@ import {
   type CompanionBoxAgentEndpointCredentials,
   type CompanionPiBrokerEventPage,
   type CompanionPiBrokerState,
+  type CompanionAttachmentFile,
+  type CompanionStagedAttachment,
+  type CompanionOutboxEntry,
+  type CompanionOutboxFile,
+  type CompanionBoxRuntimeV2,
 } from "@companion/box-runtime";
 import { COMPANION_BUDGETS_BASE } from "@companion/contracts";
 import { decryptOpaqueValue } from "@companion/core";
@@ -185,7 +189,8 @@ export function decryptCompanionAgentEndpointTokens(input: {
   };
 }
 
-type DirectOperation = "broker_state" | "read_events" | "ack_events" | "pi_daemon_status";
+type DirectOperation = "broker_state" | "read_events" | "ack_events" | "pi_daemon_status"
+  | "prompt" | "abort" | "decision";
 
 /** Codes that indict the endpoint itself; broker-relayed failures rest on the broker, not the URL. */
 const SUSPECT_CODES = new Set([
@@ -210,9 +215,11 @@ export interface DirectRuntimePiControlOptions {
   now?: () => number;
   /** Injectable for tests; production constructs the real HTTPS client per call. */
   clientFactory?: (endpoint: CompanionBoxAgentEndpointCredentials) => DirectAgentCalls;
+  dispatchResolutionMs?: number;
+  sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
 }
 
-/** The narrow read-only slice of the agent client the facade consumes; injectable for tests. */
+/** The narrow broker/file slice of the agent client the facades consume; injectable for tests. */
 export interface DirectAgentCalls {
   health(signal?: AbortSignal): Promise<{
     agentVersion: number;
@@ -231,6 +238,154 @@ export interface DirectAgentCalls {
     through: number;
     signal?: AbortSignal;
   }): Promise<{ acknowledgedCursor: number }>;
+  prompt?(input: {
+    commandId: string;
+    attemptId: string;
+    expectedInvocationId: string;
+    message: string;
+    signal?: AbortSignal;
+  }): Promise<{
+    outcome: "accepted" | "refused" | "ambiguous";
+    invocationId?: string;
+    initialCursor?: number;
+    code?: string;
+  }>;
+  dispatchStatus?(input: {
+    commandId: string;
+    attemptId: string;
+    expectedInvocationId: string;
+    message: string;
+    signal?: AbortSignal;
+  }): Promise<{
+    status: "absent" | "accepted";
+    dispatch?: {
+      outcome: "accepted" | "refused" | "ambiguous";
+      invocationId?: string;
+      initialCursor?: number;
+      code?: string;
+    };
+  }>;
+  abort?(input: {
+    commandId: string;
+    attemptId: string;
+    signal?: AbortSignal;
+  }): Promise<{ outcome: "accepted" | "refused" | "ambiguous"; invocationId?: string; code?: string }>;
+  decision?(input: {
+    commandId: string;
+    attemptId: string;
+    response: object;
+    signal?: AbortSignal;
+  }): Promise<{ outcome: "accepted" | "refused" | "ambiguous"; invocationId?: string; code?: string }>;
+  stageAttachments?(input: {
+    messageId: string;
+    files: CompanionAttachmentFile[];
+    signal?: AbortSignal;
+  }): Promise<CompanionStagedAttachment[]>;
+  clearOutbox?(signal?: AbortSignal): Promise<void>;
+  listOutbox?(input?: {
+    deadlineAt?: Date;
+    signal?: AbortSignal;
+  }): Promise<CompanionOutboxEntry[]>;
+  readOutboxFile?(input: {
+    entry: CompanionOutboxEntry;
+    deadlineAt?: Date;
+    signal?: AbortSignal;
+  }): Promise<CompanionOutboxFile>;
+}
+
+export type DirectBoxDataTransport = Pick<CompanionBoxRuntimeV2,
+  "stageAttachments" | "clearOutbox" | "listOutbox" | "readOutboxFile">;
+
+export function createDirectBoxDataTransport(options: {
+  exec: () => DirectBoxDataTransport;
+  registry: DirectBoxEndpointRegistry;
+  log?: RuntimeProcessLog;
+  now?: () => number;
+  clientFactory?: (endpoint: CompanionBoxAgentEndpointCredentials) => DirectAgentCalls;
+}): DirectBoxDataTransport {
+  const now = options.now ?? Date.now;
+  const clientFactory = options.clientFactory
+    ?? ((endpoint: CompanionBoxAgentEndpointCredentials): DirectAgentCalls =>
+      new CompanionBoxAgentClient({ endpoint }));
+
+  const directOrExec = async <T>(input: {
+    boxId: string;
+    operation: "stage_attachments" | "clear_outbox" | "list_outbox" | "read_outbox";
+    signal?: AbortSignal;
+    direct(calls: DirectAgentCalls): Promise<T> | null;
+    exec(): Promise<T>;
+  }): Promise<T> => {
+    const endpoint = options.registry.lookup(input.boxId);
+    if (!endpoint || options.registry.isSuspect(input.boxId)) return await input.exec();
+    try {
+      const direct = input.direct(clientFactory(endpoint));
+      if (direct === null) return await input.exec();
+      const value = await direct;
+      options.registry.clearSuspect(input.boxId);
+      return value;
+    } catch (error) {
+      if (input.signal?.aborted) throw input.signal.reason ?? error;
+      const stableCode = stableAgentCode(error);
+      if (SUSPECT_CODES.has(stableCode)) options.registry.markSuspect(input.boxId);
+      options.log?.warn({
+        ts: new Date(now()).toISOString(),
+        event: "runtime.direct_transport.fallback",
+        operation: input.operation,
+        stableCode,
+      });
+      return await input.exec();
+    }
+  };
+
+  return {
+    async stageAttachments(input) {
+      return await directOrExec({
+        boxId: input.boxId,
+        operation: "stage_attachments",
+        signal: input.signal,
+        direct: (calls) => calls.stageAttachments?.({
+          messageId: input.messageId,
+          files: input.files,
+          signal: input.signal,
+        }) ?? null,
+        exec: async () => await options.exec().stageAttachments(input),
+      });
+    },
+    async clearOutbox(input) {
+      await directOrExec({
+        boxId: input.boxId,
+        operation: "clear_outbox",
+        signal: input.signal,
+        direct: (calls) => calls.clearOutbox?.(input.signal) ?? null,
+        exec: async () => await options.exec().clearOutbox(input),
+      });
+    },
+    async listOutbox(input) {
+      return await directOrExec({
+        boxId: input.boxId,
+        operation: "list_outbox",
+        signal: input.signal,
+        direct: (calls) => calls.listOutbox?.({
+          deadlineAt: input.deadlineAt,
+          signal: input.signal,
+        }) ?? null,
+        exec: async () => await options.exec().listOutbox(input),
+      });
+    },
+    async readOutboxFile(input) {
+      return await directOrExec({
+        boxId: input.boxId,
+        operation: "read_outbox",
+        signal: input.signal,
+        direct: (calls) => calls.readOutboxFile?.({
+          entry: input.entry,
+          deadlineAt: input.deadlineAt,
+          signal: input.signal,
+        }) ?? null,
+        exec: async () => await options.exec().readOutboxFile(input),
+      });
+    },
+  };
 }
 
 export interface DirectRuntimePiControl {
@@ -251,6 +406,8 @@ export function createDirectRuntimePiControl(
       new CompanionBoxAgentClient({ endpoint }));
   const lastEventsServedDirect = new Map<string, boolean>();
   const lastShadowAtMs = new Map<string, number>();
+  const dispatchResolutionMs = options.dispatchResolutionMs ?? 30_000;
+  const sleep = options.sleep ?? abortableSleep;
 
   const logFallback = (operation: DirectOperation, stableCode: string): void => {
     options.log?.warn({
@@ -439,13 +596,173 @@ export function createDirectRuntimePiControl(
       if (direct !== FALLBACK) return direct;
       return await options.exec.piDaemonStatus(input);
     },
+    async prompt(input) {
+      const endpoint = options.registry.lookup(input.boxId);
+      if (!endpoint || options.registry.isSuspect(input.boxId)) {
+        return await options.exec.prompt(input);
+      }
+      let unresolvedCode = "prompt_dispatch_unresolved";
+      try {
+        const client = clientFactory(endpoint);
+        if (!client.prompt) return await options.exec.prompt(input);
+        const result = directPromptOutcome(await client.prompt(input));
+        if (result.outcome !== "ambiguous") return result;
+        unresolvedCode = result.code;
+      } catch (error) {
+        if (input.signal.aborted) throw input.signal.reason ?? error;
+        unresolvedCode = stableAgentCode(error);
+      }
+      return await resolveDirectPrompt(input, endpoint, unresolvedCode);
+    },
+    async resolvePrompt(input) {
+      const endpoint = options.registry.lookup(input.boxId);
+      if (!endpoint) return { outcome: "ambiguous", code: "prompt_dispatch_unresolved" };
+      return await resolveDirectPrompt(input, endpoint);
+    },
+    async abort(input) {
+      const endpoint = options.registry.lookup(input.boxId);
+      if (!endpoint || options.registry.isSuspect(input.boxId)) return await options.exec.abort(input);
+      const client = clientFactory(endpoint);
+      if (!client.abort) return await options.exec.abort(input);
+      try {
+        return directWriteOutcome(await client.abort(input));
+      } catch (error) {
+        if (input.signal.aborted) throw input.signal.reason ?? error;
+        const stableCode = stableAgentCode(error);
+        if (SUSPECT_CODES.has(stableCode)) options.registry.markSuspect(input.boxId);
+        logFallback("abort", stableCode);
+        return { outcome: "ambiguous", code: "pi_ack_ambiguous" };
+      }
+    },
+    async respondExtensionUi(input) {
+      const endpoint = options.registry.lookup(input.boxId);
+      if (!endpoint || options.registry.isSuspect(input.boxId)) {
+        return await options.exec.respondExtensionUi(input);
+      }
+      const client = clientFactory(endpoint);
+      if (!client.decision) return await options.exec.respondExtensionUi(input);
+      try {
+        return directWriteOutcome(await client.decision(input));
+      } catch (error) {
+        if (input.signal.aborted) throw input.signal.reason ?? error;
+        const stableCode = stableAgentCode(error);
+        if (SUSPECT_CODES.has(stableCode)) options.registry.markSuspect(input.boxId);
+        logFallback("decision", stableCode);
+        return { outcome: "ambiguous", code: "decision_delivery_ambiguous" };
+      }
+    },
   };
+
+  async function resolveDirectPrompt(
+    input: Parameters<NonNullable<RuntimePiControl["resolvePrompt"]>>[0],
+    endpoint: DirectAgentEndpoint,
+    initialCode = "prompt_dispatch_unresolved",
+  ): Promise<Awaited<ReturnType<NonNullable<RuntimePiControl["resolvePrompt"]>>>> {
+    const deadline = now() + dispatchResolutionMs;
+    let lastCode = initialCode;
+    while (now() < deadline) {
+      input.signal.throwIfAborted();
+      const resolutionTimeout = AbortSignal.timeout(Math.max(1, deadline - now()));
+      const resolutionSignal = AbortSignal.any([input.signal, resolutionTimeout]);
+      try {
+        const client = clientFactory(endpoint);
+        if (!client.dispatchStatus || !client.prompt) {
+          return { outcome: "ambiguous", code: "prompt_dispatch_unresolved" };
+        }
+        const status = await client.dispatchStatus({ ...input, signal: resolutionSignal });
+        if (status.status === "accepted" && status.dispatch) {
+          return directPromptOutcome(status.dispatch);
+        }
+        const repeated = directPromptOutcome(await client.prompt({
+          ...input,
+          signal: resolutionSignal,
+        }));
+        if (repeated.outcome !== "ambiguous") return repeated;
+        lastCode = repeated.code;
+      } catch (error) {
+        if (input.signal.aborted) throw input.signal.reason ?? error;
+        lastCode = stableAgentCode(error);
+      }
+      const remaining = deadline - now();
+      if (remaining <= 0) break;
+      await sleep(Math.min(500, remaining), input.signal);
+    }
+    logFallback("prompt", lastCode);
+    if (SUSPECT_CODES.has(lastCode)) options.registry.markSuspect(input.boxId);
+    return { outcome: "ambiguous", code: "prompt_dispatch_unresolved" };
+  }
 
   return {
     pi,
     eventPollIntervalMs: ({ boxId }) =>
       lastEventsServedDirect.get(boxId) === true ? 0 : DEFAULT_EVENT_POLL_INTERVAL_MS,
   };
+}
+
+function directPromptOutcome(input: {
+  outcome: "accepted" | "refused" | "ambiguous";
+  invocationId?: string;
+  initialCursor?: number;
+  code?: string;
+}): Awaited<ReturnType<RuntimePiControl["prompt"]>> {
+  if (
+    input.outcome === "accepted"
+    && typeof input.invocationId === "string"
+    && Number.isSafeInteger(input.initialCursor)
+    && Number(input.initialCursor) >= 0
+  ) {
+    return {
+      outcome: "accepted",
+      invocationId: input.invocationId,
+      initialCursor: BigInt(Number(input.initialCursor)),
+    };
+  }
+  const code = input.code ?? "prompt_dispatch_unresolved";
+  if (
+    input.outcome === "refused"
+    && code !== "attempt_active"
+    && code !== "dispatch_conflict"
+    && code !== "invocation_mismatch"
+  ) {
+    return { outcome: "rejected", code };
+  }
+  return { outcome: "ambiguous", code };
+}
+
+function directWriteOutcome(input: {
+  outcome: "accepted" | "refused" | "ambiguous";
+  invocationId?: string;
+  code?: string;
+}): Awaited<ReturnType<RuntimePiControl["abort"]>> {
+  if (input.outcome === "accepted" && typeof input.invocationId === "string") {
+    return { outcome: "accepted", invocationId: input.invocationId };
+  }
+  const code = input.code ?? "pi_ack_ambiguous";
+  return input.outcome === "refused"
+    ? { outcome: "rejected", code }
+    : { outcome: "ambiguous", code };
+}
+
+function stableAgentCode(error: unknown): string {
+  return error instanceof CompanionBoxAgentRequestError ? error.stableCode : "agent_unexpected";
+}
+
+function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolveSleep, rejectSleep) => {
+    if (signal.aborted) {
+      rejectSleep(signal.reason ?? new Error("aborted"));
+      return;
+    }
+    const timeout = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolveSleep();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timeout);
+      rejectSleep(signal.reason ?? new Error("aborted"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function cursorNumber(value: bigint): number {

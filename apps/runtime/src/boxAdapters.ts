@@ -248,6 +248,7 @@ export function createRuntimePiControl(options: RuntimeBoxAdapterOptions): Runti
       const result = await runtime.dispatchPrompt({
         boxId: input.boxId,
         attemptId: input.attemptId,
+        expectedInvocationId: input.expectedInvocationId,
         message: input.message,
         requestId: input.commandId,
         signal: input.signal,

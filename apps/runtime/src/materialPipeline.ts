@@ -62,6 +62,9 @@ export function createRuntimeMaterialPipeline(input: {
   apiUrl: string;
   bundledSkill: CompanionRuntimeSkill;
   runtime(): CompanionBoxRuntimeV2;
+  /** Direct hosted-agent data path for chat files/outbox; lifecycle and staging stay on runtime(). */
+  fileRuntime?: () => Pick<CompanionBoxRuntimeV2,
+    "stageAttachments" | "clearOutbox" | "listOutbox" | "readOutboxFile">;
   loadSkillArchive(storagePath: string, signal: AbortSignal): Promise<Buffer>;
   /** Object-storage read for one chat attachment. Same bucket, deliberately a separate seam. */
   loadAttachment(storageKey: string, signal: AbortSignal): Promise<Buffer>;
@@ -342,7 +345,7 @@ export function createRuntimeMaterialPipeline(input: {
         material: stage.material,
         authorization: stage.authorization,
       });
-      return await input.runtime().stageAttachments({
+      return await (input.fileRuntime?.() ?? input.runtime()).stageAttachments({
         boxId: stage.boxId,
         messageId: messageIdFromEventId(stage.messageEventId),
         files,
@@ -352,10 +355,10 @@ export function createRuntimeMaterialPipeline(input: {
   };
   const outboxHarvester: RuntimeOutboxHarvester = {
     async clearOutbox({ boxId, signal }) {
-      await input.runtime().clearOutbox({ boxId, signal });
+      await (input.fileRuntime?.() ?? input.runtime()).clearOutbox({ boxId, signal });
     },
     async harvestOutbox(harvest) {
-      const listed = await input.runtime().listOutbox({
+      const listed = await (input.fileRuntime?.() ?? input.runtime()).listOutbox({
         boxId: harvest.boxId,
         deadlineAt: harvest.deadlineAt,
         signal: harvest.signal,
@@ -384,7 +387,7 @@ export function createRuntimeMaterialPipeline(input: {
         // in either costs exactly one image: the harvest keeps whatever it has already stored and
         // reports the shortfall, rather than discarding a partial set and orphaning its objects.
         try {
-          const file = await input.runtime().readOutboxFile({
+          const file = await (input.fileRuntime?.() ?? input.runtime()).readOutboxFile({
             boxId: harvest.boxId,
             entry,
             deadlineAt: harvest.deadlineAt,

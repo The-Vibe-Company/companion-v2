@@ -953,6 +953,7 @@ export interface CompanionBoxRuntimeV2 {
   dispatchPrompt(input: {
     boxId: string;
     attemptId: string;
+    expectedInvocationId?: string;
     message: string;
     requestId?: string;
     signal?: AbortSignal;
@@ -4173,6 +4174,7 @@ done`,
   async dispatchPrompt(input: {
     boxId: string;
     attemptId: string;
+    expectedInvocationId?: string;
     message: string;
     requestId?: string;
     signal?: AbortSignal;
@@ -4186,6 +4188,9 @@ done`,
           id: input.requestId ?? `companion-dispatch:${randomUUID()}`,
           type: "prompt",
           attemptId: input.attemptId,
+          ...(input.expectedInvocationId === undefined
+            ? {}
+            : { expectedInvocationId: input.expectedInvocationId }),
           message: input.message,
           requiredInput: ["text"],
           clearOutbox: true,

@@ -34,6 +34,7 @@ import { composeRuntimeService, type RuntimeService } from "./composition";
 import { loadRuntimeServiceConfig, type RuntimeServiceConfig } from "./config";
 import { createRuntimeDatabase, type RuntimeDatabase } from "./database";
 import {
+  createDirectBoxDataTransport,
   createDirectRuntimePiControl,
   DirectBoxEndpointRegistry,
 } from "./directBoxTransport";
@@ -260,11 +261,19 @@ export async function buildProductionRuntimeService(
     const endpointRegistry = config.directTransport === "off"
       ? null
       : new DirectBoxEndpointRegistry();
+    const directFiles = endpointRegistry && config.directTransport === "on"
+      ? createDirectBoxDataTransport({
+        exec: freshRuntime,
+        registry: endpointRegistry,
+        log,
+      })
+      : null;
     const material = createRuntimeMaterialPipeline({
       masterKey: config.masterKey,
       apiUrl: config.apiUrl,
       bundledSkill,
       runtime: freshRuntime,
+      ...(directFiles ? { fileRuntime: () => directFiles } : {}),
       ...(endpointRegistry
         ? {
           registerAgentEndpoint: (boxId: string, endpoint: {

@@ -3420,6 +3420,32 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       claimed = await claimWork();
       expect(claimed.workKind).toBe("attempt");
       expect(claimed.workId).toBe(fixture.attemptId);
+      const lease = claimed;
+      const acceptedCommandId = randomUUID();
+      const acceptedPiInvocationId = "pi-invocation-write-intent";
+      await sql`
+        update companion_turn_attempts set
+          command_id = ${acceptedCommandId}::uuid,
+          pi_invocation_id = ${acceptedPiInvocationId}
+        where id = ${fixture.attemptId}::uuid
+      `;
+      const [resolvableAttempt] = await asRuntime((tx) => tx<Array<{
+        commandId: string | null;
+        commandPiInvocationId: string | null;
+      }>>`
+        select command_id::text as "commandId",
+               command_pi_invocation_id as "commandPiInvocationId"
+        from public.companion_runtime_renew_and_authorize_v2(
+          ${lease.orgId}::uuid, ${lease.companionId}::uuid,
+          ${lease.claimToken}::uuid, ${lease.claimEpoch}::bigint,
+          ${lease.gateEpoch}::bigint, ${executorId},
+          ${lease.workKind}::companion_runtime_work_kind, ${lease.workId}::uuid, 30
+        )
+      `);
+      expect(resolvableAttempt).toEqual({
+        commandId: acceptedCommandId,
+        commandPiInvocationId: acceptedPiInvocationId,
+      });
 
       const [stopped] = await asApi({
         orgId: ids.orgA,
@@ -3441,7 +3467,6 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       expect(requested?.status).toBe("running");
       expect(requested?.cancelRequestedAt).toBeInstanceOf(Date);
 
-      const lease = claimed;
       const [renewal] = await asRuntime((tx) => tx<Array<{
         authorized: boolean;
         denialCode: string | null;
@@ -3459,6 +3484,25 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         authorized: false,
         denialCode: "turn_cancel_requested",
         boxId: "bx_23456789",
+      });
+      const [resolvedCancellation] = await asRuntime((tx) => tx<Array<{
+        authorized: boolean;
+        commandId: string | null;
+        commandPiInvocationId: string | null;
+      }>>`
+        select authorized, command_id::text as "commandId",
+               command_pi_invocation_id as "commandPiInvocationId"
+        from public.companion_runtime_renew_and_authorize_v2(
+          ${lease.orgId}::uuid, ${lease.companionId}::uuid,
+          ${lease.claimToken}::uuid, ${lease.claimEpoch}::bigint,
+          ${lease.gateEpoch}::bigint, ${executorId},
+          ${lease.workKind}::companion_runtime_work_kind, ${lease.workId}::uuid, 30
+        )
+      `);
+      expect(resolvedCancellation).toEqual({
+        authorized: false,
+        commandId: null,
+        commandPiInvocationId: null,
       });
     } finally {
       if (claimed) await release(claimed);
@@ -4969,6 +5013,16 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         )::text as sequence
       `);
       expect(intent?.sequence).toBe("1");
+      const [resolvedIntent] = await asRuntime((tx) => tx<Array<{ commandId: string | null }>>`
+        select command_id::text as "commandId"
+        from public.companion_runtime_renew_and_authorize_v2(
+          ${decisionClaim.orgId}::uuid, ${decisionClaim.companionId}::uuid,
+          ${decisionClaim.claimToken}::uuid, ${decisionClaim.claimEpoch}::bigint,
+          ${decisionClaim.gateEpoch}::bigint, ${executorId}, 'decision',
+          ${decisionClaim.workId}::uuid, 30
+        )
+      `);
+      expect(resolvedIntent?.commandId).toBe(commandId);
       const [settled] = await asRuntime((tx) => tx<Array<{ settled: boolean }>>`
         select public.companion_runtime_settle(
           ${decisionClaim.orgId}::uuid, ${decisionClaim.companionId}::uuid,

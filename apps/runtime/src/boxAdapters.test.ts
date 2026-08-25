@@ -584,6 +584,7 @@ describe("runtime Box/Pi port adapters", () => {
       boxId: "bx_23456789",
       commandId: "command-1",
       attemptId: "attempt-1",
+      expectedInvocationId: "invocation-1",
       message: "hello",
       signal,
     })).resolves.toEqual({
@@ -596,6 +597,7 @@ describe("runtime Box/Pi port adapters", () => {
       boxId: "bx_23456789",
       requestId: "command-1",
       attemptId: "attempt-1",
+      expectedInvocationId: "invocation-1",
       message: "hello",
       signal,
     });
@@ -647,6 +649,7 @@ describe("runtime Box/Pi port adapters", () => {
       boxId: "bx_23456789",
       commandId: "command-1",
       attemptId: "attempt-1",
+      expectedInvocationId: "invocation-1",
       message: "hello",
       signal,
     };

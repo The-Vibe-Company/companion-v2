@@ -1,7 +1,19 @@
-/* oxlint-disable anti-slop/no-unknown-parameters, anti-slop/no-runtime-typeof -- The agent sits on a JSON wire boundary: broker socket responses and HTTP bodies arrive untyped and are narrowed here before use. */
+/* oxlint-disable anti-slop/no-unknown-parameters, anti-slop/no-runtime-typeof, anti-slop/require-safety-comment-for-type-assertion -- The agent sits on a JSON wire boundary: broker socket responses and HTTP bodies arrive untyped and are narrowed here before use. */
 import { execFile } from "node:child_process";
-import { createHash, timingSafeEqual } from "node:crypto";
-import { lstatSync, readFileSync } from "node:fs";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import {
+  chmodSync,
+  copyFileSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
 import {
   createServer as createHttpServer,
   type IncomingMessage,
@@ -14,17 +26,25 @@ import {
   sendCompanionPiBrokerCommand,
   type PiJsonObject,
 } from "./companionPiBrokerCore";
+import {
+  COMPANION_ATTACHMENT_FILENAME_PATTERN,
+  COMPANION_ATTACHMENT_MAX_BYTES,
+  COMPANION_ATTACHMENT_MIME_TYPES,
+  COMPANION_MESSAGE_ATTACHMENT_MAX_COUNT,
+} from "@companion/contracts";
 
 /**
  * The Companion Box agent is a second on-box daemon: a network front-end that speaks the existing
- * one-LF-command-per-connection Unix socket protocol to the Pi broker. It owns no lifecycle: it
- * cannot execute commands, write files, read credentials, or control systemd. Its only inbound
+ * one-LF-command-per-connection Unix socket protocol to the Pi broker. It owns no lifecycle and
+ * cannot execute shell commands, read provider credentials, or control systemd. Its narrow file
+ * surface is limited to the already-contracted attachment and outbox directories. Its only inbound
  * channel is the ascii.dev `host <port>` HTTPS proxy, whose `_token` gate sits in front of the
  * per-box bearer enforced here as defense in depth.
  */
-export const COMPANION_BOX_AGENT_VERSION = 1;
+export const COMPANION_BOX_AGENT_VERSION = 2;
 export const COMPANION_BOX_AGENT_DEFAULT_PORT = 8790;
-export const COMPANION_BOX_AGENT_MAX_BODY_BYTES = 64 * 1024;
+export const COMPANION_BOX_AGENT_MAX_BODY_BYTES = COMPANION_ATTACHMENT_MAX_BYTES;
+const COMPANION_BOX_AGENT_JSON_BODY_BYTES = 64 * 1024;
 /** The ascii.dev proxy tolerates ~25 s responses; long-poll never exceeds it. */
 export const COMPANION_BOX_AGENT_LONG_POLL_CAP_MS = 25_000;
 export const COMPANION_BOX_AGENT_LONG_POLL_INTERVAL_MS = 200;
@@ -65,6 +85,23 @@ export interface CompanionBoxAgentRequest {
 export interface CompanionBoxAgentResult {
   status: number;
   body: PiJsonObject;
+  rawBody?: Uint8Array;
+  contentType?: string;
+}
+
+export interface CompanionBoxAgentAttachmentDescriptor extends PiJsonObject {
+  position: number;
+  filename: string;
+  contentType: string;
+  byteSize: number;
+  sha256: string;
+}
+
+export interface CompanionBoxAgentOutboxEntry extends PiJsonObject {
+  name: string;
+  encodedName: string;
+  byteSize: number;
+  sha256: string;
 }
 
 /**
@@ -80,6 +117,19 @@ export interface CompanionBoxAgentSeams {
   /** True when the broker socket exists, is a socket, and is owner-only (mode 600). */
   brokerSocketReady(): boolean;
   readLayoutMarker(): string | null;
+  uploadAttachment(input: {
+    messageId: string;
+    position: number;
+    sha256: string;
+    bytes: Uint8Array;
+  }): void;
+  commitAttachments(input: {
+    messageId: string;
+    files: CompanionBoxAgentAttachmentDescriptor[];
+  }): CompanionBoxAgentAttachmentDescriptor[];
+  clearOutbox(): void;
+  listOutbox(): CompanionBoxAgentOutboxEntry[];
+  readOutbox(encodedName: string): { entry: CompanionBoxAgentOutboxEntry; bytes: Uint8Array };
   now(): number;
   sleep(ms: number): Promise<void>;
 }
@@ -88,6 +138,9 @@ export interface CompanionBoxAgentSeamPaths {
   brokerSocketPath: string;
   authFilePath: string;
   layoutMarkerPath: string;
+  attachmentsPath: string;
+  attachmentUploadsPath: string;
+  outboxPath: string;
   piUnitName?: string;
 }
 
@@ -137,6 +190,81 @@ export function companionBoxAgentSeams(paths: CompanionBoxAgentSeamPaths): Compa
         return null;
       }
     },
+    uploadAttachment(input) {
+      const directory = join(paths.attachmentUploadsPath, input.messageId);
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      const target = join(directory, `${input.position}-${input.sha256}`);
+      const temporary = `${target}.${randomUUID()}.tmp`;
+      try {
+        writeFileSync(temporary, input.bytes, { mode: 0o600, flag: "wx" });
+        renameSync(temporary, target);
+      } finally {
+        rmSync(temporary, { force: true });
+      }
+    },
+    commitAttachments(input) {
+      const parent = dirname(paths.attachmentsPath);
+      const nextRoot = join(parent, `.attachments-${randomUUID()}.next`);
+      const messageDirectory = join(nextRoot, input.messageId);
+      mkdirSync(messageDirectory, { recursive: true, mode: 0o700 });
+      try {
+        for (const file of input.files) {
+          const uploaded = join(paths.attachmentUploadsPath, input.messageId, `${file.position}-${file.sha256}`);
+          const stat = statSync(uploaded);
+          if (!stat.isFile() || stat.size !== file.byteSize) throw new Error("attachment upload is unavailable");
+          const target = join(messageDirectory, `${file.position}-${file.filename}`);
+          copyFileSync(uploaded, target);
+          chmodSync(target, 0o444);
+        }
+        rmSync(paths.attachmentsPath, { recursive: true, force: true });
+        renameSync(nextRoot, paths.attachmentsPath);
+        rmSync(join(paths.attachmentUploadsPath, input.messageId), { recursive: true, force: true });
+      } finally {
+        rmSync(nextRoot, { recursive: true, force: true });
+      }
+      return input.files.map((file) => ({ ...file }));
+    },
+    clearOutbox() {
+      mkdirSync(paths.outboxPath, { recursive: true, mode: 0o700 });
+      for (const name of readdirSync(paths.outboxPath)) {
+        rmSync(join(paths.outboxPath, name), { recursive: true, force: true });
+      }
+    },
+    listOutbox() {
+      try {
+        return readdirSync(paths.outboxPath).sort().flatMap((name) => {
+          if (!validOutboxName(name)) return [];
+          const path = join(paths.outboxPath, name);
+          const stat = lstatSync(path);
+          if (!stat.isFile()) return [];
+          const bytes = readFileSync(path);
+          return [{
+            name,
+            encodedName: Buffer.from(name, "utf8").toString("base64"),
+            byteSize: bytes.byteLength,
+            sha256: createHash("sha256").update(bytes).digest("hex"),
+          }];
+        });
+      } catch {
+        return [];
+      }
+    },
+    readOutbox(encodedName) {
+      const name = decodeOutboxName(encodedName);
+      const path = join(paths.outboxPath, name);
+      const stat = lstatSync(path);
+      if (!stat.isFile()) throw new Error("outbox entry is unavailable");
+      const bytes = readFileSync(path);
+      return {
+        entry: {
+          name,
+          encodedName,
+          byteSize: bytes.byteLength,
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+        },
+        bytes,
+      };
+    },
     now: () => Date.now(),
     sleep: (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
   };
@@ -174,9 +302,10 @@ export function bearerMatchesAuthFile(authorization: string | null, authFileCont
 }
 
 /**
- * HTTP front-end for the broker socket. Deliberately absent: exec, file writes, credentials,
- * systemd control, prompt, abort, and decision delivery — a stolen bearer is a read-only window
- * onto already-expurgated broker state, never a shell.
+ * HTTP front-end for the broker socket and bounded chat-file directories. Deliberately absent:
+ * arbitrary exec, arbitrary filesystem paths, credentials, and systemd control. Prompt dispatch
+ * is idempotent through the broker's durable ledger; abort and decision delivery preserve their
+ * explicit ambiguous-outcome contract when the one-way Pi acknowledgement is lost.
  */
 export class CompanionBoxAgentCore {
   readonly #seams: CompanionBoxAgentSeams;
@@ -204,6 +333,20 @@ export class CompanionBoxAgentCore {
     const parsed = parseUrl(request.url);
     if (!parsed) return errorResult(400, "invalid_request", "request path is invalid");
     const { path, query } = parsed;
+    if (path !== "/v1/files" && request.body
+      && request.body.byteLength > COMPANION_BOX_AGENT_JSON_BODY_BYTES) {
+      return errorResult(413, "payload_too_large", "request body exceeds the JSON limit");
+    }
+
+    if (path === "/v1/files") {
+      if (request.method !== "PUT") return methodNotAllowed();
+      return this.#uploadAttachment(query, request.body);
+    }
+    const attachmentCommit = /^\/v1\/attachments\/([0-9a-f-]{36})$/.exec(path);
+    if (attachmentCommit) {
+      if (request.method !== "POST") return methodNotAllowed();
+      return this.#commitAttachments(attachmentCommit[1]!, request.body);
+    }
 
     switch (path) {
       case "/v1/health":
@@ -218,6 +361,28 @@ export class CompanionBoxAgentCore {
       case "/v1/ack":
         if (request.method !== "POST") return methodNotAllowed();
         return await this.#ack(request.body);
+      case "/v1/prompt":
+        if (request.method !== "POST") return methodNotAllowed();
+        return await this.#prompt(request.body);
+      case "/v1/dispatch/status":
+        if (request.method !== "GET") return methodNotAllowed();
+        return await this.#dispatchStatus(query);
+      case "/v1/abort":
+        if (request.method !== "POST") return methodNotAllowed();
+        return await this.#abort(request.body);
+      case "/v1/decision":
+        if (request.method !== "POST") return methodNotAllowed();
+        return await this.#decision(request.body);
+      case "/v1/outbox":
+        if (request.method !== "GET") return methodNotAllowed();
+        return { status: 200, body: { entries: this.#seams.listOutbox() } };
+      case "/v1/outbox/file":
+        if (request.method !== "GET") return methodNotAllowed();
+        return this.#readOutbox(query);
+      case "/v1/outbox/clear":
+        if (request.method !== "POST") return methodNotAllowed();
+        this.#seams.clearOutbox();
+        return { status: 200, body: { cleared: true } };
       default:
         return errorResult(404, "not_found", "unknown agent route");
     }
@@ -273,9 +438,144 @@ export class CompanionBoxAgentCore {
     return await this.#broker("ack_events", { through: Number(through) });
   }
 
-  async #broker(type: string, fields: PiJsonObject): Promise<CompanionBoxAgentResult> {
+  async #prompt(body: Uint8Array | null): Promise<CompanionBoxAgentResult> {
+    const parsed = parseJsonBody(body);
+    if (!parsed) return errorResult(400, "invalid_request", "a JSON body is required");
+    const commandId = opaqueId(parsed.commandId);
+    const attemptId = opaqueId(parsed.attemptId);
+    const expectedInvocationId = opaqueId(parsed.expectedInvocationId);
+    const message = typeof parsed.message === "string" ? parsed.message : "";
+    if (!commandId || !attemptId || !expectedInvocationId || !message) {
+      return errorResult(400, "invalid_request", "prompt identity, invocation, and message are required");
+    }
+    return await this.#broker("prompt", {
+      id: commandId,
+      attemptId,
+      expectedInvocationId,
+      message,
+      requiredInput: ["text"],
+      clearOutbox: true,
+    }, false);
+  }
+
+  async #dispatchStatus(query: URLSearchParams): Promise<CompanionBoxAgentResult> {
+    const attemptId = opaqueId(query.get("attempt_id"));
+    const commandId = opaqueId(query.get("command_id"));
+    if (!attemptId || !commandId) {
+      return errorResult(400, "invalid_request", "dispatch identity is required");
+    }
+    return await this.#broker("dispatch_status", { attemptId, commandId });
+  }
+
+  async #abort(body: Uint8Array | null): Promise<CompanionBoxAgentResult> {
+    const parsed = parseJsonBody(body);
+    if (!parsed) return errorResult(400, "invalid_request", "a JSON body is required");
+    const commandId = opaqueId(parsed.commandId);
+    const attemptId = opaqueId(parsed.attemptId);
+    if (!commandId || !attemptId) {
+      return errorResult(400, "invalid_request", "abort identity is required");
+    }
+    return await this.#broker("abort", { id: commandId, attemptId }, false);
+  }
+
+  async #decision(body: Uint8Array | null): Promise<CompanionBoxAgentResult> {
+    const parsed = parseJsonBody(body);
+    if (!parsed) return errorResult(400, "invalid_request", "a JSON body is required");
+    const commandId = opaqueId(parsed.commandId);
+    const attemptId = opaqueId(parsed.attemptId);
+    const response = parsed.response;
+    if (!commandId || !attemptId || !isJsonObject(response)) {
+      return errorResult(400, "invalid_request", "decision identity and response are required");
+    }
+    return await this.#broker("extension_ui_response", {
+      id: commandId,
+      attemptId,
+      response,
+    }, false);
+  }
+
+  #uploadAttachment(
+    query: URLSearchParams,
+    body: Uint8Array | null,
+  ): CompanionBoxAgentResult {
+    const messageId = attachmentMessageId(query.get("message_id"));
+    const position = boundedPosition(query.get("position"));
+    const sha256 = query.get("sha256") ?? "";
+    if (!messageId || position === null || !/^[a-f0-9]{64}$/.test(sha256) || !body) {
+      return errorResult(400, "invalid_request", "attachment upload metadata is invalid");
+    }
+    if (createHash("sha256").update(body).digest("hex") !== sha256) {
+      return errorResult(409, "digest_mismatch", "attachment bytes do not match their digest");
+    }
+    this.#seams.uploadAttachment({ messageId, position, sha256, bytes: body });
+    return { status: 200, body: { uploaded: true, position, byteSize: body.byteLength, sha256 } };
+  }
+
+  #commitAttachments(messageIdValue: string, body: Uint8Array | null): CompanionBoxAgentResult {
+    const messageId = attachmentMessageId(messageIdValue);
+    const parsed = parseJsonBody(body);
+    if (!messageId || !parsed || !Array.isArray(parsed.files)
+      || parsed.files.length > COMPANION_MESSAGE_ATTACHMENT_MAX_COUNT) {
+      return errorResult(400, "invalid_request", "attachment manifest is invalid");
+    }
+    const files: CompanionBoxAgentAttachmentDescriptor[] = [];
+    for (const value of parsed.files) {
+      if (!isJsonObject(value)) return errorResult(400, "invalid_request", "attachment entry is invalid");
+      const position = Number(value.position);
+      const filename = value.filename;
+      const contentType = value.contentType;
+      const byteSize = Number(value.byteSize);
+      const sha256 = value.sha256;
+      if (
+        !Number.isSafeInteger(position) || position < 0 || position > 9
+        || typeof filename !== "string" || !COMPANION_ATTACHMENT_FILENAME_PATTERN.test(filename)
+        || typeof contentType !== "string" || !COMPANION_ATTACHMENT_MIME_TYPES.includes(contentType as never)
+        || !Number.isSafeInteger(byteSize) || byteSize < 1 || byteSize > COMPANION_ATTACHMENT_MAX_BYTES
+        || typeof sha256 !== "string" || !/^[a-f0-9]{64}$/.test(sha256)
+      ) return errorResult(400, "invalid_request", "attachment entry is invalid");
+      files.push({ position, filename, contentType, byteSize, sha256 });
+    }
+    try {
+      const committed = this.#seams.commitAttachments({ messageId, files });
+      return {
+        status: 200,
+        body: {
+          files: committed.map((file) => ({
+            ...file,
+            path: `~/attachments/${messageId}/${file.position}-${file.filename}`,
+          })),
+        },
+      };
+    } catch {
+      return errorResult(409, "attachment_unavailable", "one or more uploaded files are unavailable");
+    }
+  }
+
+  #readOutbox(query: URLSearchParams): CompanionBoxAgentResult {
+    const encodedName = query.get("name") ?? "";
+    try {
+      const file = this.#seams.readOutbox(encodedName);
+      return {
+        status: 200,
+        body: { entry: file.entry },
+        rawBody: file.bytes,
+        contentType: "application/octet-stream",
+      };
+    } catch {
+      return errorResult(404, "not_found", "outbox entry is unavailable");
+    }
+  }
+
+  async #broker(
+    type: string,
+    fields: PiJsonObject,
+    assignAgentId = true,
+  ): Promise<CompanionBoxAgentResult> {
     this.#commandSequence += 1;
-    const id = `agent:${this.#commandSequence.toString(10)}`;
+    const id = assignAgentId
+      ? `agent:${this.#commandSequence.toString(10)}`
+      : opaqueId(fields.id);
+    if (!id) return errorResult(400, "invalid_request", "command id is required");
     let response: PiJsonObject;
     try {
       response = await this.#seams.brokerCommand({ id, type, ...fields });
@@ -340,6 +640,43 @@ export class CompanionBoxAgentCore {
   }
 }
 
+function opaqueId(value: unknown): string | null {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= 256
+    && /^[A-Za-z0-9._:-]+$/.test(value)
+    ? value
+    : null;
+}
+
+function attachmentMessageId(value: unknown): string | null {
+  return typeof value === "string"
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value)
+    ? value
+    : null;
+}
+
+function boundedPosition(value: unknown): number | null {
+  if (typeof value !== "string" || !/^\d$/.test(value)) return null;
+  const position = Number(value);
+  return position >= 0 && position <= 9 ? position : null;
+}
+
+function validOutboxName(name: string): boolean {
+  return name.length > 0 && name.length <= 255 && !name.includes("/") && name !== "." && name !== "..";
+}
+
+function decodeOutboxName(encodedName: string): string {
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encodedName) || encodedName.length > 344) {
+    throw new Error("outbox name is invalid");
+  }
+  const name = Buffer.from(encodedName, "base64").toString("utf8");
+  if (!validOutboxName(name) || Buffer.from(name, "utf8").toString("base64") !== encodedName) {
+    throw new Error("outbox name is invalid");
+  }
+  return name;
+}
+
 export interface StartCompanionBoxAgentServerOptions {
   core: CompanionBoxAgentCore;
   port: number;
@@ -369,7 +706,11 @@ export async function startCompanionBoxAgentServer(
           remoteAddress: request.socket.remoteAddress ?? "unknown",
           body,
         });
-        respondJson(response, result.status, result.body);
+        if (result.rawBody) {
+          respondBytes(response, result.status, result.rawBody, result.contentType ?? "application/octet-stream");
+        } else {
+          respondJson(response, result.status, result.body);
+        }
       })
       .catch(() => {
         respondJson(response, 500, {
@@ -435,6 +776,20 @@ function respondJson(response: ServerResponse, status: number, body: PiJsonObjec
     "content-length": Buffer.byteLength(payload),
   });
   response.end(payload);
+}
+
+function respondBytes(
+  response: ServerResponse,
+  status: number,
+  body: Uint8Array,
+  contentType: string,
+): void {
+  response.writeHead(status, {
+    "content-type": contentType,
+    "cache-control": "no-store",
+    "content-length": body.byteLength,
+  });
+  response.end(body);
 }
 
 function firstHeader(value: string | string[] | undefined): string | null {

@@ -118,6 +118,12 @@ export interface BoxSimDaemonMachine {
   invocationCounter: number;
   rpcReady: boolean;
   activeAttemptId: string | null;
+  brokerDispatchLedger: Map<string, {
+    commandId: string;
+    invocationId: string;
+    initialCursor: number;
+    fingerprint: string;
+  }>;
   brokerJournal: BoxSimBrokerJournalRecord[];
   brokerAcknowledgedCursor: number;
   brokerCounters: BoxSimBrokerCounters;
@@ -177,6 +183,7 @@ export function createBoxSimCommandMachine(input: {
       invocationCounter: 0,
       rpcReady: false,
       activeAttemptId: null,
+      brokerDispatchLedger: new Map(),
       brokerJournal: [],
       brokerAcknowledgedCursor: 0,
       brokerCounters: emptyBrokerCounters(),
@@ -371,6 +378,7 @@ export function appendPiProcessExit(
     exit,
   });
   machine.daemon.activeAttemptId = null;
+  machine.daemon.brokerDispatchLedger.clear();
 }
 
 /** Classify only known adapter commands. Unknown strings are never delegated to a host shell. */
@@ -690,6 +698,7 @@ async function startDaemon(machine: BoxSimCommandMachine, restart: boolean): Pro
   machine.daemon.brokerAcknowledgedCursor = brokerTailCursor(machine);
   machine.daemon.rpcReady = true;
   machine.daemon.activeAttemptId = null;
+  machine.daemon.brokerDispatchLedger.clear();
   try {
     if (restart) await machine.piController?.restart();
     else await machine.piController?.start();
@@ -830,6 +839,39 @@ export async function executeBrokerControl(
         modelInput,
       }))}\n`);
     }
+    case "dispatch_status": {
+      const attemptId = typeof command.attemptId === "string" ? command.attemptId : null;
+      const commandId = typeof command.commandId === "string" ? command.commandId : null;
+      if (!attemptId || !commandId) {
+        return ok(`${JSON.stringify(brokerFailureFor(
+          command,
+          "invalid_command",
+          "dispatch identity is required",
+        ))}\n`);
+      }
+      const recorded = machine.daemon.brokerDispatchLedger.get(attemptId);
+      if (!recorded) {
+        return ok(`${JSON.stringify(responseFor(command, { status: "absent", attemptId, commandId }))}\n`);
+      }
+      if (recorded.commandId !== commandId) {
+        return ok(`${JSON.stringify(brokerFailureFor(
+          command,
+          "dispatch_conflict",
+          "attempt dispatch identity does not match",
+        ))}\n`);
+      }
+      return ok(`${JSON.stringify(responseFor(command, {
+        status: "accepted",
+        attemptId,
+        commandId,
+        invocationId: recorded.invocationId,
+        fingerprint: recorded.fingerprint,
+        piAcknowledged: true,
+        initialCursor: recorded.initialCursor,
+        requiredInput: ["text"],
+        clearOutbox: true,
+      }))}\n`);
+    }
     case "read_events": {
       const after = brokerNonNegativeInteger(command.after);
       const limit = command.limit === undefined ? BROKER_READ_LIMIT : brokerNonNegativeInteger(command.limit);
@@ -897,8 +939,65 @@ async function executeRpc(
   }
   const brokerCommand = extractBrokerJson(commandText);
   if (!brokerCommand) return failed("Pi broker command was not valid JSON");
+  return await executeBrokerCommand(machine, brokerCommand);
+}
+
+async function executeBrokerCommand(
+  machine: BoxSimCommandMachine,
+  brokerCommand: BoxSimJsonObject,
+): Promise<BoxSimCommandResult> {
   const brokerControl = await executeBrokerControl(machine, brokerCommand);
   if (brokerControl) return brokerControl;
+  const promptAttemptIdResult = z.string().safeParse(brokerCommand.attemptId);
+  const promptAttemptId = brokerCommand.type === "prompt" && promptAttemptIdResult.success
+    ? promptAttemptIdResult.data
+    : null;
+  const promptCommandId = brokerCommand.type === "prompt" && typeof brokerCommand.id === "string"
+    ? brokerCommand.id
+    : null;
+  const promptFingerprint = promptAttemptId && promptCommandId
+    ? createHash("sha256").update(JSON.stringify({
+      attemptId: promptAttemptId,
+      expectedInvocationId: typeof brokerCommand.expectedInvocationId === "string"
+        ? brokerCommand.expectedInvocationId
+        : null,
+      message: brokerCommand.message,
+      requiredInput: brokerCommand.requiredInput,
+      clearOutbox: brokerCommand.clearOutbox === true,
+    })).digest("hex")
+    : null;
+  if (
+    brokerCommand.type === "prompt"
+    && typeof brokerCommand.expectedInvocationId === "string"
+    && brokerCommand.expectedInvocationId !== machine.daemon.invocationId
+  ) {
+    return ok(`${JSON.stringify(brokerFailureFor(
+      brokerCommand,
+      "invocation_mismatch",
+      "prompt does not match the current Pi invocation",
+    ))}\n`);
+  }
+  const recorded = promptAttemptId
+    ? machine.daemon.brokerDispatchLedger.get(promptAttemptId)
+    : undefined;
+  if (recorded) {
+    if (recorded.commandId !== promptCommandId || recorded.fingerprint !== promptFingerprint) {
+      return ok(`${JSON.stringify(brokerFailureFor(
+        brokerCommand,
+        "dispatch_conflict",
+        "attempt dispatch identity does not match",
+      ))}\n`);
+    }
+    return ok(`${JSON.stringify(responseFor(brokerCommand, {
+      attemptId: promptAttemptId,
+      commandId: recorded.commandId,
+      invocationId: recorded.invocationId,
+      piAcknowledged: true,
+      initialCursor: recorded.initialCursor,
+      requiredInput: brokerCommand.requiredInput ?? ["text"],
+      clearOutbox: true,
+    }))}\n`);
+  }
   if (brokerCommand.type === "prompt" && machine.daemon.activeAttemptId) {
     return ok(`${JSON.stringify(brokerFailureFor(
       brokerCommand,
@@ -906,10 +1005,21 @@ async function executeRpc(
       "another Pi attempt is already active",
     ))}\n`);
   }
-  const promptAttemptIdResult = z.string().safeParse(brokerCommand.attemptId);
-  const promptAttemptId = brokerCommand.type === "prompt" && promptAttemptIdResult.success
-    ? promptAttemptIdResult.data
-    : null;
+  const abortAttemptId = brokerCommand.type === "abort" ? machine.daemon.activeAttemptId : null;
+  if (brokerCommand.type === "abort" && typeof brokerCommand.attemptId === "string"
+    && abortAttemptId && brokerCommand.attemptId !== abortAttemptId) {
+    return ok(`${JSON.stringify(brokerFailureFor(
+      brokerCommand,
+      "attempt_mismatch",
+      "abort does not match the active Pi attempt",
+    ))}\n`);
+  }
+  if (brokerCommand.type === "abort" && !abortAttemptId) {
+    return ok(`${JSON.stringify(responseFor(brokerCommand, {
+      aborted: false,
+      invocationId: machine.daemon.invocationId,
+    }))}\n`);
+  }
   const initialCursor = brokerCommand.type === "prompt" ? brokerTailCursor(machine) : null;
   if (brokerCommand.type === "prompt" && brokerCommand.clearOutbox === true) {
     for (const path of machine.persistentFiles.keys()) {
@@ -961,12 +1071,44 @@ async function executeRpc(
           },
         };
     if (
+      response.success === true
+      && promptAttemptId
+      && promptCommandId
+      && promptFingerprint
+      && machine.daemon.invocationId
+      && initialCursor !== null
+    ) {
+      machine.daemon.brokerDispatchLedger.set(promptAttemptId, {
+        commandId: promptCommandId,
+        invocationId: machine.daemon.invocationId,
+        initialCursor,
+        fingerprint: promptFingerprint,
+      });
+    }
+    if (
       response.success !== true
       && promptAttemptId
       && machine.daemon.activeAttemptId === promptAttemptId
     ) {
       machine.daemon.activeAttemptId = null;
     }
+  } else if (brokerCommand.type === "abort") {
+    if (response.success === true) machine.daemon.activeAttemptId = null;
+    response = response.success === true
+      ? responseFor(brokerCommand, {
+        aborted: true,
+        attemptId: abortAttemptId,
+        invocationId: machine.daemon.invocationId,
+      })
+      : {
+          ...responseFor(brokerCommand),
+          success: false,
+          error: {
+            code: "pi_abort_refused",
+            message: "Pi refused the abort",
+            ambiguous: false,
+          },
+        };
   }
   return ok(`${JSON.stringify(response)}\n`);
 }
@@ -980,6 +1122,13 @@ async function executeExtensionResponse(
   }
   const brokerCommand = extractBrokerJson(commandText);
   if (!brokerCommand) return failed("Pi extension response was not valid JSON");
+  return await executeExtensionResponseCommand(machine, brokerCommand);
+}
+
+async function executeExtensionResponseCommand(
+  machine: BoxSimCommandMachine,
+  brokerCommand: BoxSimJsonObject,
+): Promise<BoxSimCommandResult> {
   const requestedAttemptIdResult = z.string().safeParse(brokerCommand.attemptId);
   const requestedAttemptId = requestedAttemptIdResult.success
     ? requestedAttemptIdResult.data
@@ -1025,6 +1174,21 @@ async function executeExtensionResponse(
     invocationId: machine.daemon.invocationId,
     delivered: true,
   }))}\n`);
+}
+
+/** Direct-agent entrypoint: the same broker semantics as an exec-transport socket command. */
+export async function executeBrokerAgentCommand(
+  machine: BoxSimCommandMachine,
+  command: Record<string, unknown>,
+): Promise<BoxSimCommandResult> {
+  if (machine.daemon.status !== "active" || !machine.daemon.rpcReady) {
+    return failed("Pi RPC is not ready");
+  }
+  const parsed = boxSimJsonObjectSchema.safeParse(command);
+  if (!parsed.success) return failed("Pi broker command was not valid JSON");
+  return parsed.data.type === "extension_ui_response"
+    ? await executeExtensionResponseCommand(machine, parsed.data)
+    : await executeBrokerCommand(machine, parsed.data);
 }
 
 function joinedFileCommand(machine: BoxSimCommandMachine, command: string): BoxSimCommandResult {

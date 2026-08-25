@@ -6,6 +6,7 @@ export {
   COMPANION_PI_BROKER_READ_BYTES,
   COMPANION_PI_BROKER_SEGMENT_BYTES,
   COMPANION_PI_SUPPORTED_EVENT_TYPES,
+  CompanionPiDispatchLedger,
   CompanionPiBroker,
   SegmentedCompanionPiJournal,
   StrictLfJsonlDecoder,
@@ -16,6 +17,7 @@ export {
 } from "./companionPiBrokerCore";
 export type {
   CompanionPiBrokerClientOptions,
+  CompanionPiAcceptedDispatch,
   CompanionPiBrokerCounters,
   CompanionPiBrokerOptions,
   CompanionPiBrokerSocketOptions,

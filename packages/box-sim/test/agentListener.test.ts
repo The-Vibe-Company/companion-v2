@@ -182,7 +182,7 @@ describe("Companion box agent listener", () => {
     const active = await agentGet(`${endpoint}/v1/health?_token=${proxyToken}`);
     expect(active.status).toBe(200);
     expect(await active.json()).toEqual({
-      agentVersion: 1,
+      agentVersion: 2,
       piUnit: "active",
       brokerSocketReady: true,
       layoutMarker: "14:pins:overlay=agent",
@@ -191,7 +191,7 @@ describe("Companion box agent listener", () => {
     await expect(executeBoxCommand(machine, "Pi daemon is still active after stop"))
       .resolves.toMatchObject({ success: true });
     expect(await (await agentGet(`${endpoint}/v1/health?_token=${proxyToken}`)).json()).toEqual({
-      agentVersion: 1,
+      agentVersion: 2,
       piUnit: "inactive",
       brokerSocketReady: false,
       layoutMarker: "14:pins:overlay=agent",

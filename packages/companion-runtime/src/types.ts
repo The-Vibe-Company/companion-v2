@@ -280,6 +280,10 @@ export interface RuntimeAuthorization {
   decisionDeliveryState: DecisionDeliveryState | null;
   decisionRequestKey: string | null;
   decisionResponseText: string | null;
+  /** Persisted prompt/decision write identity, exposed so takeover can resolve broker state. */
+  commandId: string | null;
+  /** Pi invocation pinned atomically with the prompt write intent. */
+  commandPiInvocationId: string | null;
 }
 
 export interface RuntimeCheckpointInput {
@@ -772,6 +776,8 @@ export function decodeRuntimeAuthorizationRow(
     decisionDeliveryState: nullableEnumeration(row, "decision_delivery_state", DECISION_DELIVERY_STATES),
     decisionRequestKey: nullableString(row, "decision_request_key"),
     decisionResponseText: nullableString(row, "decision_response_text"),
+    commandId: nullableUuid(row, "command_id"),
+    commandPiInvocationId: nullableString(row, "command_pi_invocation_id"),
   };
 
   if (authorization.boxId !== null && !BOX_ID.test(authorization.boxId)) {

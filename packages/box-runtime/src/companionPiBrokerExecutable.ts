@@ -6,6 +6,7 @@ import { startCompanionMcpGateway } from "./companionMcpGateway";
 
 import {
   COMPANION_PI_BROKER_MAX_LINE_BYTES,
+  CompanionPiDispatchLedger,
   CompanionPiBroker,
   SegmentedCompanionPiJournal,
   StrictLfJsonlDecoder,
@@ -24,6 +25,8 @@ const socketPath = optionalAbsolutePath("COMPANION_PI_SOCKET_PATH")
   ?? join(root, "state", "pi-broker.sock");
 const journalPath = optionalAbsolutePath("COMPANION_PI_JOURNAL_PATH")
   ?? join(root, "events");
+const dispatchLedgerPath = optionalAbsolutePath("COMPANION_PI_DISPATCH_LEDGER_PATH")
+  ?? join(root, "state", "dispatch-ledger.json");
 const outboxPath = resolve(root, "..", "..", "outbox");
 const layoutMarker = process.env.PI_BROKER_LAYOUT_MARKER;
 const maxLineBytes = optionalPositiveInteger("COMPANION_PI_MAX_LINE_BYTES")
@@ -48,6 +51,7 @@ interface CompanionPiBrokerOptions {
   invocationId: string;
   transport: CompanionPiRpcTransport;
   journal: SegmentedCompanionPiJournal;
+  dispatchLedger: CompanionPiDispatchLedger;
   outboxPath: string;
   layoutMarker?: string;
 }
@@ -205,6 +209,10 @@ async function main(): Promise<void> {
   const journalOptions: CompanionPiJournalOptions = { directory: journalPath };
   if (segmentBytes !== undefined) journalOptions.segmentBytes = segmentBytes;
   const journal = new SegmentedCompanionPiJournal(journalOptions);
+  const dispatchLedger = new CompanionPiDispatchLedger({
+    path: dispatchLedgerPath,
+    invocationId,
+  });
   const gatewayToken = process.env.COMPANION_MCP_BROKER_TOKEN ?? "";
   const gateway = await startCompanionMcpGateway({
     configPath: join(root, "state", "mcp-gateway.json"),
@@ -219,6 +227,7 @@ async function main(): Promise<void> {
     invocationId,
     transport,
     journal,
+    dispatchLedger,
     outboxPath,
   };
   if (layoutMarker) brokerOptions.layoutMarker = layoutMarker;

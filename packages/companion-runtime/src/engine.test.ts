@@ -708,6 +708,10 @@ describe("RuntimeEngine attempts", () => {
 
     expect(result.outcome).toBe("interrupted");
     expect(ports.promptCalls).toHaveLength(1);
+    expect(store.checkpoints).toContainEqual(expect.objectContaining({
+      nextCheckpoint: "dispatch_write_intent",
+      piInvocationId: PI_INVOCATION_ID,
+    }));
     expect(store.settlements[0]).toMatchObject({
       terminalStatus: "interrupted",
       error: { code: "prompt_dispatch_ambiguous", action: "retry" },
@@ -775,6 +779,124 @@ describe("RuntimeEngine attempts", () => {
 
     expect(result.outcome).toBe("interrupted");
     expect(ports.promptCalls).toHaveLength(0);
+    expect(store.settlements[0]?.error?.code).toBe("prompt_dispatch_ambiguous");
+  });
+
+  it("resolves a takeover write intent from the durable prompt ledger without staging or replay", async () => {
+    const claim = attemptClaim({
+      checkpoint: "dispatch_write_intent",
+      checkpointSequence: 4n,
+      attemptStatus: "dispatching",
+      turnStatus: "dispatching",
+      dispatchState: "write_intent",
+    });
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(claim, { commandId: COMMAND_ID, eventCursor: 0n }),
+      material: attemptMaterial({ attachments: [imageAttachment()] }),
+    });
+    const ports = fakePorts(store);
+    const resolved: Array<{ commandId: string; expectedInvocationId: string; message: string }> = [];
+    ports.pi.resolvePrompt = async (input) => {
+      resolved.push({
+        commandId: input.commandId,
+        expectedInvocationId: input.expectedInvocationId,
+        message: input.message,
+      });
+      return { outcome: "accepted", invocationId: PI_INVOCATION_ID, initialCursor: 0n };
+    };
+    ports.eventReads.push(assistantAndSettlementPage());
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(ports.promptCalls).toHaveLength(0);
+    expect(ports.stagedAttachments).toHaveLength(0);
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0]?.commandId).toBe(COMMAND_ID);
+    expect(resolved[0]?.expectedInvocationId).toBe(PI_INVOCATION_ID);
+    expect(resolved[0]?.message).toContain(
+      `~/attachments/${MESSAGE_EVENT_ID.slice(4)}/0-chart.png`,
+    );
+    expect(store.checkpoints.map((checkpoint) => checkpoint.nextCheckpoint)).toContain("dispatch_accepted");
+  });
+
+  it("keeps an unresolved takeover prompt interrupted and actionable", async () => {
+    const claim = attemptClaim({
+      checkpoint: "dispatch_write_intent",
+      checkpointSequence: 4n,
+      attemptStatus: "dispatching",
+      turnStatus: "dispatching",
+      dispatchState: "write_intent",
+    });
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(claim, { commandId: COMMAND_ID }),
+    });
+    const ports = fakePorts(store);
+    ports.pi.resolvePrompt = async () => ({
+      outcome: "ambiguous",
+      code: "prompt_dispatch_unresolved",
+    });
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("interrupted");
+    expect(ports.promptCalls).toHaveLength(0);
+    expect(store.checkpoints.at(-1)?.nextCheckpoint).toBe("dispatch_ambiguous");
+    expect(store.settlements[0]?.error?.code).toBe("prompt_dispatch_ambiguous");
+  });
+
+  it("does not contact a replacement Pi when takeover sees a changed instance invocation", async () => {
+    const claim = attemptClaim({
+      checkpoint: "dispatch_write_intent",
+      checkpointSequence: 4n,
+      attemptStatus: "dispatching",
+      turnStatus: "dispatching",
+      dispatchState: "write_intent",
+    });
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(claim, {
+        commandId: COMMAND_ID,
+        piInvocationId: "replacement-pi-invocation",
+      }),
+    });
+    const ports = fakePorts(store);
+    const resolvePrompt = vi.fn(async () => ({
+      outcome: "accepted" as const,
+      invocationId: "replacement-pi-invocation",
+      initialCursor: 0n,
+    }));
+    ports.pi.resolvePrompt = resolvePrompt;
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("interrupted");
+    expect(resolvePrompt).not.toHaveBeenCalled();
+    expect(store.settlements[0]?.error?.code).toBe("prompt_dispatch_ambiguous");
+  });
+
+  it("refuses a takeover ledger proof from a different Pi invocation", async () => {
+    const claim = attemptClaim({
+      checkpoint: "dispatch_write_intent",
+      checkpointSequence: 4n,
+      attemptStatus: "dispatching",
+      turnStatus: "dispatching",
+      dispatchState: "write_intent",
+    });
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(claim, { commandId: COMMAND_ID, eventCursor: 0n }),
+    });
+    const ports = fakePorts(store);
+    ports.pi.resolvePrompt = async () => ({
+      outcome: "accepted",
+      invocationId: "different-pi-invocation",
+      initialCursor: 0n,
+    });
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("interrupted");
+    expect(ports.promptCalls).toHaveLength(0);
+    expect(store.checkpoints.at(-1)?.nextCheckpoint).toBe("dispatch_ambiguous");
     expect(store.settlements[0]?.error?.code).toBe("prompt_dispatch_ambiguous");
   });
 

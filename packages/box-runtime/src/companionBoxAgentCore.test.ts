@@ -24,6 +24,7 @@ import { COMPANION_BOX_AGENT_SOURCE } from "./companionBoxAgentSource";
 
 const BEARER = "a".repeat(64);
 const BEARER_SHA256 = createHash("sha256").update(BEARER, "utf8").digest("hex");
+const MESSAGE_ID = "11111111-1111-4111-8111-111111111111";
 
 const processes: ChildProcess[] = [];
 const directories: string[] = [];
@@ -59,6 +60,11 @@ function fakeAgent(
     readAuthFile: () => JSON.stringify({ tokenSha256: BEARER_SHA256 }),
     brokerSocketReady: () => true,
     readLayoutMarker: () => "14:pkgs:overlay=abcdef",
+    uploadAttachment: () => undefined,
+    commitAttachments: ({ files }) => files,
+    clearOutbox: () => undefined,
+    listOutbox: () => [],
+    readOutbox: () => { throw new Error("missing outbox fixture"); },
     now: () => nowMs,
     // Sleeping advances the fake clock so long-poll deadlines resolve deterministically.
     sleep: async (ms: number) => {
@@ -280,10 +286,145 @@ describe("CompanionBoxAgentCore routes", () => {
     }
   });
 
+  it("preserves durable command identity for prompt resolution and control writes", async () => {
+    const agent = fakeAgent();
+    const prompt = await agent.core.handle(request({
+      method: "POST",
+      url: "/v1/prompt",
+      body: Buffer.from(JSON.stringify({
+        commandId: "command-1",
+        attemptId: "attempt-1",
+        expectedInvocationId: "inv-1",
+        message: "hello",
+      })),
+    }));
+    expect(prompt.status).toBe(200);
+    expect(agent.seams.brokerCommand).toHaveBeenLastCalledWith({
+      id: "command-1",
+      type: "prompt",
+      attemptId: "attempt-1",
+      expectedInvocationId: "inv-1",
+      message: "hello",
+      requiredInput: ["text"],
+      clearOutbox: true,
+    });
+
+    await agent.core.handle(request({
+      url: "/v1/dispatch/status?attempt_id=attempt-1&command_id=command-1",
+    }));
+    expect(agent.seams.brokerCommand).toHaveBeenLastCalledWith(expect.objectContaining({
+      type: "dispatch_status",
+      attemptId: "attempt-1",
+      commandId: "command-1",
+    }));
+
+    await agent.core.handle(request({
+      method: "POST",
+      url: "/v1/abort",
+      body: Buffer.from(JSON.stringify({ commandId: "abort-1", attemptId: "attempt-1" })),
+    }));
+    expect(agent.seams.brokerCommand).toHaveBeenLastCalledWith({
+      id: "abort-1",
+      type: "abort",
+      attemptId: "attempt-1",
+    });
+
+    await agent.core.handle(request({
+      method: "POST",
+      url: "/v1/decision",
+      body: Buffer.from(JSON.stringify({
+        commandId: "decision-1",
+        attemptId: "attempt-1",
+        response: { answer: "yes" },
+      })),
+    }));
+    expect(agent.seams.brokerCommand).toHaveBeenLastCalledWith({
+      id: "decision-1",
+      type: "extension_ui_response",
+      attemptId: "attempt-1",
+      response: { answer: "yes" },
+    });
+  });
+
+  it("stages attachment bytes by digest and commits only a validated manifest", async () => {
+    const bytes = Buffer.from("direct attachment");
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const uploadAttachment = vi.fn();
+    const commitAttachments = vi.fn(({ files }) => files);
+    const agent = fakeAgent({ uploadAttachment, commitAttachments });
+
+    const uploaded = await agent.core.handle(request({
+      method: "PUT",
+      url: `/v1/files?message_id=${MESSAGE_ID}&position=0&sha256=${sha256}`,
+      body: bytes,
+    }));
+    expect(uploaded.status).toBe(200);
+    expect(uploadAttachment).toHaveBeenCalledWith({
+      messageId: MESSAGE_ID,
+      position: 0,
+      sha256,
+      bytes,
+    });
+
+    const manifest = {
+      files: [{
+        position: 0,
+        filename: "notes.txt",
+        contentType: "text/plain",
+        byteSize: bytes.byteLength,
+        sha256,
+      }],
+    };
+    const committed = await agent.core.handle(request({
+      method: "POST",
+      url: `/v1/attachments/${MESSAGE_ID}`,
+      body: Buffer.from(JSON.stringify(manifest)),
+    }));
+    expect(committed.status).toBe(200);
+    expect(committed.body).toMatchObject({
+      files: [{ path: `~/attachments/${MESSAGE_ID}/0-notes.txt`, sha256 }],
+    });
+
+    const mismatched = await agent.core.handle(request({
+      method: "PUT",
+      url: `/v1/files?message_id=${MESSAGE_ID}&position=0&sha256=${"0".repeat(64)}`,
+      body: bytes,
+    }));
+    expect(mismatched.status).toBe(409);
+  });
+
+  it("lists, reads, and clears only the bounded outbox surface", async () => {
+    const bytes = Buffer.from("image bytes");
+    const encodedName = Buffer.from("answer.png").toString("base64");
+    const entry = {
+      name: "answer.png",
+      encodedName,
+      byteSize: bytes.byteLength,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    };
+    const clearOutbox = vi.fn();
+    const agent = fakeAgent({
+      clearOutbox,
+      listOutbox: () => [entry],
+      readOutbox: () => ({ entry, bytes }),
+    });
+
+    const listed = await agent.core.handle(request({ url: "/v1/outbox" }));
+    expect(listed.body).toEqual({ entries: [entry] });
+    const read = await agent.core.handle(request({
+      url: `/v1/outbox/file?name=${encodeURIComponent(encodedName)}`,
+    }));
+    expect(read.status).toBe(200);
+    expect(read.rawBody).toEqual(bytes);
+    const cleared = await agent.core.handle(request({ method: "POST", url: "/v1/outbox/clear" }));
+    expect(cleared.body).toEqual({ cleared: true });
+    expect(clearOutbox).toHaveBeenCalledTimes(1);
+  });
+
   it("answers 404 for unknown routes and 405 for wrong methods", async () => {
     const agent = fakeAgent();
     expect((await agent.core.handle(request({ url: "/v1/exec" }))).status).toBe(404);
-    expect((await agent.core.handle(request({ url: "/v1/prompt", method: "POST" }))).status).toBe(404);
+    expect((await agent.core.handle(request({ url: "/v1/prompt" }))).status).toBe(405);
     expect((await agent.core.handle(request({ method: "POST" }))).status).toBe(405);
     expect((await agent.core.handle(request({ url: "/v1/ack" }))).status).toBe(405);
   });

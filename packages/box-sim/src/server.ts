@@ -5,7 +5,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from "node:net";
 import type { Socket } from "node:net";
 
-import { executeBrokerControl, type BoxSimCommandMachine } from "./commandShims";
+import { executeBrokerAgentCommand, type BoxSimCommandMachine } from "./commandShims";
 import { createBoxSimPiController } from "./piController";
 import {
   BOX_SIM_CONTROL_PREFIX,
@@ -71,6 +71,16 @@ function sendJson(response: ServerResponse, status: number, body: unknown): void
   response.end(payload);
 }
 
+function sendBytes(response: ServerResponse, status: number, body: Uint8Array): void {
+  if (response.destroyed || response.headersSent) return;
+  response.writeHead(status, {
+    "Cache-Control": "no-store",
+    "Content-Length": body.byteLength,
+    "Content-Type": "application/octet-stream",
+  });
+  response.end(body);
+}
+
 function sendError(response: ServerResponse, error: BoxSimHttpError, requestId: string): void {
   sendJson(response, error.status, {
     ok: false,
@@ -122,6 +132,20 @@ async function readJsonBody(request: IncomingMessage, limit: number): Promise<un
   } catch {
     throw new BoxSimHttpError(400, "invalid_json", "Request body is not valid JSON");
   }
+}
+
+async function readRawBody(request: IncomingMessage, limit: number): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bytes += buffer.byteLength;
+    if (bytes > limit) {
+      throw new BoxSimHttpError(413, "request_too_large", `Request body exceeds ${limit} bytes`);
+    }
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks, bytes);
 }
 
 function decodePathSegment(value: string): string {
@@ -763,6 +787,7 @@ export function createBoxSimServer(options: BoxSimServerOptions = {}): BoxSimSer
     machine: BoxSimCommandMachine,
     type: string,
     fields: JsonObject,
+    preserveCommandId = false,
   ): Promise<AgentResult> {
     if (machine.daemon.status !== "active" || !machine.daemon.rpcReady) {
       // The daemon owns the broker socket, so a stopped Pi is an unreachable broker, not an error
@@ -770,13 +795,16 @@ export function createBoxSimServer(options: BoxSimServerOptions = {}): BoxSimSer
       return agentError(503, "broker_unavailable", "Pi broker is unreachable");
     }
     agentCommandSequence += 1;
-    const result = await executeBrokerControl(machine, {
-      id: `agent:${agentCommandSequence.toString(10)}`,
-      type,
+    const id = preserveCommandId && typeof fields.id === "string"
+      ? fields.id
+      : `agent:${agentCommandSequence.toString(10)}`;
+    const result = await executeBrokerAgentCommand(machine, {
       // SAFETY: broker control fields are JSON scalars/objects assembled by the handlers below.
       ...(fields as Record<string, string | number>),
+      id,
+      type,
     });
-    if (!result) return agentError(502, "broker_failed", "Pi broker command failed");
+    if (!result.success) return agentError(503, "broker_unavailable", "Pi broker is unreachable");
     const response = JSON.parse(result.stdout) as JsonObject;
     const data = response.data;
     if (response.success === true && data && typeof data === "object" && !Array.isArray(data)) {
@@ -893,7 +921,7 @@ export function createBoxSimServer(options: BoxSimServerOptions = {}): BoxSimSer
     const method = request.method ?? "GET";
     if (method === "GET" && path === "/v1/health") {
       sendJson(response, 200, {
-        agentVersion: 1,
+        agentVersion: 2,
         piUnit: machine.daemon.status === "active" ? "active" : "inactive",
         brokerSocketReady: machine.daemon.status === "active" && machine.daemon.rpcReady,
         layoutMarker: agentLayoutMarker(machine),
@@ -920,12 +948,198 @@ export function createBoxSimServer(options: BoxSimServerOptions = {}): BoxSimSer
       sendJson(response, result.status, result.body);
       return;
     }
+    if (method === "POST" && path === "/v1/prompt") {
+      const body = asObject(await readJsonBody(request, 64 * 1024));
+      if (
+        typeof body.commandId !== "string"
+        || typeof body.attemptId !== "string"
+        || typeof body.expectedInvocationId !== "string"
+        || typeof body.message !== "string"
+        || body.message.length === 0
+      ) {
+        sendJson(response, 400, agentError(400, "invalid_request", "prompt identity, invocation, and message are required").body);
+        return;
+      }
+      await withFault({
+        request,
+        response,
+        point: "agent.prompt",
+        operation: () => agentBroker(machine, "prompt", {
+          id: body.commandId as string,
+          attemptId: body.attemptId as string,
+          expectedInvocationId: body.expectedInvocationId as string,
+          message: body.message as string,
+          requiredInput: ["text"],
+          clearOutbox: true,
+        }, true),
+        respond: (result) => sendJson(response, result.status, result.body),
+      });
+      return;
+    }
+    if (method === "GET" && path === "/v1/dispatch/status") {
+      const attemptId = url.searchParams.get("attempt_id");
+      const commandId = url.searchParams.get("command_id");
+      if (!attemptId || !commandId) {
+        sendJson(response, 400, agentError(400, "invalid_request", "dispatch identity is required").body);
+        return;
+      }
+      const result = await agentBroker(machine, "dispatch_status", { attemptId, commandId });
+      sendJson(response, result.status, result.body);
+      return;
+    }
+    if (method === "POST" && path === "/v1/abort") {
+      const body = asObject(await readJsonBody(request, 64 * 1024));
+      if (typeof body.commandId !== "string" || typeof body.attemptId !== "string") {
+        sendJson(response, 400, agentError(400, "invalid_request", "abort identity is required").body);
+        return;
+      }
+      const result = await agentBroker(machine, "abort", {
+        id: body.commandId,
+        attemptId: body.attemptId,
+      }, true);
+      sendJson(response, result.status, result.body);
+      return;
+    }
+    if (method === "POST" && path === "/v1/decision") {
+      const body = asObject(await readJsonBody(request, 64 * 1024));
+      if (
+        typeof body.commandId !== "string"
+        || typeof body.attemptId !== "string"
+        || !body.response
+        || typeof body.response !== "object"
+        || Array.isArray(body.response)
+      ) {
+        sendJson(response, 400, agentError(400, "invalid_request", "decision identity and response are required").body);
+        return;
+      }
+      const result = await agentBroker(machine, "extension_ui_response", {
+        id: body.commandId,
+        attemptId: body.attemptId,
+        response: body.response,
+      }, true);
+      sendJson(response, result.status, result.body);
+      return;
+    }
+    if (method === "PUT" && path === "/v1/files") {
+      const messageId = url.searchParams.get("message_id");
+      const position = url.searchParams.get("position");
+      const digest = url.searchParams.get("sha256");
+      if (
+        !messageId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(messageId)
+        || position === null || !/^\d$/.test(position)
+        || !digest || !/^[a-f0-9]{64}$/.test(digest)
+      ) {
+        sendJson(response, 400, agentError(400, "invalid_request", "attachment upload metadata is invalid").body);
+        return;
+      }
+      const bytes = await readRawBody(request, 10 * 1024 * 1024);
+      if (createHash("sha256").update(bytes).digest("hex") !== digest) {
+        sendJson(response, 409, agentError(409, "digest_mismatch", "attachment bytes do not match their digest").body);
+        return;
+      }
+      machine.persistentFiles.set(
+        `.companion/runtime/attachment-uploads/${messageId}/${position}-${digest}`,
+        Buffer.from(bytes),
+      );
+      sendJson(response, 200, { uploaded: true, position: Number(position), byteSize: bytes.byteLength, sha256: digest });
+      return;
+    }
+    const attachmentCommit = /^\/v1\/attachments\/([0-9a-f-]{36})$/.exec(path);
+    if (method === "POST" && attachmentCommit) {
+      const messageId = attachmentCommit[1]!;
+      const body = asObject(await readJsonBody(request, 64 * 1024));
+      if (!Array.isArray(body.files) || body.files.length > 10) {
+        sendJson(response, 400, agentError(400, "invalid_request", "attachment manifest is invalid").body);
+        return;
+      }
+      const committed: JsonObject[] = [];
+      for (const candidate of body.files) {
+        const file = asObject(candidate);
+        if (
+          !Number.isSafeInteger(file.position)
+          || Number(file.position) < 0 || Number(file.position) > 9
+          || typeof file.filename !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(file.filename)
+          || typeof file.contentType !== "string"
+          || !Number.isSafeInteger(file.byteSize) || Number(file.byteSize) < 1
+          || typeof file.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(file.sha256)
+        ) {
+          sendJson(response, 400, agentError(400, "invalid_request", "attachment entry is invalid").body);
+          return;
+        }
+        const uploaded = machine.persistentFiles.get(
+          `.companion/runtime/attachment-uploads/${messageId}/${String(file.position)}-${file.sha256}`,
+        );
+        if (!uploaded || uploaded.byteLength !== file.byteSize) {
+          sendJson(response, 409, agentError(409, "attachment_unavailable", "one or more uploaded files are unavailable").body);
+          return;
+        }
+        committed.push({
+          ...file,
+          path: `~/attachments/${messageId}/${String(file.position)}-${file.filename}`,
+        });
+      }
+      for (const filePath of machine.persistentFiles.keys()) {
+        if (filePath.startsWith("attachments/")) machine.persistentFiles.delete(filePath);
+      }
+      for (const file of committed) {
+        const uploadedPath = `.companion/runtime/attachment-uploads/${messageId}/${String(file.position)}-${String(file.sha256)}`;
+        machine.persistentFiles.set(
+          `attachments/${messageId}/${String(file.position)}-${String(file.filename)}`,
+          Buffer.from(machine.persistentFiles.get(uploadedPath)!),
+        );
+        machine.persistentFiles.delete(uploadedPath);
+      }
+      sendJson(response, 200, { files: committed });
+      return;
+    }
+    if (method === "POST" && path === "/v1/outbox/clear") {
+      for (const filePath of machine.persistentFiles.keys()) {
+        if (filePath.startsWith("outbox/")) machine.persistentFiles.delete(filePath);
+      }
+      sendJson(response, 200, { cleared: true });
+      return;
+    }
+    if (method === "GET" && path === "/v1/outbox") {
+      const entries = [...machine.persistentFiles.entries()]
+        .filter(([filePath]) => /^outbox\/[^/]+$/.test(filePath))
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([filePath, bytes]) => {
+          const name = filePath.slice("outbox/".length);
+          return {
+            name,
+            encodedName: Buffer.from(name, "utf8").toString("base64"),
+            byteSize: bytes.byteLength,
+            sha256: createHash("sha256").update(bytes).digest("hex"),
+          };
+        });
+      sendJson(response, 200, { entries });
+      return;
+    }
+    if (method === "GET" && path === "/v1/outbox/file") {
+      const encodedName = url.searchParams.get("name") ?? "";
+      const name = Buffer.from(encodedName, "base64").toString("utf8");
+      if (!name || name.includes("/") || Buffer.from(name, "utf8").toString("base64") !== encodedName) {
+        sendJson(response, 404, agentError(404, "not_found", "outbox entry is unavailable").body);
+        return;
+      }
+      const bytes = machine.persistentFiles.get(`outbox/${name}`);
+      if (!bytes) {
+        sendJson(response, 404, agentError(404, "not_found", "outbox entry is unavailable").body);
+        return;
+      }
+      sendBytes(response, 200, bytes);
+      return;
+    }
     sendJson(response, 404, { error: { code: "not_found", message: "unknown agent route", ambiguous: false } });
   }
 
   const agentServer = agentPort === undefined ? null : createServer((request, response) => {
-    void handleAgent(request, response).catch(() => {
+    void handleAgent(request, response).catch((error: unknown) => {
       if (response.destroyed) return;
+      if (error instanceof BoxSimHttpError) {
+        sendJson(response, error.status, agentError(error.status, error.code, error.message).body);
+        return;
+      }
       sendJson(response, 500, {
         error: { code: "agent_internal", message: "the box agent simulator failed to answer", ambiguous: false },
       });

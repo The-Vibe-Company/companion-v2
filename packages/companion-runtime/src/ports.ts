@@ -131,6 +131,21 @@ export interface RuntimePiControl {
     boxId: string;
     commandId: string;
     attemptId: string;
+    /** Pi invocation observed idle immediately before the durable write intent. */
+    expectedInvocationId: string;
+    message: string;
+    signal: AbortSignal;
+  }): Promise<BrokerPromptWriteOutcome>;
+  /**
+   * Resolve a persisted prompt write-intent through the broker's durable dispatch ledger. Present
+   * only when the direct transport is enabled; the exec-only path keeps the conservative
+   * interruption behavior because it has no bounded status channel.
+   */
+  resolvePrompt?(input: {
+    boxId: string;
+    commandId: string;
+    attemptId: string;
+    expectedInvocationId: string;
     message: string;
     signal: AbortSignal;
   }): Promise<BrokerPromptWriteOutcome>;

@@ -613,6 +613,17 @@ BEGIN
       ];
     END IF;
 
+    -- 0126 exposes the durable dispatch command id and its pinned Pi invocation to the executor so
+    -- takeover can resolve the exact prompt against the on-box ledger. The legacy function remains
+    -- executable for rolling deploys, while only the dedicated runtime receives this extension.
+    IF pg_catalog.to_regprocedure(
+      'public.companion_runtime_renew_and_authorize_v2(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)'
+    ) IS NOT NULL THEN
+      companion_runtime_functions := companion_runtime_functions || ARRAY[
+        'public.companion_runtime_renew_and_authorize_v2(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)'::regprocedure
+      ];
+    END IF;
+
     -- 0110 records staged credential expiry and publishes it only after a new Pi invocation.
     -- 0124 re-created the record function with the hosted Box-agent endpoint arguments, so the
     -- feature detection keys on that latest signature.

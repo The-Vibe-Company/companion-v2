@@ -1,3 +1,4 @@
+/* oxlint-disable anti-slop/no-conditional-empty-object-spread -- The test harness conditionally installs timing seams so production defaults remain exercised by omission. */
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -8,6 +9,7 @@ import { encryptOpaqueValue } from "@companion/core";
 import type { RuntimeLogRecord, RuntimePiControl } from "@companion/companion-runtime";
 
 import {
+  createDirectBoxDataTransport,
   createDirectRuntimePiControl,
   decryptCompanionAgentEndpointTokens,
   DirectBoxEndpointRegistry,
@@ -112,6 +114,8 @@ function harness(input: {
   nowMs?: () => number;
   register?: boolean;
   observedAt?: Date;
+  dispatchResolutionMs?: number;
+  sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
 }) {
   const nowMs = input.nowMs ?? (() => 1_000_000);
   const registry = new DirectBoxEndpointRegistry({ now: nowMs });
@@ -133,6 +137,10 @@ function harness(input: {
     log,
     now: nowMs,
     clientFactory: () => calls,
+    ...(input.dispatchResolutionMs === undefined
+      ? {}
+      : { dispatchResolutionMs: input.dispatchResolutionMs }),
+    ...(input.sleep === undefined ? {} : { sleep: input.sleep }),
   });
   return { facade, exec, calls, records, registry, endpoint };
 }
@@ -314,15 +322,25 @@ describe("createDirectRuntimePiControl (on)", () => {
     expect(facade.eventPollIntervalMs({ boxId: BOX_ID })).toBe(500);
   });
 
-  it("never wraps prompt, abort, decision, or lifecycle calls", async () => {
-    const { facade, exec, calls } = harness({});
-    await facade.pi.prompt({
+  it("routes prompt, abort, and decision direct while lifecycle calls stay on exec", async () => {
+    const calls = agentCalls({
+      prompt: vi.fn(async () => ({
+        outcome: "accepted" as const,
+        invocationId: "inv-1",
+        initialCursor: 5,
+      })),
+      abort: vi.fn(async () => ({ outcome: "accepted" as const, invocationId: "inv-1" })),
+      decision: vi.fn(async () => ({ outcome: "accepted" as const, invocationId: "inv-1" })),
+    });
+    const { facade, exec } = harness({ calls });
+    await expect(facade.pi.prompt({
       boxId: BOX_ID,
       commandId: "c1",
       attemptId: "a1",
+      expectedInvocationId: "inv-1",
       message: "hello",
       signal,
-    });
+    })).resolves.toEqual({ outcome: "accepted", invocationId: "inv-1", initialCursor: 5n });
     await facade.pi.abort({ boxId: BOX_ID, commandId: "c2", attemptId: "a1", signal });
     await facade.pi.respondExtensionUi({
       boxId: BOX_ID,
@@ -332,12 +350,264 @@ describe("createDirectRuntimePiControl (on)", () => {
       signal,
     });
     await facade.pi.startPiDaemon({ boxId: BOX_ID, signal });
-    expect(exec.prompt).toHaveBeenCalledTimes(1);
-    expect(exec.abort).toHaveBeenCalledTimes(1);
-    expect(exec.respondExtensionUi).toHaveBeenCalledTimes(1);
+    expect(exec.prompt).not.toHaveBeenCalled();
+    expect(exec.abort).not.toHaveBeenCalled();
+    expect(exec.respondExtensionUi).not.toHaveBeenCalled();
     expect(exec.startPiDaemon).toHaveBeenCalledTimes(1);
-    expect(calls.brokerState).not.toHaveBeenCalled();
-    expect(calls.readEvents).not.toHaveBeenCalled();
+    expect(calls.prompt).toHaveBeenCalledTimes(1);
+    expect(calls.abort).toHaveBeenCalledTimes(1);
+    expect(calls.decision).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps failed direct abort and decision writes ambiguous without exec replay", async () => {
+    const failedAbort = agentCalls({
+      abort: vi.fn(async () => {
+        throw new CompanionBoxAgentRequestError("agent_unreachable");
+      }),
+    });
+    const first = harness({ calls: failedAbort });
+    await expect(first.facade.pi.abort({
+      boxId: BOX_ID,
+      commandId: "abort-1",
+      attemptId: "attempt-1",
+      signal,
+    })).resolves.toEqual({ outcome: "ambiguous", code: "pi_ack_ambiguous" });
+    expect(first.exec.abort).not.toHaveBeenCalled();
+    expect(first.registry.isSuspect(BOX_ID)).toBe(true);
+
+    const failedDecision = agentCalls({
+      decision: vi.fn(async () => {
+        throw new CompanionBoxAgentRequestError("agent_timeout");
+      }),
+    });
+    const second = harness({ calls: failedDecision });
+    await expect(second.facade.pi.respondExtensionUi({
+      boxId: BOX_ID,
+      commandId: "decision-1",
+      attemptId: "attempt-1",
+      response: {},
+      signal,
+    })).resolves.toEqual({ outcome: "ambiguous", code: "decision_delivery_ambiguous" });
+    expect(second.exec.respondExtensionUi).not.toHaveBeenCalled();
+    expect(second.registry.isSuspect(BOX_ID)).toBe(true);
+  });
+
+  it("resolves a lost prompt response from the durable broker ledger without exec replay", async () => {
+    const calls = agentCalls({
+      prompt: vi.fn(async () => {
+        throw new CompanionBoxAgentRequestError("agent_timeout");
+      }),
+      dispatchStatus: vi.fn(async () => ({
+        status: "accepted" as const,
+        dispatch: {
+          outcome: "accepted" as const,
+          invocationId: "inv-1",
+          initialCursor: 9,
+        },
+      })),
+    });
+    const { facade, exec } = harness({ calls });
+    await expect(facade.pi.prompt({
+      boxId: BOX_ID,
+      commandId: "command-1",
+      attemptId: "attempt-1",
+      expectedInvocationId: "inv-1",
+      message: "hello",
+      signal,
+    })).resolves.toEqual({ outcome: "accepted", invocationId: "inv-1", initialCursor: 9n });
+    expect(calls.dispatchStatus).toHaveBeenCalledWith(expect.objectContaining({
+      commandId: "command-1",
+      attemptId: "attempt-1",
+    }));
+    expect(exec.prompt).not.toHaveBeenCalled();
+  });
+
+  it("repeats only the same idempotent prompt command when the ledger first reports absent", async () => {
+    const prompt = vi.fn()
+      .mockResolvedValueOnce({ outcome: "ambiguous", code: "pi_ack_ambiguous" })
+      .mockResolvedValueOnce({ outcome: "accepted", invocationId: "inv-1", initialCursor: 11 });
+    const calls = agentCalls({
+      prompt,
+      dispatchStatus: vi.fn(async () => ({ status: "absent" as const })),
+    });
+    const { facade, exec } = harness({ calls });
+    const input = {
+      boxId: BOX_ID,
+      commandId: "command-1",
+      attemptId: "attempt-1",
+      expectedInvocationId: "inv-1",
+      message: "hello",
+      signal,
+    };
+    await expect(facade.pi.prompt(input)).resolves.toMatchObject({ outcome: "accepted" });
+    expect(prompt).toHaveBeenNthCalledWith(1, input);
+    expect(prompt).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      boxId: BOX_ID,
+      commandId: "command-1",
+      attemptId: "attempt-1",
+      expectedInvocationId: "inv-1",
+      message: "hello",
+      signal: expect.any(AbortSignal),
+    }));
+    expect(exec.prompt).not.toHaveBeenCalled();
+  });
+
+  it("aborts a stalled ledger lookup at the prompt-resolution deadline", async () => {
+    const calls = agentCalls({
+      prompt: vi.fn(async () => {
+        throw new CompanionBoxAgentRequestError("agent_timeout");
+      }),
+      dispatchStatus: vi.fn(async (input) => await new Promise<never>((_resolve, reject) => {
+        input.signal?.addEventListener("abort", () => reject(input.signal?.reason), { once: true });
+      })),
+    });
+    const { facade, exec } = harness({
+      calls,
+      nowMs: Date.now,
+      dispatchResolutionMs: 50,
+    });
+    const started = Date.now();
+    await expect(facade.pi.prompt({
+      boxId: BOX_ID,
+      commandId: "command-1",
+      attemptId: "attempt-1",
+      expectedInvocationId: "inv-1",
+      message: "hello",
+      signal,
+    })).resolves.toEqual({ outcome: "ambiguous", code: "prompt_dispatch_unresolved" });
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(exec.prompt).not.toHaveBeenCalled();
+  });
+
+  it("returns an explicit ambiguity after bounded prompt resolution and never falls back to exec", async () => {
+    let nowMs = 1_000_000;
+    const calls = agentCalls({
+      prompt: vi.fn(async () => {
+        throw new CompanionBoxAgentRequestError("agent_timeout");
+      }),
+      dispatchStatus: vi.fn(async () => ({ status: "absent" as const })),
+    });
+    const { facade, exec } = harness({
+      calls,
+      nowMs: () => nowMs,
+      dispatchResolutionMs: 1_000,
+      sleep: async (ms) => { nowMs += ms; },
+    });
+    await expect(facade.pi.prompt({
+      boxId: BOX_ID,
+      commandId: "command-1",
+      attemptId: "attempt-1",
+      expectedInvocationId: "inv-1",
+      message: "hello",
+      signal,
+    })).resolves.toEqual({ outcome: "ambiguous", code: "prompt_dispatch_unresolved" });
+    expect(exec.prompt).not.toHaveBeenCalled();
+  });
+
+  it("never replays a lost prompt onto a replacement Pi invocation", async () => {
+    let nowMs = 1_000_000;
+    const prompt = vi.fn()
+      .mockResolvedValueOnce({ outcome: "ambiguous", code: "pi_ack_ambiguous" })
+      .mockResolvedValue({ outcome: "refused", code: "invocation_mismatch" });
+    const calls = agentCalls({
+      prompt,
+      dispatchStatus: vi.fn(async () => ({ status: "absent" as const })),
+    });
+    const { facade, exec } = harness({
+      calls,
+      nowMs: () => nowMs,
+      dispatchResolutionMs: 1_000,
+      sleep: async (ms) => { nowMs += ms; },
+    });
+    const input = {
+      boxId: BOX_ID,
+      commandId: "command-stale-invocation",
+      attemptId: "attempt-stale-invocation",
+      expectedInvocationId: "inv-1",
+      message: "Do not replay me",
+      signal,
+    };
+
+    await expect(facade.pi.prompt(input)).resolves.toEqual({
+      outcome: "ambiguous",
+      code: "prompt_dispatch_unresolved",
+    });
+    expect(prompt).toHaveBeenCalledWith(expect.objectContaining({
+      expectedInvocationId: "inv-1",
+    }));
+    expect(exec.prompt).not.toHaveBeenCalled();
+  });
+});
+
+describe("createDirectBoxDataTransport", () => {
+  it("uses direct bytes on the hot path and falls back per idempotent file operation", async () => {
+    const registry = new DirectBoxEndpointRegistry({ now: () => 1_000_000 });
+    registry.register(BOX_ID, {
+      hostedUrl: "https://agent.invalid",
+      proxyToken: "proxy-token-1234567890",
+      bearerToken: "bearer-token",
+      observedAt: new Date(1_000_000),
+    });
+    const directFiles = vi.fn(async () => [{
+      position: 0,
+      filename: "notes.txt",
+      contentType: "text/plain",
+      byteSize: 5,
+      path: "~/attachments/message/0-notes.txt",
+    }]);
+    const calls = agentCalls({ stageAttachments: directFiles });
+    const exec = {
+      stageAttachments: vi.fn(async () => []),
+      clearOutbox: vi.fn(async () => undefined),
+      listOutbox: vi.fn(async () => []),
+      readOutboxFile: vi.fn(async (input) => ({ entry: input.entry, bytes: Buffer.alloc(0) })),
+    };
+    const transport = createDirectBoxDataTransport({
+      exec: () => exec,
+      registry,
+      clientFactory: () => calls,
+    });
+    const files = [{ position: 0, filename: "notes.txt", contentType: "text/plain", bytes: Buffer.from("hello") }];
+    await transport.stageAttachments({ boxId: BOX_ID, messageId: "message", files, signal });
+    expect(directFiles).toHaveBeenCalledWith({ messageId: "message", files, signal });
+    expect(exec.stageAttachments).not.toHaveBeenCalled();
+
+    calls.listOutbox = vi.fn(async () => {
+      throw new CompanionBoxAgentRequestError("agent_unreachable");
+    });
+    await transport.listOutbox({ boxId: BOX_ID, signal });
+    expect(exec.listOutbox).toHaveBeenCalledTimes(1);
+  });
+
+  it("forwards the absolute outbox deadline to the direct client", async () => {
+    const registry = new DirectBoxEndpointRegistry({ now: () => 1_000_000 });
+    registry.register(BOX_ID, {
+      hostedUrl: "https://agent.invalid",
+      proxyToken: "proxy-token-1234567890",
+      bearerToken: "bearer-token",
+      observedAt: new Date(1_000_000),
+    });
+    const listOutbox = vi.fn(async () => []);
+    const readOutboxFile = vi.fn(async (input) => ({ entry: input.entry, bytes: Buffer.alloc(0) }));
+    const exec = {
+      stageAttachments: vi.fn(async () => []),
+      clearOutbox: vi.fn(async () => undefined),
+      listOutbox: vi.fn(async () => []),
+      readOutboxFile: vi.fn(async (input) => ({ entry: input.entry, bytes: Buffer.alloc(0) })),
+    };
+    const transport = createDirectBoxDataTransport({
+      exec: () => exec,
+      registry,
+      clientFactory: () => agentCalls({ listOutbox, readOutboxFile }),
+    });
+    const deadlineAt = new Date(1_030_000);
+    const entry = { name: "answer.png", encodedName: "YW5zd2VyLnBuZw==", byteSize: 0, sha256: "0".repeat(64) };
+    await transport.listOutbox({ boxId: BOX_ID, deadlineAt, signal });
+    await transport.readOutboxFile({ boxId: BOX_ID, entry, deadlineAt, signal });
+    expect(listOutbox).toHaveBeenCalledWith({ deadlineAt, signal });
+    expect(readOutboxFile).toHaveBeenCalledWith({ entry, deadlineAt, signal });
+    expect(exec.listOutbox).not.toHaveBeenCalled();
+    expect(exec.readOutboxFile).not.toHaveBeenCalled();
   });
 });
 
