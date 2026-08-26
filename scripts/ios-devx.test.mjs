@@ -175,6 +175,7 @@ test("CI tests iOS without secrets and keeps the live provider diagnostic manual
   assert.match(ci, /xcodebuild test/);
   assert.match(ci, /testTranscriptWindowDemoKeepsLatestEntriesOrderedAndSeparated/);
   assert.match(ci, /testTranscriptWindowDemoBottomControlsNeverCoverChatContent/);
+  assert.match(ci, /testMarkdownTableDemoKeepsRowsAndColumnsSeparated/);
   assert.doesNotMatch(ci, /testChatPhotoLibraryOpensOnFirstSelectionWithKeyboardVisible/);
   assert.match(ci, /xcrun simctl list devices available --json/);
   assert.match(ci, /node scripts\/select-ios-simulator\.mjs/);

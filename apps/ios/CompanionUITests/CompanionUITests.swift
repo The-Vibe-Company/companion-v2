@@ -572,16 +572,15 @@ final class CompanionUITests: XCTestCase {
         app.launchArguments = ["-companion-transcript-window-demo"]
         app.launch()
 
-        let orderedIDs = ["long-116", "long-117", "long-118", "long-119", "long-120"]
+        let orderedIDs = ["long-118", "long-119", "long-120"]
         let entries = orderedIDs.map { app.descendants(matching: .any)["chat.entry.\($0)"] }
         XCTAssertTrue(entries.last?.waitForExistence(timeout: 5) == true)
 
-        for entry in entries where !entry.isHittable {
-            app.swipeUp()
-        }
         for (earlier, later) in zip(entries, entries.dropFirst()) {
             XCTAssertTrue(earlier.exists, "Missing \(earlier.identifier)")
             XCTAssertTrue(later.exists, "Missing \(later.identifier)")
+            XCTAssertTrue(earlier.isHittable, "\(earlier.identifier) must share the latest viewport")
+            XCTAssertTrue(later.isHittable, "\(later.identifier) must share the latest viewport")
             XCTAssertLessThanOrEqual(
                 earlier.frame.maxY,
                 later.frame.minY,
@@ -629,6 +628,12 @@ final class CompanionUITests: XCTestCase {
         XCTAssertTrue(replying.exists)
         XCTAssertFalse(replying.frame.intersects(queue.frame))
         XCTAssertFalse(replying.frame.intersects(composer.frame))
+
+        queue.tap()
+        let queueList = app.descendants(matching: .any)["chat.queue.list"]
+        XCTAssertTrue(queueList.waitForExistence(timeout: 2))
+        XCTAssertLessThanOrEqual(queueList.frame.maxY, composer.frame.minY)
+        XCTAssertFalse(scrollToBottom.frame.intersects(queueList.frame))
         try captureScreenshot(named: "chat-layout-regression-short.png")
     }
 
@@ -741,6 +746,41 @@ final class CompanionUITests: XCTestCase {
         XCTAssertLessThanOrEqual(wideTable.frame.maxX, app.frame.maxX + 1)
         XCTAssertGreaterThanOrEqual(wideTable.frame.minX, app.frame.minX - 1)
         try captureScreenshot(named: "markdown-tables-accessibility-landscape.png")
+    }
+
+    @MainActor
+    func testMarkdownTableDemoKeepsRowsAndColumnsSeparated() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-markdown-table-demo"]
+        app.launch()
+
+        let simpleTable = app.descendants(matching: .any)["markdown-table-demo.simple"]
+        XCTAssertTrue(simpleTable.waitForExistence(timeout: 5))
+        let headerLeft = simpleTable.descendants(matching: .any)["markdown.table.cell.0.0"]
+        let headerRight = simpleTable.descendants(matching: .any)["markdown.table.cell.0.1"]
+        let firstLeft = simpleTable.descendants(matching: .any)["markdown.table.cell.1.0"]
+        let firstRight = simpleTable.descendants(matching: .any)["markdown.table.cell.1.1"]
+        XCTAssertFalse(headerLeft.frame.intersects(headerRight.frame))
+        XCTAssertFalse(firstLeft.frame.intersects(firstRight.frame))
+        XCTAssertLessThanOrEqual(headerLeft.frame.maxY, firstLeft.frame.minY)
+        XCTAssertEqual(headerLeft.frame.minX, firstLeft.frame.minX, accuracy: 1)
+        XCTAssertEqual(headerRight.frame.maxX, firstRight.frame.maxX, accuracy: 1)
+
+        let longTable = app.descendants(matching: .any)["markdown-table-demo.long-content"]
+        for _ in 0..<5 where !longTable.isHittable { app.swipeUp() }
+        XCTAssertTrue(longTable.isHittable)
+        XCTAssertGreaterThanOrEqual(longTable.frame.minX, app.frame.minX - 1)
+        XCTAssertLessThanOrEqual(longTable.frame.maxX, app.frame.maxX + 1)
+        let longRows = (0...3).map {
+            longTable.descendants(matching: .any)["markdown.table.cell.\($0).0"]
+        }
+        for (earlier, later) in zip(longRows, longRows.dropFirst()) {
+            XCTAssertTrue(earlier.exists)
+            XCTAssertTrue(later.exists)
+            XCTAssertLessThanOrEqual(earlier.frame.maxY, later.frame.minY)
+            XCTAssertEqual(earlier.frame.minX, later.frame.minX, accuracy: 1)
+        }
+        try captureScreenshot(named: "markdown-tables-aligned.png")
     }
 
     @MainActor
