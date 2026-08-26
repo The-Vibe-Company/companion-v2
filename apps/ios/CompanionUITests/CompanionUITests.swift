@@ -575,7 +575,7 @@ final class CompanionUITests: XCTestCase {
         delete.tap()
         confirmRosterDeletion(in: app)
 
-        let ambiguousMessage = "The deletion response was not received. Retry Delete safely reuses the same request."
+        let ambiguousMessage = "Deletion could not be confirmed. Luna was restored. Retrying reuses the same request."
         let ambiguousNotice = app.descendants(matching: .any)["Error. \(ambiguousMessage)"]
         XCTAssertTrue(ambiguousNotice.waitForExistence(timeout: 5))
 
@@ -585,9 +585,7 @@ final class CompanionUITests: XCTestCase {
         retry.tap()
         confirmRosterDeletion(in: app)
 
-        let acceptedMessage = "Deletion requested. The Companion will remain visible until its Box is permanently deleted."
-        let acceptedNotice = app.descendants(matching: .any)[acceptedMessage]
-        XCTAssertTrue(acceptedNotice.waitForExistence(timeout: 5))
+        XCTAssertTrue(row.waitForNonExistence(timeout: 5))
     }
 
     @MainActor
