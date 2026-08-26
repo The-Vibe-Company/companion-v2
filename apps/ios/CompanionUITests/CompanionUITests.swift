@@ -206,6 +206,104 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    func testQueuedMessagesStayCollapsedAndCanBeRemoved() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-queued-demo"]
+        app.launch()
+
+        let queue = app.buttons["chat.queue.toggle"]
+        XCTAssertTrue(queue.waitForExistence(timeout: 5))
+        XCTAssertEqual(queue.label, "3 queued messages")
+        XCTAssertTrue(app.descendants(matching: .any)["queue.demo.composer"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["chat.queue.list"].exists)
+        XCTAssertFalse(app.staticTexts["Then tighten the empty-state copy."].exists)
+
+        queue.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["chat.queue.list"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["Then tighten the empty-state copy."].exists)
+        XCTAssertTrue(app.staticTexts["2 images, 1 file"].exists)
+
+        let remove = app.buttons["chat.queue.remove.aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]
+        XCTAssertTrue(remove.exists)
+        XCTAssertTrue(remove.label.contains("Compare these screenshots"))
+        XCTAssertNotEqual(
+            remove.label,
+            app.buttons["chat.queue.remove.bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"].label
+        )
+        remove.tap()
+        XCTAssertTrue(app.buttons["Remove from queue"].waitForExistence(timeout: 2))
+        app.buttons["Remove from queue"].tap()
+
+        XCTAssertTrue(app.buttons["chat.queue.toggle"].waitForExistence(timeout: 2))
+        XCTAssertEqual(app.buttons["chat.queue.toggle"].label, "2 queued messages")
+        XCTAssertFalse(app.staticTexts[
+            "Compare these screenshots and call out the visual regressions."
+        ].exists)
+
+        app.buttons["chat.queue.toggle"].tap()
+        XCTAssertFalse(app.descendants(matching: .any)["chat.queue.list"].exists)
+    }
+
+    @MainActor
+    func testQueuedMessagesSupportAccessibilityDynamicType() throws {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-companion-queued-demo",
+            "-UIPreferredContentSizeCategoryName",
+            "UICTContentSizeCategoryAccessibilityExtraExtraExtraLarge",
+        ]
+        app.launch()
+
+        let queue = app.buttons["chat.queue.toggle"]
+        XCTAssertTrue(queue.waitForExistence(timeout: 5))
+        queue.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["chat.queue.list"].exists)
+        XCTAssertTrue(app.buttons[
+            "chat.queue.remove.aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        ].exists)
+    }
+
+    @MainActor
+    func testQueuedMessagesRemainReadOnlyForAViewer() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-queued-demo"]
+        app.launchEnvironment["COMPANION_QUEUED_DEMO_ACCESS"] = "viewer"
+        app.launch()
+
+        let queue = app.buttons["chat.queue.toggle"]
+        XCTAssertTrue(queue.waitForExistence(timeout: 5))
+        queue.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["chat.queue.list"].exists)
+        XCTAssertFalse(app.buttons[
+            "chat.queue.remove.aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        ].exists)
+    }
+
+    @MainActor
+    func testQueuedMessageRemovalCanRetryAfterFailure() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-queued-demo"]
+        app.launchEnvironment["COMPANION_QUEUED_DEMO_FAIL_ONCE"] = "1"
+        app.launch()
+
+        app.buttons["chat.queue.toggle"].tap()
+        let remove = app.buttons["chat.queue.remove.aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]
+        XCTAssertTrue(remove.waitForExistence(timeout: 5))
+        remove.tap()
+        app.buttons["Remove from queue"].tap()
+
+        let queueList = app.descendants(matching: .any)["chat.queue.list"]
+        app.buttons["chat.queue.toggle"].tap()
+        XCTAssertTrue(queueList.waitForNonExistence(timeout: 2))
+        app.buttons["chat.queue.toggle"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["chat.queue.error"].waitForExistence(timeout: 2))
+        XCTAssertTrue(remove.isEnabled)
+        remove.tap()
+        app.buttons["Remove from queue"].tap()
+        XCTAssertEqual(app.buttons["chat.queue.toggle"].label, "2 queued messages")
+    }
+
+    @MainActor
     func testInterruptedTurnDemoCanCancelAndReleaseTheQueue() throws {
         let app = XCUIApplication()
         app.launchArguments = ["-companion-interruption-demo"]

@@ -68,9 +68,10 @@ xcodebuildmcp swift-package test --package-path apps/ios/CompanionKit
 Release builds ignore launch arguments and environment variables and always use
 `https://api.thecompanion.sh`.
 
-The Debug-only `-glass-chat-demo`, `-markdown-table-demo`, `-glass-management-demo`,
-`-glass-management-demo-plugins`, `-companion-icon-demo`, `-companion-decision-demo`,
-`-companion-interruption-demo`, `-companion-transcript-window-demo`, `-companion-resources-demo`,
+The Debug-only `-glass-chat-demo`, `-companion-queued-demo`, `-markdown-table-demo`,
+`-glass-management-demo`, `-glass-management-demo-plugins`,
+`-companion-icon-demo`, `-companion-decision-demo`, `-companion-interruption-demo`,
+`-companion-transcript-window-demo`, `-companion-resources-demo`,
 `-companion-settings-demo`, and
 `-companion-roster-demo` launch arguments
 open deterministic showcases without requiring a server or account. Add `-companion-reduce-motion`
@@ -84,6 +85,8 @@ the adaptive Companion color tokens in dark appearance.
 The interruption demo accepts `COMPANION_INTERRUPTION_DEMO_ACCESS=owner|editor|viewer`; set
 `COMPANION_INTERRUPTION_DEMO_FAIL_RETRY_ONCE=1` to verify that an uncertain submission keeps the
 same safe retry action available.
+The queued-message demo accepts `COMPANION_QUEUED_DEMO_ACCESS=owner|editor|viewer`; set
+`COMPANION_QUEUED_DEMO_FAIL_ONCE=1` to verify that a failed removal remains retryable.
 The roster demo accepts the equivalent `COMPANION_ROSTER_DEMO_ACCESS` value and simulates immediate
 removal, restoration after a lost first deletion response, and a same-key `202` retry. These
 arguments are excluded from Release behavior.
@@ -91,6 +94,11 @@ The resources demo accepts `COMPANION_RESOURCES_DEMO_EMPTY=skills|routines|trigg
 section's deterministic empty state.
 Combine `-companion-roster-demo -companion-notification-demo` to inject a version-1 response payload
 and verify deferred navigation to Luna's chat without contacting APNs.
+
+Queued messages stay collapsed above the composer until opened. Owner and Editor can remove an
+unstarted queued turn through the shared cancel route; Viewer remains read-only. The shared `/v1`
+contract does not expose a queued-message edit mutation, so iOS does not offer editing or invent a
+mobile-only replacement endpoint.
 
 ## TestFlight release
 

@@ -42,7 +42,7 @@ struct ChatView: View {
     @State private var error: String?
     @State private var pendingMessages: [PendingMessage] = []
     @State private var markdownByEventID: [String: CachedMarkdownDocument] = [:]
-    @State private var decisionSubmissionGate = CompanionDecisionSubmissionGate()
+    @State private var threadMutationGate = CompanionThreadMutationGate()
     @State private var decisionCatalog = CompanionDecisionCatalog.empty
     @State private var decisionCatalogLoaded = false
     @State private var transcriptWindow = CompanionTranscriptWindow()
@@ -72,6 +72,8 @@ struct ChatView: View {
 
     var body: some View {
         let visibleEntries = entries
+        let renderedEntries = visibleEntries.filter { !$0.queued }
+        let queuedEntries = visibleEntries.filter(\.queued)
         CompanionBackdrop(style: .companion(visualTheme.base)) {
             ScrollViewReader { proxy in
                 ScrollView {
@@ -93,10 +95,10 @@ struct ChatView: View {
                                 loadEarlierButton
                             }
 
-                            ForEach(Array(visibleEntries.enumerated()), id: \.element.eventID) { index, entry in
+                            ForEach(Array(renderedEntries.enumerated()), id: \.element.eventID) { index, entry in
                                 if startsNewDay(
                                     entry,
-                                    after: index > 0 ? visibleEntries[index - 1] : nil
+                                    after: index > 0 ? renderedEntries[index - 1] : nil
                                 ) {
                                     dayMarker(for: transcriptDate(entry.createdAt) ?? .now)
                                 }
@@ -140,7 +142,7 @@ struct ChatView: View {
                                     accent: visualTheme.accent,
                                     accentForeground: visualTheme.accentForeground,
                                     onRetry: retryInterruptedTurn,
-                                    onCancel: cancelInterruptedTurn
+                                    onCancel: cancelTurn
                                 )
                                 .id("interrupted-\(interruptedTurn.id)")
                             }
@@ -170,7 +172,7 @@ struct ChatView: View {
                 .scrollDismissesKeyboard(.interactively)
                 .scrollIndicators(.hidden)
                 .safeAreaInset(edge: .bottom, spacing: 0) {
-                    composer
+                    bottomControls(queuedEntries: queuedEntries)
                         .overlay(alignment: .topTrailing) {
                             if !isNearBottom {
                                 scrollToBottomButton {
@@ -377,6 +379,23 @@ struct ChatView: View {
         .padding(28)
         .companionGlass(radius: 28)
         .padding(.top, 56)
+    }
+
+    @ViewBuilder
+    private func bottomControls(queuedEntries: [TranscriptEntry]) -> some View {
+        VStack(spacing: 8) {
+            if !queuedEntries.isEmpty {
+                CompanionQueuedMessagesView(
+                    entries: queuedEntries,
+                    canManage: thread?.canSend == true,
+                    accent: visualTheme.accent,
+                    onRemove: cancelTurn
+                )
+                .padding(.horizontal, 12)
+            }
+
+            composer
+        }
     }
 
     @ViewBuilder
@@ -639,10 +658,10 @@ struct ChatView: View {
     }
 
     private var pendingStartsNewDay: Bool {
-        guard let last = entries.last, let date = transcriptDate(last.createdAt) else { return true }
+        guard let last = entries.last(where: { !$0.queued }),
+              let date = transcriptDate(last.createdAt) else { return true }
         return !Calendar.autoupdatingCurrent.isDateInToday(date)
     }
-
     private func startsNewDay(_ entry: TranscriptEntry, after previous: TranscriptEntry?) -> Bool {
         guard let previous else { return true }
         guard let date = transcriptDate(entry.createdAt),
@@ -817,7 +836,8 @@ struct ChatView: View {
         requestID: String,
         action: CompanionDecisionAction
     ) async throws {
-        guard await decisionSubmissionGate.acquire(requestID: requestID) else { return }
+        let mutationID = "decision:\(requestID)"
+        guard await threadMutationGate.acquire(mutationID: mutationID) else { return }
         threadProjection.invalidateRefreshes()
 
         do {
@@ -839,11 +859,11 @@ struct ChatView: View {
                 for: Array(next.entries[visibleRange])
             )
             markdownByEventID = renderedMarkdown
-            await decisionSubmissionGate.release(requestID: requestID)
+            await threadMutationGate.release(mutationID: mutationID)
         } catch {
             threadProjection.invalidateRefreshes()
             await reload(silently: true)
-            await decisionSubmissionGate.release(requestID: requestID)
+            await threadMutationGate.release(mutationID: mutationID)
             throw error
         }
     }
@@ -867,25 +887,34 @@ struct ChatView: View {
         return operation
     }
 
-    private func cancelInterruptedTurn(turnID: String) async throws {
+    private func cancelTurn(turnID: String) async throws {
+        let mutationID = "cancel:\(turnID)"
+        guard await threadMutationGate.acquire(mutationID: mutationID) else { return }
         threadProjection.invalidateRefreshes()
-        let next: CompanionThread
-        if let services {
-            next = try await services.cancelTurn(companion.id, turnID)
-        } else {
-            next = try await sessionStore.cancelCompanionTurn(
-                companionID: companion.id,
-                turnID: turnID
+        do {
+            let next: CompanionThread
+            if let services {
+                next = try await services.cancelTurn(companion.id, turnID)
+            } else {
+                next = try await sessionStore.cancelCompanionTurn(
+                    companionID: companion.id,
+                    turnID: turnID
+                )
+            }
+            threadProjection.replaceAfterMutation(with: next)
+            transcriptWindow.refresh(totalCount: next.entries.count)
+            let visibleRange = transcriptWindow.visibleRange(for: next.entries.count)
+            let renderedMarkdown = await renderedMarkdown(
+                for: Array(next.entries[visibleRange])
             )
+            markdownByEventID = renderedMarkdown
+            await refreshCompanionProjection()
+            await threadMutationGate.release(mutationID: mutationID)
+        } catch {
+            await reload(silently: true)
+            await threadMutationGate.release(mutationID: mutationID)
+            throw error
         }
-        threadProjection.replaceAfterMutation(with: next)
-        transcriptWindow.refresh(totalCount: next.entries.count)
-        let visibleRange = transcriptWindow.visibleRange(for: next.entries.count)
-        let renderedMarkdown = await renderedMarkdown(
-            for: Array(next.entries[visibleRange])
-        )
-        markdownByEventID = renderedMarkdown
-        await refreshCompanionProjection()
     }
 
     private func refreshCompanionProjection() async {
