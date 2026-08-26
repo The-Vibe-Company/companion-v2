@@ -832,10 +832,10 @@ function ComposerImageChip({
       <div className="border-border bg-muted h-16 w-16 overflow-hidden rounded-lg border">
         {src ? (
           // eslint-disable-next-line @next/next/no-img-element
-          <img src={src} alt={file.name} className="h-full w-full object-cover" />
+          <img src={src} alt="" className="h-full w-full object-cover" />
         ) : null}
       </div>
-      {/* Keeps the filename in the DOM for screen readers and text-content assertions. */}
+      {/* Carries the filename for screen readers (the img is decorative) and textContent checks. */}
       <span className="sr-only">{file.name}</span>
       <button
         type="button"
@@ -844,7 +844,7 @@ function ComposerImageChip({
           onRemove(index);
         }}
         aria-label={`Remove ${file.name}`}
-        className="bg-background/90 text-foreground hover:bg-background absolute -right-1 -top-1 grid size-5 place-items-center rounded-full shadow-sm"
+        className="bg-background/90 text-foreground hover:bg-background pointer-coarse:size-9 absolute -right-1 -top-1 grid size-6 place-items-center rounded-full shadow-sm"
       >
         <XIcon className="size-3" />
       </button>
