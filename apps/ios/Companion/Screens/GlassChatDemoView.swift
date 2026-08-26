@@ -31,7 +31,7 @@ struct GlassChatDemoView: View {
 
     var body: some View {
         NavigationStack {
-            CompanionBackdrop(style: .companion(visualTheme.base)) {
+            CompanionBackdrop {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(spacing: 16) {
@@ -60,7 +60,6 @@ struct GlassChatDemoView: View {
                                             timestamp: message.timestamp,
                                             companionName: companionName,
                                             icon: icon,
-                                            accent: visualTheme.accent,
                                             markdown: markdownByEventID[message.eventID]?.document,
                                             reasoning: message.reasoning,
                                             reasoningExpansion: reasoningBinding(for: message.eventID)
@@ -94,12 +93,12 @@ struct GlassChatDemoView: View {
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
-            .tint(visualTheme.accent)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button { showRoster = true } label: {
                         Image(systemName: "line.3.horizontal")
                     }
+                    .tint(visualTheme.accent)
                     .accessibilityLabel("Ouvrir les conversations")
                 }
 
@@ -146,6 +145,7 @@ struct GlassChatDemoView: View {
                     } label: {
                         Image(systemName: "ellipsis")
                     }
+                    .tint(visualTheme.accent)
                     .accessibilityLabel("Options de la conversation")
                 }
             }
@@ -315,7 +315,7 @@ private struct GlassRosterDemoView: View {
 
     var body: some View {
         NavigationStack {
-            CompanionBackdrop(style: .neutral) {
+            CompanionBackdrop {
                 ScrollView {
                     LazyVStack(spacing: 12) {
                         ForEach(companions) { companion in

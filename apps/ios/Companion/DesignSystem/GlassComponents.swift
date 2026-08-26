@@ -1,22 +1,10 @@
 import SwiftUI
 import CompanionKit
 
-enum CompanionBackdropStyle {
-    case decorative
-    case neutral
-    case companion(Color)
-}
-
 struct CompanionBackdrop<Content: View>: View {
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-    let style: CompanionBackdropStyle
     let content: Content
 
-    init(
-        style: CompanionBackdropStyle = .decorative,
-        @ViewBuilder content: () -> Content
-    ) {
-        self.style = style
+    init(@ViewBuilder content: () -> Content) {
         self.content = content()
     }
 
@@ -24,42 +12,6 @@ struct CompanionBackdrop<Content: View>: View {
         ZStack {
             Color.companionCanvas
                 .ignoresSafeArea()
-
-            switch style {
-            case .neutral:
-                EmptyView()
-            case .companion(_) where reduceTransparency:
-                EmptyView()
-            case .companion(let color):
-                color
-                    .opacity(0.10)
-                    .ignoresSafeArea()
-                    .accessibilityHidden(true)
-            case .decorative where !reduceTransparency:
-                GeometryReader { geometry in
-                    Circle()
-                        .fill(Color.companionAccent.opacity(0.18))
-                        .frame(width: geometry.size.width * 0.86)
-                        .blur(radius: 68)
-                        .offset(x: -geometry.size.width * 0.34, y: -geometry.size.height * 0.18)
-
-                    Circle()
-                        .fill(Color.companionAccentGold.opacity(0.20))
-                        .frame(width: geometry.size.width * 0.72)
-                        .blur(radius: 72)
-                        .offset(x: geometry.size.width * 0.52, y: geometry.size.height * 0.18)
-
-                    Circle()
-                        .fill(Color(red: 0.34, green: 0.62, blue: 1).opacity(0.15))
-                        .frame(width: geometry.size.width * 0.92)
-                        .blur(radius: 84)
-                        .offset(x: -geometry.size.width * 0.18, y: geometry.size.height * 0.72)
-                }
-                .ignoresSafeArea()
-                .accessibilityHidden(true)
-            case .decorative:
-                EmptyView()
-            }
 
             content
         }

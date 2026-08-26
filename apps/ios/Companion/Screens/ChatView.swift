@@ -73,7 +73,7 @@ struct ChatView: View {
         let visibleEntries = entries
         let renderedEntries = visibleEntries
         let queuedEntries = queuedEntries(in: thread)
-        CompanionBackdrop(style: .companion(visualTheme.base)) {
+        CompanionBackdrop {
             ScrollViewReader { proxy in
                 VStack(spacing: 0) {
                     ScrollView {
@@ -120,7 +120,6 @@ struct ChatView: View {
                                             entry: entry,
                                             own: entry.role == "user" && entry.authorID == thread?.viewerID,
                                             companion: currentCompanion,
-                                            accent: visualTheme.accent,
                                             markdown: markdownByEventID[entry.eventID]?.document,
                                             reasoningExpansion: reasoningBinding(for: entry.eventID),
                                             onOpenToolDetails: { selectedToolDetail = $0 }
@@ -205,7 +204,6 @@ struct ChatView: View {
         }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { headerToolbar }
-        .tint(visualTheme.accent)
         .sheet(item: $selectedToolDetail) { route in
             CompanionToolRunDetailView(tool: route.tool, timestamp: route.timestamp)
                 .presentationDetents([.large])
@@ -283,6 +281,7 @@ struct ChatView: View {
                 Image(systemName: "gearshape")
                     .frame(width: 44, height: 44)
             }
+            .tint(visualTheme.accent)
             .accessibilityLabel("Settings for \(currentCompanion.name)")
             .accessibilityIdentifier("chat.settings")
         }
@@ -305,6 +304,7 @@ struct ChatView: View {
             .padding(.horizontal, 14)
         }
         .buttonStyle(.glass)
+        .tint(visualTheme.accent)
         .disabled(loadingEarlier)
         .accessibilityLabel("Load earlier messages")
         .accessibilityIdentifier("chat.load-earlier")
@@ -320,6 +320,7 @@ struct ChatView: View {
             }
             .buttonStyle(.glass)
             .buttonBorderShape(.circle)
+            .tint(visualTheme.accent)
             .accessibilityLabel("Scroll to latest message")
             .accessibilityIdentifier("chat.scroll-to-bottom")
         }
@@ -346,6 +347,7 @@ struct ChatView: View {
         } actions: {
             Button("Try again") { Task { await reload() } }
                 .buttonStyle(.glassProminent)
+                .tint(visualTheme.accent)
         }
         .padding(.top, 60)
     }
@@ -464,6 +466,7 @@ struct ChatView: View {
                         }
                         .buttonStyle(.glass)
                         .buttonBorderShape(.circle)
+                        .tint(visualTheme.accent)
                         .disabled(attachDisabled)
                         .accessibilityLabel(
                             remainingAttachmentCapacity == 0
@@ -1193,7 +1196,6 @@ struct ChatMessageBubble: View {
     var companionName = "Companion"
     var companionID: String?
     var icon: CompanionSummary.Icon?
-    var accent = Color.companionAccent
     var markdown: MarkdownDocument?
     var reasoning: String? = nil
     var reasoningExpansion: Binding<Bool>? = nil
@@ -1244,7 +1246,7 @@ struct ChatMessageBubble: View {
             }
 
             if kind == .assistant, let markdown {
-                MarkdownMessageView(document: markdown, accent: accent)
+                MarkdownMessageView(document: markdown, accent: .companionInk)
             } else {
                 Text(content)
                     .font(.body)
@@ -1282,7 +1284,7 @@ struct ChatMessageBubble: View {
                 .padding(.horizontal, 14)
                 .padding(.vertical, 11)
                 .frame(maxWidth: 340, alignment: .leading)
-                .companionMaterial(radius: 18, tint: accent.opacity(0.10))
+                .companionGlass(radius: 18)
         } else if kind == .assistant {
             contentView
                 .padding(.vertical, 3)
@@ -1415,7 +1417,6 @@ private struct MessageEntryView: View {
     let entry: TranscriptEntry
     let own: Bool
     let companion: CompanionSummary
-    let accent: Color
     let markdown: MarkdownDocument?
     let reasoningExpansion: Binding<Bool>
     let onOpenToolDetails: (ToolRunDetailRoute) -> Void
@@ -1440,7 +1441,6 @@ private struct MessageEntryView: View {
                 companionName: companion.name,
                 companionID: companion.id,
                 icon: companion.icon,
-                accent: accent,
                 markdown: entry.role == "assistant" ? markdown : nil,
                 reasoning: entry.role == "assistant" ? entry.reasoning : nil,
                 reasoningExpansion: reasoningExpansion,
@@ -1487,13 +1487,12 @@ private struct PendingMessageView: View {
                 content: message.content,
                 kind: .mine,
                 timestamp: statusLabel,
-                accent: accent,
                 localAttachments: message.attachments
             )
 
             if let progress = message.uploadProgress, !message.failed {
                 ProgressView(value: progress)
-                    .tint(accent)
+                    .tint(Color.companionMuted)
                     .frame(maxWidth: 220)
                     .accessibilityLabel("Uploading attachments")
                     .accessibilityValue(progress.formatted(.percent.precision(.fractionLength(0))))

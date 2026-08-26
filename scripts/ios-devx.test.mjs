@@ -87,6 +87,70 @@ test("the iOS app packages the approved light appearance and provider marks", ()
   assert.equal(appIcon[25], 2, "App Store icon must be RGB without alpha");
 });
 
+test("full-screen native backdrops stay neutral in every state", () => {
+  const glassComponents = read("apps/ios/Companion/DesignSystem/GlassComponents.swift");
+  const backdrop = glassComponents.slice(
+    glassComponents.indexOf("struct CompanionBackdrop"),
+    glassComponents.indexOf("extension View"),
+  );
+  const backdropCallers = [
+    "apps/ios/Companion/Navigation/RootView.swift",
+    ...readdirSync(resolve(ROOT, "apps/ios/Companion/Screens"))
+      .filter((file) => file.endsWith(".swift"))
+      .map((file) => `apps/ios/Companion/Screens/${file}`),
+  ].map(read).join("\n");
+  const managementComponents = read(
+    "apps/ios/Companion/DesignSystem/ManagementComponents.swift",
+  );
+
+  assert.match(backdrop, /Color\.companionCanvas\s*\n\s*\.ignoresSafeArea\(\)/);
+  assert.deepEqual(
+    [...backdrop.matchAll(/\bColor\.[A-Za-z]\w*/g)].map(([color]) => color),
+    ["Color.companionCanvas"],
+  );
+  assert.doesNotMatch(
+    backdrop,
+    /CompanionBackdropStyle|case \.companion|GeometryReader|\.fill\(|\.opacity\(|\.(?:red|companionAccent|companionDanger)\b/,
+  );
+  assert.doesNotMatch(backdropCallers, /CompanionBackdrop\s*\(\s*style:/);
+  assert.doesNotMatch(
+    managementComponents,
+    /\.background\s*(?:\(\s*(?:(?:Color)?\.)?(?:companionDanger|red)\b|\{[\s\S]{0,120}?(?:companionDanger|Color\.red|\.red\b))/,
+  );
+});
+
+test("chat content stays neutral while Companion accents remain on actions and identity", () => {
+  const chat = read("apps/ios/Companion/Screens/ChatView.swift");
+  const bubble = chat.slice(
+    chat.indexOf("struct ChatMessageBubble"),
+    chat.indexOf("struct CompanionThinkingDisclosure"),
+  );
+  const decisionCard = read("apps/ios/Companion/Screens/CompanionDecisionCard.swift");
+  const glassChatDemo = read("apps/ios/Companion/Screens/GlassChatDemoView.swift");
+  const glassDemoBubbles = glassChatDemo.slice(
+    glassChatDemo.indexOf("ChatMessageBubble("),
+    glassChatDemo.indexOf(".accessibilityIdentifier(message.accessibilityIdentifier)"),
+  );
+  const queuedDemo = read("apps/ios/Companion/Screens/CompanionQueuedMessagesDemoView.swift");
+  const queuedDemoBubbles = queuedDemo.slice(
+    queuedDemo.indexOf("ChatMessageBubble("),
+    queuedDemo.indexOf(".padding(16)"),
+  );
+
+  assert.match(bubble, /\.companionGlass\(radius: 18\)/);
+  assert.match(bubble, /MarkdownMessageView\(document: markdown, accent: \.companionInk\)/);
+  assert.doesNotMatch(bubble, /var accent\b|accent\.opacity|visualTheme\.accent|tint:/);
+  assert.doesNotMatch(chat, /\.toolbar \{ headerToolbar \}\s*\.tint\(visualTheme\.accent\)/);
+  assert.match(chat, /\.buttonStyle\(\.glassProminent\)\s*\.buttonBorderShape\(\.circle\)\s*\.tint\(visualTheme\.accent\)/);
+  assert.doesNotMatch(decisionCard, /pending \? accent\.opacity/);
+  assert.doesNotMatch(glassDemoBubbles, /accent:|tint:/);
+  assert.doesNotMatch(queuedDemoBubbles, /accent:|tint:/);
+  assert.doesNotMatch(
+    glassChatDemo,
+    /\.navigationBarTitleDisplayMode\(\.inline\)\s*\.tint\(visualTheme\.accent\)/,
+  );
+});
+
 test("the project is synchronized, shared, and backed by CompanionKit", () => {
   const project = read("apps/ios/Companion.xcodeproj/project.pbxproj");
   const scheme = read("apps/ios/Companion.xcodeproj/xcshareddata/xcschemes/Companion.xcscheme");

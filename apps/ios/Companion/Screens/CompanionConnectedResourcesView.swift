@@ -94,7 +94,7 @@ struct CompanionConnectedResourcesView: View {
     }
 
     var body: some View {
-        CompanionBackdrop(style: .companion(visualTheme.base)) {
+        CompanionBackdrop {
             Group {
                 if loading, resources == nil {
                     loadingState

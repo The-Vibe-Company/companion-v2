@@ -7,7 +7,7 @@ struct MarkdownTableDemoView: View {
 
     var body: some View {
         NavigationStack {
-            CompanionBackdrop(style: .neutral) {
+            CompanionBackdrop {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 24) {
                         ForEach(fixtures) { fixture in
