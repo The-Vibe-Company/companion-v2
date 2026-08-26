@@ -1348,6 +1348,7 @@ enum CompanionConnectedResourcesDemoFixtures {
             {
               "id":"44444444-4444-4444-8444-444444444444",
               "name":"Pull request opened",
+              "prompt":"Summarize the pull request.",
               "provider":"github",
               "registration_status":"registered",
               "enabled":true,
