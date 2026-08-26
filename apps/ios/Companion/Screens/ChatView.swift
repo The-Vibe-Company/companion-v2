@@ -73,7 +73,7 @@ struct ChatView: View {
     var body: some View {
         let visibleEntries = entries
         let renderedEntries = visibleEntries.filter { !$0.queued }
-        let queuedEntries = visibleEntries.filter(\.queued)
+        let queuedEntries = thread?.entries.filter(\.queued) ?? []
         CompanionBackdrop(style: .companion(visualTheme.base)) {
             ScrollViewReader { proxy in
                 ScrollView {
@@ -691,7 +691,7 @@ struct ChatView: View {
         return previous.entries.count != next.entries.count
             || previous.entries.last != next.entries.last
             || previous.interruptedTurn != next.interruptedTurn
-            || (previous.interruptedTurn != nil && previous.queuedCount != next.queuedCount)
+            || previous.queuedCount != next.queuedCount
     }
 
     private func loadEarlier() async {
