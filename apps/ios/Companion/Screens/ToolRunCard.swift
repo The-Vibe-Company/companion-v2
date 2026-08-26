@@ -272,6 +272,7 @@ struct CompanionToolRunCard: View {
     }
 }
 
+@MainActor
 private enum ToolRunScreenshotCache {
     private static let images: NSCache<NSString, UIImage> = {
         let cache = NSCache<NSString, UIImage>()
