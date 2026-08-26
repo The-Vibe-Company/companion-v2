@@ -727,20 +727,25 @@ private struct MessageEntryView: View {
     let accent: Color
     let markdown: MarkdownDocument?
 
+    @ViewBuilder
     var body: some View {
-        ChatMessageBubble(
-            content: entry.content,
-            kind: kind,
-            authorName: own ? nil : entry.authorName ?? (entry.role == "user" ? "Workspace member" : companion.name),
-            timestamp: timeLabel,
-            queued: entry.queued,
-            companionName: companion.name,
-            companionID: companion.id,
-            icon: companion.icon,
-            accent: accent,
-            markdown: entry.role == "assistant" ? markdown : nil,
-            attachments: entry.attachments
-        )
+        if entry.role == "tool", let tool = entry.tool {
+            CompanionToolRunCard(tool: tool)
+        } else {
+            ChatMessageBubble(
+                content: entry.content,
+                kind: kind,
+                authorName: own ? nil : entry.authorName ?? (entry.role == "user" ? "Workspace member" : companion.name),
+                timestamp: timeLabel,
+                queued: entry.queued,
+                companionName: companion.name,
+                companionID: companion.id,
+                icon: companion.icon,
+                accent: accent,
+                markdown: entry.role == "assistant" ? markdown : nil,
+                attachments: entry.attachments
+            )
+        }
     }
 
     private var kind: ChatMessageBubble.Kind {
