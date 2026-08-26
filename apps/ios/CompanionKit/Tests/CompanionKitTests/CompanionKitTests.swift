@@ -1274,6 +1274,27 @@ func decodesEveryStructuredToolRunStatus() throws {
 }
 
 @Test
+func preservesMaximumStructuredToolDetailAsLiteralText() throws {
+    let untrusted = String(repeating: "<script>alert('literal')</script> & output\n", count: 500)
+    let detail = String(untrusted.prefix(16_000))
+    let data = try JSONSerialization.data(withJSONObject: [
+        "call_id": "call-detail-16k",
+        "kind": "computer",
+        "name": "computer",
+        "title": "Inspect the complete operation payload",
+        "status": "ok",
+        "detail": detail,
+        "screenshot": "data:image/jpeg;base64,/9j/4AAQSkZJRg==",
+    ])
+
+    let run = try JSONDecoder().decode(CompanionToolRun.self, from: data)
+    #expect(run.detail == detail)
+    #expect(run.detail?.count == 16_000)
+    #expect(run.detail?.hasPrefix("<script>") == true)
+    #expect(run.screenshot == "data:image/jpeg;base64,/9j/4AAQSkZJRg==")
+}
+
+@Test
 func unknownToolKindKeepsTheContainingThreadReadable() throws {
     let data = Data(#"""
     {
