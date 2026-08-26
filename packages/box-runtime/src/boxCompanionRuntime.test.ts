@@ -1475,6 +1475,14 @@ describe("default Pi packages on the Box disk", () => {
 });
 
 describe("staged Companion instructions", () => {
+  it("always asks for direct links to specific resources", () => {
+    for (const surface of ["web", "mobile_web", "native_mobile"] as const) {
+      const text = composedInstructions(null, surface);
+      expect(text).toContain("include a direct link whenever one exists");
+      expect(text).toContain("Prefer GitHub URLs, official documentation, or the authoritative source.");
+    }
+  });
+
   it("always tells Pi how to show an image, with or without a persona", () => {
     expect(composedInstructions("Answer briefly.")).toContain(COMPANION_OUTBOX_INSTRUCTIONS);
     expect(composedInstructions(null)).toContain(COMPANION_OUTBOX_INSTRUCTIONS);
@@ -1531,6 +1539,13 @@ describe("staged Companion instructions", () => {
       `At most ${COMPANION_TRIGGER_MAX_PER_COMPANION} per Companion. You cannot create one yourself.`,
     );
     expect(text).toContain(COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS.join(", "));
+  });
+
+  it("describes the fixed per-turn time metadata without embedding a changing clock value", () => {
+    const text = composedInstructions();
+    expect(text).toContain("fixed-format Current time and User timezone block");
+    expect(text).toContain("trusted runtime metadata");
+    expect(text).not.toMatch(/Current time: \d{4}-\d{2}-\d{2}T/);
   });
 
   it("does not tell Pi that memory is wiped or that tool runs are invisible", () => {

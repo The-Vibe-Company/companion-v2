@@ -383,6 +383,10 @@ export interface RuntimeWorkMaterial {
   attemptId: string | null;
   messageEventId: string | null;
   promptText: string | null;
+  /** Durable attempt start used to make the per-turn time suffix byte-stable across recovery. */
+  turnStartedAt: Date | null;
+  /** Stored member IANA timezone; UTC is supplied by the database only when the profile is unset. */
+  memberTimezone: string | null;
   decisionRequestKind: DecisionRequestKind | null;
   decisionResponsePayload: Record<string, unknown> | null;
   providerMaterial: Record<string, unknown>[];

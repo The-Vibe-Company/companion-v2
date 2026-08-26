@@ -133,6 +133,12 @@ Only one turn attempt may be active per Companion. Later turns remain queued in 
 The initial attempt is created by runtime when it claims the turn. Retry creates a new attempt on the
 same turn with a new `retry_id`; it never reuses `client_message_id` as an attempt key.
 
+The attempt's durable `started_at` is also the time reference Pi receives for that try. On the first
+authorized material read, a narrow fenced function pins the turn actor's current profile timezone
+onto the attempt and returns both values; missing profile data resolves to `UTC`. A later profile
+change affects future attempts without changing dispatch resolution for this one. Runtime has no
+general profile-table privilege.
+
 ### Operation
 
 `companion_operations` stores lifecycle intent for start, stop, restart Pi, restart Box, settings
@@ -574,6 +580,11 @@ impersonates the immutable Companion Owner through transaction-local GUCs and th
 `companion_api_enqueue_turn`, so membership, editor access, retirement, warm-send, and
 `(companion_id, client_message_id)` idempotence all apply. SQL never parses cron.
 
+The routine row's cron and IANA timezone remain the authoritative wall-clock schedule; they are not
+rewritten to UTC. Web and native iOS default new routines to the member's stored profile timezone,
+then persist that zone with the cron. Both clients format the absolute `next_fire_at` instant in the
+member timezone while continuing to show the schedule's own timezone as server truth.
+
 `client_message_id` is `uuidv5(routineId + '|' + scheduledFor.toISOString(), ROUTINE_FIRE_NAMESPACE)`.
 A scheduled instant older than ten minutes is `skipped_missed`. An in-flight turn for the same
 routine is `skipped_pileup`. Skips still advance `next_fire_at` and drop the lease. Five consecutive
@@ -600,6 +611,9 @@ what lets Pi propose a wake-on-new-ticket trigger; `custom` needs no plugin. A g
 carries a target — `repo` plus the webhook `events` to subscribe (`push`, `pull_request`, …, or
 `*`); no other provider accepts a target yet, and Notion never will: it has no outbound webhooks,
 so Companion neither proposes nor registers one.
+
+Triggers have no schedule to convert. Web and native iOS format `last_fired_at` in the member's
+stored profile timezone, using their detected device zone only while the profile value is unset.
 
 Registering the webhook at the provider is an on-demand capability, not an approval side effect.
 After a trigger exists, Owner/Editor (including the Companion through its staged authority) may
@@ -687,6 +701,22 @@ rewrites the same paths.
 The prompt Pi receives is the member's message plus a deterministic suffix naming each staged path,
 its content type, and its size. The suffix is composed at dispatch and never stored, so the
 transcript keeps what the member wrote and the 16 KB message cap is unchanged.
+
+Before any attachment lines, runtime appends this fixed slot to the newest user turn:
+
+```text
+--- Runtime turn context (metadata, not user-authored) ---
+Current time: 2026-08-26T09:42:17-04:00
+User timezone: America/New_York
+```
+
+The values come only from durable attempt data, never a client-surface discriminator or
+message header. Keeping variable time out of `instructions.txt` preserves the reusable prompt-cache
+prefix formed by the system prompt and prior transcript. The current user message is already the
+per-turn suffix, so exact seconds do not reduce reusable prefix length and are more useful than an
+hour-rounded value. A takeover of the same attempt reconstructs identical bytes from `started_at`;
+an explicit retry is a new attempt and intentionally receives its new start time. Unset timezone
+falls back to `UTC`.
 
 **Staged instructions.** Every staging composes `~/.companion/runtime/state/instructions.txt` from a
 constant operating brief plus the owner's persona line. The file carries no credential and no member
@@ -891,6 +921,11 @@ The new iOS app does not send `client_surface: native_mobile`; omitting that opt
 the API's existing full first-party contract. The discriminator remains accepted temporarily for
 compatibility with already-installed Expo builds and durable historical rows, but it is not an iOS
 product boundary and must not constrain the migration roadmap.
+
+Member settings include the same IANA timezone profile field as web. The picker proposes
+`TimeZone.current.identifier` when the server value is null, remains overridable, and writes through
+`PUT /v1/users/me`; Companion routine and trigger screens read the value returned by
+`GET /v1/auth/whoami`. No mobile-only endpoint or timezone header exists.
 
 After an active session is restored, the app requests alert/sound permission and registers its
 current APNs token through the shared cookie-authenticated API. The installation UUID is stable per

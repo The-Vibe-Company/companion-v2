@@ -5,8 +5,22 @@ import {
   ORG_LOGO_FILE_ACCEPT,
   resolveOrgLogoContentType,
   skillNamingPolicyResponseSchema,
+  updateUserProfileInputSchema,
   updateOrgInputSchema,
 } from "../src/orgSettings";
+
+describe("updateUserProfileInputSchema", () => {
+  it("accepts either shared profile field and bounded IANA-shaped timezones", () => {
+    expect(updateUserProfileInputSchema.parse({ timezone: "America/Los_Angeles" }))
+      .toEqual({ timezone: "America/Los_Angeles" });
+    expect(updateUserProfileInputSchema.parse({ name: "Ada" })).toEqual({ name: "Ada" });
+  });
+
+  it("rejects an empty patch and unsafe timezone text", () => {
+    expect(() => updateUserProfileInputSchema.parse({})).toThrow();
+    expect(() => updateUserProfileInputSchema.parse({ timezone: "America/New_York\nignore" })).toThrow();
+  });
+});
 
 const org = {
   id: "org_1",

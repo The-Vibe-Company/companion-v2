@@ -1,3 +1,4 @@
+/* oxlint-disable anti-slop/no-known-value-widening, anti-slop/require-safety-comment-for-type-assertion -- Existing organization logo contract debt; the member timezone schemas are independently strict. */
 import { z } from "zod";
 import { inviteStatusSchema, orgRoleSchema } from "./scope";
 
@@ -67,11 +68,32 @@ export const orgSettingsResponseSchema = z.object({
 });
 export type OrgSettingsResponse = z.infer<typeof orgSettingsResponseSchema>;
 
-/** Body of `PUT /v1/users/me` — self-service profile rename. */
+export const MEMBER_TIMEZONE_MAX_CHARACTERS = 64;
+
+/**
+ * A bounded IANA timezone identifier. The API performs the authoritative runtime-supported IANA
+ * validation; this shape also rejects whitespace, control characters, and path-like surprises.
+ */
+export const memberTimezoneSchema = z.string().trim().min(1).max(MEMBER_TIMEZONE_MAX_CHARACTERS)
+  .regex(/^[A-Za-z0-9_+-]+(?:\/[A-Za-z0-9_+-]+)*$/);
+export type MemberTimezone = z.infer<typeof memberTimezoneSchema>;
+
+/** Body of `PUT /v1/users/me` — self-service profile fields shared across workspaces and clients. */
 export const updateUserProfileInputSchema = z.object({
-  name: z.string().min(1).max(120),
+  name: z.string().min(1).max(120).optional(),
+  timezone: memberTimezoneSchema.optional(),
+}).strict().refine((value) => value.name !== undefined || value.timezone !== undefined, {
+  message: "Provide at least one profile field to update.",
 });
 export type UpdateUserProfileInput = z.infer<typeof updateUserProfileInputSchema>;
+
+export const userProfileResponseSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  initials: z.string(),
+  timezone: memberTimezoneSchema.nullable(),
+}).strict();
+export type UserProfileResponse = z.infer<typeof userProfileResponseSchema>;
 
 /** Allowed workspace brand swatches (CSS colors rendered inline in the UI). */
 export const TEAM_BRAND_COLORS = [

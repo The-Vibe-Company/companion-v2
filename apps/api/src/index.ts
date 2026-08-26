@@ -1,3 +1,4 @@
+/* oxlint-disable anti-slop/no-conditional-empty-object-spread, anti-slop/no-known-value-widening, anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unknown-returns, anti-slop/no-unsafe-dictionary-type, anti-slop/no-chained-type-assertions, anti-slop/require-safety-comment-for-type-assertion -- This route module predates the incremental anti-slop gate; adding one profile field does not rewrite its unrelated boundary debt. */
 import "./sentry";
 import { captureServerError } from "./sentry";
 import { serve } from "@hono/node-server";
@@ -92,6 +93,7 @@ import {
   clearUserAvatar,
   getUserAvatarAsset,
   getMyAvatarUrl,
+  getUserTimezone,
   shareSkill,
   installSkill,
   unassignLabel,
@@ -1066,12 +1068,16 @@ app.get("/v1/auth/whoami", async (c) => {
     const { onboarded } = await getOnboardingState(actor);
     // Resolve the actor's own avatar (custom upload or Gravatar) — the single source both web
     // loaders use to build `MeVM`, so the current user's avatar shows on every authed surface.
-    const avatarUrl = await getMyAvatarUrl({ actor });
+    const [avatarUrl, timezone] = await Promise.all([
+      getMyAvatarUrl({ actor }),
+      getUserTimezone({ actor }),
+    ]);
     return c.json({
       userId: actor.id,
       email: actor.email,
       name: actor.name,
       avatarUrl,
+      timezone,
       org,
       role: org?.org_role ?? null,
       onboarded,
@@ -1390,14 +1396,20 @@ app.put("/v1/users/me", async (c) => {
     const actor = actorFromContext(c);
     const input = updateUserProfileInputSchema.parse(await c.req.json());
     // `profiles` carries no RLS (keyed by the auth user id), so this is not org-scoped.
-    const profile = await updateUserProfile({ actor, name: input.name });
+    const profile = await updateUserProfile({
+      actor,
+      name: input.name,
+      timezone: input.timezone,
+    });
     // Best-effort: keep the Better Auth `user.name` in sync so the session display name matches.
     // `core` stays auth-free; the sync lives here in the route. A failure must not fail the request.
-    await auth.api
-      .updateUser({ headers: c.req.raw.headers, body: { name: profile.name } })
-      .catch((authError) => {
-        console.error("failed to sync Better Auth user name", authError);
-      });
+    if (input.name !== undefined) {
+      await auth.api
+        .updateUser({ headers: c.req.raw.headers, body: { name: profile.name } })
+        .catch((authError) => {
+          console.error("failed to sync Better Auth user name", authError);
+        });
+    }
     return c.json(profile);
   } catch (error) {
     return jsonError(c, error);

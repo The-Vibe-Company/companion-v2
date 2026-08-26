@@ -409,11 +409,28 @@ function decodeMaterial(row: RuntimeSqlRow): RuntimeWorkMaterial {
   if (messageEventId !== null && !MESSAGE_EVENT_ID_PATTERN.test(messageEventId)) {
     throw new RuntimeStoreContractError();
   }
+  const rawTurnStartedAt = row.turn_started_at;
+  const turnStartedAt = rawTurnStartedAt === null ? null : rawTurnStartedAt;
+  if (
+    turnStartedAt !== null
+    && (!(turnStartedAt instanceof Date) || !Number.isFinite(turnStartedAt.getTime()))
+  ) throw new RuntimeStoreContractError();
+  const memberTimezone = nullableText(row, "member_timezone");
+  if (memberTimezone !== null) {
+    if (memberTimezone.length > 64) throw new RuntimeStoreContractError();
+    try {
+      new Intl.DateTimeFormat("en-US", { timeZone: memberTimezone }).format(new Date(0));
+    } catch {
+      throw new RuntimeStoreContractError();
+    }
+  }
   return {
     turnId: nullableUuidText(row, "turn_id"),
     attemptId: nullableUuidText(row, "attempt_id"),
     messageEventId,
     promptText: prompt,
+    turnStartedAt,
+    memberTimezone,
     decisionRequestKind: requestKind,
     decisionResponsePayload: decisionPayload,
     providerMaterial: objectArray(row, "provider_material"),
@@ -803,14 +820,23 @@ export class PostgresRuntimeStore implements RuntimeStore {
   ): Promise<RuntimeWorkMaterial | null> {
     return await mapped(async () => {
       const rows = await this.sql.unsafe<RuntimeSqlRow[]>(`
-        SELECT turn_id, attempt_id, message_event_id, prompt_text, decision_request_kind,
-               decision_response_payload, provider_material, skill_material, mcp_material,
-               model_input, has_visible_output, attachments, credential_snapshot_matches,
-               box_id, agent_hosted_url, agent_token_ciphertext, agent_observed_at
+        SELECT material.turn_id, material.attempt_id, material.message_event_id,
+               material.prompt_text, material.decision_request_kind,
+               material.decision_response_payload, material.provider_material,
+               material.skill_material, material.mcp_material, material.model_input,
+               material.has_visible_output, material.attachments,
+               material.credential_snapshot_matches, material.box_id,
+               material.agent_hosted_url, material.agent_token_ciphertext,
+               material.agent_observed_at, turn_context.turn_started_at,
+               turn_context.member_timezone
         FROM public.companion_runtime_get_material(
           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
           $6::text, $7::public.companion_runtime_work_kind, $8::uuid, $9::integer
-        )
+        ) material
+        CROSS JOIN public.companion_runtime_get_turn_context(
+          $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
+          $6::text, $7::public.companion_runtime_work_kind, $8::uuid, $9::integer
+        ) turn_context
       `, [...fenceParameters(fence), leaseSeconds]);
       if (rows.length === 0) return null;
       return decodeMaterial(one(rows, "work material"));

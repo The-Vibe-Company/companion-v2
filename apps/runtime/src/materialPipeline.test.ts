@@ -56,6 +56,8 @@ function workMaterial(accessExpiresAt?: string | null): RuntimeWorkMaterial {
     attemptId: null,
     messageEventId: null,
     promptText: null,
+    turnStartedAt: null,
+    memberTimezone: null,
     decisionRequestKind: null,
     decisionResponsePayload: null,
     providerMaterial: [],

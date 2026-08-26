@@ -541,6 +541,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         (
           select count(*)::int from unnest(array[
             'public.companion_runtime_get_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)',
+            'public.companion_runtime_get_turn_context(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)',
             'public.companion_runtime_get_config_catalog(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)',
             'public.companion_runtime_mint_hub_token(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)',
             'public.companion_runtime_mint_mcp_broker_token(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)',
@@ -570,7 +571,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           ${runtimeRole}, 'public.companion_runtime_guard_duplicate_cleanup()', 'EXECUTE'
         ) as "helperCallable"
     `;
-    expect(acl).toEqual({ privateTableReads: 0, callableFunctions: 23, helperCallable: false });
+    expect(acl).toEqual({ privateTableReads: 0, callableFunctions: 24, helperCallable: false });
     await expect(asRuntime((tx) => tx`select * from companion_turn_attempts`))
       .rejects.toThrow(/permission denied/i);
 
@@ -4974,6 +4975,14 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       selectedMcpAccountIds: [ids.revokedMcpAccount],
     });
     try {
+      await sql`
+        insert into profiles (id, email, name, initials, timezone)
+        values (
+          ${ids.revokedA}, ${`${ids.revokedA}@example.test`},
+          'Runtime executor actor', 'RE', 'America/Los_Angeles'
+        )
+        on conflict (id) do update set timezone = excluded.timezone
+      `;
       const claim = await claimWork();
       expect(claim.workKind).toBe("attempt");
       // Phase 2.1 read path: the fenced material read carries the instance's Box id and the
@@ -5035,6 +5044,31 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         credential_generation: ids.revokedMcpGeneration,
         ciphertext: "ciphertext-revoked-mcp",
       }]);
+      const turnContext = await asRuntime((tx) => tx<Array<{
+        startedAt: Date;
+        timezone: string;
+      }>>`
+        select turn_started_at as "startedAt", member_timezone as timezone
+        from public.companion_runtime_get_turn_context(
+          ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
+          ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
+          ${claim.workKind}, ${claim.workId}::uuid, 30
+        )
+      `);
+      expect(turnContext).toEqual([{
+        startedAt: expect.any(Date),
+        timezone: "America/Los_Angeles",
+      }]);
+      await sql`update profiles set timezone = 'UTC' where id = ${ids.revokedA}`;
+      const pinnedTurnContext = await asRuntime((tx) => tx<Array<{ timezone: string }>>`
+        select member_timezone as timezone
+        from public.companion_runtime_get_turn_context(
+          ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
+          ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
+          ${claim.workKind}, ${claim.workId}::uuid, 30
+        )
+      `);
+      expect(pinnedTurnContext).toEqual([{ timezone: "America/Los_Angeles" }]);
 
       const forged = await asRuntime((tx) => tx`
         select * from public.companion_runtime_get_material(

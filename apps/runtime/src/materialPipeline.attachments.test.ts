@@ -37,6 +37,8 @@ function material(overrides: Partial<RuntimeWorkMaterial> = {}): RuntimeWorkMate
     attemptId,
     messageEventId,
     promptText: "look at this",
+    turnStartedAt: new Date("2026-08-26T13:42:17.000Z"),
+    memberTimezone: "UTC",
     decisionRequestKind: null,
     decisionResponsePayload: null,
     providerMaterial: [],

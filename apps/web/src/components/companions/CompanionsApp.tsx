@@ -249,6 +249,7 @@ export function CompanionsApp({
   initialCompanionId,
   initialSettingsCompanionId,
   initialPluginsOpen = false,
+  memberTimezone = null,
 }: {
   orgs: OrgVM[];
   currentOrg: OrgVM;
@@ -263,6 +264,8 @@ export function CompanionsApp({
   initialCompanionId?: string | null;
   initialSettingsCompanionId?: string | null;
   initialPluginsOpen?: boolean;
+  /** Stored member zone; null falls back to this browser until the member saves Preferences. */
+  memberTimezone?: string | null;
 }) {
   const router = useRouter();
   const orgActions = useOrgActions();
@@ -1269,6 +1272,7 @@ export function CompanionsApp({
               }}
               contextSkills={skills}
               contextRoutines={routines}
+              memberTimezone={memberTimezone}
               onRoutinesChange={setRoutines}
               contextTriggers={triggers}
               onTriggersChange={setTriggers}

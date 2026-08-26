@@ -17,8 +17,9 @@ The native roster can create Companions, open their essential settings from chat
 menu, and request Owner-only durable deletion. A confirmed deletion removes the Companion from the
 local roster immediately while the durable request runs; request failure restores the row, and a
 later roster poll may honestly reintroduce a Companion the control plane still returns. Essential
-settings cover the Companion icon, name, instructions, provider, and model; Editor access is
-editable and Viewer access is read-only.
+settings cover the Companion icon, name, instructions, provider, and model. Identity opens as a
+dedicated pushed editor for Owner and Editor, and both creation and editing show the complete visual
+icon catalog; Viewer access remains read-only.
 Connected resources now lives inside those settings as one child management page. It retains the
 native Skills, routines, and triggers status views, lists the member's attached MCP plugin accounts
 by provider and label, and lets the Companion Owner attach or detach already-connected accounts.
@@ -80,15 +81,17 @@ xcodebuildmcp swift-package test --package-path apps/ios/CompanionKit
 Release builds ignore launch arguments and environment variables and always use
 `https://api.thecompanion.sh`.
 
-The Debug-only `-glass-chat-demo`, `-companion-queued-demo`, `-markdown-table-demo`,
+The Debug-only `-glass-chat-demo`, `-glass-chat-thinking-demo`, `-companion-queued-demo`, `-markdown-table-demo`,
 `-glass-management-demo`, `-glass-management-demo-plugins`,
-`-companion-icon-demo`, `-companion-decision-demo`, `-companion-interruption-demo`,
+`-companion-icon-demo`, `-companion-create-demo`, `-companion-decision-demo`, `-companion-interruption-demo`,
 `-companion-transcript-window-demo`, `-companion-resources-demo`,
 `-companion-settings-demo`, and
 `-companion-roster-demo` launch arguments
 open deterministic showcases without requiring a server or account. Add `-companion-reduce-motion`
 alongside `-companion-icon-demo` to force the gallery's Reduce Motion path. The settings demo accepts
 `COMPANION_SETTINGS_DEMO_ACCESS=owner|editor|viewer` for deterministic role and deletion UI tests.
+The creation demo supplies deterministic provider and create responses so the shared identity icon gallery
+can be exercised without an account or server.
 The decision demo accepts `COMPANION_DECISION_DEMO_ACCESS=owner|editor|viewer` for the matching
 decision controls. Set `COMPANION_DECISION_DEMO_FAIL_ONCE=<request-id>` to exercise a failed
 submission followed by an enabled retry.
@@ -106,6 +109,8 @@ removal, restoration after a lost first deletion response, and a same-key `202` 
 arguments are excluded from Release behavior.
 The resources demo accepts `COMPANION_RESOURCES_DEMO_EMPTY=skills|routines|triggers` to show one
 section's deterministic empty state.
+Combine `-glass-chat-demo -glass-chat-thinking-demo` to keep the composer-adjacent thinking status
+visible and connect its tap target to the demo reply's collapsed reasoning disclosure.
 Combine `-companion-roster-demo -companion-notification-demo` to inject a version-1 response payload
 and verify deferred navigation to Luna's chat without contacting APNs.
 

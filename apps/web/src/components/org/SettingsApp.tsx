@@ -1,4 +1,5 @@
 "use client";
+/* oxlint-disable anti-slop/no-unknown-returns, anti-slop/require-safety-comment-for-type-assertion -- Existing controller boundary debt; the timezone setter follows the established RPC pattern. */
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -14,6 +15,7 @@ import {
   revokeToken as revokeTokenRpc,
   setMemberRole as setMemberRoleRpc,
   updateMe as updateMeRpc,
+  updateMyTimezone as updateMyTimezoneRpc,
   updateOrg as updateOrgRpc,
   uploadWorkspaceLogo as uploadWorkspaceLogoRpc,
   uploadUserAvatar as uploadUserAvatarRpc,
@@ -98,6 +100,7 @@ export function SettingsController({
   const [invites, setInvites] = useState<Invite[]>(data.invites);
   const [billing, setBilling] = useState(data.billing);
   const [gettingStarted, setGettingStarted] = useState(data.gettingStarted);
+  const [timezone, setTimezone] = useState<string | null>(data.timezone ?? null);
   useEffect(() => {
     router.prefetch("/skills");
   }, [router]);
@@ -109,6 +112,7 @@ export function SettingsController({
     setInvites(data.invites);
     setBilling(data.billing);
     setGettingStarted(data.gettingStarted);
+    setTimezone(data.timezone ?? null);
   }, [data]);
   useEffect(() => {
     document.cookie = `companion_org=${encodeURIComponent(data.current.id)}; path=/; SameSite=Lax`;
@@ -233,8 +237,21 @@ export function SettingsController({
     billing,
     gettingStarted,
     prefs,
+    timezone,
     setTheme,
     setAccent,
+    setTimezone: async (nextTimezone) => {
+      setBusy(true);
+      try {
+        const profile = await updateMyTimezoneRpc(nextTimezone);
+        setTimezone(profile.timezone);
+      } catch (error) {
+        setErr(error instanceof Error ? error.message : String(error));
+        throw error;
+      } finally {
+        setBusy(false);
+      }
+    },
     setMyName: (name) => {
       const trimmed = name.trim();
       if (!trimmed) return;

@@ -1,6 +1,7 @@
 /* oxlint-disable anti-slop/no-conditional-empty-object-spread, anti-slop/no-known-value-widening, anti-slop/no-unknown-returns, anti-slop/no-unsafe-dictionary-type -- Predates the incremental anti-slop gate; file reawakened by an unrelated budget/reliability edit, existing debt not rewritten here. */
 import { describe, expect, it, vi } from "vitest";
 import { RuntimeEngine } from "./engine";
+import { turnContextPromptSuffix } from "./attempt";
 import type { RuntimeProcessLog } from "./logging";
 import type { RuntimePiControl } from "./ports";
 import {
@@ -25,6 +26,9 @@ import {
   MemoryRuntimeStore,
   TestClock,
 } from "./test/fixtures";
+
+const PROMPT_WITH_TURN_CONTEXT = "Hello from a durable turn"
+  + turnContextPromptSuffix(new Date("2026-08-26T13:00:00.000Z"), "UTC");
 
 function imageAttachment() {
   return {
@@ -177,7 +181,7 @@ describe("RuntimeEngine attempts", () => {
     const result = await engine.execute(claim);
 
     expect(result.outcome).toBe("succeeded");
-    expect(ports.promptCalls).toEqual([{ attemptId: ATTEMPT_ID, message: "Hello from a durable turn" }]);
+    expect(ports.promptCalls).toEqual([{ attemptId: ATTEMPT_ID, message: PROMPT_WITH_TURN_CONTEXT }]);
     expect(store.checkpoints.map((checkpoint) => checkpoint.nextCheckpoint)).toEqual([
       "dispatch_write_intent",
       "dispatch_accepted",
@@ -276,7 +280,7 @@ describe("RuntimeEngine attempts", () => {
 
     expect(result.outcome).toBe("succeeded");
     expect(restartPiDaemon).toHaveBeenCalledOnce();
-    expect(ports.promptCalls).toEqual([{ attemptId: ATTEMPT_ID, message: "Hello from a durable turn" }]);
+    expect(ports.promptCalls).toEqual([{ attemptId: ATTEMPT_ID, message: PROMPT_WITH_TURN_CONTEXT }]);
     expect(store.checkpoints).toContainEqual(expect.objectContaining({
       nextCheckpoint: "dispatch_accepted",
       piInvocationId: overlayInvocationId,
@@ -1077,6 +1081,8 @@ describe("RuntimeEngine attempts", () => {
     expect(ports.log).not.toContain("clear-outbox");
     const message = ports.promptCalls[0]?.message ?? "";
     expect(message.startsWith("Hello from a durable turn")).toBe(true);
+    expect(message).toContain("Current time: 2026-08-26T13:00:00Z");
+    expect(message.indexOf("Runtime turn context")).toBeLessThan(message.indexOf("The user attached"));
     expect(message).toContain("The user attached 2 files, staged read-only at:");
     expect(message).toContain("1. ~/attachments/");
     expect(message).toContain("chart.png (image/png, 2048 bytes)");

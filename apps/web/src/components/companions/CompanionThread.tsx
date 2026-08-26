@@ -203,6 +203,7 @@ export function CompanionThread({
   context,
   contextSkills,
   contextRoutines = [],
+  memberTimezone,
   onRoutinesChange,
   contextTriggers = [],
   onTriggersChange,
@@ -230,6 +231,7 @@ export function CompanionThread({
   /** Selected skills this surface can name; the panel counts the ones it cannot. */
   contextSkills: CompanionContextSkill[];
   contextRoutines?: CompanionRoutine[];
+  memberTimezone?: string | null;
   onRoutinesChange?: (routines: CompanionRoutine[]) => void;
   contextTriggers?: CompanionTrigger[];
   onTriggersChange?: (triggers: CompanionTrigger[]) => void;
@@ -476,6 +478,7 @@ export function CompanionThread({
             skills={contextSkills}
             orgId={orgId}
             routines={contextRoutines}
+            memberTimezone={memberTimezone}
             onRoutinesChange={onRoutinesChange ?? (() => undefined)}
             triggers={contextTriggers}
             onTriggersChange={onTriggersChange ?? (() => undefined)}
