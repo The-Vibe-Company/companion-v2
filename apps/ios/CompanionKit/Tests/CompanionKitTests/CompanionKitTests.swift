@@ -259,6 +259,117 @@ func companionAccessKeepsEditorsEditableAndViewersReadOnly() throws {
 }
 
 @Test
+func loadsConnectedResourcesFromTheSharedFirstPartyRoutes() async throws {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [MockURLProtocol.self]
+    MockURLProtocol.handler = { request in
+        let requestURL = try #require(request.url)
+        #expect(request.httpMethod == "GET")
+        #expect(request.value(forHTTPHeaderField: "x-companion-org") == "org-1")
+        let data: Data
+        switch requestURL.path {
+        case "/v1/skills":
+            let components = try #require(URLComponents(url: requestURL, resolvingAgainstBaseURL: false))
+            #expect(components.queryItems == [URLQueryItem(name: "lib", value: "accessible")])
+            data = Data(#"""
+            [
+              {"id":"11111111-1111-4111-8111-111111111111","slug":"incident-summary","description":"Summarizes incidents.","display":{"name":"Incident Summary"}},
+              {"id":"99999999-9999-4999-8999-999999999999","slug":"not-selected","description":"Not connected."}
+            ]
+            """#.utf8)
+        case "/v1/companions/companion-1/routines":
+            data = Data(#"""
+            {"routines":[{
+              "id":"33333333-3333-4333-8333-333333333333",
+              "name":"Weekday brief",
+              "cron":"0 9 * * 1-5",
+              "timezone":"America/New_York",
+              "enabled":true,
+              "next_fire_at":"2026-08-27T13:00:00.000Z",
+              "last_error_message":null
+            }]}
+            """#.utf8)
+        case "/v1/companions/companion-1/triggers":
+            data = Data(#"""
+            {"triggers":[{
+              "id":"44444444-4444-4444-8444-444444444444",
+              "name":"Pull request opened",
+              "provider":"github",
+              "registration_status":"registered",
+              "enabled":false,
+              "last_error_message":null
+            }]}
+            """#.utf8)
+        default:
+            Issue.record("Unexpected connected-resources route: \(requestURL.absoluteString)")
+            data = Data()
+        }
+        let response = try #require(HTTPURLResponse(
+            url: requestURL,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: ["Cache-Control": "private, no-store"]
+        ))
+        return (response, data)
+    }
+    defer { MockURLProtocol.handler = nil }
+
+    let client = APIClient(
+        baseURL: URL(string: "http://127.0.0.1:3001")!,
+        session: URLSession(configuration: configuration)
+    )
+    await client.setAuthority(Session(
+        cookie: "better-auth.session_token=session",
+        orgID: "org-1",
+        needsOnboarding: false,
+        user: .init(id: "user-1", email: "stan@example.com", name: "Stan")
+    ))
+
+    let resources = try await client.connectedResources(
+        companionID: "companion-1",
+        selectedSkillIDs: [
+            "11111111-1111-4111-8111-111111111111",
+            "22222222-2222-4222-8222-222222222222",
+        ]
+    )
+
+    #expect(resources.skills.map(\.slug) == ["incident-summary"])
+    #expect(resources.skills.map(\.displayName) == ["Incident Summary"])
+    #expect(resources.hiddenSkillCount == 1)
+    #expect(resources.routines.first?.scheduleDescription == "Weekdays at 09:00")
+    #expect(resources.routines.first?.status == .active)
+    #expect(resources.triggers.first?.providerName == "GitHub")
+    #expect(resources.triggers.first?.registrationDescription == "Webhook registered")
+    #expect(resources.triggers.first?.status == .disabled)
+}
+
+@Test
+func humanizesCommonRoutineSchedules() throws {
+    let examples = [
+        ("*/15 * * * *", "Every 15 minutes"),
+        ("0 * * * *", "Every hour"),
+        ("30 14 * * *", "Every day at 14:30"),
+        ("0 9 * * 1-5", "Weekdays at 09:00"),
+        ("0 8 1 * *", "Custom schedule"),
+    ]
+    for (cron, expected) in examples {
+        let data = Data(#"""
+        {
+          "id":"33333333-3333-4333-8333-333333333333",
+          "name":"Schedule",
+          "cron":"\#(cron)",
+          "timezone":"UTC",
+          "enabled":true,
+          "next_fire_at":null,
+          "last_error_message":null
+        }
+        """#.utf8)
+        let routine = try JSONDecoder().decode(CompanionRoutine.self, from: data)
+        #expect(routine.scheduleDescription == expected)
+    }
+}
+
+@Test
 func settingsUpdatePreservesTheRosterMessageProjection() throws {
     let previous = try JSONDecoder().decode(CompanionSummary.self, from: Data(#"""
     {
