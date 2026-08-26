@@ -66,6 +66,27 @@ private final class NotificationMockURLProtocol: URLProtocol, @unchecked Sendabl
     override func stopLoading() {}
 }
 
+private final class ConnectedResourcesMockURLProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        do {
+            let handler = try #require(Self.handler)
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
 private func requestBody(_ request: URLRequest) throws -> Data {
     if let body = request.httpBody { return body }
     let stream = try #require(request.httpBodyStream)
@@ -261,8 +282,8 @@ func companionAccessKeepsEditorsEditableAndViewersReadOnly() throws {
 @Test
 func loadsConnectedResourcesFromTheSharedFirstPartyRoutes() async throws {
     let configuration = URLSessionConfiguration.ephemeral
-    configuration.protocolClasses = [MockURLProtocol.self]
-    MockURLProtocol.handler = { request in
+    configuration.protocolClasses = [ConnectedResourcesMockURLProtocol.self]
+    ConnectedResourcesMockURLProtocol.handler = { request in
         let requestURL = try #require(request.url)
         #expect(request.httpMethod == "GET")
         #expect(request.value(forHTTPHeaderField: "x-companion-org") == "org-1")
@@ -312,7 +333,7 @@ func loadsConnectedResourcesFromTheSharedFirstPartyRoutes() async throws {
         ))
         return (response, data)
     }
-    defer { MockURLProtocol.handler = nil }
+    defer { ConnectedResourcesMockURLProtocol.handler = nil }
 
     let client = APIClient(
         baseURL: URL(string: "http://127.0.0.1:3001")!,
