@@ -22,6 +22,8 @@ struct RootView: View {
                 MarkdownTableDemoView()
             } else if ProcessInfo.processInfo.arguments.contains("-companion-interruption-demo") {
                 CompanionInterruptedTurnDemoView()
+            } else if ProcessInfo.processInfo.arguments.contains("-companion-transcript-window-demo") {
+                CompanionTranscriptWindowDemoView()
             } else if ProcessInfo.processInfo.arguments.contains("-companion-decision-demo") {
                 CompanionDecisionDemoView()
             } else if ProcessInfo.processInfo.arguments.contains("-companion-icon-demo") {
@@ -54,6 +56,7 @@ struct RootView: View {
             guard !arguments.contains("-companion-queued-demo"),
                   !arguments.contains("-markdown-table-demo"),
                   !arguments.contains("-companion-interruption-demo"),
+                  !arguments.contains("-companion-transcript-window-demo"),
                   !arguments.contains("-companion-decision-demo"),
                   !arguments.contains("-companion-icon-demo"),
                   !arguments.contains("-companion-resources-demo"),

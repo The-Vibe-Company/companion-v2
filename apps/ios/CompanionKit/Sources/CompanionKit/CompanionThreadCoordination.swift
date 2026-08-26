@@ -32,6 +32,94 @@ public struct CompanionThreadProjection: Equatable, Sendable {
     public mutating func invalidateRefreshes() {
         revision += 1
     }
+
+    /// Clears the projected thread while keeping refresh generations monotonic across resource
+    /// changes. Replacing this value with a fresh projection could let an older request's numeric
+    /// generation collide with the first refresh for the next Companion.
+    public mutating func reset() {
+        revision += 1
+        thread = nil
+    }
+}
+
+/// Tracks the progressively disclosed portion of a complete thread response.
+///
+/// The thread endpoint intentionally remains unpaginated. This value keeps the client-side
+/// presentation bounded by exposing the newest page first, then adding older entries in fixed
+/// pages when the reader asks for them. Refreshing a growing response preserves the number of
+/// entries the reader has already exposed.
+public struct CompanionTranscriptWindow: Equatable, Sendable {
+    public static let defaultPageSize = 50
+
+    public let pageSize: Int
+    public private(set) var totalCount: Int
+    public private(set) var exposedCount: Int
+
+    public init(
+        totalCount: Int = 0,
+        pageSize: Int = CompanionTranscriptWindow.defaultPageSize
+    ) {
+        let pageSize = max(1, pageSize)
+        self.pageSize = pageSize
+        self.totalCount = 0
+        self.exposedCount = 0
+        refresh(totalCount: totalCount)
+    }
+
+    /// Whether an older page remains hidden from the rendered transcript.
+    public var hasEarlierEntries: Bool {
+        exposedCount < totalCount
+    }
+
+    /// The indexes of the entries exposed by this window for the last refreshed response.
+    public var visibleRange: Range<Int> {
+        visibleRange(for: totalCount)
+    }
+
+    /// The indexes of the entries exposed by this window for a response with `count` entries.
+    /// The overload keeps a caller safe while a response is being installed after a refresh.
+    public func visibleRange(for count: Int) -> Range<Int> {
+        let count = max(0, count)
+        let visibleCount = min(exposedCount, count)
+        return (count - visibleCount)..<count
+    }
+
+    /// Installs the count from a complete thread response.
+    ///
+    /// A first refresh exposes at most one page. Later refreshes retain the current exposed
+    /// count by default. A reader browsing history can instead preserve the entries already on
+    /// screen, growing the exposed count by the number of newly appended tail entries.
+    public mutating func refresh(
+        totalCount: Int,
+        preservingCurrentEntries: Bool = false
+    ) {
+        let count = max(0, totalCount)
+        let appendedCount = max(0, count - self.totalCount)
+        self.totalCount = count
+        if exposedCount == 0 {
+            exposedCount = min(pageSize, count)
+        } else if preservingCurrentEntries {
+            exposedCount = min(count, exposedCount + appendedCount)
+        } else {
+            exposedCount = min(exposedCount, count)
+        }
+    }
+
+    /// Reveals one older page and returns whether the window changed.
+    @discardableResult
+    public mutating func loadEarlier() -> Bool {
+        guard hasEarlierEntries else { return false }
+        let nextCount = min(totalCount, exposedCount + pageSize)
+        guard nextCount != exposedCount else { return false }
+        exposedCount = nextCount
+        return true
+    }
+
+    /// Clears the response and disclosure state, such as when navigating to another Companion.
+    public mutating func reset() {
+        totalCount = 0
+        exposedCount = 0
+    }
 }
 
 /// Serializes durable writes whose response replaces the whole thread while still deduplicating the

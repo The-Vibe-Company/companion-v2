@@ -82,7 +82,8 @@ Release builds ignore launch arguments and environment variables and always use
 
 The Debug-only `-glass-chat-demo`, `-companion-queued-demo`, `-markdown-table-demo`,
 `-glass-management-demo`, `-glass-management-demo-plugins`,
-`-companion-icon-demo`, `-companion-decision-demo`, `-companion-interruption-demo`, `-companion-resources-demo`,
+`-companion-icon-demo`, `-companion-decision-demo`, `-companion-interruption-demo`,
+`-companion-transcript-window-demo`, `-companion-resources-demo`,
 `-companion-settings-demo`, and
 `-companion-roster-demo` launch arguments
 open deterministic showcases without requiring a server or account. Add `-companion-reduce-motion`

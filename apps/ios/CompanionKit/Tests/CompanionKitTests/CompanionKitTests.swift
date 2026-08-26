@@ -1438,6 +1438,103 @@ func decisionResponseInvalidatesAnOlderThreadPoll() throws {
 }
 
 @Test
+func resettingAThreadProjectionKeepsRefreshGenerationsMonotonic() {
+    var projection = CompanionThreadProjection()
+    let staleRefresh = projection.beginRefresh()
+
+    projection.reset()
+    let currentRefresh = projection.beginRefresh()
+
+    #expect(!projection.accepts(refresh: staleRefresh))
+    #expect(projection.accepts(refresh: currentRefresh))
+    #expect(projection.thread == nil)
+}
+
+@Test
+func transcriptWindowStartsWithNewestFiftyEntries() {
+    var window = CompanionTranscriptWindow()
+
+    window.refresh(totalCount: 120)
+
+    #expect(window.totalCount == 120)
+    #expect(window.exposedCount == 50)
+    #expect(window.visibleRange == (70..<120))
+    #expect(window.hasEarlierEntries)
+}
+
+@Test
+func transcriptWindowExpandsByFiftyUntilEverythingIsExposed() {
+    var window = CompanionTranscriptWindow(totalCount: 120)
+
+    let firstExpansion = window.loadEarlier()
+    #expect(firstExpansion)
+    #expect(window.exposedCount == 100)
+    #expect(window.visibleRange == (20..<120))
+    let secondExpansion = window.loadEarlier()
+    #expect(secondExpansion)
+    #expect(window.exposedCount == 120)
+    #expect(window.visibleRange == (0..<120))
+    #expect(!window.hasEarlierEntries)
+    let exhaustedExpansion = window.loadEarlier()
+    #expect(!exhaustedExpansion)
+}
+
+@Test
+func transcriptWindowKeepsSmallTranscriptsFullyExposed() {
+    var window = CompanionTranscriptWindow()
+
+    window.refresh(totalCount: 12)
+
+    #expect(window.exposedCount == 12)
+    #expect(window.visibleRange == (0..<12))
+    #expect(!window.hasEarlierEntries)
+    let expansion = window.loadEarlier()
+    #expect(!expansion)
+}
+
+@Test
+func transcriptWindowRefreshGrowthPreservesExposedCount() {
+    var window = CompanionTranscriptWindow(totalCount: 120)
+    let expansion = window.loadEarlier()
+    #expect(expansion)
+
+    window.refresh(totalCount: 150)
+
+    #expect(window.exposedCount == 100)
+    #expect(window.visibleRange == (50..<150))
+    #expect(window.hasEarlierEntries)
+}
+
+@Test
+func transcriptWindowRefreshCanPreserveEntriesWhileReadingHistory() {
+    var window = CompanionTranscriptWindow(totalCount: 120)
+
+    window.refresh(totalCount: 123, preservingCurrentEntries: true)
+
+    #expect(window.exposedCount == 53)
+    #expect(window.visibleRange == (70..<123))
+    #expect(window.hasEarlierEntries)
+}
+
+@Test
+func transcriptWindowResetStartsDisclosureOver() {
+    var window = CompanionTranscriptWindow(totalCount: 120)
+    let expansion = window.loadEarlier()
+    #expect(expansion)
+
+    window.reset()
+
+    #expect(window.totalCount == 0)
+    #expect(window.exposedCount == 0)
+    #expect(window.visibleRange == (0..<0))
+    #expect(!window.hasEarlierEntries)
+
+    window.refresh(totalCount: 80)
+    #expect(window.exposedCount == 50)
+    #expect(window.visibleRange == (30..<80))
+}
+
+@Test
 func threadMutationGateRejectsDoubleTapAndAllowsRetry() async {
     let gate = CompanionThreadMutationGate()
     let firstQuestion = await gate.acquire(mutationID: "decision:question-1")
