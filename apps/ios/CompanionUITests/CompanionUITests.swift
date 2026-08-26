@@ -571,18 +571,23 @@ final class CompanionUITests: XCTestCase {
         app.launch()
 
         let loadEarlier = app.buttons["chat.load-earlier"]
-        for _ in 0..<5 where !loadEarlier.exists {
+        for _ in 0..<12 where !loadEarlier.isHittable {
             app.swipeDown()
         }
         XCTAssertTrue(loadEarlier.waitForExistence(timeout: 5))
-        let preservedAnchor = app.staticTexts["Long-thread message 71"]
-        XCTAssertTrue(preservedAnchor.isHittable)
+        XCTAssertTrue(loadEarlier.isHittable)
+        let preservedAnchor = app.descendants(matching: .any)["chat.entry.long-71"]
+        XCTAssertTrue(preservedAnchor.exists)
         loadEarlier.tap()
 
-        XCTAssertTrue(preservedAnchor.waitForExistence(timeout: 3))
+        let anchorVisible = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isHittable == true"),
+            object: preservedAnchor
+        )
+        wait(for: [anchorVisible], timeout: 3)
         XCTAssertTrue(preservedAnchor.isHittable)
-        let earlier = app.staticTexts["Long-thread message 21"]
-        for _ in 0..<5 where !earlier.exists {
+        let earlier = app.descendants(matching: .any)["chat.entry.long-21"]
+        for _ in 0..<12 where !earlier.exists {
             app.swipeDown()
         }
         XCTAssertTrue(earlier.waitForExistence(timeout: 3))
@@ -608,6 +613,88 @@ final class CompanionUITests: XCTestCase {
         )
         wait(for: [latestVisible], timeout: 3)
         XCTAssertTrue(latest.isHittable)
+    }
+
+    @MainActor
+    func testTranscriptWindowDemoKeepsLatestEntriesOrderedAndSeparated() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-transcript-window-demo"]
+        app.launch()
+
+        let latest = app.descendants(matching: .any)["chat.entry.long-120"]
+        if !latest.waitForExistence(timeout: 3) {
+            let scrollToBottom = app.buttons["chat.scroll-to-bottom"]
+            XCTAssertTrue(scrollToBottom.waitForExistence(timeout: 3))
+            scrollToBottom.tap()
+        }
+
+        let entries = [
+            app.buttons.matching(
+                NSPredicate(format: "label CONTAINS %@", "run_layout_checks")
+            ).firstMatch,
+            app.descendants(matching: .any)["chat.entry.long-119"],
+            latest,
+        ]
+        XCTAssertTrue(entries.last?.waitForExistence(timeout: 5) == true)
+
+        for (earlier, later) in zip(entries, entries.dropFirst()) {
+            XCTAssertTrue(earlier.exists, "Missing \(earlier.identifier)")
+            XCTAssertTrue(later.exists, "Missing \(later.identifier)")
+            XCTAssertTrue(earlier.isHittable, "\(earlier.identifier) must share the latest viewport")
+            XCTAssertTrue(later.isHittable, "\(later.identifier) must share the latest viewport")
+            XCTAssertLessThanOrEqual(
+                earlier.frame.maxY,
+                later.frame.minY,
+                "Transcript entries overlap or render out of ordinal order"
+            )
+        }
+
+        let table = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "markdown.table.")
+        ).firstMatch
+        XCTAssertTrue(table.exists)
+    }
+
+    @MainActor
+    func testTranscriptWindowDemoBottomControlsNeverCoverChatContent() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-transcript-window-demo"]
+        app.launchEnvironment["COMPANION_TRANSCRIPT_DEMO_SHORT"] = "1"
+        app.launch()
+
+        let queue = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "2 queued")
+        ).firstMatch
+        let composer = app.buttons.matching(
+            NSPredicate(format: "identifier == %@", "chat.composer-controls")
+        ).firstMatch
+        let thinking = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "Luna thinking")
+        ).firstMatch
+        XCTAssertTrue(queue.waitForExistence(timeout: 5))
+        XCTAssertTrue(composer.exists)
+        XCTAssertLessThanOrEqual(queue.frame.maxY, composer.frame.minY)
+
+        app.swipeDown()
+        let scrollToBottom = app.buttons["chat.scroll-to-bottom"]
+        XCTAssertTrue(scrollToBottom.waitForExistence(timeout: 3))
+        let transcript = app.scrollViews.matching(
+            NSPredicate(format: "identifier == %@", "chat.transcript")
+        ).firstMatch
+        XCTAssertTrue(transcript.exists)
+        XCTAssertLessThanOrEqual(transcript.frame.maxY, scrollToBottom.frame.minY)
+        XCTAssertLessThanOrEqual(scrollToBottom.frame.maxY, queue.frame.minY)
+
+        XCTAssertTrue(thinking.waitForExistence(timeout: 3))
+        XCTAssertFalse(thinking.frame.intersects(queue.frame))
+        XCTAssertFalse(thinking.frame.intersects(composer.frame))
+
+        queue.tap()
+        let queueList = app.descendants(matching: .any)["chat.queue.list"]
+        XCTAssertTrue(queueList.waitForExistence(timeout: 2))
+        XCTAssertLessThanOrEqual(queueList.frame.maxY, composer.frame.minY)
+        XCTAssertFalse(scrollToBottom.frame.intersects(queueList.frame))
+        try captureScreenshot(named: "chat-layout-regression-short.png")
     }
 
     @MainActor
@@ -678,7 +765,9 @@ final class CompanionUITests: XCTestCase {
         nativeWideTable.swipeLeft()
         XCTAssertLessThan(trailingCell.frame.minX, trailingCellInitialX)
 
-        let longTable = app.descendants(matching: .any)["markdown-table-demo.long-content"]
+        let longTable = app.otherElements.matching(
+            NSPredicate(format: "identifier == %@", "markdown-table-demo.long-content")
+        ).firstMatch
         for _ in 0..<4 where !longTable.isHittable { app.swipeUp() }
         let longDetailCell = longTable.descendants(matching: .any)["markdown.table.cell.1.1"]
         XCTAssertTrue(longDetailCell.exists)
@@ -719,6 +808,43 @@ final class CompanionUITests: XCTestCase {
         XCTAssertLessThanOrEqual(wideTable.frame.maxX, app.frame.maxX + 1)
         XCTAssertGreaterThanOrEqual(wideTable.frame.minX, app.frame.minX - 1)
         try captureScreenshot(named: "markdown-tables-accessibility-landscape.png")
+    }
+
+    @MainActor
+    func testMarkdownTableDemoKeepsRowsAndColumnsSeparated() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-markdown-table-demo"]
+        app.launch()
+
+        let simpleTable = app.descendants(matching: .any)["markdown-table-demo.simple"]
+        XCTAssertTrue(simpleTable.waitForExistence(timeout: 5))
+        let headerLeft = simpleTable.descendants(matching: .any)["markdown.table.cell.0.0"]
+        let headerRight = simpleTable.descendants(matching: .any)["markdown.table.cell.0.1"]
+        let firstLeft = simpleTable.descendants(matching: .any)["markdown.table.cell.1.0"]
+        let firstRight = simpleTable.descendants(matching: .any)["markdown.table.cell.1.1"]
+        XCTAssertFalse(headerLeft.frame.intersects(headerRight.frame))
+        XCTAssertFalse(firstLeft.frame.intersects(firstRight.frame))
+        XCTAssertLessThanOrEqual(headerLeft.frame.maxY, firstLeft.frame.minY)
+        XCTAssertEqual(headerLeft.frame.minX, firstLeft.frame.minX, accuracy: 1)
+        XCTAssertEqual(headerRight.frame.maxX, firstRight.frame.maxX, accuracy: 1)
+
+        let longTable = app.otherElements.matching(
+            NSPredicate(format: "identifier == %@", "markdown-table-demo.long-content")
+        ).firstMatch
+        for _ in 0..<5 where !app.frame.intersects(longTable.frame) { app.swipeUp() }
+        XCTAssertTrue(app.frame.intersects(longTable.frame))
+        XCTAssertGreaterThanOrEqual(longTable.frame.minX, app.frame.minX - 1)
+        XCTAssertLessThanOrEqual(longTable.frame.maxX, app.frame.maxX + 1)
+        let longRows = (0...3).map {
+            longTable.descendants(matching: .any)["markdown.table.cell.\($0).0"]
+        }
+        for (earlier, later) in zip(longRows, longRows.dropFirst()) {
+            XCTAssertTrue(earlier.exists)
+            XCTAssertTrue(later.exists)
+            XCTAssertLessThanOrEqual(earlier.frame.maxY, later.frame.minY)
+            XCTAssertEqual(earlier.frame.minX, later.frame.minX, accuracy: 1)
+        }
+        try captureScreenshot(named: "markdown-tables-aligned.png")
     }
 
     @MainActor

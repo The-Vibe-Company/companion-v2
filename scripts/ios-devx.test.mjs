@@ -227,7 +227,7 @@ test("the iOS launcher derives the API port from Conductor and uses XcodeBuildMC
   assert.doesNotMatch(launcher, /iPhone 17|\bxcodebuild\b|\bxcrun\b|\bsimctl\b/);
 });
 
-test("CI builds iOS without secrets and keeps the live provider diagnostic manual", () => {
+test("CI tests iOS without secrets and keeps the live provider diagnostic manual", () => {
   const ci = read(".github/workflows/ci.yml");
   const e2e = read(".github/workflows/ios-e2e.yml");
 
@@ -236,7 +236,11 @@ test("CI builds iOS without secrets and keeps the live provider diagnostic manua
   assert.match(ci, /if: needs\.scope\.outputs\.skill == 'true' \|\| needs\.scope\.outputs\.ios == 'true'/);
   assert.doesNotMatch(ci, /xcodebuildmcp/i);
   assert.match(ci, /swift test --package-path apps\/ios\/CompanionKit/);
-  assert.match(ci, /xcodebuild build/);
+  assert.match(ci, /xcodebuild test/);
+  assert.match(ci, /testTranscriptWindowDemoLoadsEarlierMessages/);
+  assert.match(ci, /testTranscriptWindowDemoKeepsLatestEntriesOrderedAndSeparated/);
+  assert.match(ci, /testTranscriptWindowDemoBottomControlsNeverCoverChatContent/);
+  assert.match(ci, /testMarkdownTableDemoKeepsRowsAndColumnsSeparated/);
   assert.doesNotMatch(ci, /testChatPhotoLibraryOpensOnFirstSelectionWithKeyboardVisible/);
   assert.match(ci, /xcrun simctl list devices available --json/);
   assert.match(ci, /node scripts\/select-ios-simulator\.mjs/);
