@@ -888,6 +888,7 @@ public struct TranscriptEntry: Codable, Identifiable, Equatable, Sendable {
         content = try container.decode(String.self, forKey: .content)
         authorID = try container.decodeIfPresent(String.self, forKey: .authorID)
         authorName = try container.decodeIfPresent(String.self, forKey: .authorName)
+        tool = try container.decodeIfPresent(CompanionToolRun.self, forKey: .tool)
         queued = try container.decodeIfPresent(Bool.self, forKey: .queued) ?? false
         attachments = try container.decodeIfPresent([CompanionAttachment].self, forKey: .attachments) ?? []
         createdAt = try container.decode(String.self, forKey: .createdAt)
