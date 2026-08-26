@@ -229,17 +229,23 @@ private struct MarkdownNodeView: View {
 private struct MarkdownText: View {
     let content: AttributedString
     let accent: Color
+    var textAlignment: TextAlignment = .leading
 
     var body: some View {
         text
             .foregroundStyle(Color.companionInk)
             .tint(accent)
+            .multilineTextAlignment(textAlignment)
     }
 
     @ViewBuilder
     private var text: some View {
         if containsConductorLink {
-            MarkdownInlineFlow(content: content, accent: accent)
+            MarkdownInlineFlow(
+                content: content,
+                accent: accent,
+                textAlignment: textAlignment
+            )
         } else {
             Text(content)
         }
@@ -267,9 +273,17 @@ private struct MarkdownInlineRun: Identifiable {
 private struct MarkdownInlineFlow: View {
     let runs: [MarkdownInlineRun]
     let accent: Color
+    let textAlignment: TextAlignment
 
-    init(content: AttributedString, accent: Color) {
+    @Environment(\.layoutDirection) private var layoutDirection
+
+    init(
+        content: AttributedString,
+        accent: Color,
+        textAlignment: TextAlignment
+    ) {
         self.accent = accent
+        self.textAlignment = textAlignment
         var inlineRuns: [MarkdownInlineRun] = []
         for run in content.runs {
             var fragment = AttributedString(content[run.range])
@@ -290,7 +304,10 @@ private struct MarkdownInlineFlow: View {
     }
 
     var body: some View {
-        MarkdownInlineFlowLayout {
+        MarkdownInlineFlowLayout(
+            textAlignment: textAlignment,
+            layoutDirection: layoutDirection
+        ) {
             ForEach(runs) { run in
                 if run.isConductorLink, let link = run.link {
                     Link(destination: link) {
@@ -311,6 +328,9 @@ private struct MarkdownInlineFlow: View {
 }
 
 private struct MarkdownInlineFlowLayout: Layout {
+    let textAlignment: TextAlignment
+    let layoutDirection: LayoutDirection
+
     private struct RawPlacement {
         let index: Int
         let size: CGSize
@@ -370,6 +390,7 @@ private struct MarkdownInlineFlowLayout: Layout {
         )
         var rawPlacements: [RawPlacement] = []
         var lineHeights: [CGFloat] = []
+        var lineWidths: [CGFloat] = []
         var lineWidth: CGFloat = 0
         var lineHeight: CGFloat = 0
         var line = 0
@@ -380,6 +401,7 @@ private struct MarkdownInlineFlowLayout: Layout {
             if lineWidth > 0, idealSize.width > width - lineWidth {
                 maxLineWidth = max(maxLineWidth, lineWidth)
                 lineHeights.append(lineHeight)
+                lineWidths.append(lineWidth)
                 line += 1
                 lineWidth = 0
                 lineHeight = 0
@@ -403,6 +425,7 @@ private struct MarkdownInlineFlowLayout: Layout {
 
         maxLineWidth = max(maxLineWidth, lineWidth)
         lineHeights.append(lineHeight)
+        lineWidths.append(lineWidth)
 
         var lineOrigins: [CGFloat] = []
         var y: CGFloat = 0
@@ -412,11 +435,15 @@ private struct MarkdownInlineFlowLayout: Layout {
         }
 
         let placements = rawPlacements.map { raw in
-            Placement(
+            let lineOffset = horizontalOffset(
+                availableWidth: proposedWidth.flatMap { $0.isFinite ? $0 : nil } ?? maxLineWidth,
+                lineWidth: lineWidths[raw.line]
+            )
+            return Placement(
                 index: raw.index,
                 size: raw.size,
                 origin: CGPoint(
-                    x: raw.x,
+                    x: raw.x + lineOffset,
                     y: lineOrigins[raw.line] + (lineHeights[raw.line] - raw.size.height) / 2
                 )
             )
@@ -428,6 +455,18 @@ private struct MarkdownInlineFlowLayout: Layout {
                 height: y
             )
         )
+    }
+
+    private func horizontalOffset(availableWidth: CGFloat, lineWidth: CGFloat) -> CGFloat {
+        let remainingWidth = max(availableWidth - lineWidth, 0)
+        switch textAlignment {
+        case .center:
+            return remainingWidth / 2
+        case .leading:
+            return layoutDirection == .rightToLeft ? remainingWidth : 0
+        case .trailing:
+            return layoutDirection == .rightToLeft ? 0 : remainingWidth
+        }
     }
 }
 
@@ -505,33 +544,70 @@ private struct MarkdownTableView: View {
     let accent: Color
 
     var body: some View {
-        ScrollView(.horizontal) {
-            Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
-                ForEach(rows) { row in
-                    GridRow {
-                        ForEach(Array(columns.indices), id: \.self) { column in
-                            let cell = row.children.first { child in
-                                if case .tableCell(let index) = child.kind {
-                                    return index == column
+        VStack(alignment: .trailing, spacing: 0) {
+            ScrollView(.horizontal) {
+                Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
+                    ForEach(Array(rows.enumerated()), id: \.element.id) { rowIndex, row in
+                        GridRow {
+                            ForEach(Array(columns.indices), id: \.self) { column in
+                                let cell = row.children.first { child in
+                                    if case .tableCell(let index) = child.kind {
+                                        return index == column
+                                    }
+                                    return false
                                 }
-                                return false
+                                MarkdownTableCell(
+                                    content: cell?.content ?? AttributedString(),
+                                    header: headerText(column: column),
+                                    alignment: columns[column],
+                                    isHeader: isHeader(row),
+                                    rowIndex: rowIndex,
+                                    isLastRow: rowIndex == rows.count - 1,
+                                    isLastColumn: column == columns.count - 1,
+                                    accent: accent
+                                )
+                                .accessibilityIdentifier(
+                                    "markdown.table.cell.\(rowIndex).\(column)"
+                                )
                             }
-                            MarkdownTableCell(
-                                content: cell?.content ?? AttributedString(),
-                                header: headerText(column: column),
-                                alignment: columns[column],
-                                isHeader: isHeader(row),
-                                accent: accent
-                            )
                         }
+                        .accessibilityElement(children: .contain)
+                        .accessibilityLabel(rowAccessibilityLabel(row, index: rowIndex))
                     }
                 }
+                .fixedSize(horizontal: true, vertical: false)
+            }
+            .scrollIndicators(.visible)
+            .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if columns.count > 2 {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.left.and.right")
+                    Text("Scroll")
+                }
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(Color.companionMuted)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .background(Color.companionSurfaceRaised.opacity(0.34))
+                .overlay(alignment: .top) {
+                    Rectangle()
+                        .fill(Color.companionDivider)
+                        .frame(height: 0.5)
+                }
+                .accessibilityHidden(true)
             }
         }
-        .scrollIndicators(.visible)
         .companionMaterial(radius: 10)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Markdown table")
+        .accessibilityLabel(
+            "Table, \(columns.count) columns, \(dataRowCount) rows"
+        )
+        .accessibilityHint(
+            columns.count > 2 ? "Swipe horizontally to read every column." : ""
+        )
     }
 
     private var columns: [MarkdownNode.TableAlignment] {
@@ -563,6 +639,14 @@ private struct MarkdownTableView: View {
         let value = String(cell.content.characters).trimmingCharacters(in: .whitespacesAndNewlines)
         return value.isEmpty ? nil : value
     }
+
+    private var dataRowCount: Int {
+        rows.filter { !isHeader($0) }.count
+    }
+
+    private func rowAccessibilityLabel(_ row: MarkdownNode, index: Int) -> String {
+        isHeader(row) ? "Column headers" : "Row \(index)"
+    }
 }
 
 private struct MarkdownTableCell: View {
@@ -570,20 +654,49 @@ private struct MarkdownTableCell: View {
     let header: String?
     let alignment: MarkdownNode.TableAlignment
     let isHeader: Bool
+    let rowIndex: Int
+    let isLastRow: Bool
+    let isLastColumn: Bool
     let accent: Color
 
+    @ScaledMetric(relativeTo: .body) private var minimumWidth: CGFloat = 120
+    @ScaledMetric(relativeTo: .body) private var idealWidth: CGFloat = 152
+    @ScaledMetric(relativeTo: .body) private var maximumWidth: CGFloat = 280
+    @ScaledMetric(relativeTo: .body) private var horizontalPadding: CGFloat = 12
+    @ScaledMetric(relativeTo: .body) private var verticalPadding: CGFloat = 10
+
     var body: some View {
-        MarkdownText(content: content, accent: accent)
+        MarkdownText(content: content, accent: accent, textAlignment: textAlignment)
             .font(isHeader ? .subheadline.weight(.semibold) : .subheadline)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .frame(minWidth: 96, maxWidth: 240, alignment: frameAlignment)
-            .background(isHeader ? Color.companionSurfaceRaised : Color.clear)
-            .overlay {
-                Rectangle().stroke(Color.companionDivider, lineWidth: 0.5)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, horizontalPadding)
+            .padding(.vertical, verticalPadding)
+            .frame(
+                minWidth: minimumWidth,
+                idealWidth: idealWidth,
+                maxWidth: maximumWidth,
+                maxHeight: .infinity,
+                alignment: frameAlignment
+            )
+            .background(cellBackground)
+            .overlay(alignment: .bottom) {
+                if !isLastRow {
+                    Rectangle()
+                        .fill(Color.companionDivider)
+                        .frame(height: 0.5)
+                }
             }
+            .overlay(alignment: .trailing) {
+                if !isLastColumn {
+                    Rectangle()
+                        .fill(Color.companionDivider)
+                        .frame(width: 0.5)
+                }
+            }
+            .accessibilityElement(children: .contain)
             .accessibilityAddTraits(isHeader ? .isHeader : [])
             .accessibilityLabel(accessibilityLabel)
+            .accessibilityValue("\(alignmentLabel) aligned")
     }
 
     private var frameAlignment: Alignment {
@@ -594,10 +707,32 @@ private struct MarkdownTableCell: View {
         }
     }
 
+    private var textAlignment: TextAlignment {
+        switch alignment {
+        case .leading: return .leading
+        case .center: return .center
+        case .trailing: return .trailing
+        }
+    }
+
+    private var cellBackground: Color {
+        if isHeader { return .companionSurfaceRaised }
+        return rowIndex.isMultiple(of: 2) ? Color.clear : Color.companionSurfaceRaised.opacity(0.34)
+    }
+
+    private var alignmentLabel: String {
+        switch alignment {
+        case .leading: return "Left"
+        case .center: return "Center"
+        case .trailing: return "Right"
+        }
+    }
+
     private var accessibilityLabel: String {
         let value = String(content.characters).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !isHeader, let header else { return value }
-        return "\(header): \(value)"
+        let spokenValue = value.isEmpty ? "No value" : value
+        guard !isHeader, let header else { return spokenValue }
+        return "\(header), \(spokenValue)"
     }
 }
 

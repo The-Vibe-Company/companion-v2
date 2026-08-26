@@ -62,7 +62,7 @@ xcodebuildmcp swift-package test --package-path apps/ios/CompanionKit
 Release builds ignore launch arguments and environment variables and always use
 `https://api.thecompanion.sh`.
 
-The Debug-only `-glass-chat-demo`, `-glass-management-demo`, `-glass-management-demo-plugins`,
+The Debug-only `-glass-chat-demo`, `-markdown-table-demo`, `-glass-management-demo`, `-glass-management-demo-plugins`,
 `-companion-icon-demo`, `-companion-decision-demo`, `-companion-interruption-demo`, `-companion-resources-demo`,
 `-companion-settings-demo`, and
 `-companion-roster-demo` launch arguments
@@ -72,6 +72,8 @@ alongside `-companion-icon-demo` to force the gallery's Reduce Motion path. The 
 The decision demo accepts `COMPANION_DECISION_DEMO_ACCESS=owner|editor|viewer` for the matching
 decision controls. Set `COMPANION_DECISION_DEMO_FAIL_ONCE=<request-id>` to exercise a failed
 submission followed by an enabled retry.
+Add `-markdown-table-dark-demo` alongside `-markdown-table-demo` to exercise the table gallery with
+the adaptive Companion color tokens in dark appearance.
 The interruption demo accepts `COMPANION_INTERRUPTION_DEMO_ACCESS=owner|editor|viewer`; set
 `COMPANION_INTERRUPTION_DEMO_FAIL_RETRY_ONCE=1` to verify that an uncertain submission keeps the
 same safe retry action available.

@@ -115,12 +115,17 @@ private struct CompanionMaterialModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
             .background(
-                reduceTransparency ? AnyShapeStyle(Color.white) : AnyShapeStyle(.ultraThinMaterial),
+                reduceTransparency
+                    ? AnyShapeStyle(Color.companionSurfaceOpaque)
+                    : AnyShapeStyle(.ultraThinMaterial),
                 in: RoundedRectangle(cornerRadius: radius, style: .continuous)
             )
             .overlay {
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .stroke(reduceTransparency ? Color.black.opacity(0.10) : Color.companionBorder, lineWidth: 0.7)
+                    .stroke(
+                        reduceTransparency ? Color.companionDivider : Color.companionBorder,
+                        lineWidth: 0.7
+                    )
             }
     }
 }
