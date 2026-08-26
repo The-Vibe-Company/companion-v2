@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  answerCompanionRoutineDecisionV2,
   claimDueCompanionRoutines,
   createCompanionRoutineV2,
   createCompanionV2,
@@ -320,5 +321,171 @@ describe("Companion routines over the real database", () => {
       database: integrationDb,
     });
     expect(fired.outcome).toBe("fired");
+  });
+
+  it("denies an expired routine proposal without creating a routine", async () => {
+    const turnId = randomUUID();
+    const attemptId = randomUUID();
+    const clientMessageId = randomUUID();
+    const requestKey = randomUUID();
+    // A poll/runtime sweep can lag the wall-clock deadline, leaving an expired card visibly
+    // pending for a short window. Explicit denial is still fail-closed and must win that race.
+    const expiresAt = new Date(Date.now() - 60_000);
+    const proposal = {
+      kind: "routine",
+      name: "conductor-progress-check",
+      prompt: "Check every active Conductor workspace and report its progress.",
+      cron: "*/30 * * * *",
+      timezone: "Europe/Paris",
+    };
+
+    await integrationSql`
+      insert into companion_threads(org_id, companion_id, next_ordinal, last_message_at)
+      values (${fixture.orgA}::uuid, ${companionId}::uuid, 2, now())
+      on conflict (companion_id) do update
+      set next_ordinal = 2, updated_at = now()
+    `;
+    await integrationSql`
+      insert into companion_transcript_entries(
+        org_id, companion_id, event_id, ordinal, role, content, author_id
+      ) values (
+        ${fixture.orgA}::uuid, ${companionId}::uuid, ${`msg:${clientMessageId}`},
+        0, 'user', 'Propose a Conductor progress routine', ${fixture.owner.id}
+      )
+    `;
+    await integrationSql`
+      insert into companion_turns (
+        id, org_id, companion_id, client_message_id, message_event_id,
+        queue_sequence, actor_id, client_surface, status,
+        inactivity_deadline_at, absolute_deadline_at
+      ) values (
+        ${turnId}::uuid, ${fixture.orgA}::uuid, ${companionId}::uuid,
+        ${clientMessageId}::uuid, ${`msg:${clientMessageId}`}, 1,
+        ${fixture.owner.id}, 'native_mobile', 'needs_input',
+        null, now() + interval '2 hours'
+      )
+    `;
+    await integrationSql`
+      insert into companion_turn_attempts (
+        id, org_id, companion_id, turn_id, attempt_number, actor_id,
+        runtime_generation, settings_revision, skills_revision, model_id,
+        provider_ids, provider_credential_refs, selected_skill_ids,
+        selected_mcp_account_ids, mcp_credential_refs,
+        status, checkpoint, dispatch_state, command_id,
+        dispatch_accepted_at, pi_invocation_id, last_activity_at
+      ) values (
+        ${attemptId}::uuid, ${fixture.orgA}::uuid, ${companionId}::uuid, ${turnId}::uuid,
+        1, ${fixture.owner.id}, 1, 1, 1, 'claude-opus-4-8',
+        ${JSON.stringify(["anthropic"])}::jsonb,
+        ${JSON.stringify([{ provider_id: "anthropic", credential_generation: randomUUID(), credential_version: 1 }])}::jsonb,
+        '[]'::jsonb, '[]'::jsonb, '[]'::jsonb,
+        'needs_input', 'needs_input', 'accepted', ${randomUUID()}::uuid,
+        now(), ${`pi-${attemptId}`}, now()
+      )
+    `;
+    await integrationSql`
+      insert into companion_decision_deliveries(
+        org_id, companion_id, turn_id, attempt_id,
+        request_key, request_kind, expires_at, proposal
+      ) values (
+        ${fixture.orgA}::uuid, ${companionId}::uuid, ${turnId}::uuid, ${attemptId}::uuid,
+        ${requestKey}, 'routine_proposal', ${expiresAt.toISOString()},
+        ${JSON.stringify(proposal)}::jsonb
+      )
+    `;
+    const decision = {
+      request_id: requestKey,
+      kind: "routine",
+      name: "propose_routine",
+      title: "Check every Conductor workspace every 30 minutes",
+      detail: "Monitor all active Conductor workspaces.",
+      status: "pending",
+      answer: null,
+      decided_by_id: null,
+      decided_by_name: null,
+      decided_at: null,
+      expires_at: expiresAt.toISOString(),
+      proposal,
+    };
+    await integrationSql`
+      insert into companion_transcript_entries(
+        org_id, companion_id, event_id, ordinal, role, content, decision
+      ) values (
+        ${fixture.orgA}::uuid, ${companionId}::uuid, ${`decision:${requestKey}`},
+        1, 'decision', ${decision.title}, ${JSON.stringify(decision)}::jsonb
+      )
+    `;
+
+    await asActor(fixture.owner, (database) => answerCompanionRoutineDecisionV2({
+      orgId: fixture.orgA,
+      companionId,
+      requestId: requestKey,
+      decision: "deny",
+      database,
+    }));
+
+    // The runtime expiry sweep may win the row lock after the HTTP preflight saw `pending` but
+    // before this answer function selects it. Deny treats that actorless terminal row as the same
+    // fail-closed outcome instead of returning a conflict.
+    const sweptRequestKey = randomUUID();
+    const sweptAt = new Date();
+    await integrationSql`
+      insert into companion_decision_deliveries(
+        org_id, companion_id, turn_id, attempt_id,
+        request_key, request_kind, decision_status, responded_at, expires_at, proposal
+      ) values (
+        ${fixture.orgA}::uuid, ${companionId}::uuid, ${turnId}::uuid, ${attemptId}::uuid,
+        ${sweptRequestKey}, 'routine_proposal', 'expired', ${sweptAt.toISOString()},
+        ${expiresAt.toISOString()}, ${JSON.stringify(proposal)}::jsonb
+      )
+    `;
+    await asActor(fixture.owner, (database) => answerCompanionRoutineDecisionV2({
+      orgId: fixture.orgA,
+      companionId,
+      requestId: sweptRequestKey,
+      decision: "deny",
+      database,
+    }));
+
+    // The exception is deliberately one-way: expiry can never be bypassed to create a routine.
+    const expiredAllowRequestKey = randomUUID();
+    await integrationSql`
+      insert into companion_decision_deliveries(
+        org_id, companion_id, turn_id, attempt_id,
+        request_key, request_kind, expires_at, proposal
+      ) values (
+        ${fixture.orgA}::uuid, ${companionId}::uuid, ${turnId}::uuid, ${attemptId}::uuid,
+        ${expiredAllowRequestKey}, 'routine_proposal', ${expiresAt.toISOString()},
+        ${JSON.stringify(proposal)}::jsonb
+      )
+    `;
+    await expect(asActor(fixture.owner, (database) => answerCompanionRoutineDecisionV2({
+      orgId: fixture.orgA,
+      companionId,
+      requestId: expiredAllowRequestKey,
+      decision: "allow",
+      database,
+    }))).rejects.toMatchObject({ cause: { code: "55000" } });
+
+    await expect(asActor(fixture.owner, (database) => listCompanionRoutinesV2({
+      orgId: fixture.orgA,
+      companionId,
+      database,
+    }))).resolves.toEqual([]);
+    const [delivery] = await integrationDb
+      .select({ decisionStatus: schema.companionDecisionDeliveries.decisionStatus })
+      .from(schema.companionDecisionDeliveries)
+      .where(eq(schema.companionDecisionDeliveries.requestKey, requestKey));
+    expect(delivery).toEqual({ decisionStatus: "denied" });
+    const [entry] = await integrationDb
+      .select({ decision: schema.companionTranscriptEntries.decision })
+      .from(schema.companionTranscriptEntries)
+      .where(eq(schema.companionTranscriptEntries.eventId, `decision:${requestKey}`));
+    expect(entry?.decision).toMatchObject({ status: "denied", decided_by_id: fixture.owner.id });
+    const [swept] = await integrationDb
+      .select({ decisionStatus: schema.companionDecisionDeliveries.decisionStatus })
+      .from(schema.companionDecisionDeliveries)
+      .where(eq(schema.companionDecisionDeliveries.requestKey, sweptRequestKey));
+    expect(swept).toEqual({ decisionStatus: "expired" });
   });
 });
