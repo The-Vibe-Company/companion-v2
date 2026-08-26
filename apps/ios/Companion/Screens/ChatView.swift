@@ -491,20 +491,26 @@ struct ChatView: View {
         pendingMessages[index].failed = false
         if !message.attachments.isEmpty { pendingMessages[index].uploadProgress = 0 }
         error = nil
+        let uploadProgress: (@Sendable (Double) -> Void)?
+        if message.attachments.isEmpty {
+            uploadProgress = nil
+        } else {
+            uploadProgress = { progress in
+                Task { @MainActor in
+                    guard let current = pendingMessages.firstIndex(where: { $0.id == id }) else {
+                        return
+                    }
+                    pendingMessages[current].uploadProgress = progress
+                }
+            }
+        }
         do {
             try await sessionStore.sendMessage(
                 companionID: companion.id,
                 content: message.content,
                 clientMessageID: message.id,
                 attachments: message.attachments,
-                uploadProgress: message.attachments.isEmpty ? nil : { progress in
-                    Task { @MainActor in
-                        guard let current = pendingMessages.firstIndex(where: { $0.id == id }) else {
-                            return
-                        }
-                        pendingMessages[current].uploadProgress = progress
-                    }
-                }
+                uploadProgress: uploadProgress
             )
             pendingMessages.removeAll { $0.id == id }
             await reload(silently: true)
