@@ -349,6 +349,66 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    func testTranscriptWindowDemoStartsWithOnlyTheNewestFiftyMessages() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-transcript-window-demo"]
+        app.launch()
+
+        XCTAssertTrue(app.staticTexts["Long-thread message 120"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["Long-thread message 1"].exists)
+        for _ in 0..<5 where !app.buttons["chat.load-earlier"].exists {
+            app.swipeDown()
+        }
+        XCTAssertTrue(app.buttons["chat.load-earlier"].waitForExistence(timeout: 3))
+    }
+
+    @MainActor
+    func testTranscriptWindowDemoLoadsEarlierMessages() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-transcript-window-demo"]
+        app.launch()
+
+        let loadEarlier = app.buttons["chat.load-earlier"]
+        for _ in 0..<5 where !loadEarlier.exists {
+            app.swipeDown()
+        }
+        XCTAssertTrue(loadEarlier.waitForExistence(timeout: 5))
+        let preservedAnchor = app.staticTexts["Long-thread message 71"]
+        XCTAssertTrue(preservedAnchor.isHittable)
+        loadEarlier.tap()
+
+        XCTAssertTrue(preservedAnchor.waitForExistence(timeout: 3))
+        XCTAssertTrue(preservedAnchor.isHittable)
+        let earlier = app.staticTexts["Long-thread message 21"]
+        for _ in 0..<5 where !earlier.exists {
+            app.swipeDown()
+        }
+        XCTAssertTrue(earlier.waitForExistence(timeout: 3))
+    }
+
+    @MainActor
+    func testTranscriptWindowDemoReturnsToLatestAfterScrollingAway() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-transcript-window-demo"]
+        app.launch()
+
+        let latest = app.staticTexts["Long-thread message 120"]
+        XCTAssertTrue(latest.waitForExistence(timeout: 5))
+        app.swipeDown()
+
+        let scrollToBottom = app.buttons["chat.scroll-to-bottom"]
+        XCTAssertTrue(scrollToBottom.waitForExistence(timeout: 3))
+        scrollToBottom.tap()
+
+        let latestVisible = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isHittable == true"),
+            object: latest
+        )
+        wait(for: [latestVisible], timeout: 3)
+        XCTAssertTrue(latest.isHittable)
+    }
+
+    @MainActor
     func testCompanionMarkdownSupportsAccessibilityTextInLandscape() throws {
         let app = XCUIApplication()
         app.launchArguments = [

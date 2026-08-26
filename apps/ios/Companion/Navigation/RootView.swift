@@ -18,6 +18,8 @@ struct RootView: View {
 #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("-companion-interruption-demo") {
                 CompanionInterruptedTurnDemoView()
+            } else if ProcessInfo.processInfo.arguments.contains("-companion-transcript-window-demo") {
+                CompanionTranscriptWindowDemoView()
             } else if ProcessInfo.processInfo.arguments.contains("-companion-decision-demo") {
                 CompanionDecisionDemoView()
             } else if ProcessInfo.processInfo.arguments.contains("-companion-icon-demo") {
@@ -48,6 +50,7 @@ struct RootView: View {
 #if DEBUG
             let arguments = ProcessInfo.processInfo.arguments
             guard !arguments.contains("-companion-interruption-demo"),
+                  !arguments.contains("-companion-transcript-window-demo"),
                   !arguments.contains("-companion-decision-demo"),
                   !arguments.contains("-companion-icon-demo"),
                   !arguments.contains("-companion-resources-demo"),
