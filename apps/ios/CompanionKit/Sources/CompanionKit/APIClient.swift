@@ -1,5 +1,24 @@
 import Foundation
 
+private final class UploadProgressDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    private let onProgress: @Sendable (Double) -> Void
+
+    init(onProgress: @escaping @Sendable (Double) -> Void) {
+        self.onProgress = onProgress
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didSendBodyData bytesSent: Int64,
+        totalBytesSent: Int64,
+        totalBytesExpectedToSend: Int64
+    ) {
+        guard totalBytesExpectedToSend > 0 else { return }
+        onProgress(min(1, Double(totalBytesSent) / Double(totalBytesExpectedToSend)))
+    }
+}
+
 public struct APIError: Error, LocalizedError, Equatable, Sendable {
     public let status: Int
     public let code: String?
@@ -459,8 +478,41 @@ public actor APIClient {
         ).thread
     }
 
-    public func sendMessage(companionID: String, content: String, clientMessageID: UUID) async throws {
+    public func sendMessage(
+        companionID: String,
+        content: String,
+        clientMessageID: UUID,
+        attachments: [CompanionMessageAttachment] = [],
+        uploadProgress: (@Sendable (Double) -> Void)? = nil
+    ) async throws {
         let id = companionID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? companionID
+        if !attachments.isEmpty {
+            guard attachments.count <= companionMessageAttachmentMaximumCount else {
+                throw CompanionMessageAttachmentError.tooMany
+            }
+            let boundary = "CompanionBoundary-\(UUID().uuidString)"
+            let uploadFile = try Self.writeMultipartMessageFile(
+                boundary: boundary,
+                content: content,
+                clientMessageID: clientMessageID,
+                attachments: attachments
+            )
+            defer { try? FileManager.default.removeItem(at: uploadFile) }
+            uploadProgress?(0)
+            _ = try await perform(
+                path: "/v1/companions/\(id)/messages",
+                method: "POST",
+                body: nil,
+                acceptedStatuses: 200..<300,
+                additionallyAcceptedStatus: 409,
+                timeout: 120,
+                additionalHeaders: ["Content-Type": "multipart/form-data; boundary=\(boundary)"],
+                uploadProgress: uploadProgress,
+                uploadFile: uploadFile
+            )
+            uploadProgress?(1)
+            return
+        }
         let body = try encoder.encode([
             "content": content,
             "client_message_id": clientMessageID.uuidString.lowercased(),
@@ -473,6 +525,18 @@ public actor APIClient {
             additionallyAcceptedStatus: 409,
             timeout: 210
         )
+    }
+
+    public func attachmentData(companionID: String, attachmentID: String) async throws -> Data {
+        let companion = companionID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? companionID
+        let attachment = attachmentID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? attachmentID
+        let (data, _) = try await perform(
+            path: "/v1/companions/\(companion)/attachments/\(attachment)",
+            method: "GET",
+            body: nil,
+            timeout: 60
+        )
+        return data
     }
 
     private func decode<T: Decodable>(
@@ -517,9 +581,11 @@ public actor APIClient {
         acceptedStatuses: Range<Int> = 200..<300,
         additionallyAcceptedStatus: Int? = nil,
         timeout: TimeInterval = 30,
-        additionalHeaders: [String: String] = [:]
+        additionalHeaders: [String: String] = [:],
+        uploadProgress: (@Sendable (Double) -> Void)? = nil,
+        uploadFile: URL? = nil
     ) async throws -> (Data, HTTPURLResponse) {
-        let request = try makeRequest(
+        var request = try makeRequest(
             path: path,
             method: method,
             body: body,
@@ -530,7 +596,17 @@ public actor APIClient {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await session.data(for: request)
+            if let uploadFile {
+                request.httpBody = nil
+                let delegate = uploadProgress.map { UploadProgressDelegate(onProgress: $0) }
+                (data, response) = try await session.upload(
+                    for: request,
+                    fromFile: uploadFile,
+                    delegate: delegate
+                )
+            } else {
+                (data, response) = try await session.data(for: request)
+            }
         } catch {
             throw APIError(status: 0, code: "network_error", message: "The server could not be reached.")
         }
@@ -589,6 +665,63 @@ public actor APIClient {
             request.setValue(value, forHTTPHeaderField: name)
         }
         return request
+    }
+
+    private static func writeMultipartMessageFile(
+        boundary: String,
+        content: String,
+        clientMessageID: UUID,
+        attachments: [CompanionMessageAttachment]
+    ) throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("companion-message-\(UUID().uuidString).multipart")
+        guard FileManager.default.createFile(
+            atPath: url.path,
+            contents: nil,
+            attributes: [.posixPermissions: 0o600]
+        ) else {
+            throw APIError(status: 0, code: "upload_prepare_failed", message: "The attachments could not be prepared.")
+        }
+        let handle: FileHandle
+        do {
+            handle = try FileHandle(forWritingTo: url)
+        } catch {
+            try? FileManager.default.removeItem(at: url)
+            throw error
+        }
+        do {
+            func append(_ string: String) throws {
+                try handle.write(contentsOf: Data(string.utf8))
+            }
+            func appendField(name: String, value: String) throws {
+                try append("--\(boundary)\r\n")
+                try append("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n")
+                try append(value)
+                try append("\r\n")
+            }
+
+            try appendField(name: "content", value: content)
+            try appendField(name: "client_message_id", value: clientMessageID.uuidString.lowercased())
+            for attachment in attachments {
+                let filename = attachment.filename
+                    .replacingOccurrences(of: "\\", with: "\\\\")
+                    .replacingOccurrences(of: "\"", with: "\\\"")
+                    .replacingOccurrences(of: "\r", with: "_")
+                    .replacingOccurrences(of: "\n", with: "_")
+                try append("--\(boundary)\r\n")
+                try append("Content-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\n")
+                try append("Content-Type: \(attachment.contentType.rawValue)\r\n\r\n")
+                try handle.write(contentsOf: attachment.data)
+                try append("\r\n")
+            }
+            try append("--\(boundary)--\r\n")
+            try handle.close()
+            return url
+        } catch {
+            try? handle.close()
+            try? FileManager.default.removeItem(at: url)
+            throw error
+        }
     }
 
     static func sessionCookie(from response: HTTPURLResponse) -> String? {

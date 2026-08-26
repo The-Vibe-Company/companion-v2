@@ -417,10 +417,36 @@ public final class SessionStore {
         }
     }
 
-    public func sendMessage(companionID: String, content: String, clientMessageID: UUID) async throws {
+    public func sendMessage(
+        companionID: String,
+        content: String,
+        clientMessageID: UUID,
+        attachments: [CompanionMessageAttachment] = [],
+        uploadProgress: (@Sendable (Double) -> Void)? = nil
+    ) async throws {
         do {
-            try await client.sendMessage(companionID: companionID, content: content, clientMessageID: clientMessageID)
+            try await client.sendMessage(
+                companionID: companionID,
+                content: content,
+                clientMessageID: clientMessageID,
+                attachments: attachments,
+                uploadProgress: uploadProgress
+            )
             await persistRollingAuthority()
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func attachmentData(companionID: String, attachmentID: String) async throws -> Data {
+        do {
+            let data = try await client.attachmentData(
+                companionID: companionID,
+                attachmentID: attachmentID
+            )
+            await persistRollingAuthority()
+            return data
         } catch let error as APIError where error.status == 401 {
             await clearLocalSession()
             throw error

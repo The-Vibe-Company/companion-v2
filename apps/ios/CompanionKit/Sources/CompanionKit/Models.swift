@@ -1134,6 +1134,7 @@ public struct TranscriptEntry: Codable, Identifiable, Equatable, Sendable {
     public let decision: CompanionDecision?
     public let tool: CompanionToolRun?
     public let queued: Bool
+    public let attachments: [CompanionAttachment]
     public let createdAt: String
 
     public var id: String { eventID }
@@ -1148,7 +1149,23 @@ public struct TranscriptEntry: Codable, Identifiable, Equatable, Sendable {
         case decision
         case tool
         case queued
+        case attachments
         case createdAt = "created_at"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        eventID = try container.decode(String.self, forKey: .eventID)
+        ordinal = try container.decode(Int.self, forKey: .ordinal)
+        role = try container.decode(String.self, forKey: .role)
+        content = try container.decode(String.self, forKey: .content)
+        authorID = try container.decodeIfPresent(String.self, forKey: .authorID)
+        authorName = try container.decodeIfPresent(String.self, forKey: .authorName)
+        decision = try container.decodeIfPresent(CompanionDecision.self, forKey: .decision)
+        tool = try container.decodeIfPresent(CompanionToolRun.self, forKey: .tool)
+        queued = try container.decodeIfPresent(Bool.self, forKey: .queued) ?? false
+        attachments = try container.decodeIfPresent([CompanionAttachment].self, forKey: .attachments) ?? []
+        createdAt = try container.decode(String.self, forKey: .createdAt)
     }
 }
 
