@@ -6,9 +6,9 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
-  rmSync,
   writeFileSync,
 } from "node:fs";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -39,19 +39,22 @@ const brokerStateSchema = z.object({
 });
 const stringArraySchema = z.array(z.string());
 const journalKindSchema = z.object({ kind: z.string() });
+const errnoSchema = z.object({ code: z.string() });
 
-afterEach(async () => {
+afterEach(cleanupTrackedResources);
+
+async function cleanupTrackedResources(): Promise<void> {
   await Promise.all(processes.splice(0).map(stopBrokerProcess));
   for (const directory of directories.splice(0)) {
-    rmSync(directory, {
+    await rm(directory, {
       recursive: true,
       force: true,
-      // Linux can transiently report ENOTEMPTY while child-process pipe teardown finishes.
-      maxRetries: 5,
+      // Linux can transiently report ENOTEMPTY while the last descendant releases the directory.
+      maxRetries: 20,
       retryDelay: 25,
     });
   }
-});
+}
 
 describe("COMPANION_PI_BROKER_SOURCE", () => {
   it("is the byte-exact deterministic bundle and retains only Node built-in imports", async () => {
@@ -90,6 +93,7 @@ describe("COMPANION_PI_BROKER_SOURCE", () => {
     chmodSync(piPath, 0o700);
 
     const broker = trackBrokerProcess(spawn(process.execPath, [brokerPath], {
+      detached: true,
       env: {
         ...process.env,
         COMPANION_PI_ROOT: runtimeRoot,
@@ -204,6 +208,7 @@ describe("COMPANION_PI_BROKER_SOURCE", () => {
     writeFileSync(piPath, fakePiSource(), { mode: 0o700 });
 
     const broker = trackBrokerProcess(spawn(process.execPath, [brokerPath], {
+      detached: true,
       env: {
         ...process.env,
         COMPANION_PI_ROOT: runtimeRoot,
@@ -237,6 +242,7 @@ describe("COMPANION_PI_BROKER_SOURCE", () => {
     writeFileSync(piPath, "#!/usr/bin/env node\nprocess.exit(23);\n", { mode: 0o700 });
 
     const broker = trackBrokerProcess(spawn(process.execPath, [brokerPath], {
+      detached: true,
       env: {
         ...process.env,
         COMPANION_PI_ROOT: runtimeRoot,
@@ -278,6 +284,7 @@ describe("Pi broker --append-system-prompt", () => {
     writeFileSync(piPath, fakePiSource(), { mode: 0o700 });
     chmodSync(piPath, 0o700);
     trackBrokerProcess(spawn(process.execPath, [brokerPath], {
+      detached: true,
       env: {
         ...process.env,
         COMPANION_PI_ROOT: runtimeRoot,
@@ -319,9 +326,10 @@ const grandchild = spawn(process.execPath, ["-e", "setTimeout(() => {}, 150)"], 
 });
 grandchild.unref();`,
     ], {
+      detached: true,
       stdio: ["pipe", "pipe", "pipe"],
     }));
-    await new Promise<void>((resolve) => broker.once("exit", () => resolve()));
+    await waitFor(() => broker.exitCode !== null || broker.signalCode !== null);
 
     expect(broker.exitCode).toBe(0);
     expect(broker.stdout.closed).toBe(false);
@@ -343,12 +351,13 @@ writeFileSync(process.argv[1], String(grandchild.pid));
 grandchild.unref();`,
       grandchildPidPath,
     ], {
+      detached: true,
       stdio: ["pipe", "pipe", "pipe"],
     }));
     await waitFor(() => existsSync(grandchildPidPath));
     const grandchildPid = z.coerce.number().int().positive()
       .parse(readFileSync(grandchildPidPath, "utf8"));
-    await new Promise<void>((resolve) => broker.once("exit", () => resolve()));
+    await waitFor(() => broker.exitCode !== null || broker.signalCode !== null);
     expect(broker.stdout.closed).toBe(false);
 
     const teardown = stopBrokerProcess(broker, 25);
@@ -367,6 +376,37 @@ grandchild.unref();`,
       }
       await teardown;
     }
+  });
+
+  it("stops repeated descendant writers before removing their temp directories", async () => {
+    const homes: string[] = [];
+    for (let index = 0; index < 3; index += 1) {
+      const home = temporaryDirectory("pi-broker-repeated-cleanup-");
+      homes.push(home);
+      const readyPath = join(home, "ready");
+      const pulsePath = join(home, "pulse");
+      trackBrokerProcess(spawn(process.execPath, [
+        "-e",
+        `const { spawn } = require("node:child_process");
+const { writeFileSync } = require("node:fs");
+const grandchild = spawn(process.execPath, [
+  "-e",
+  'const { writeFileSync } = require("node:fs"); setInterval(() => writeFileSync(process.argv[1], String(Date.now())), 1);',
+  process.argv[2],
+], { stdio: ["ignore", "inherit", "inherit"] });
+writeFileSync(process.argv[1], String(grandchild.pid));
+grandchild.unref();`,
+        readyPath,
+        pulsePath,
+      ], {
+        detached: true,
+        stdio: ["pipe", "pipe", "pipe"],
+      }));
+      await waitFor(() => existsSync(readyPath) && existsSync(pulsePath));
+    }
+
+    await cleanupTrackedResources();
+    expect(homes.every((home) => !existsSync(home))).toBe(true);
   });
 });
 
@@ -480,19 +520,31 @@ async function stopBrokerProcess(
   child: ChildProcessWithoutNullStreams,
   closeTimeoutMs = 3_000,
 ): Promise<void> {
-  // Let the broker's SIGTERM handler terminate and await its Pi child before removing the shared
-  // temp directory. SIGKILL bypasses that handler and lets Pi race rmSync with late file writes.
-  if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+  const processGroupId = child.pid;
+  // Every tracked fixture leads its own process group, so an already-exited broker cannot orphan a
+  // Pi descendant that keeps inherited stdio open or races temp-directory removal with late writes.
+  signalProcessGroup(processGroupId, "SIGTERM");
   try {
+    // Node emits close only after the broker exits and every inherited stdio stream closes, so a
+    // Pi descendant cannot still be writing through the fixture's pipes when this resolves.
     await waitForExitWithin(child, closeTimeoutMs);
   } catch {
-    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-    // An exited process cannot be killed again, and an orphan descendant may keep its inherited
-    // pipe open indefinitely. Close our pipe ends and keep even the fallback wait bounded.
+    signalProcessGroup(processGroupId, "SIGKILL");
+    // Close our pipe ends as a final bound even if the host delays reaping a killed descendant.
     child.stdin.destroy();
     child.stdout.destroy();
     child.stderr.destroy();
     await waitForExitWithin(child, closeTimeoutMs).catch(() => undefined);
+  }
+}
+
+function signalProcessGroup(processGroupId: number | undefined, signal: NodeJS.Signals): void {
+  if (!processGroupId) return;
+  try {
+    process.kill(-processGroupId, signal);
+  } catch (error) {
+    const parsed = errnoSchema.safeParse(error);
+    if (!parsed.success || parsed.data.code !== "ESRCH") throw error;
   }
 }
 
