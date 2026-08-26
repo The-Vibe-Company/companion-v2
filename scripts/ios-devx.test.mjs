@@ -103,6 +103,22 @@ test("the project is synchronized, shared, and backed by CompanionKit", () => {
   assert.match(read("apps/ios/README.md"), /same\s+`\/v1` API/);
 });
 
+test("reply notifications embed the locally rendered avatar service extension", () => {
+  const project = read("apps/ios/Companion.xcodeproj/project.pbxproj");
+  const appInfo = read("apps/ios/Companion/Support/Info.plist");
+  const extensionInfo = read("apps/ios/CompanionNotificationService/Info.plist");
+  const entitlements = read("apps/ios/Config/Companion.entitlements");
+
+  assert.match(project, /CompanionNotificationService\.appex in Embed App Extensions/);
+  assert.match(project, /productName = CompanionNotificationAvatar/);
+  assert.match(project, /PRODUCT_BUNDLE_IDENTIFIER = dev\.companion\.mobile\.dev\.notifyextension/);
+  assert.match(project, /PRODUCT_BUNDLE_IDENTIFIER = dev\.companion\.mobile\.notifyextension/);
+  assert.match(extensionInfo, /com\.apple\.usernotifications\.service/);
+  assert.match(extensionInfo, /\$\(PRODUCT_MODULE_NAME\)\.NotificationService/);
+  assert.match(appInfo, /<string>INSendMessageIntent<\/string>/);
+  assert.match(entitlements, /com\.apple\.developer\.usernotifications\.communication/);
+});
+
 test("the Expo client and its repository-local skills are gone", () => {
   assert.equal(existsSync(resolve(ROOT, "apps/mobile")), false);
   assert.equal(existsSync(resolve(ROOT, "skills-lock.json")), false);

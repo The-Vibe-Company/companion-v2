@@ -34,6 +34,12 @@ Push Notifications are requested immediately after the first active session. Deb
 production APNs. A tap waits for session and roster restoration, verifies the workspace and current
 access, then opens the existing chat. Foreground alerts include banner, Notification Center list,
 and sound unless that chat is already open. The app deliberately uses no numeric badge.
+Reply pushes also carry the Companion's four cosmetic icon indexes and `mutable-content: 1`. The
+embedded Notification Service Extension renders the closed blob catalog into a PNG locally, then
+uses it as the sender image for Apple's communication-notification treatment. No avatar endpoint,
+credential, or network request is involved. If intent enrichment cannot finish, the extension
+returns the same title/body with the PNG as a standard attachment; if the extension itself times
+out, iOS displays the original plain alert. Decision and failure alerts remain plain notifications.
 
 Long-term native work is guided by the repo-local `ios-product-dev`, `swiftui-expert-dev`,
 `design-frontend-dev`, and `xcodebuildmcp-cli` skills. Their iOS-specific packages are mirrored
@@ -88,16 +94,22 @@ macOS 26 runner, verifies the complete approved push range, and checks the iPhon
 signing. It has no arbitrary-ref manual dispatch; an existing delivery can be retried from its
 GitHub Actions run. The workflow uses the protected `ios-testflight` environment and the
 `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8`,
-`IOS_DISTRIBUTION_P12`, `IOS_DISTRIBUTION_P12_PASSWORD`, and `IOS_PROVISIONING_PROFILE` secrets. The
-signing certificate and profile are installed only in a temporary CI keychain and removed after the
-job.
+`IOS_DISTRIBUTION_P12`, `IOS_DISTRIBUTION_P12_PASSWORD`, `IOS_PROVISIONING_PROFILE`, and
+`IOS_NOTIFICATION_EXTENSION_PROVISIONING_PROFILE` secrets. The signing certificate and profiles
+are installed only for the release job and removed afterward.
 
-Before distributing a push-enabled build, enable Push Notifications on both App IDs and replace the
-`IOS_PROVISIONING_PROFILE` secret with a regenerated profile containing the `aps-environment`
-entitlement. Deploy migration 0124 before that build, and configure the worker-only
-`COMPANION_APNS_KEY_ID`, `COMPANION_APNS_TEAM_ID`, and base64-encoded
-`COMPANION_APNS_PRIVATE_KEY_BASE64`. Validate background, terminated, foreground, decision, failure,
-and tap routing on a physical/TestFlight device with Apple's Push Notification Console. Removing all
+The archive embeds `CompanionNotificationService` with production bundle id
+`dev.companion.mobile.notifyextension` (Debug uses the containing app prefix
+`dev.companion.mobile.dev.notifyextension`). The app profile must include Push Notifications and
+Communication Notifications; the extension needs its own App Store distribution profile. The
+extension has no separate entitlement file and makes no network request.
+
+Before distributing a push-enabled build, enable Push Notifications and Communication Notifications
+on the app App ID, register the extension App ID, and replace both provisioning-profile secrets with
+matching regenerated profiles. Deploy migrations 0124 and 0131 before that build, and configure the
+worker-only `COMPANION_APNS_KEY_ID`, `COMPANION_APNS_TEAM_ID`, and base64-encoded
+`COMPANION_APNS_PRIVATE_KEY_BASE64`. Validate background, terminated, foreground, decision,
+failure, and tap routing on a physical/TestFlight device with Apple's Push Notification Console. Removing all
 three worker variables is the push rollback; turns and the iOS app continue to function.
 
 If the matching `main` CI fails, no TestFlight delivery is created. A later successful CI run for
@@ -112,6 +124,7 @@ ASC_KEY_ID="<key-id>" \
 ASC_ISSUER_ID="<issuer-id>" \
 ASC_KEY_PATH="/secure/path/AuthKey_<key-id>.p8" \
 IOS_PROVISIONING_PROFILE_SPECIFIER="Companion Native App Store 2026-08-24" \
+IOS_NOTIFICATION_EXTENSION_PROVISIONING_PROFILE_SPECIFIER="Companion Notification Service App Store 2026-08-26" \
 bash apps/ios/scripts/release.sh
 ```
 
