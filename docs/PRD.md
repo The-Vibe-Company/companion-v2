@@ -116,8 +116,11 @@ explicitly recoverable interruption even after the browser, API, or one runtime 
   a turn; malformed or oversized lines advance safely without storing their raw content.
 - A missing acknowledgement after a possible prompt write is `interrupted` and never auto-replayed.
   A proven negative acknowledgement may be retried under the lifecycle retry policy.
-- Ten minutes without correlated activity stalls a turn; every attempt also has a two-hour absolute
-  deadline. “Companion is replying…” is true only after Pi ACK and before terminal settlement.
+- Ten minutes without correlated activity stalls a running turn; the inactivity clock pauses while
+  a blocking human decision is in `needs_input`. After ten minutes without an answer, or sooner when
+  the member sends another message, Pi receives a cancelled response and chooses a safe fallback or
+  finishes the old turn. Silence and later messages never approve a proposal. “Companion is
+  replying…” is true only after Pi ACK and before terminal settlement.
 - Persisted failures contain only a stable code, an expurgated message of at most 500 characters,
   and an allowed action. Provider payloads, tokens, signed URLs, and raw Pi lines are forbidden.
 - Model catalog normalization preserves Pi's `input` capability so a text-only model rejects image

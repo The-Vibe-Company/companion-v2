@@ -527,6 +527,21 @@ describe("Companion chat contracts", () => {
       created_at: "2026-08-12T12:00:03.000Z",
     }).decision).toMatchObject({ kind: "shell", status: "pending" });
 
+    expect(companionTranscriptEntrySchema.parse({
+      event_id: "decision:ui-1",
+      ordinal: 3,
+      role: "decision",
+      content: "ls -la",
+      author_id: null,
+      author_name: null,
+      decision: {
+        ...decision,
+        status: "cancelled",
+        decided_at: "2026-08-12T12:01:00.000Z",
+      },
+      created_at: "2026-08-12T12:00:03.000Z",
+    }).decision).toMatchObject({ kind: "shell", status: "cancelled" });
+
     expect(() => companionTranscriptEntrySchema.parse({
       event_id: "decision:ui-1",
       ordinal: 3,

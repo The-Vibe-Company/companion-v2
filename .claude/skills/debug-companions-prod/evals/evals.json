@@ -10,7 +10,7 @@
     {
       "id": 2,
       "prompt": "A user says their Companion chat 'just dies after about 5 minutes' mid-conversation. Figure out why.",
-      "expected_output": "Collects db_query.py turn, db_query.py decisions, and runtime logs for the turn, then explicitly distinguishes the three signatures: (1) ask_user decision expiry at the ~5-minute timeout (decision_status=expired, needs_input, member-side), (2) pi_event_stream_interrupted (transport loss, runtime-side), and (3) turn_stalled at the 10-minute inactivity deadline (Pi wedged). Names which signature the evidence supports and performs zero mutations — no retry injection, no marking attempts queued.",
+      "expected_output": "Collects db_query.py turn, db_query.py decisions, and runtime logs for the turn, then explicitly distinguishes the three signatures: (1) ask_user decision expiry after ten minutes or earlier cancelled supersession by a newer member message, neither of which grants approval, including the pre-0129 inactivity-pause bug, (2) pi_event_stream_interrupted (transport loss, runtime-side), and (3) turn_stalled at the 10-minute running inactivity deadline (Pi wedged). Names which signature the evidence supports and performs zero mutations — no retry injection, no marking attempts queued.",
       "files": []
     },
     {

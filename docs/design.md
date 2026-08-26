@@ -138,6 +138,13 @@ apply after its settlement and before the next turn. On a warm Box, configuratio
 applied only after runtime stages the exact snapshot, restarts Pi, and observes a different idle Pi
 invocation; takeover repeats those idempotent steps if their final observation was lost.
 
+A blocking `ask_user` or `propose_*` decision moves the turn to `needs_input` and clears the
+inactivity deadline. An answer resumes Pi; after ten minutes, absence returns a cancelled response
+so Pi chooses a safe fallback without inferring approval. A newer member message cancels the wait
+sooner, remains an ordinary queued turn, and never supplies an implicit answer. That queued turn has
+no cold-start deadline until it reaches the head; runtime then decides whether restaging is needed
+and starts the three-minute cold-start window from that decision.
+
 ## Dedicated runtime execution
 
 `apps/runtime` sweeps every two seconds, claims with a 30-second lease, renews every ten seconds,

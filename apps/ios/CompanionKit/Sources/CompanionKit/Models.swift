@@ -819,6 +819,7 @@ public enum CompanionDecisionStatus: String, Codable, Equatable, Sendable {
     case denied
     case answered
     case expired
+    case cancelled
     case unknown
 
     public init(from decoder: Decoder) throws {

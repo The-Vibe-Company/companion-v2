@@ -2,7 +2,7 @@
 name: debug-companions-prod
 description: "Read-only production debugging for the Companions runtime on
   Railway and box.ascii.dev. Use when production box launches fail, a chat dies
-  or stalls (especially around the five-minute mark), turns sit queued or
+  or stalls while waiting for input, turns sit queued or
   interrupted, a Companion appears to reply forever, /healthz is unhealthy, or
   an operator needs Railway deployment status, redacted runtime logs, provider
   Box inventory, or named read-only PostgreSQL runtime queries. Every script
@@ -107,6 +107,10 @@ python3 scripts/railway_logs.py --service runtime --companion <uuid> --since 6h
   `creating_box`/`waiting_ready`/`installing_layout`: the cold path (Box ready
   + Pi install) exceeded the 3-minute SQL deadline. Check `ops` checkpoints and
   `attempt_count` to see where time went.
+- A `cold_start_deadline_exceeded` operation whose `started_at` is already later
+  than the turn deadline, with no attempt and an existing warm idle Box, is the
+  pre-0129 queued-follow-up bug: the send was misclassified while Pi was busy.
+  It is not evidence of a Box cold start.
 - `box_create_ambiguous`: create may have committed provider-side. Run
   `box_list.py --companion` — two Boxes with the same generation is the
   evidence. Do NOT delete either; the runtime discovers the
@@ -116,9 +120,9 @@ python3 scripts/railway_logs.py --service runtime --companion <uuid> --since 6h
   provider incident; count occurrences over the window before escalating to
   ascii.dev.
 
-### Chat dies or stalls around five minutes
+### Chat dies or stalls while waiting for input
 
-Three distinct signatures produce "my chat died after ~5 minutes". Identify
+Three distinct signatures can produce "my chat died while I was away". Identify
 which one you have before touching anything:
 
 ```bash
@@ -127,12 +131,13 @@ python3 scripts/db_query.py decisions --companion <uuid> --since 24h
 python3 scripts/railway_logs.py --service runtime --turn <uuid> --since 24h
 ```
 
-1. **Decision expiry (ask_user timeout, ~5 minutes).** `decisions` shows a
+1. **Decision expiry (ask_user timeout, 10 minutes).** `decisions` shows a
    `question`/`confirmation` row with `decision_status=expired` and an
-   `expires_at` roughly five minutes after `created_at`; the turn left
-   `needs_input` without a member answer. Cause: nobody answered Pi's
-   question in time. Not a runtime fault — advise answering faster or check
-   why the prompt was not seen.
+   `expires_at` roughly ten minutes after creation; `cancelled` before that can
+   mean a newer member message returned control to Pi. Neither state grants
+   approval. On releases before migration 0129, a
+   decision can instead be followed by `turn_stalled` after ten minutes because
+   the inactivity clock was not actually paused.
 2. **`pi_event_stream_interrupted`.** The attempt's error triplet names this
    code: the broker's event stream from Pi broke mid-turn. Look at the
    attempt's `unknown_event_count`/`malformed_event_count` and runtime logs
@@ -146,8 +151,9 @@ python3 scripts/railway_logs.py --service runtime --turn <uuid> --since 24h
    error code. Check whether Pi is wedged (`instance` shows `pi_state`) —
    Retry recycles Pi.
 
-The five-minute ask_user expiry and the ten-minute stall are different clocks;
-a report of "about five minutes" is usually case 1, "about ten" is case 3.
+The decision expiry and the ten-minute running stall are different clocks.
+After migration 0129, `needs_input` pauses inactivity; before it, trust the row
+timestamps and error code over the expected state-machine semantics.
 
 ### Turn interrupted or Pi silent
 

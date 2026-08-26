@@ -629,6 +629,8 @@ function companionConfigInstructions(includeCatalog: boolean): string {
     "",
     `- ask_user puts a question to the person and waits up to ${instructionClock(COMPANION_DECISION_TIMEOUT_MS)}. Use it for a decision, a`,
     "  preference, missing information, or sign-off before something consequential.",
+    "  No answer means no approval: choose a safe fallback or finish the turn. A newer member message",
+    "  may end the wait early and will arrive separately as the next queued turn.",
     "- propose_config proposes adding or removing skills, attaching or detaching plugins, changing your",
     "  model, or rewriting your persona line. Approval applies after this turn ends, so a proposed change",
     "  is never active in the turn that proposed it.",

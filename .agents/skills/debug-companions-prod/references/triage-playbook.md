@@ -25,7 +25,7 @@ Companion; later turns wait in order. An ambiguous dispatch becomes
 Never: delete a Box, mark an operation completed, or bump checkpoints. A
 permanent-delete failure keeps its ledger rows on purpose.
 
-## 2. Chat dies or stalls around five minutes — three signatures
+## 2. Chat dies or stalls while waiting for input — three signatures
 
 All three present as "the Companion just stopped answering". They have
 different clocks and different owners. Collect all three evidence items before
@@ -37,12 +37,11 @@ python3 scripts/db_query.py decisions --companion <uuid> --since 24h
 python3 scripts/railway_logs.py --service runtime --turn <uuid> --since 24h
 ```
 
-### 2a. Decision expiry (ask_user timeout, ≈5 minutes)
+### 2a. Decision expiry or supersession (ask_user, at most ten minutes)
 
-- **Evidence:** `decisions` shows a `question`/`confirmation` row with
-  `decision_status=expired`, `expires_at ≈ created_at + 5 min`; the turn was
-  in `needs_input` and settled after the expiry; no transport error code.
-- **Cause:** Pi asked, nobody answered before the decision deadline.
+- **Evidence:** `decision_status=expired` at roughly ten minutes means no answer;
+  `cancelled` earlier can mean a newer member message superseded the wait.
+- **Cause:** Pi received no explicit approval and regained control fail-closed.
 - **Owner:** member/UX, not the runtime. Advise answering pending questions;
   check why the ask was not noticed.
 - **Runbook:** Turn is interrupted or Pi is silent (deadlines settle visibly).
@@ -70,8 +69,9 @@ python3 scripts/railway_logs.py --service runtime --turn <uuid> --since 24h
   suggest a long-running tool hitting the budget.
 - **Runbook:** Turn is interrupted or Pi is silent.
 
-Rule of thumb: "died after ~5 min" → check 2a first; "~10 min" → 2c;
-error code present → trust the code over the anecdote.
+For releases before migration 0129, a pending decision may incorrectly retain
+the ten-minute inactivity deadline and end as `turn_stalled`; after 0129,
+`needs_input` pauses that clock. Trust timestamps and the persisted error code.
 
 ## 3. Turn interrupted / Pi silent / queue blocked
 

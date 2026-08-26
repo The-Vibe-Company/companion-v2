@@ -739,6 +739,20 @@ describe("a permission card in the thread", () => {
     expect(buttonNamed(container, "Allow")).toBeUndefined();
   });
 
+  it("shows a superseded card as closed without approval", () => {
+    const container = mount(thread([
+      entry({
+        role: "decision",
+        event_id: "decision:ui-1",
+        content: "rm -rf build",
+        decision: card({ status: "cancelled" }),
+      }),
+    ]));
+
+    expect(container.textContent).toContain("Closed without approval");
+    expect(buttonNamed(container, "Allow")).toBeUndefined();
+  });
+
   it("tells a Viewer who the thread is waiting on instead of offering the controls", () => {
     const container = mount(thread(
       [entry({ role: "decision", event_id: "decision:ui-1", content: "rm -rf build", decision: card() })],

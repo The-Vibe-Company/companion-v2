@@ -748,6 +748,11 @@ func decodesEveryCompanionDecisionKindAndProposal() throws {
           "event_id":"decision:trigger","ordinal":6,"role":"decision","content":"GitHub release",
           "author_id":null,"author_name":null,"queued":false,"created_at":"2026-08-26T06:00:08.000Z",
           "decision":{"request_id":"trigger-1","kind":"trigger","name":"trigger","title":"GitHub release","detail":null,"status":"expired","answer":null,"decided_by_id":null,"decided_by_name":null,"decided_at":"2026-08-26T06:10:00.000Z","expires_at":"2026-08-26T06:10:00.000Z","proposal":{"kind":"trigger","name":"release-watch","prompt":"Review releases","provider":"github","target":{"repo":"companion/app","events":["release"]}}}
+        },
+        {
+          "event_id":"decision:cancelled","ordinal":7,"role":"decision","content":"Superseded question",
+          "author_id":null,"author_name":null,"queued":false,"created_at":"2026-08-26T06:00:09.000Z",
+          "decision":{"request_id":"question-closed","kind":"question","name":"ask_user","title":"Superseded question","detail":null,"status":"cancelled","answer":null,"decided_by_id":null,"decided_by_name":null,"decided_at":"2026-08-26T06:00:10.000Z","expires_at":"2026-08-26T06:10:00.000Z","proposal":null}
         }
       ],
       "queued_count":0
@@ -756,10 +761,11 @@ func decodesEveryCompanionDecisionKindAndProposal() throws {
 
     let thread = try JSONDecoder().decode(CompanionThread.self, from: data)
     #expect(thread.entries.compactMap { $0.decision?.kind } == [
-        .shell, .file, .question, .config, .routine, .trigger,
+        .shell, .file, .question, .config, .routine, .trigger, .question,
     ])
     #expect(thread.entries[1].decision?.status == .denied)
     #expect(thread.entries[2].decision?.answer == "The stable release")
+    #expect(thread.entries[6].decision?.status == .cancelled)
 
     guard case .config(let config) = thread.entries[3].decision?.proposal else {
         Issue.record("Expected a config proposal")

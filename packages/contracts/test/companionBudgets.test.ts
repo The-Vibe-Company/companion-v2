@@ -47,12 +47,9 @@ describe("companion budget derivation", () => {
 });
 
 describe("companion budget invariants", () => {
-  it("decision timeout never exceeds the inactivity stall", () => {
-    // The stall clock pauses while a decision is pending: on `needs_input` the runtime releases
-    // its claim and the SQL resume path re-arms `inactivity_deadline_at`
-    // (companion_runtime_resume_after_decision_delivery), so the decision window may approach the
-    // stall but must never exceed it — otherwise an expired decision could only surface as a stall.
-    expect(base.decisionTimeoutMs).toBeLessThanOrEqual(base.inactivityStallMs);
+  it("returns unanswered decisions to Pi after ten minutes", () => {
+    expect(base.decisionTimeoutMs).toBe(10 * 60 * 1_000);
+    expect(base.decisionTimeoutMs).toBeLessThan(base.turnAbsoluteDeadlineMs);
   });
 
   it("plain tool runs settle before exec tool runs may", () => {
@@ -171,8 +168,6 @@ describe("SQL budget contract", () => {
       .toContain(base.turnAbsoluteDeadlineMs);
     expect(contract.companion_runtime_checkpoint?.map(sqlIntervalToMs))
       .toContain(base.inactivityStallMs);
-    expect(contract.companion_runtime_checkpoint?.map(sqlIntervalToMs))
-      .toContain(base.decisionTimeoutMs);
     expect(contract.companion_runtime_prepare_queued_turn_material?.map(sqlIntervalToMs))
       .toContain(base.coldStartDeadlineMs);
     expect(contract.companion_runtime_prepare_queued_turn_material?.map(sqlIntervalToMs))

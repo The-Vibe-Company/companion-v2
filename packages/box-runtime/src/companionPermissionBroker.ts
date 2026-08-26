@@ -17,7 +17,7 @@ import {
   COMPANION_TRIGGER_PROVIDERS,
 } from "@companion/contracts";
 
-/** Fail closed with the Box extension's own question timeout (5 minutes). Timeout → cancelled. */
+/** Return control to Pi after ten minutes without ever turning absence into approval. */
 export const COMPANION_DECISION_TIMEOUT_MS = COMPANION_BUDGETS_BASE.decisionTimeoutMs;
 
 /**
@@ -209,8 +209,8 @@ function summarizeProposal(proposal: Record<string, unknown>): string {
 
 export default function companionPermissionBroker(pi: ExtensionAPI) {
   pi.on("tool_call", async (event, ctx) => {
-    // Interactive decisions have their own five-minute fail-closed UI deadline. Their execute
-    // bodies do not perform external work, so the shorter execution timer must not abort a
+    // Interactive decisions have their own ten-minute fail-closed UI deadline. Their execute bodies
+    // do not perform external work, so the shorter execution timer must not abort a
     // still-actionable question or config proposal.
     if (INTERACTIVE_TOOLS.has(event.toolName)) return undefined;
     startToolTimeout(event.toolCallId, event.toolName, ctx);
@@ -259,7 +259,10 @@ export default function companionPermissionBroker(pi: ExtensionAPI) {
       );
       if (answer === undefined || !answer.trim()) {
         return {
-          content: [{ type: "text", text: "User did not answer (denied or timed out)." }],
+          content: [{
+            type: "text",
+            text: "No user answer was received (denied, timed out, or superseded by a newer message). Do not infer approval. Choose a safe fallback, explain that you did so, or stop this turn so the newer message can run.",
+          }],
           details: { question, answer: null },
         };
       }

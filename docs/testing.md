@@ -115,6 +115,10 @@ Run API + worker + runtime + web + migrated PostgreSQL + Box/Pi simulator and pr
   prompt or Box;
 - two concurrent sends execute in order, one Pi attempt at a time;
 - `ask_user` persists a decision and resumes the same attempt;
+- a pending `ask_user` or `propose_*` remains actionable without an inactivity stall for up to the
+  two-hour absolute deadline;
+- a follow-up sent while a warm Pi is busy stays queued without a cold-start deadline, then is
+  re-evaluated only after it reaches the head;
 - a success and each new pending decision fan out once to the author's active devices, while a
   queued cancellation creates no delivery;
 - `propose_routine` projects a card, approve creates the row, and deny/expiry leave none;
@@ -149,7 +153,11 @@ newest eligible failed delete with a retained provider operation id.
   as recovery.
 - Lease: 30 seconds, renewed every ten seconds; takeover under 45 seconds.
 - Cold start: terminal success or explicit failure under three minutes.
-- Inactivity stall: ten minutes plus one sweep; absolute deadline: two hours plus one sweep.
+- Human decision window: ten minutes; a newer member message ends it sooner. Both paths deliver a
+  fail-closed cancellation to Pi, pause inactivity throughout `needs_input`, and never grant an
+  approval.
+- Inactivity stall: ten minutes plus one sweep while running; absolute deadline: two hours plus one
+  sweep.
 - `/healthz` fails when PostgreSQL, the claim loop, or the most recent sweep is unhealthy.
 
 Deterministic fault tests cover every boundary around list, create, resume, bundle upload/apply,

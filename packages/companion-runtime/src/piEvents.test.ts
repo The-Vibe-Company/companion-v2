@@ -798,12 +798,14 @@ describe("Pi journal validation and projection", () => {
         request_kind: "routine_proposal",
         content: summary,
         proposal,
+        expires_at: "2026-08-19T12:10:00.000Z",
         decision: expect.objectContaining({
           kind: "routine",
           name: "routine",
           title: summary,
           status: "pending",
           proposal,
+          expires_at: "2026-08-19T12:10:00.000Z",
         }),
       }),
     ]);

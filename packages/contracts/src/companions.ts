@@ -495,13 +495,14 @@ export const companionDecisionKindSchema = z.enum([
 ]);
 export type CompanionDecisionKind = z.infer<typeof companionDecisionKindSchema>;
 
-/** A card is `pending` until Allow / Deny / answer, or until the fail-closed timeout expires. */
+/** A card is pending until answered, expired, or cancelled by lifecycle/newer-message progress. */
 export const companionDecisionStatusSchema = z.enum([
   "pending",
   "allowed",
   "denied",
   "answered",
   "expired",
+  "cancelled",
 ]);
 export type CompanionDecisionStatus = z.infer<typeof companionDecisionStatusSchema>;
 

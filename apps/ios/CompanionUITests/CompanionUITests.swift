@@ -108,12 +108,16 @@ final class CompanionUITests: XCTestCase {
         app.launchEnvironment["COMPANION_DECISION_DEMO_ACCESS"] = "editor"
         app.launch()
 
-        for requestID in ["question-1", "config-1", "routine-1", "trigger-1", "shell-1", "file-1"] {
+        for requestID in [
+            "question-1", "config-1", "routine-1", "trigger-1", "shell-1", "file-1",
+            "question-closed",
+        ] {
             let card = app.descendants(matching: .any)["decision.card.\(requestID)"]
             for _ in 0..<6 where !card.exists { app.swipeUp() }
             XCTAssertTrue(card.waitForExistence(timeout: 2), "Missing \(requestID)")
         }
         XCTAssertTrue(app.staticTexts["Timed out, denied"].exists)
+        XCTAssertTrue(app.staticTexts["Closed without approval"].exists)
     }
 
     @MainActor

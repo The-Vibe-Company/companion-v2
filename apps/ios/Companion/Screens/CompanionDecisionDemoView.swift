@@ -85,6 +85,7 @@ private enum CompanionDecisionDemoFixtures {
         decode(#"{"request_id":"trigger-1","kind":"trigger","name":"trigger","title":"Watch GitHub releases","detail":null,"status":"pending","answer":null,"decided_by_id":null,"decided_by_name":null,"decided_at":null,"expires_at":"2026-08-26T07:00:00.000Z","proposal":{"kind":"trigger","name":"release-watch","prompt":"Review new releases.","provider":"github","target":{"repo":"companion/app","events":["release"]}}}"#),
         decode(#"{"request_id":"shell-1","kind":"shell","name":"shell","title":"pnpm test","detail":"Runs the complete test suite.","status":"allowed","answer":null,"decided_by_id":"owner-1","decided_by_name":"Stan","decided_at":"2026-08-26T06:10:00.000Z","expires_at":"2026-08-26T07:00:00.000Z","proposal":null}"#),
         decode(#"{"request_id":"file-1","kind":"file","name":"edit","title":"Package.swift","detail":null,"status":"expired","answer":null,"decided_by_id":null,"decided_by_name":null,"decided_at":"2026-08-26T06:10:00.000Z","expires_at":"2026-08-26T06:10:00.000Z","proposal":null}"#),
+        decode(#"{"request_id":"question-closed","kind":"question","name":"ask_user","title":"Superseded question","detail":null,"status":"cancelled","answer":null,"decided_by_id":null,"decided_by_name":null,"decided_at":"2026-08-26T06:11:00.000Z","expires_at":"2026-08-26T07:00:00.000Z","proposal":null}"#),
     ]
 
     private static func decode(_ json: String) -> CompanionDecision {
