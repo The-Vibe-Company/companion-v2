@@ -623,6 +623,27 @@ func decodesAttachmentMetadataWithoutAStorageURL() throws {
 }
 
 @Test
+func decodesQueuedTurnIdentityForExistingCancelRoute() throws {
+    let entry = try JSONDecoder().decode(TranscriptEntry.self, from: Data(#"""
+    {
+      "event_id":"msg:17f8b827-8a06-4ef8-9352-58cc03c849a4",
+      "ordinal":9,
+      "role":"user",
+      "content":"Review these screenshots next",
+      "author_id":"owner-1",
+      "author_name":"Stan",
+      "turn_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "queued":true,
+      "attachments":[],
+      "created_at":"2026-08-26T11:00:00.000Z"
+    }
+    """#.utf8))
+
+    #expect(entry.queued)
+    #expect(entry.turnID == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+}
+
+@Test
 func validatesAttachmentsFromBytesBeforeUpload() throws {
     let png = try CompanionMessageAttachment(
         id: try #require(UUID(uuidString: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")),
@@ -1075,37 +1096,37 @@ func decisionResponseInvalidatesAnOlderThreadPoll() throws {
 }
 
 @Test
-func decisionSubmissionGateRejectsDoubleTapAndAllowsRetry() async {
-    let gate = CompanionDecisionSubmissionGate()
-    let firstQuestion = await gate.acquire(requestID: "question-1")
-    let duplicateQuestion = await gate.acquire(requestID: "question-1")
+func threadMutationGateRejectsDoubleTapAndAllowsRetry() async {
+    let gate = CompanionThreadMutationGate()
+    let firstQuestion = await gate.acquire(mutationID: "decision:question-1")
+    let duplicateQuestion = await gate.acquire(mutationID: "decision:question-1")
     #expect(firstQuestion)
     #expect(!duplicateQuestion)
 
-    await gate.release(requestID: "question-1")
-    let retryQuestion = await gate.acquire(requestID: "question-1")
+    await gate.release(mutationID: "decision:question-1")
+    let retryQuestion = await gate.acquire(mutationID: "decision:question-1")
     #expect(retryQuestion)
-    await gate.release(requestID: "question-1")
+    await gate.release(mutationID: "decision:question-1")
 }
 
 @Test
-func decisionSubmissionGateSerializesDistinctThreadSnapshots() async throws {
-    let gate = CompanionDecisionSubmissionGate()
+func threadMutationGateSerializesDecisionAndCancellationSnapshots() async throws {
+    let gate = CompanionThreadMutationGate()
     let secondAcquisition = AsyncBooleanProbe()
-    #expect(await gate.acquire(requestID: "question-1"))
+    #expect(await gate.acquire(mutationID: "decision:question-1"))
 
     let secondRequest = Task {
-        let acquired = await gate.acquire(requestID: "shell-2")
+        let acquired = await gate.acquire(mutationID: "cancel:turn-2")
         await secondAcquisition.mark()
         return acquired
     }
     try await Task.sleep(for: .milliseconds(20))
     #expect(!(await secondAcquisition.read()))
 
-    await gate.release(requestID: "question-1")
+    await gate.release(mutationID: "decision:question-1")
     #expect(await secondRequest.value)
     #expect(await secondAcquisition.read())
-    await gate.release(requestID: "shell-2")
+    await gate.release(mutationID: "cancel:turn-2")
 }
 
 @Test
