@@ -66,16 +66,20 @@ private enum CompanionTranscriptWindowDemoFixtures {
         return try! JSONDecoder().decode(CompanionThread.self, from: data)
     }()
 
-    static let services = ChatServices(
-        thread: { _ in thread },
-        listCompanions: { [companion] },
-        decide: { _, _, _ in thread },
-        retryTurn: { _, _, _ in throw CompanionTranscriptWindowDemoError.unavailable },
-        cancelTurn: { _, _ in thread },
-        listSkills: { [] },
-        listPlugins: { [] },
-        listProviders: { throw CompanionTranscriptWindowDemoError.unavailable }
-    )
+    static let services: ChatServices = {
+        let fixtureThread = thread
+        let fixtureCompanion = companion
+        return ChatServices(
+            thread: { _ in fixtureThread },
+            listCompanions: { [fixtureCompanion] },
+            decide: { _, _, _ in fixtureThread },
+            retryTurn: { _, _, _ in throw CompanionTranscriptWindowDemoError.unavailable },
+            cancelTurn: { _, _ in fixtureThread },
+            listSkills: { [] },
+            listPlugins: { [] },
+            listProviders: { throw CompanionTranscriptWindowDemoError.unavailable }
+        )
+    }()
 
     private static func decode<Value: Decodable>(_ json: String) -> Value {
         try! JSONDecoder().decode(Value.self, from: Data(json.utf8))
