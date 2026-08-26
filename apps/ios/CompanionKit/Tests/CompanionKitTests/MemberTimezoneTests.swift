@@ -23,6 +23,22 @@ private final class MemberTimezoneMockURLProtocol: URLProtocol, @unchecked Senda
     override func stopLoading() {}
 }
 
+private func memberTimezoneRequestBody(_ request: URLRequest) throws -> Data {
+    if let body = request.httpBody { return body }
+    let stream = try #require(request.httpBodyStream)
+    stream.open()
+    defer { stream.close() }
+    var data = Data()
+    var buffer = [UInt8](repeating: 0, count: 4_096)
+    while stream.hasBytesAvailable {
+        let count = stream.read(&buffer, maxLength: buffer.count)
+        if count < 0 { throw stream.streamError ?? URLError(.cannotDecodeRawData) }
+        if count == 0 { break }
+        data.append(buffer, count: count)
+    }
+    return data
+}
+
 @Test
 func decodesMemberTimezoneAndPreservesItInTheSession() throws {
     let identity = try JSONDecoder().decode(WhoAmI.self, from: Data(#"""
@@ -105,19 +121,21 @@ func apiClientUsesProfileRoutineAndTriggerRoutes() async throws {
     configuration.protocolClasses = [MemberTimezoneMockURLProtocol.self]
     MemberTimezoneMockURLProtocol.handler = { request in
         let requestURL = try #require(request.url)
-        let body = request.httpBody.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let body = try #require(
+            JSONSerialization.jsonObject(with: memberTimezoneRequestBody(request)) as? [String: Any]
+        )
         let responseData: Data
         switch (requestURL.path, request.httpMethod) {
         case ("/v1/users/me", "PUT"):
-            #expect(body?["timezone"] as? String == "Europe/Paris")
-            #expect(body?.keys.contains("name") == false)
+            #expect(body["timezone"] as? String == "Europe/Paris")
+            #expect(body.keys.contains("name") == false)
             responseData = Data(#"{"id":"user-1","name":"Member","initials":"ME","timezone":"Europe/Paris"}"#.utf8)
         case ("/v1/companions/companion-1/routines", "POST"):
-            #expect(body?["cron"] as? String == "0 9 * * 1-5")
-            #expect(body?["timezone"] as? String == "Europe/Paris")
+            #expect(body["cron"] as? String == "0 9 * * 1-5")
+            #expect(body["timezone"] as? String == "Europe/Paris")
             responseData = Data(#"{"routine":{"id":"33333333-3333-4333-8333-333333333333","name":"Daily brief","prompt":"Summarize today.","cron":"0 9 * * 1-5","timezone":"Europe/Paris","enabled":true,"next_fire_at":"2026-08-27T07:00:00.000Z","last_fired_at":null,"last_error_message":null}}"#.utf8)
         case ("/v1/companions/companion-1/triggers", "POST"):
-            #expect(body?["provider"] as? String == "github")
+            #expect(body["provider"] as? String == "github")
             responseData = Data(#"{"trigger":{"id":"44444444-4444-4444-8444-444444444444","name":"Pull request","prompt":"Summarize the pull request.","provider":"github","target":{"repo":"acme/project","events":["pull_request"]},"registration_status":"manual","enabled":true,"webhook_url":null,"last_fired_at":null,"last_error_message":null}}"#.utf8)
         default:
             Issue.record("Unexpected route: \(request.httpMethod ?? "") \(requestURL.path)")
