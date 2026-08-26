@@ -40,6 +40,40 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    func testCompanionToolRunCardShowsStatusAndExpandsLiteralDetail() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-glass-chat-demo"]
+        app.launch()
+
+        let shellCard = app.descendants(matching: .any)["demo.tool-run.shell"]
+        XCTAssertTrue(shellCard.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Shell command"].exists)
+        XCTAssertTrue(app.staticTexts["Done"].exists)
+        XCTAssertTrue(app.staticTexts["File operation"].exists)
+        XCTAssertTrue(app.staticTexts["Failed"].exists)
+
+        let subagentCard = app.descendants(matching: .any)["demo.tool-run.subagent"]
+        XCTAssertTrue(subagentCard.exists)
+        let disclosure = app.buttons["tool-run.disclosure"]
+        XCTAssertTrue(disclosure.exists)
+        disclosure.tap()
+
+        let detail = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "Reviewing the transcript model")
+        ).firstMatch
+        XCTAssertTrue(detail.waitForExistence(timeout: 2))
+        let showMore = app.buttons["tool-run.show-more"]
+        XCTAssertTrue(showMore.exists)
+        showMore.tap()
+        let fullDetail = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "Finishing the native tool-operation review")
+        ).firstMatch
+        XCTAssertTrue(fullDetail.waitForExistence(timeout: 2))
+        XCTAssertTrue(app.buttons["Show less detail"].exists)
+        try captureScreenshot(named: "chat-tool-operations.png")
+    }
+
+    @MainActor
     func testLiquidGlassDemoRendersCompanionMarkdownSafely() throws {
         let app = XCUIApplication()
         app.launchArguments = ["-glass-chat-demo"]
