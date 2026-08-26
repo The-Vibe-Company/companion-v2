@@ -388,6 +388,71 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    func testChatOpensConnectedResourcesWithNativeResourceDetails() throws {
+        let app = launchCompanionRoster(access: "viewer")
+        let row = app.descendants(matching: .any)["companion.row.c96ab360-00f3-4497-a51a-51442db8add1"]
+        row.tap()
+
+        let resourcesButton = app.buttons["chat.resources"]
+        XCTAssertTrue(resourcesButton.waitForExistence(timeout: 5))
+        XCTAssertTrue(resourcesButton.label.contains("Connected resources"))
+        resourcesButton.tap()
+
+        XCTAssertTrue(app.navigationBars["Connected resources"].waitForExistence(timeout: 2))
+        let skill = app.descendants(matching: .any)[
+            "companion.resources.skill.11111111-1111-4111-8111-111111111111"
+        ]
+        XCTAssertTrue(skill.waitForExistence(timeout: 2))
+        XCTAssertTrue(skill.label.contains("Incident Summary"))
+        XCTAssertTrue(skill.label.contains("Enabled"))
+        XCTAssertTrue(app.descendants(matching: .any)["companion.resources.skills.hidden"].exists)
+
+        let routine = app.descendants(matching: .any)[
+            "companion.resources.routine.33333333-3333-4333-8333-333333333333"
+        ]
+        XCTAssertTrue(routine.exists)
+        XCTAssertTrue(routine.label.contains("Weekdays at 09:00"))
+        XCTAssertTrue(routine.label.contains("America/New_York"))
+        XCTAssertTrue(routine.label.contains("Active"))
+
+        let trigger = app.descendants(matching: .any)[
+            "companion.resources.trigger.44444444-4444-4444-8444-444444444444"
+        ]
+        if !trigger.exists { app.swipeUp() }
+        XCTAssertTrue(trigger.waitForExistence(timeout: 2))
+        XCTAssertTrue(trigger.label.contains("GitHub"))
+        XCTAssertTrue(trigger.label.contains("Webhook registered"))
+        XCTAssertTrue(trigger.label.contains("Active"))
+    }
+
+    @MainActor
+    func testConnectedResourcesShowsSectionEmptyStates() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-resources-demo"]
+        app.launchEnvironment["COMPANION_RESOURCES_DEMO_EMPTY"] = "triggers"
+        app.launch()
+
+        XCTAssertTrue(app.navigationBars["Connected resources"].waitForExistence(timeout: 5))
+        let empty = app.descendants(matching: .any)["companion.resources.triggers.empty"]
+        for _ in 0..<3 where !empty.exists { app.swipeUp() }
+        XCTAssertTrue(empty.waitForExistence(timeout: 2))
+        XCTAssertTrue(empty.label.contains("No triggers connected"))
+        XCTAssertTrue(empty.label.contains("Webhook prompts will appear here"))
+    }
+
+    @MainActor
+    func testRosterContextMenuOpensConnectedResources() throws {
+        let app = launchCompanionRoster(access: "editor")
+        let row = app.descendants(matching: .any)["companion.row.c96ab360-00f3-4497-a51a-51442db8add1"]
+        openRosterContextMenu(for: row, in: app)
+
+        let resources = app.buttons["Connected resources"]
+        XCTAssertTrue(resources.waitForExistence(timeout: 2))
+        resources.tap()
+        XCTAssertTrue(app.navigationBars["Connected resources"].waitForExistence(timeout: 2))
+    }
+
+    @MainActor
     func testNotificationDemoOpensTheTargetConversationAfterRosterRestore() throws {
         let app = XCUIApplication()
         app.launchArguments = ["-companion-roster-demo", "-companion-notification-demo"]

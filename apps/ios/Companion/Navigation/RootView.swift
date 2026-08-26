@@ -22,6 +22,8 @@ struct RootView: View {
                 CompanionIconCatalogDemoView(
                     forceReduceMotion: ProcessInfo.processInfo.arguments.contains("-companion-reduce-motion")
                 )
+            } else if ProcessInfo.processInfo.arguments.contains("-companion-resources-demo") {
+                CompanionConnectedResourcesDemoView()
             } else if ProcessInfo.processInfo.arguments.contains("-glass-chat-demo") {
                 GlassChatDemoView()
             } else if ProcessInfo.processInfo.arguments.contains("-companion-settings-demo") {
@@ -45,6 +47,7 @@ struct RootView: View {
             let arguments = ProcessInfo.processInfo.arguments
             guard !arguments.contains("-companion-decision-demo"),
                   !arguments.contains("-companion-icon-demo"),
+                  !arguments.contains("-companion-resources-demo"),
                   !arguments.contains("-glass-chat-demo"),
                   !arguments.contains("-companion-settings-demo"),
                   !arguments.contains("-companion-roster-demo"),

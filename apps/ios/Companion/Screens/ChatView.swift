@@ -15,6 +15,7 @@ struct ChatView: View {
     @Environment(SessionStore.self) private var sessionStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let companion: CompanionSummary
+    let onResources: () -> Void
     let onSettings: () -> Void
     let onPlugins: () -> Void
     private let services: ChatServices?
@@ -32,6 +33,7 @@ struct ChatView: View {
 
     init(
         companion: CompanionSummary,
+        onResources: @escaping () -> Void = {},
         onPlugins: @escaping () -> Void = {},
         services: ChatServices? = nil,
         onSettings: @escaping () -> Void
@@ -39,6 +41,7 @@ struct ChatView: View {
         self.companion = companion
         self.onPlugins = onPlugins
         self.services = services
+        self.onResources = onResources
         self.onSettings = onSettings
         _currentCompanion = State(initialValue: companion)
     }
@@ -176,6 +179,15 @@ struct ChatView: View {
                 compact: true,
                 replyingColor: visualTheme.accent
             )
+        }
+
+        ToolbarItem(placement: .topBarTrailing) {
+            Button(action: onResources) {
+                Image(systemName: "link")
+                    .frame(width: 44, height: 44)
+            }
+            .accessibilityLabel("Connected resources for \(currentCompanion.name)")
+            .accessibilityIdentifier("chat.resources")
         }
 
         ToolbarItem(placement: .topBarTrailing) {
