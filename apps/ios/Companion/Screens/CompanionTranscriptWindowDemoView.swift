@@ -19,6 +19,9 @@ struct CompanionTranscriptWindowDemoView: View {
 @MainActor
 private enum CompanionTranscriptWindowDemoFixtures {
     static let companionID = "c96ab360-00f3-4497-a51a-51442db8add1"
+    static let usesShortThread = ProcessInfo.processInfo.environment[
+        "COMPANION_TRANSCRIPT_DEMO_SHORT"
+    ] == "1"
 
     static let companion: CompanionSummary = decode(#"""
     {
@@ -31,39 +34,131 @@ private enum CompanionTranscriptWindowDemoFixtures {
       "access":"owner",
       "hidden":false,
       "unread":false,
-      "last_message":{"preview":"Long-thread message 120","role":"assistant","created_at":"2026-08-26T12:00:00.000Z"},
-      "runtime":{"state":"running","replying":false,"last_error":null,"provider_ids":["anthropic"],"latest_operation":null}
+      "last_message":{"preview":"The release matrix is now stable.","role":"assistant","created_at":"2026-08-26T12:00:00.000Z"},
+      "runtime":{"state":"running","replying":true,"last_error":null,"provider_ids":["anthropic"],"latest_operation":null}
     }
     """#)
 
     static let thread: CompanionThread = {
-        let entries: [[String: Any]] = (1...120).map { index in
-            [
+        let transcriptCount = usesShortThread ? 10 : 120
+        var entries: [[String: Any]] = (1...transcriptCount).map { index in
+            let role = index.isMultiple(of: 2) ? "assistant" : "user"
+            var entry: [String: Any] = [
                 "event_id": "long-\(index)",
                 "ordinal": index,
-                "role": "assistant",
+                "role": role,
                 "content": "Long-thread message \(index)",
-                "author_id": NSNull(),
-                "author_name": NSNull(),
+                "author_id": role == "user" ? "owner-1" as Any : NSNull(),
+                "author_name": role == "user" ? "Stan" as Any : NSNull(),
                 "decision": NSNull(),
                 "tool": NSNull(),
                 "queued": false,
                 "attachments": [Any](),
-                "created_at": String(format: "2026-08-26T%02d:%02d:00.000Z", index / 60, index % 60),
+                "created_at": String(
+                    format: index <= transcriptCount / 2
+                        ? "2026-08-25T%02d:%02d:00.000Z"
+                        : "2026-08-26T%02d:%02d:00.000Z",
+                    index / 60,
+                    index % 60
+                ),
             ]
+
+            switch index {
+            case transcriptCount - 4:
+                entry["role"] = "user"
+                entry["content"] = "Check the final deployment table before we ship."
+                entry["author_id"] = "owner-1"
+                entry["author_name"] = "Stan"
+            case transcriptCount - 3:
+                entry["role"] = "assistant"
+                entry["content"] = """
+                ## Release matrix
+
+                | Surface | State | Owner |
+                | :-- | :--: | --: |
+                | iOS chat | Ready for review | Mobile |
+                | Runtime | Healthy | Platform |
+                """
+                entry["author_id"] = NSNull()
+                entry["author_name"] = NSNull()
+            case transcriptCount - 2:
+                entry["role"] = "tool"
+                entry["content"] = ""
+                entry["author_id"] = NSNull()
+                entry["author_name"] = NSNull()
+                entry["tool"] = [
+                    "call_id": "layout-check",
+                    "kind": "shell",
+                    "name": "run_layout_checks",
+                    "title": "Validate native chat layout",
+                    "status": "ok",
+                    "detail": "Ordering and non-overlap checks completed.",
+                    "screenshot": NSNull(),
+                ]
+            case transcriptCount - 1:
+                entry["role"] = "user"
+                entry["content"] = "Keep that result attached to the reply below."
+                entry["author_id"] = "owner-1"
+                entry["author_name"] = "Stan"
+            case transcriptCount:
+                entry["role"] = "assistant"
+                entry["content"] = "Long-thread message \(transcriptCount)"
+                entry["author_id"] = NSNull()
+                entry["author_name"] = NSNull()
+            default:
+                break
+            }
+            return entry
         }
+
+        entries.append(contentsOf: [
+            queuedEntry(
+                ordinal: transcriptCount + 1,
+                eventID: "queued-one",
+                turnID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                content: "Queue the accessibility follow-up."
+            ),
+            queuedEntry(
+                ordinal: transcriptCount + 2,
+                eventID: "queued-two",
+                turnID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                content: "Then verify the compact-width layout."
+            ),
+        ])
         let payload: [String: Any] = [
             "companion_id": companionID,
             "viewer_id": "owner-1",
             "read_only": false,
             "can_send": true,
             "entries": entries,
-            "queued_count": 0,
+            "queued_count": 2,
             "interrupted_turn": NSNull(),
         ]
         let data = try! JSONSerialization.data(withJSONObject: payload)
         return try! JSONDecoder().decode(CompanionThread.self, from: data)
     }()
+
+    private static func queuedEntry(
+        ordinal: Int,
+        eventID: String,
+        turnID: String,
+        content: String
+    ) -> [String: Any] {
+        [
+            "event_id": eventID,
+            "ordinal": ordinal,
+            "role": "user",
+            "content": content,
+            "author_id": "owner-1",
+            "author_name": "Stan",
+            "decision": NSNull(),
+            "tool": NSNull(),
+            "turn_id": turnID,
+            "queued": true,
+            "attachments": [Any](),
+            "created_at": "2026-08-26T12:01:00.000Z",
+        ]
+    }
 
     static let services: ChatServices = {
         let fixtureThread = thread

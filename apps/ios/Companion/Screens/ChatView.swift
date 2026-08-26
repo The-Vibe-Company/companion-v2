@@ -127,6 +127,7 @@ struct ChatView: View {
                                         )
                                     }
                                 }
+                                .accessibilityIdentifier("chat.entry.\(entry.eventID)")
                                 .id(entry.id)
                             }
 
@@ -182,6 +183,7 @@ struct ChatView: View {
                             reduceMotion ? nil : .easeOut(duration: 0.18),
                             value: isNearBottom
                         )
+                        .accessibilityIdentifier("chat.bottom-controls")
                 }
                 .onScrollGeometryChange(for: CGFloat.self) { geometry in
                     max(0, geometry.contentSize.height - geometry.visibleRect.maxY)
@@ -289,6 +291,7 @@ struct ChatView: View {
         .padding(.vertical, 11)
         .companionGlass(radius: 18)
         .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("chat.replying-status")
     }
 
     private var loadEarlierButton: some View {
@@ -338,6 +341,7 @@ struct ChatView: View {
             .padding(.vertical, 6)
             .background(.thinMaterial, in: Capsule())
             .accessibilityAddTraits(.isHeader)
+            .accessibilityIdentifier("chat.day-marker.\(dayLabel(for: date))")
     }
 
     private func unavailableState(_ message: String) -> some View {
@@ -505,6 +509,7 @@ struct ChatView: View {
         .padding(.horizontal, 12)
         .padding(.top, 8)
         .padding(.bottom, 6)
+        .accessibilityIdentifier("chat.composer-controls")
     }
 
     private var sendDisabled: Bool {

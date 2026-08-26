@@ -567,6 +567,72 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    func testTranscriptWindowDemoKeepsLatestEntriesOrderedAndSeparated() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-transcript-window-demo"]
+        app.launch()
+
+        let orderedIDs = ["long-116", "long-117", "long-118", "long-119", "long-120"]
+        let entries = orderedIDs.map { app.descendants(matching: .any)["chat.entry.\($0)"] }
+        XCTAssertTrue(entries.last?.waitForExistence(timeout: 5) == true)
+
+        for entry in entries where !entry.isHittable {
+            app.swipeUp()
+        }
+        for (earlier, later) in zip(entries, entries.dropFirst()) {
+            XCTAssertTrue(earlier.exists, "Missing \(earlier.identifier)")
+            XCTAssertTrue(later.exists, "Missing \(later.identifier)")
+            XCTAssertLessThanOrEqual(
+                earlier.frame.maxY,
+                later.frame.minY,
+                "Transcript entries overlap or render out of ordinal order"
+            )
+        }
+
+        let table = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "markdown.table.")
+        ).firstMatch
+        let tool = app.buttons["tool-run.open-details.long-118"]
+        XCTAssertTrue(table.exists)
+        XCTAssertTrue(tool.exists)
+    }
+
+    @MainActor
+    func testTranscriptWindowDemoBottomControlsNeverCoverChatContent() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-transcript-window-demo"]
+        app.launchEnvironment["COMPANION_TRANSCRIPT_DEMO_SHORT"] = "1"
+        app.launch()
+
+        let queue = app.buttons["chat.queue.toggle"]
+        let composer = app.descendants(matching: .any)["chat.composer-controls"]
+        let replying = app.descendants(matching: .any)["chat.replying-status"]
+        XCTAssertTrue(queue.waitForExistence(timeout: 5))
+        XCTAssertTrue(composer.exists)
+        XCTAssertLessThanOrEqual(queue.frame.maxY, composer.frame.minY)
+
+        app.swipeDown()
+        let scrollToBottom = app.buttons["chat.scroll-to-bottom"]
+        XCTAssertTrue(scrollToBottom.waitForExistence(timeout: 3))
+        XCTAssertLessThanOrEqual(scrollToBottom.frame.maxY, queue.frame.minY)
+
+        let visibleEntries = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "chat.entry.")
+        ).allElementsBoundByIndex.filter(\.isHittable)
+        for entry in visibleEntries {
+            XCTAssertFalse(
+                scrollToBottom.frame.intersects(entry.frame),
+                "Scroll-to-latest covers \(entry.identifier)"
+            )
+        }
+
+        XCTAssertTrue(replying.exists)
+        XCTAssertFalse(replying.frame.intersects(queue.frame))
+        XCTAssertFalse(replying.frame.intersects(composer.frame))
+        try captureScreenshot(named: "chat-layout-regression-short.png")
+    }
+
+    @MainActor
     func testCompanionMarkdownSupportsAccessibilityTextInLandscape() throws {
         let app = XCUIApplication()
         app.launchArguments = [

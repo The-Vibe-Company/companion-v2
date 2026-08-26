@@ -202,15 +202,17 @@ jobs:
         if: needs.scope.outputs.ios == 'true'
         run: swift test --package-path apps/ios/CompanionKit
 
-      - name: Build the simulator application
+      - name: Build and test native chat regressions
         if: needs.scope.outputs.ios == 'true'
         run: >-
-          xcodebuild build
+          xcodebuild test
           -workspace apps/ios/Companion.xcworkspace
           -scheme Companion
           -configuration Debug
           -destination "platform=iOS Simulator,id=${{ steps.simulator.outputs.id }}"
           -derivedDataPath "$RUNNER_TEMP/companion-derived-data"
+          -only-testing:CompanionUITests/CompanionUITests/testTranscriptWindowDemoKeepsLatestEntriesOrderedAndSeparated
+          -only-testing:CompanionUITests/CompanionUITests/testTranscriptWindowDemoBottomControlsNeverCoverChatContent
           CODE_SIGNING_ALLOWED=NO
 
   quality:
