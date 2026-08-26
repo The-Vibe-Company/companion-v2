@@ -14,8 +14,9 @@ struct CompanionSettingsView: View {
 
     let companion: CompanionSummary
     let onSaved: (CompanionSummary) -> Void
+    let onDeletionStarted: (CompanionSummary, UUID) -> Void
     let onDeletionAccepted: (String, CompanionOperationSummary) -> Void
-    let onDeletionAmbiguous: (String, UUID) -> Void
+    let onDeletionFailed: (CompanionSummary, UUID, Error) -> Void
     private let services: CompanionSettingsServices?
 
     @State private var currentCompanion: CompanionSummary
@@ -37,14 +38,16 @@ struct CompanionSettingsView: View {
     init(
         companion: CompanionSummary,
         onSaved: @escaping (CompanionSummary) -> Void,
+        onDeletionStarted: @escaping (CompanionSummary, UUID) -> Void = { _, _ in },
         onDeletionAccepted: @escaping (String, CompanionOperationSummary) -> Void,
-        onDeletionAmbiguous: @escaping (String, UUID) -> Void = { _, _ in },
+        onDeletionFailed: @escaping (CompanionSummary, UUID, Error) -> Void = { _, _, _ in },
         services: CompanionSettingsServices? = nil
     ) {
         self.companion = companion
         self.onSaved = onSaved
+        self.onDeletionStarted = onDeletionStarted
         self.onDeletionAccepted = onDeletionAccepted
-        self.onDeletionAmbiguous = onDeletionAmbiguous
+        self.onDeletionFailed = onDeletionFailed
         self.services = services
         _currentCompanion = State(initialValue: companion)
         _name = State(initialValue: companion.name)
@@ -393,6 +396,7 @@ struct CompanionSettingsView: View {
         success = nil
         let requestID = deleteRequestID ?? UUID()
         deleteRequestID = requestID
+        onDeletionStarted(currentCompanion, requestID)
         do {
             let operation: CompanionOperationSummary
             if let services {
@@ -406,7 +410,7 @@ struct CompanionSettingsView: View {
             deleteRequestID = nil
             onDeletionAccepted(currentCompanion.id, operation)
         } catch {
-            onDeletionAmbiguous(currentCompanion.id, requestID)
+            onDeletionFailed(currentCompanion, requestID, error)
             if let apiError = error as? APIError, apiError.status == 0 {
                 self.error = "The deletion response was not received. Retry Delete safely reuses the same request."
             } else {
@@ -492,13 +496,20 @@ struct CompanionSettingsDemoView: View {
                     description: Text("The Companion will remain visible until its Box is permanently deleted.")
                 )
             } else {
-                ChatView(companion: companion) {
+                ChatView(
+                    companion: companion,
+                    services: CompanionSettingsDemoFixtures.chatServices(access: access)
+                ) {
                     showingSettings = true
                 }
                 .navigationDestination(isPresented: $showingSettings) {
                     CompanionSettingsView(
                         companion: companion,
                         onSaved: { companion = $0 },
+                        onDeletionStarted: { _, _ in
+                            deletionRequested = true
+                            showingSettings = false
+                        },
                         onDeletionAccepted: { _, operation in
                             deletionRequested = operation.isActive
                             showingSettings = !operation.isActive
@@ -535,6 +546,31 @@ private enum CompanionSettingsDemoFixtures {
             listProviders: { providers },
             updateCompanion: { _, input in updatedCompanion(input: input, access: access) },
             deleteCompanion: { _, _ in deleteOperation }
+        )
+    }
+
+    static func chatServices(access: CompanionAccess) -> ChatServices {
+        let currentCompanion = companion(access: access)
+        let currentThread: CompanionThread = decode(#"""
+        {
+          "companion_id":"c96ab360-00f3-4497-a51a-51442db8add1",
+          "viewer_id":"user-1",
+          "read_only":\#(access == .viewer ? "true" : "false"),
+          "can_send":\#(access == .viewer ? "false" : "true"),
+          "entries":[],
+          "queued_count":0,
+          "interrupted_turn":null
+        }
+        """#)
+        return ChatServices(
+            thread: { _ in currentThread },
+            listCompanions: { [currentCompanion] },
+            decide: { _, _, _ in currentThread },
+            retryTurn: { _, _, _ in deleteOperation },
+            cancelTurn: { _, _ in currentThread },
+            listSkills: { [] },
+            listPlugins: { [] },
+            listProviders: { providers }
         )
     }
 
