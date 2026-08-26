@@ -366,7 +366,7 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
         let previousOperation = previous.runtime.latestOperation
         let parentRuntimeIsStale = previousOperation?.isActive == true
             && incomingOperationID != previousOperation?.id
-        CompanionSummary(
+        return CompanionSummary(
             id: id,
             name: name,
             persona: persona,
