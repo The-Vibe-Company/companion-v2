@@ -190,38 +190,40 @@ jobs:
         with:
           node-version: 22
 
-      - name: Install XcodeBuildMCP
-        if: needs.scope.outputs.ios == 'true'
-        run: npm install --global xcodebuildmcp@2.7.0
-
       - name: Select an available simulator
         if: needs.scope.outputs.ios == 'true'
         id: simulator
         run: |
-          xcodebuildmcp simulator list --output json > "$RUNNER_TEMP/simulators.json"
+          xcrun simctl list devices available --json > "$RUNNER_TEMP/simulators.json"
           simulator_id="$(node scripts/select-ios-simulator.mjs "$RUNNER_TEMP/simulators.json")"
           echo "id=$simulator_id" >> "$GITHUB_OUTPUT"
 
       - name: Test CompanionKit
         if: needs.scope.outputs.ios == 'true'
-        run: xcodebuildmcp swift-package test --package-path apps/ios/CompanionKit
+        run: swift test --package-path apps/ios/CompanionKit
 
       - name: Build the simulator application
         if: needs.scope.outputs.ios == 'true'
         run: >-
-          xcodebuildmcp simulator build
-          --workspace-path apps/ios/Companion.xcworkspace
-          --scheme Companion
-          --configuration Debug
-          --simulator-id "${{ steps.simulator.outputs.id }}"
-          --derived-data-path "$RUNNER_TEMP/companion-derived-data"
-          --extra-args CODE_SIGNING_ALLOWED=NO
+          xcodebuild build
+          -workspace apps/ios/Companion.xcworkspace
+          -scheme Companion
+          -configuration Debug
+          -destination "platform=iOS Simulator,id=${{ steps.simulator.outputs.id }}"
+          -derivedDataPath "$RUNNER_TEMP/companion-derived-data"
+          CODE_SIGNING_ALLOWED=NO
 
       - name: Test photo picker focus handoff
         if: needs.scope.outputs.ios == 'true'
         run: >-
-          xcodebuildmcp simulator test
-          --json '{"workspacePath":"apps/ios/Companion.xcworkspace","scheme":"Companion","configuration":"Debug","simulatorId":"${{ steps.simulator.outputs.id }}","derivedDataPath":"${{ runner.temp }}/companion-derived-data","progress":true,"extraArgs":["CODE_SIGNING_ALLOWED=NO","-only-testing:CompanionUITests/CompanionUITests/testChatPhotoLibraryOpensOnFirstSelectionWithKeyboardVisible"]}'
+          xcodebuild test
+          -workspace apps/ios/Companion.xcworkspace
+          -scheme Companion
+          -configuration Debug
+          -destination "platform=iOS Simulator,id=${{ steps.simulator.outputs.id }}"
+          -derivedDataPath "$RUNNER_TEMP/companion-derived-data"
+          -only-testing:CompanionUITests/CompanionUITests/testChatPhotoLibraryOpensOnFirstSelectionWithKeyboardVisible
+          CODE_SIGNING_ALLOWED=NO
 
   quality:
     name: Quality Node 22

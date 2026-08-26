@@ -732,7 +732,8 @@ struct ChatView: View {
     private func presentPhotoLibrary() {
         composerFocused = false
         Task { @MainActor in
-            await Task.yield()
+            // UIKit must finish dismissing the menu and keyboard before another presenter starts.
+            try? await Task.sleep(for: .milliseconds(250))
             showPhotoPicker = true
         }
     }
@@ -740,7 +741,7 @@ struct ChatView: View {
     private func presentDocumentPicker() {
         composerFocused = false
         Task { @MainActor in
-            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(250))
             showDocumentPicker = true
         }
     }

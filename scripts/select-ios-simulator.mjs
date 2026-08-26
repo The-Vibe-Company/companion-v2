@@ -18,7 +18,18 @@ function compareVersions(left, right) {
 }
 
 export function selectLatestIOSSimulator(payload) {
-  const simulators = payload?.data?.simulators;
+  const nativeDevices = payload?.devices;
+  const simulators = nativeDevices != null && !Array.isArray(nativeDevices)
+    ? Object.entries(nativeDevices).flatMap(([runtime, devices]) => {
+        const runtimeMatch = /^com\.apple\.CoreSimulator\.SimRuntime\.iOS-(\d+(?:-\d+)*)$/.exec(runtime);
+        if (!runtimeMatch || !Array.isArray(devices)) return [];
+        return devices.map((device) => ({
+          ...device,
+          simulatorId: device?.udid,
+          runtime: `iOS ${runtimeMatch[1].replaceAll("-", ".")}`,
+        }));
+      })
+    : payload?.data?.simulators;
   if (!Array.isArray(simulators)) throw new Error("Invalid simulator list response");
 
   const candidates = simulators
