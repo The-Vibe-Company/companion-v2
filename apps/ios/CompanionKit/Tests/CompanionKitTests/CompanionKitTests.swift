@@ -1103,14 +1103,17 @@ func transcriptWindowStartsWithNewestFiftyEntries() {
 func transcriptWindowExpandsByFiftyUntilEverythingIsExposed() {
     var window = CompanionTranscriptWindow(totalCount: 120)
 
-    #expect(window.loadEarlier())
+    let firstExpansion = window.loadEarlier()
+    #expect(firstExpansion)
     #expect(window.exposedCount == 100)
     #expect(window.visibleRange == (20..<120))
-    #expect(window.loadEarlier())
+    let secondExpansion = window.loadEarlier()
+    #expect(secondExpansion)
     #expect(window.exposedCount == 120)
     #expect(window.visibleRange == (0..<120))
     #expect(!window.hasEarlierEntries)
-    #expect(!window.loadEarlier())
+    let exhaustedExpansion = window.loadEarlier()
+    #expect(!exhaustedExpansion)
 }
 
 @Test
@@ -1122,13 +1125,15 @@ func transcriptWindowKeepsSmallTranscriptsFullyExposed() {
     #expect(window.exposedCount == 12)
     #expect(window.visibleRange == (0..<12))
     #expect(!window.hasEarlierEntries)
-    #expect(!window.loadEarlier())
+    let expansion = window.loadEarlier()
+    #expect(!expansion)
 }
 
 @Test
 func transcriptWindowRefreshGrowthPreservesExposedCount() {
     var window = CompanionTranscriptWindow(totalCount: 120)
-    #expect(window.loadEarlier())
+    let expansion = window.loadEarlier()
+    #expect(expansion)
 
     window.refresh(totalCount: 150)
 
@@ -1151,7 +1156,8 @@ func transcriptWindowRefreshCanPreserveEntriesWhileReadingHistory() {
 @Test
 func transcriptWindowResetStartsDisclosureOver() {
     var window = CompanionTranscriptWindow(totalCount: 120)
-    #expect(window.loadEarlier())
+    let expansion = window.loadEarlier()
+    #expect(expansion)
 
     window.reset()
 
