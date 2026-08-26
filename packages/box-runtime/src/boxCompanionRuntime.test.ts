@@ -1203,6 +1203,8 @@ describe("default Pi packages on the Box disk", () => {
     expect(script).not.toContain("awk 'NF { line=$0 } END { print line }' \"$qmd_log\"");
   });
 
+  // Full Turbo quality runs many workspaces concurrently; keep the syntax guard deterministic
+  // without coupling it to Vitest's five-second default under runner contention.
   it("is a script bash can parse, with and without the optional install", async () => {
     // The layout script is generated from a template literal, so no shell linter in CI ever sees
     // it. A quoting slip in it is a Box that fails every staging, which is every message.
@@ -1216,7 +1218,7 @@ describe("default Pi packages on the Box disk", () => {
       expect(parsed.stderr).toBe("");
       expect(parsed.status).toBe(0);
     }
-  });
+  }, 15_000);
 
   it("gives the relayout longer than a turn's own cold start, so the install is never lost", async () => {
     await stagedLayoutScript();
