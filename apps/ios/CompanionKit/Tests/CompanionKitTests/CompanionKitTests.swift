@@ -518,6 +518,7 @@ func loadsConnectedResourcesFromTheSharedFirstPartyRoutes() async throws {
             {"triggers":[{
               "id":"44444444-4444-4444-8444-444444444444",
               "name":"Pull request opened",
+              "prompt":"Summarize the pull request.",
               "provider":"github",
               "registration_status":"registered",
               "enabled":false,
@@ -562,6 +563,7 @@ func loadsConnectedResourcesFromTheSharedFirstPartyRoutes() async throws {
     #expect(resources.hiddenSkillCount == 1)
     #expect(resources.routines.first?.scheduleDescription == "Weekdays at 09:00")
     #expect(resources.routines.first?.status == .active)
+    #expect(resources.triggers.first?.prompt == "Summarize the pull request.")
     #expect(resources.triggers.first?.providerName == "GitHub")
     #expect(resources.triggers.first?.registrationDescription == "Webhook registered")
     #expect(resources.triggers.first?.status == .disabled)

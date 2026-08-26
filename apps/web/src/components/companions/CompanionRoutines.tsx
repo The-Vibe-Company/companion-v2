@@ -8,19 +8,25 @@ import {
   deleteCompanionRoutine,
   updateCompanionRoutine,
 } from "@/lib/companions";
+import { updateMyTimezone } from "@/lib/org";
 import { Dialog } from "../org/primitives";
 import { Badge } from "../cds";
 import { Icon } from "../Icon";
+import {
+  browserTimeZones,
+  detectedBrowserTimeZone,
+  formatMemberDateTime,
+} from "@/lib/timezones";
 
-function nextFires(cron: string, timezone: string, count = 3): string[] {
-  const validated = validateRoutineSchedule({ cron, timezone });
+function nextFires(cron: string, scheduleTimezone: string, displayTimezone: string, count = 3): string[] {
+  const validated = validateRoutineSchedule({ cron, timezone: scheduleTimezone });
   if (!validated.ok) return [];
   const fires: string[] = [];
   let cursor = new Date();
   try {
     for (let i = 0; i < count; i += 1) {
-      const next = computeNextFireAt(cron, timezone, cursor);
-      fires.push(next.toLocaleString(undefined, { timeZone: timezone }));
+      const next = computeNextFireAt(cron, scheduleTimezone, cursor);
+      fires.push(formatMemberDateTime(next, displayTimezone));
       cursor = next;
     }
   } catch {
@@ -33,25 +39,34 @@ function RoutineEditor({
   orgId,
   companionId,
   initial,
+  memberTimezone,
   onSaved,
   onClose,
 }: {
   orgId: string;
   companionId: string;
   initial: CompanionRoutine | null;
+  memberTimezone?: string | null;
   onSaved: (routine: CompanionRoutine) => void;
   onClose: () => void;
 }) {
   const [name, setName] = useState(initial?.name ?? "");
   const [prompt, setPrompt] = useState(initial?.prompt ?? "");
   const [cron, setCron] = useState(initial?.cron ?? "0 9 * * 1-5");
-  const [timezone, setTimezone] = useState(
-    initial?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? "UTC",
-  );
+  const detectedTimezone = useMemo(detectedBrowserTimeZone, []);
+  const displayTimezone = memberTimezone ?? detectedTimezone;
+  const [timezone, setTimezone] = useState(initial?.timezone ?? displayTimezone);
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const preview = useMemo(() => nextFires(cron, timezone), [cron, timezone]);
+  const preview = useMemo(
+    () => nextFires(cron, timezone, displayTimezone),
+    [cron, displayTimezone, timezone],
+  );
+  const timezoneOptions = useMemo(
+    () => browserTimeZones(displayTimezone, timezone),
+    [displayTimezone, timezone],
+  );
   const schedule = useMemo(() => validateRoutineSchedule({ cron, timezone }), [cron, timezone]);
 
   async function save() {
@@ -59,6 +74,11 @@ function RoutineEditor({
     setBusy(true);
     setError(null);
     try {
+      if (!initial && (memberTimezone === null || memberTimezone === undefined)) {
+        // Make the browser-detected default durable before creating the first schedule. That keeps
+        // subsequent web, iOS, worker, and Pi behavior on the same member-owned source of truth.
+        await updateMyTimezone(displayTimezone);
+      }
       const routine = initial
         ? await updateCompanionRoutine(orgId, companionId, initial.id, {
           name, prompt, cron, timezone, enabled,
@@ -111,7 +131,7 @@ function RoutineEditor({
         <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={5} />
       </label>
       <label className="og-field">
-        <span>Cron</span>
+        <span>Cron (local wall time)</span>
         <input
           value={cron}
           onChange={(event) => setCron(event.target.value)}
@@ -120,8 +140,10 @@ function RoutineEditor({
         />
       </label>
       <label className="og-field">
-        <span>Timezone</span>
-        <input value={timezone} onChange={(event) => setTimezone(event.target.value)} spellCheck={false} />
+        <span>Schedule timezone</span>
+        <select value={timezone} onChange={(event) => setTimezone(event.target.value)}>
+          {timezoneOptions.map((option) => <option key={option}>{option}</option>)}
+        </select>
       </label>
       <label className="og-field og-field--check">
         <input
@@ -135,7 +157,7 @@ function RoutineEditor({
         {schedule.ok
           ? (
             <>
-              Next fires: {preview.join(" · ") || "—"}
+              Next fires in {displayTimezone}: {preview.join(" · ") || "—"}
             </>
           )
           : schedule.code === "interval_too_short"
@@ -153,15 +175,18 @@ export function CompanionRoutines({
   orgId,
   companionId,
   routines,
+  memberTimezone,
   canEdit,
   onChange,
 }: {
   orgId: string;
   companionId: string;
   routines: CompanionRoutine[];
+  memberTimezone?: string | null;
   canEdit: boolean;
   onChange: (routines: CompanionRoutine[]) => void;
 }) {
+  const displayTimezone = memberTimezone ?? detectedBrowserTimeZone();
   const [editing, setEditing] = useState<CompanionRoutine | null | "new">(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
@@ -228,7 +253,7 @@ export function CompanionRoutines({
                 </span>
                 {routine.enabled && routine.next_fire_at && (
                   <span className="chat-context__caption">
-                    Next {new Date(routine.next_fire_at).toLocaleString()}
+                    Next {formatMemberDateTime(routine.next_fire_at, displayTimezone)} · {displayTimezone}
                   </span>
                 )}
                 {routine.last_error_message && (
@@ -273,6 +298,7 @@ export function CompanionRoutines({
           orgId={orgId}
           companionId={companionId}
           initial={editing === "new" ? null : editing}
+          memberTimezone={memberTimezone}
           onSaved={(routine) => {
             const exists = routines.some((item) => item.id === routine.id);
             onChange(exists

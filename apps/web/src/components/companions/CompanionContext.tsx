@@ -41,6 +41,7 @@ export function CompanionContext({
   skills,
   orgId,
   routines,
+  memberTimezone,
   onRoutinesChange,
   triggers,
   onTriggersChange,
@@ -58,6 +59,7 @@ export function CompanionContext({
   skills: CompanionContextSkill[];
   orgId: string;
   routines: CompanionRoutine[];
+  memberTimezone?: string | null;
   onRoutinesChange: (routines: CompanionRoutine[]) => void;
   triggers: CompanionTrigger[];
   onTriggersChange: (triggers: CompanionTrigger[]) => void;
@@ -224,6 +226,7 @@ export function CompanionContext({
           orgId={orgId}
           companionId={companion.id}
           routines={routines}
+          memberTimezone={memberTimezone}
           canEdit={onSettings !== null}
           onChange={onRoutinesChange}
         />
@@ -232,6 +235,7 @@ export function CompanionContext({
           orgId={orgId}
           companionId={companion.id}
           triggers={triggers}
+          memberTimezone={memberTimezone}
           canEdit={onSettings !== null}
           onChange={onTriggersChange}
         />

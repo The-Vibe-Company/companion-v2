@@ -840,6 +840,8 @@ final class CompanionUITests: XCTestCase {
         XCTAssertTrue(routine.exists)
         XCTAssertTrue(routine.label.contains("Weekdays at 09:00"))
         XCTAssertTrue(routine.label.contains("America/New_York"))
+        XCTAssertTrue(routine.label.contains("Next"))
+        XCTAssertTrue(routine.label.contains("in \(expectedDeviceTimezone)"))
         XCTAssertTrue(routine.label.contains("Active"))
 
         let trigger = app.descendants(matching: .any)[
@@ -850,6 +852,43 @@ final class CompanionUITests: XCTestCase {
         XCTAssertTrue(trigger.label.contains("GitHub"))
         XCTAssertTrue(trigger.label.contains("Webhook registered"))
         XCTAssertTrue(trigger.label.contains("Active"))
+    }
+
+    @MainActor
+    func testOwnerCreatesResourcesInTheDeviceTimezoneByDefault() throws {
+        let app = launchCompanionRoster(access: "owner")
+        let row = app.descendants(matching: .any)["companion.row.c96ab360-00f3-4497-a51a-51442db8add1"]
+        row.tap()
+        let settingsButton = app.buttons["chat.settings"]
+        XCTAssertTrue(settingsButton.waitForExistence(timeout: 5))
+        settingsButton.tap()
+        let resourcesButton = app.descendants(matching: .any)["companion.settings.resources"]
+        XCTAssertTrue(resourcesButton.waitForExistence(timeout: 2))
+        resourcesButton.tap()
+
+        let addRoutine = app.buttons["companion.resources.routines.add"]
+        XCTAssertTrue(addRoutine.waitForExistence(timeout: 2))
+        XCTAssertTrue(app.buttons["companion.resources.triggers.add"].exists)
+        addRoutine.tap()
+
+        XCTAssertTrue(app.navigationBars["New routine"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts[expectedDeviceTimezone].exists)
+        XCTAssertTrue(app.staticTexts["Cron is evaluated as local wall-clock time in this timezone. Change your member timezone from Account › Member settings."].exists)
+    }
+
+    @MainActor
+    func testMemberSettingsUsesADeviceDefaultAndSearchableTimezonePicker() throws {
+        let app = launchCompanionRoster(access: "owner")
+        app.buttons["account.menu"].tap()
+        let settings = app.buttons["Member settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 2))
+        settings.tap()
+
+        XCTAssertTrue(app.navigationBars["Member settings"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts[expectedDeviceTimezone].exists)
+        app.buttons["member-settings.timezone"].tap()
+        XCTAssertTrue(app.navigationBars["Choose timezone"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.searchFields["Search timezones"].exists)
     }
 
     @MainActor
@@ -1027,6 +1066,13 @@ final class CompanionUITests: XCTestCase {
         settings.tap()
         XCTAssertTrue(app.navigationBars["Companion settings"].waitForExistence(timeout: 2))
         return app
+    }
+
+    private var expectedDeviceTimezone: String {
+        let identifier = TimeZone.current.identifier
+        return identifier == "UTC" || TimeZone.knownTimeZoneIdentifiers.contains(identifier)
+            ? identifier
+            : "UTC"
     }
 
     @MainActor

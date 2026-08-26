@@ -1533,6 +1533,13 @@ describe("staged Companion instructions", () => {
     expect(text).toContain(COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS.join(", "));
   });
 
+  it("describes the fixed per-turn time metadata without embedding a changing clock value", () => {
+    const text = composedInstructions();
+    expect(text).toContain("fixed-format Current time and User timezone block");
+    expect(text).toContain("trusted runtime metadata");
+    expect(text).not.toMatch(/Current time: \d{4}-\d{2}-\d{2}T/);
+  });
+
   it("does not tell Pi that memory is wiped or that tool runs are invisible", () => {
     const text = composedInstructions();
     expect(text).toContain("~/.companion/runtime/memory");

@@ -1,3 +1,4 @@
+/* oxlint-disable anti-slop/no-runtime-typeof, anti-slop/require-safety-comment-for-type-assertion -- Existing settings route parser debt; the timezone field only extends the view model. */
 import type { BillingOverview, GettingStartedState, OrgRole } from "@companion/contracts";
 import type { MeVM } from "@/lib/types";
 
@@ -75,6 +76,8 @@ export interface ApiKeyVM {
 
 export interface SettingsAppData {
   me: MeVM;
+  /** Stored personal IANA timezone; null until the member accepts the detected default. */
+  timezone?: string | null;
   current: OrgFull;
   domainJoin: DomainJoinVM;
   users: Record<string, SeedUser>;
@@ -151,12 +154,14 @@ export interface OrgCtx {
   ownerCount: (org: OrgFull) => number;
   /** Personal display prefs (theme + accent), persisted per-device in localStorage. */
   prefs: { theme: "light" | "dark" | "system"; accent: string };
+  timezone: string | null;
   /** Signed-in actor context for the domain access editor (Workspace › General). */
   domainJoin: DomainJoinVM;
   billing: BillingOverview | null;
   gettingStarted: GettingStartedState | null;
   setTheme: (theme: "light" | "dark" | "system") => void;
   setAccent: (accent: string) => void;
+  setTimezone: (timezone: string) => Promise<void>;
   setMyName: (name: string) => void;
   setWorkspace: (patch: {
     name?: string;

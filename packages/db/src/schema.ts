@@ -334,6 +334,8 @@ export const profiles = pgTable("profiles", {
   name: text("name").notNull(),
   initials: text("initials").notNull(),
   handle: text("handle"),
+  /** Per-member IANA timezone shared by every first-party client and Companion they operate. */
+  timezone: text("timezone"),
   /**
    * Same-origin serve path for a custom uploaded avatar (`/v1/users/{id}/avatar`), or null to fall
    * back to the user's Gravatar / colored initials. Parallels `organizations.logoUrl`; the binary
@@ -344,7 +346,12 @@ export const profiles = pgTable("profiles", {
   onboardedAt: timestamp("onboarded_at", { withTimezone: true }),
   createdAt: now(),
   updatedAt: updatedAt(),
-});
+}, (t) => ({
+  timezoneCheck: check(
+    "profiles_timezone_check",
+    sql`${t.timezone} is null or (char_length(${t.timezone}) between 1 and 64 and ${t.timezone} !~ E'[\\n\\r]')`,
+  ),
+}));
 
 export const organizations = pgTable(
   "organizations",
@@ -1133,6 +1140,8 @@ export const companionTurnAttempts = pgTable(
     eventCursor: bigint("event_cursor", { mode: "bigint" }).notNull().default(0n),
     lastActivityAt: timestamp("last_activity_at", { withTimezone: true }),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    /** Profile timezone pinned on the attempt's first authorized material read. */
+    memberTimezone: text("member_timezone"),
     settledAt: timestamp("settled_at", { withTimezone: true }),
     unknownEventCount: integer("unknown_event_count").notNull().default(0),
     malformedEventCount: integer("malformed_event_count").notNull().default(0),
@@ -1165,6 +1174,7 @@ export const companionTurnAttempts = pgTable(
     checkpointCheck: check("companion_turn_attempts_checkpoint_check", sql`${t.checkpoint} in ('starting','dispatch_write_intent','dispatch_accepted','dispatch_ambiguous','dispatch_rejected','running','needs_input','event_projected','agent_settled','process_exited') and ${t.checkpointSequence} >= 0`),
     dispatchCheck: check("companion_turn_attempts_dispatch_check", sql`${t.dispatchCount} >= 0 and ((${t.dispatchState} = 'pending' and ${t.commandId} is null) or (${t.dispatchState} <> 'pending' and ${t.commandId} is not null)) and (${t.dispatchAcceptedAt} is null or ${t.dispatchState} = 'accepted')`),
     invocationCheck: check("companion_turn_attempts_pi_invocation_check", sql`${t.piInvocationId} is null or (char_length(${t.piInvocationId}) between 1 and 200 and ${t.piInvocationId} !~ E'[\\n\\r]')`),
+    memberTimezoneCheck: check("companion_turn_attempts_member_timezone_check", sql`${t.memberTimezone} is null or (char_length(${t.memberTimezone}) between 1 and 64 and ${t.memberTimezone} !~ E'[\\n\\r]')`),
     progressCheck: check("companion_turn_attempts_progress_check", sql`${t.eventCursor} >= 0 and ${t.unknownEventCount} >= 0 and ${t.malformedEventCount} >= 0 and ${t.oversizedEventCount} >= 0`),
     terminalCheck: check("companion_turn_attempts_terminal_check", sql`(${t.status} in ('succeeded','failed','interrupted','cancelled')) = (${t.settledAt} is not null)`),
     terminalProofCheck: check("companion_turn_attempts_terminal_proof_check", sql`(${t.status} <> 'succeeded' or (${t.checkpoint} = 'agent_settled' and ${t.dispatchState} = 'accepted' and ${t.piInvocationId} is not null)) and (${t.dispatchState} <> 'ambiguous' or ${t.status} not in ('succeeded','failed','cancelled')) and (${t.dispatchState} <> 'rejected' or ${t.status} not in ('succeeded','cancelled'))`),

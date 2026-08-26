@@ -11,6 +11,11 @@ Members use the web or CLI for Skills Hub workflows. External coding agents use 
 Auth to consume the same skill APIs. Hosted Companions use a separate authenticated chat and runtime
 boundary; Agent Auth never grants Box lifecycle access.
 
+Each member may store one IANA timezone in their personal profile. It is shared across their
+workspaces and first-party web and iOS clients, not inferred from a per-message client header. The
+clients offer their browser or device timezone as the initial choice. When it is unset, runtime uses
+UTC until the member saves an override.
+
 ## Users and authorization
 
 - **Organization Owner** manages organization identity, membership, billing, GitHub, provider
@@ -58,6 +63,8 @@ slash-separated, multi-assigned, and may exist without skills.
    Skills, and selected member MCP accounts; send work and leave while it continues.
 9. Return to a durable thread that truthfully shows queued, active, input-needed, completed, failed,
    interrupted, or cancelled work, and explicitly Retry or Cancel an ambiguous attempt.
+10. See and create routine schedules, trigger activity, and Companion time references in the
+    member's stored timezone on both web and native iOS.
 
 ## Hosted Companion boundary
 

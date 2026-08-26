@@ -86,6 +86,19 @@ public final class SessionStore {
         self.notificationInstallationID = notificationInstallationID
     }
 
+    public var currentSession: Session? {
+        switch phase {
+        case .restoring, .signedOut:
+            return nil
+        case .onboarding(let session), .active(let session):
+            return session
+        }
+    }
+
+    public var memberTimezone: String? {
+        currentSession?.user.timezone
+    }
+
     public func restore() async {
         guard !restored else { return }
         restored = true
@@ -144,6 +157,37 @@ public final class SessionStore {
         publish(authenticated)
     }
 
+    /// Updates the member's shared profile and rolls the returned values into the secure session
+    /// snapshot so every first-party surface immediately uses the new timezone/name.
+    public func updateUserProfile(
+        name: String? = nil,
+        timezone: String? = nil
+    ) async throws -> UserProfile {
+        do {
+            let profile = try await client.updateUserProfile(name: name, timezone: timezone)
+            if let current = currentSession {
+                let updated = Session(
+                    cookie: await client.currentAuthority()?.cookie ?? current.cookie,
+                    orgID: current.orgID,
+                    needsOnboarding: current.needsOnboarding,
+                    user: .init(
+                        id: profile.id,
+                        email: current.user.email,
+                        name: profile.name,
+                        timezone: profile.timezone
+                    )
+                )
+                await client.setAuthority(updated)
+                try? persist(updated)
+                publish(updated)
+            }
+            return profile
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
     public func signOut() async {
         if let notificationInstallationID {
             try? await client.unregisterNotificationDevice(installationID: notificationInstallationID)
@@ -188,6 +232,131 @@ public final class SessionStore {
             )
             await persistRollingAuthority()
             return resources
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func listCompanionRoutines(companionID: String) async throws -> [CompanionRoutine] {
+        do {
+            let routines = try await client.listCompanionRoutines(companionID: companionID)
+            await persistRollingAuthority()
+            return routines
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func listCompanionTriggers(companionID: String) async throws -> [CompanionTrigger] {
+        do {
+            let triggers = try await client.listCompanionTriggers(companionID: companionID)
+            await persistRollingAuthority()
+            return triggers
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func createCompanionRoutine(
+        companionID: String,
+        input: CreateCompanionRoutineInput
+    ) async throws -> CompanionRoutine {
+        do {
+            let routine = try await client.createCompanionRoutine(companionID: companionID, input: input)
+            await persistRollingAuthority()
+            return routine
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func updateCompanionRoutine(
+        companionID: String,
+        routineID: String,
+        input: UpdateCompanionRoutineInput
+    ) async throws -> CompanionRoutine {
+        do {
+            let routine = try await client.updateCompanionRoutine(
+                companionID: companionID,
+                routineID: routineID,
+                input: input
+            )
+            await persistRollingAuthority()
+            return routine
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func deleteCompanionRoutine(companionID: String, routineID: String) async throws {
+        do {
+            try await client.deleteCompanionRoutine(companionID: companionID, routineID: routineID)
+            await persistRollingAuthority()
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func createCompanionTrigger(
+        companionID: String,
+        input: CreateCompanionTriggerInput
+    ) async throws -> CompanionTrigger {
+        do {
+            let trigger = try await client.createCompanionTrigger(companionID: companionID, input: input)
+            await persistRollingAuthority()
+            return trigger
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func updateCompanionTrigger(
+        companionID: String,
+        triggerID: String,
+        input: UpdateCompanionTriggerInput
+    ) async throws -> CompanionTrigger {
+        do {
+            let trigger = try await client.updateCompanionTrigger(
+                companionID: companionID,
+                triggerID: triggerID,
+                input: input
+            )
+            await persistRollingAuthority()
+            return trigger
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func deleteCompanionTrigger(companionID: String, triggerID: String) async throws {
+        do {
+            try await client.deleteCompanionTrigger(companionID: companionID, triggerID: triggerID)
+            await persistRollingAuthority()
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func rotateCompanionTriggerSecret(
+        companionID: String,
+        triggerID: String
+    ) async throws -> CompanionTrigger {
+        do {
+            let trigger = try await client.rotateCompanionTriggerSecret(
+                companionID: companionID,
+                triggerID: triggerID
+            )
+            await persistRollingAuthority()
+            return trigger
         } catch let error as APIError where error.status == 401 {
             await clearLocalSession()
             throw error

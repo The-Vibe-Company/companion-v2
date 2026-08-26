@@ -13,6 +13,7 @@ import { Dialog } from "../org/primitives";
 import { Badge } from "../cds";
 import { Icon } from "../Icon";
 import { PluginMark } from "./PluginMark";
+import { detectedBrowserTimeZone, formatMemberDateTime } from "@/lib/timezones";
 
 export interface CompanionTriggersApi {
   createCompanionTrigger: typeof createCompanionTrigger;
@@ -136,6 +137,7 @@ export function CompanionTriggers({
   orgId,
   companionId,
   triggers,
+  memberTimezone,
   canEdit,
   onChange,
   api = defaultCompanionTriggersApi,
@@ -143,10 +145,12 @@ export function CompanionTriggers({
   orgId: string;
   companionId: string;
   triggers: CompanionTrigger[];
+  memberTimezone?: string | null;
   canEdit: boolean;
   onChange: (triggers: CompanionTrigger[]) => void;
   api?: CompanionTriggersApi;
 }) {
+  const displayTimezone = memberTimezone ?? detectedBrowserTimeZone();
   const [editing, setEditing] = useState<CompanionTrigger | null | "new">(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -273,7 +277,7 @@ export function CompanionTriggers({
                 </span>
                 {trigger.last_fired_at && (
                   <span className="chat-context__caption">
-                    Last fired {new Date(trigger.last_fired_at).toLocaleString()}
+                    Last fired {formatMemberDateTime(trigger.last_fired_at, displayTimezone)} · {displayTimezone}
                   </span>
                 )}
                 {trigger.last_error_message && (

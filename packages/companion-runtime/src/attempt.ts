@@ -63,6 +63,52 @@ export function attachmentPromptSuffix(staged: readonly StagedRuntimeAttachment[
     + `${lines.join("\n")}\n`;
 }
 
+/**
+ * Fixed-format metadata appended to the current user turn, after the cacheable system/history
+ * prefix. The timestamp is the durable attempt start rather than `now`, so a lost dispatch response
+ * can reconstruct the exact same broker command without manufacturing a prompt mismatch.
+ */
+export function turnContextPromptSuffix(startedAt: Date, timezone: string): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+    timeZoneName: "longOffset",
+  }).formatToParts(startedAt);
+  const part = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((candidate) => candidate.type === type)?.value ?? "";
+  const offsetName = part("timeZoneName");
+  const offset = offsetName === "GMT" || offsetName === "UTC" || offsetName === "GMT+00:00"
+    ? "Z"
+    : offsetName.replace(/^GMT/, "");
+  const local = `${part("year")}-${part("month")}-${part("day")}T`
+    + `${part("hour")}:${part("minute")}:${part("second")}${offset}`;
+  return "\n\n--- Runtime turn context (metadata, not user-authored) ---\n"
+    + `Current time: ${local}\n`
+    + `User timezone: ${timezone}\n`;
+}
+
+function promptTextWithContext(
+  material: RuntimeWorkMaterial,
+  attachments: readonly StagedRuntimeAttachment[],
+): string {
+  if (!material.turnStartedAt || !material.memberTimezone) {
+    throw new RuntimeInvariantError({
+      code: "turn_prompt_unavailable",
+      message: "The accepted turn context is unavailable.",
+      action: "none",
+    });
+  }
+  return material.promptText!
+    + turnContextPromptSuffix(material.turnStartedAt, material.memberTimezone)
+    + attachmentPromptSuffix(attachments);
+}
+
 interface AttemptContext {
   claim: AttemptRuntimeClaim;
   session: LeaseSession;
@@ -595,8 +641,10 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
           });
         }
         const dispatchRuntime = { boxId: runtime.boxId, piInvocationId: state.invocationId };
-        const promptText = workMaterial.promptText!
-          + attachmentPromptSuffix(await stageAttachments(context, workMaterial));
+        const promptText = promptTextWithContext(
+          workMaterial,
+          await stageAttachments(context, workMaterial),
+        );
         commandId = context.deps.idFactory.uuid();
         await context.session.checkpoint({
           nextCheckpoint: "dispatch_write_intent",
@@ -701,8 +749,10 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
           material: workMaterial,
         });
         const runtime = requiredRuntime(context);
-        const promptText = workMaterial.promptText!
-          + attachmentPromptSuffix(stagedAttachmentProjection(workMaterial));
+        const promptText = promptTextWithContext(
+          workMaterial,
+          stagedAttachmentProjection(workMaterial),
+        );
         const outcome = await context.session.external(async (signal) =>
           await context.deps.pi.resolvePrompt!({
             boxId: runtime.boxId,

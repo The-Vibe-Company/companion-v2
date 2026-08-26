@@ -14,6 +14,7 @@ public struct WhoAmI: Codable, Equatable, Sendable {
     public let userID: String
     public let email: String
     public let name: String?
+    public let timezone: String?
     public let org: WorkspaceIdentity?
     public let onboarded: Bool
     public let needsOnboarding: Bool
@@ -22,9 +23,28 @@ public struct WhoAmI: Codable, Equatable, Sendable {
         case userID = "userId"
         case email
         case name
+        case timezone
         case org
         case onboarded
         case needsOnboarding
+    }
+
+    public init(
+        userID: String,
+        email: String,
+        name: String?,
+        org: WorkspaceIdentity?,
+        onboarded: Bool,
+        needsOnboarding: Bool,
+        timezone: String? = nil
+    ) {
+        self.userID = userID
+        self.email = email
+        self.name = name
+        self.org = org
+        self.onboarded = onboarded
+        self.needsOnboarding = needsOnboarding
+        self.timezone = timezone
     }
 }
 
@@ -38,11 +58,13 @@ public struct Session: Codable, Equatable, Sendable {
         public let id: String
         public let email: String
         public let name: String?
+        public let timezone: String?
 
-        public init(id: String, email: String, name: String?) {
+        public init(id: String, email: String, name: String?, timezone: String? = nil) {
             self.id = id
             self.email = email
             self.name = name
+            self.timezone = timezone
         }
     }
 
@@ -58,8 +80,50 @@ public struct Session: Codable, Equatable, Sendable {
             cookie: cookie,
             orgID: identity.org?.id,
             needsOnboarding: identity.needsOnboarding || identity.org == nil,
-            user: User(id: identity.userID, email: identity.email, name: identity.name)
+            user: User(
+                id: identity.userID,
+                email: identity.email,
+                name: identity.name,
+                timezone: identity.timezone
+            )
         )
+    }
+}
+
+/// Self-service profile fields accepted by the shared `PUT /v1/users/me` endpoint.
+/// Optional values are omitted rather than encoded as null so partial updates remain safe.
+public struct UpdateUserProfileInput: Encodable, Equatable, Sendable {
+    public let name: String?
+    public let timezone: String?
+
+    public init(name: String? = nil, timezone: String? = nil) {
+        self.name = name
+        self.timezone = timezone
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case timezone
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(name, forKey: .name)
+        try container.encodeIfPresent(timezone, forKey: .timezone)
+    }
+}
+
+public struct UserProfile: Codable, Equatable, Sendable {
+    public let id: String
+    public let name: String
+    public let initials: String
+    public let timezone: String?
+
+    public init(id: String, name: String, initials: String, timezone: String?) {
+        self.id = id
+        self.name = name
+        self.initials = initials
+        self.timezone = timezone
     }
 }
 
@@ -446,21 +510,57 @@ public struct CompanionSkillSummary: Codable, Identifiable, Equatable, Sendable 
 
 public struct CompanionRoutine: Codable, Identifiable, Equatable, Sendable {
     public let id: String
+    public let companionID: String?
     public let name: String
+    /// The prompt is present on the API projection and is optional here for compatibility with
+    /// older cached projections that only carried the resource summary.
+    public let prompt: String?
     public let cron: String
     public let timezone: String
     public let enabled: Bool
     public let nextFireAt: String?
+    public let lastFiredAt: String?
+    public let lastErrorCode: String?
     public let lastErrorMessage: String?
 
     enum CodingKeys: String, CodingKey {
         case id
+        case companionID = "companion_id"
         case name
+        case prompt
         case cron
         case timezone
         case enabled
         case nextFireAt = "next_fire_at"
+        case lastFiredAt = "last_fired_at"
+        case lastErrorCode = "last_error_code"
         case lastErrorMessage = "last_error_message"
+    }
+
+    public init(
+        id: String,
+        name: String,
+        cron: String,
+        timezone: String,
+        enabled: Bool,
+        nextFireAt: String?,
+        lastErrorMessage: String?,
+        companionID: String? = nil,
+        prompt: String? = nil,
+        lastFiredAt: String? = nil,
+        lastErrorCode: String? = nil
+    ) {
+        self.id = id
+        self.companionID = companionID
+        self.name = name
+        self.prompt = prompt
+        self.cron = cron
+        self.timezone = timezone
+        self.enabled = enabled
+        self.nextFireAt = nextFireAt
+        self.lastFiredAt = lastFiredAt
+        self.lastErrorCode = lastErrorCode
+        self.lastErrorMessage = lastErrorMessage
     }
 
     public var status: CompanionConnectedResourceStatus {
@@ -505,6 +605,28 @@ public struct CompanionRoutine: Codable, Identifiable, Equatable, Sendable {
     }
 }
 
+public enum CompanionTriggerProvider: String, Codable, CaseIterable, Equatable, Hashable, Sendable {
+    case linear
+    case github
+    case custom
+    case unknown
+
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = Self(rawValue: value) ?? .unknown
+    }
+}
+
+public struct CompanionTriggerTarget: Codable, Equatable, Sendable {
+    public let repo: String?
+    public let events: [String]?
+
+    public init(repo: String? = nil, events: [String]? = nil) {
+        self.repo = repo
+        self.events = events
+    }
+}
+
 public struct CompanionTrigger: Codable, Identifiable, Equatable, Sendable {
     public enum RegistrationStatus: String, Codable, Equatable, Sendable {
         case manual
@@ -519,19 +641,59 @@ public struct CompanionTrigger: Codable, Identifiable, Equatable, Sendable {
     }
 
     public let id: String
+    public let companionID: String?
     public let name: String
+    public let prompt: String
     public let provider: String
+    public let target: CompanionTriggerTarget?
     public let registrationStatus: RegistrationStatus
     public let enabled: Bool
+    public let webhookURL: String?
+    public let lastFiredAt: String?
+    public let lastErrorCode: String?
     public let lastErrorMessage: String?
 
     enum CodingKeys: String, CodingKey {
         case id
+        case companionID = "companion_id"
         case name
+        case prompt
         case provider
+        case target
         case registrationStatus = "registration_status"
         case enabled
+        case webhookURL = "webhook_url"
+        case lastFiredAt = "last_fired_at"
+        case lastErrorCode = "last_error_code"
         case lastErrorMessage = "last_error_message"
+    }
+
+    public init(
+        id: String,
+        name: String,
+        prompt: String = "",
+        provider: String,
+        registrationStatus: RegistrationStatus,
+        enabled: Bool,
+        lastErrorMessage: String?,
+        companionID: String? = nil,
+        target: CompanionTriggerTarget? = nil,
+        webhookURL: String? = nil,
+        lastFiredAt: String? = nil,
+        lastErrorCode: String? = nil
+    ) {
+        self.id = id
+        self.companionID = companionID
+        self.name = name
+        self.prompt = prompt
+        self.provider = provider
+        self.target = target
+        self.registrationStatus = registrationStatus
+        self.enabled = enabled
+        self.webhookURL = webhookURL
+        self.lastFiredAt = lastFiredAt
+        self.lastErrorCode = lastErrorCode
+        self.lastErrorMessage = lastErrorMessage
     }
 
     public var status: CompanionConnectedResourceStatus {
@@ -574,6 +736,173 @@ public struct CompanionConnectedResources: Equatable, Sendable {
         self.hiddenSkillCount = hiddenSkillCount
         self.routines = routines
         self.triggers = triggers
+    }
+}
+
+/// Payloads for the shared Companion routine routes. A fresh id is generated client-side so a
+/// request can be retried without creating a second durable routine.
+public struct CreateCompanionRoutineInput: Encodable, Equatable, Sendable {
+    public let id: String
+    public let name: String
+    public let prompt: String
+    public let cron: String
+    public let timezone: String
+    public let enabled: Bool
+
+    public init(
+        id: String = UUID().uuidString.lowercased(),
+        name: String,
+        prompt: String,
+        cron: String,
+        timezone: String,
+        enabled: Bool = true
+    ) {
+        self.id = id
+        self.name = name
+        self.prompt = prompt
+        self.cron = cron
+        self.timezone = timezone
+        self.enabled = enabled
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case prompt
+        case cron
+        case timezone
+        case enabled
+    }
+}
+
+public struct UpdateCompanionRoutineInput: Encodable, Equatable, Sendable {
+    public let name: String?
+    public let prompt: String?
+    public let cron: String?
+    public let timezone: String?
+    public let enabled: Bool?
+
+    public init(
+        name: String? = nil,
+        prompt: String? = nil,
+        cron: String? = nil,
+        timezone: String? = nil,
+        enabled: Bool? = nil
+    ) {
+        self.name = name
+        self.prompt = prompt
+        self.cron = cron
+        self.timezone = timezone
+        self.enabled = enabled
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case prompt
+        case cron
+        case timezone
+        case enabled
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(name, forKey: .name)
+        try container.encodeIfPresent(prompt, forKey: .prompt)
+        try container.encodeIfPresent(cron, forKey: .cron)
+        try container.encodeIfPresent(timezone, forKey: .timezone)
+        try container.encodeIfPresent(enabled, forKey: .enabled)
+    }
+}
+
+/// Payloads for the shared Companion trigger routes. Trigger secrets and webhook URLs are always
+/// generated by the control plane and never accepted from this client.
+public struct CreateCompanionTriggerInput: Encodable, Equatable, Sendable {
+    public let id: String
+    public let name: String
+    public let prompt: String
+    public let provider: CompanionTriggerProvider
+    public let target: CompanionTriggerTarget?
+    public let enabled: Bool
+
+    public init(
+        id: String = UUID().uuidString.lowercased(),
+        name: String,
+        prompt: String,
+        provider: CompanionTriggerProvider,
+        target: CompanionTriggerTarget? = nil,
+        enabled: Bool = true
+    ) {
+        self.id = id
+        self.name = name
+        self.prompt = prompt
+        self.provider = provider
+        self.target = target
+        self.enabled = enabled
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case prompt
+        case provider
+        case target
+        case enabled
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(prompt, forKey: .prompt)
+        try container.encode(provider.rawValue, forKey: .provider)
+        try container.encodeIfPresent(target, forKey: .target)
+        try container.encode(enabled, forKey: .enabled)
+    }
+}
+
+public struct UpdateCompanionTriggerInput: Encodable, Equatable, Sendable {
+    public let name: String?
+    public let prompt: String?
+    public let provider: CompanionTriggerProvider?
+    public let target: CompanionTriggerTarget?
+    public let enabled: Bool?
+
+    public init(
+        name: String? = nil,
+        prompt: String? = nil,
+        provider: CompanionTriggerProvider? = nil,
+        target: CompanionTriggerTarget? = nil,
+        enabled: Bool? = nil
+    ) {
+        self.name = name
+        self.prompt = prompt
+        self.provider = provider
+        self.target = target
+        self.enabled = enabled
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case prompt
+        case provider
+        case target
+        case enabled
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(name, forKey: .name)
+        try container.encodeIfPresent(prompt, forKey: .prompt)
+        if let provider {
+            try container.encode(provider.rawValue, forKey: .provider)
+            // A provider change from GitHub to a provider without targets must explicitly clear
+            // the old target. A nil provider means this is a narrow patch (for example, a toggle),
+            // so leave target omitted in that case.
+            try container.encode(target, forKey: .target)
+        } else {
+            try container.encodeIfPresent(target, forKey: .target)
+        }
+        try container.encodeIfPresent(enabled, forKey: .enabled)
     }
 }
 

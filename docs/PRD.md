@@ -50,6 +50,9 @@ explicitly recoverable interruption even after the browser, API, or one runtime 
   contacts Box.
 - Creation selects one connected Pi provider, one validated model, selected Skills, optional
   write-on-behalf, and selected member MCP accounts. Provider and MCP credentials stay write-only.
+- A member profile carries one optional IANA timezone shared by every workspace and first-party
+  client. Web and native iOS detect their local timezone as the initial picker value and persist an
+  override through the same profile endpoint; clients do not send a per-message timezone header.
 
 ### Durable turns and lifecycle
 
@@ -85,6 +88,9 @@ explicitly recoverable interruption even after the browser, API, or one runtime 
   turn for the same routine skips the next fire. Five consecutive failures disable the routine.
 - The thread projects a routine origin on the user entry. The UI hides that prompt and shows
   `Routine: <name>` above the ordinary reply.
+- Web and native iOS create new cron schedules in the member's stored timezone and render future
+  fire instants in that timezone. Existing routine cron/timezone values remain authoritative on the
+  server; viewing them converts their absolute next-fire instant to the current member timezone.
 
 ### Triggers
 
@@ -105,6 +111,8 @@ explicitly recoverable interruption even after the browser, API, or one runtime 
   is skipped. Five consecutive failures disable the trigger.
 - The thread projects a trigger origin on the user entry. The UI hides that prompt and shows
   `Trigger: <name>` above the ordinary reply.
+- Web and native iOS render trigger fire activity in the member's stored timezone. Triggers remain
+  event-driven and do not acquire a cron schedule.
 
 ### Pi protocol and failure semantics
 
@@ -125,6 +133,9 @@ explicitly recoverable interruption even after the browser, API, or one runtime 
   and an allowed action. Provider payloads, tokens, signed URLs, and raw Pi lines are forbidden.
 - Model catalog normalization preserves Pi's `input` capability so a text-only model rejects image
   work explicitly before an unbounded turn.
+- Every attempted user turn carries a fixed-format runtime metadata suffix with the durable attempt
+  start rendered in the member's IANA timezone. The changing value stays outside the cacheable
+  system/history prefix; an unset profile uses UTC.
 
 ### Cutover
 
