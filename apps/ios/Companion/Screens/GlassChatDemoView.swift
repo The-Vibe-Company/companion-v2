@@ -10,6 +10,7 @@ struct GlassChatDemoView: View {
     @State private var showRoster = false
     @State private var showDesignInfo = false
     @State private var markdownByEventID: [String: CachedMarkdownDocument] = [:]
+    @State private var selectedToolDetail: ToolRunDetailRoute?
 
     private let companionName = "Companion"
     private let icon = CompanionSummary.Icon(shape: 1, mouth: 1, accessory: 6, color: 7)
@@ -40,7 +41,13 @@ struct GlassChatDemoView: View {
                             ForEach(messages) { message in
                                 Group {
                                     if let tool = message.tool {
-                                        CompanionToolRunCard(tool: tool)
+                                        CompanionToolRunCard(tool: tool, eventID: message.eventID) {
+                                            selectedToolDetail = ToolRunDetailRoute(
+                                                id: message.eventID,
+                                                tool: tool,
+                                                timestamp: message.timestamp
+                                            )
+                                        }
                                     } else {
                                         ChatMessageBubble(
                                             content: message.content,
@@ -141,6 +148,11 @@ struct GlassChatDemoView: View {
             .sheet(isPresented: $showRoster) {
                 GlassRosterDemoView()
                     .presentationDetents([.medium, .large])
+                    .presentationDragIndicator(.visible)
+            }
+            .sheet(item: $selectedToolDetail) { route in
+                CompanionToolRunDetailView(tool: route.tool, timestamp: route.timestamp)
+                    .presentationDetents([.large])
                     .presentationDragIndicator(.visible)
             }
             .alert("Liquid Glass, avec intention", isPresented: $showDesignInfo) {
@@ -347,7 +359,10 @@ private struct DemoMessage: Identifiable {
     var timestamp: String?
     var tool: CompanionToolRun?
 
-    var eventID: String { id.uuidString }
+    var eventID: String {
+        if let callID = tool?.callID { return "tool:\(callID)" }
+        return id.uuidString
+    }
 
     var isMarkdownFixture: Bool {
         content.hasPrefix("## Rapport")
@@ -387,11 +402,15 @@ private struct DemoMessage: Identifiable {
             tool: .init(
                 callID: "demo-shell-1",
                 kind: .shell,
-                name: "shell",
+                name: "run_command",
                 title: "Shell command",
                 status: .ok,
-                detail: nil,
-                screenshot: nil
+                detail: """
+                $ pnpm test --filter CompanionKit
+                Tests passed: 48
+                <output is displayed literally, not interpreted as HTML>
+                """,
+                screenshot: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAFCAIAAAD38zoCAAAAZElEQVR4nAXBMQ0AIAwEQGwgAxNNkEFSE13r4B38ylQHnyCgnrgb07AM23AMYYDhGp5hTOdybudxhhPO63zOMbNW1s46WZGFrJv1ssakFrWpQwUF6lKPGlO91Ft91KGG+qqf+gMnV0CxPrkGNgAAAABJRU5ErkJggg=="
             )
         ),
         .init(
