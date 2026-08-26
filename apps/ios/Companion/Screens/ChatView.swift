@@ -70,6 +70,7 @@ struct ChatView: View {
     }
 
     var body: some View {
+        let visibleEntries = entries
         CompanionBackdrop(style: .companion(visualTheme.base)) {
             ScrollViewReader { proxy in
                 ScrollView {
@@ -83,7 +84,7 @@ struct ChatView: View {
                                 .padding(.top, 80)
                         } else if let error, thread == nil {
                             unavailableState(error)
-                        } else if entries.isEmpty && pendingMessages.isEmpty
+                        } else if visibleEntries.isEmpty && pendingMessages.isEmpty
                                     && thread?.interruptedTurn == nil {
                             emptyState
                         } else {
@@ -91,8 +92,11 @@ struct ChatView: View {
                                 loadEarlierButton
                             }
 
-                            ForEach(Array(entries.enumerated()), id: \.element.eventID) { index, entry in
-                                if startsNewDay(entry, after: index > 0 ? entries[index - 1] : nil) {
+                            ForEach(Array(visibleEntries.enumerated()), id: \.element.eventID) { index, entry in
+                                if startsNewDay(
+                                    entry,
+                                    after: index > 0 ? visibleEntries[index - 1] : nil
+                                ) {
                                     dayMarker(for: transcriptDate(entry.createdAt) ?? .now)
                                 }
                                 Group {
@@ -555,9 +559,7 @@ struct ChatView: View {
                     && isNearBottom)
 
             transcriptWindow = nextWindow
-            for (eventID, cached) in renderedMarkdown {
-                markdownByEventID[eventID] = cached
-            }
+            markdownByEventID = renderedMarkdown
             threadProjection.accept(next, refresh: generation)
             error = nil
             if shouldFollowTail {
@@ -664,9 +666,7 @@ struct ChatView: View {
             return
         }
 
-        for (eventID, cached) in renderedMarkdown {
-            markdownByEventID[eventID] = cached
-        }
+        markdownByEventID = renderedMarkdown
         transcriptWindow = expandedWindow
         requestScroll(to: .entry(firstEventID))
     }
@@ -810,9 +810,7 @@ struct ChatView: View {
             let renderedMarkdown = await renderedMarkdown(
                 for: Array(next.entries[visibleRange])
             )
-            for (eventID, cached) in renderedMarkdown {
-                markdownByEventID[eventID] = cached
-            }
+            markdownByEventID = renderedMarkdown
             await decisionSubmissionGate.release(requestID: requestID)
         } catch {
             threadProjection.invalidateRefreshes()
@@ -858,9 +856,7 @@ struct ChatView: View {
         let renderedMarkdown = await renderedMarkdown(
             for: Array(next.entries[visibleRange])
         )
-        for (eventID, cached) in renderedMarkdown {
-            markdownByEventID[eventID] = cached
-        }
+        markdownByEventID = renderedMarkdown
         await refreshCompanionProjection()
     }
 
