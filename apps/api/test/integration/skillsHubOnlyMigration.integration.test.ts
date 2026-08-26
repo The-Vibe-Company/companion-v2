@@ -49,7 +49,8 @@ describe("Skills Hub-only database migration", () => {
             and p.proname not in (
               'companion_runtime_get_attempt_terminal_projection',
               'companion_runtime_project_event_batch',
-              'companion_runtime_project_automatic_decision_close'
+              'companion_runtime_project_automatic_decision_close',
+              'companion_runtime_reconcile_projected_decision_with_member_turn'
             )
         ) as "runtimeFunctions",
         (
