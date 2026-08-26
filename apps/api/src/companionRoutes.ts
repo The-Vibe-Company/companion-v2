@@ -1652,6 +1652,17 @@ export function registerCompanionRoutes(
           requestId,
           database,
         });
+        // Denial is fail-closed. If the runtime expiry/cancellation sweep won the row lock just
+        // before this request, the requested negative outcome is already durable and should be
+        // reported as success instead of surfacing a database conflict to a stale client card.
+        if (
+          body.action === "deny"
+          && ["denied", "expired", "cancelled"].includes(pending.decisionStatus)
+        ) {
+          return projectThreadForHttp(
+            await readCompanionThreadV2({ actor, orgId, companionId, database }),
+          );
+        }
         if (pending.requestKind === "config_proposal") {
           if (body.action === "answer") {
             throw new Error("Companion config proposals cannot be answered with free text");
