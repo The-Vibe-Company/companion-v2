@@ -314,7 +314,7 @@ private struct MarkdownInlineFlow: View {
                         Text(run.content)
                             .foregroundStyle(accent)
                             .underline()
-                            .frame(minWidth: 44, minHeight: 44)
+                            .frame(minHeight: 44)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -410,8 +410,12 @@ private struct MarkdownInlineFlowLayout: Layout {
             let availableWidth = max(width - lineWidth, 1)
             let measuredSize: CGSize
             if idealSize.width > availableWidth {
-                measuredSize = subview.sizeThatFits(
+                let fittedSize = subview.sizeThatFits(
                     ProposedViewSize(width: availableWidth, height: nil)
+                )
+                measuredSize = CGSize(
+                    width: min(fittedSize.width, availableWidth),
+                    height: fittedSize.height
                 )
             } else {
                 measuredSize = idealSize
@@ -544,54 +548,29 @@ private struct MarkdownTableView: View {
     let accent: Color
 
     var body: some View {
-        VStack(alignment: .trailing, spacing: 0) {
-            ScrollView(.horizontal) {
-                Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
-                    ForEach(Array(rows.enumerated()), id: \.element.id) { rowIndex, row in
-                        GridRow {
-                            ForEach(Array(columns.indices), id: \.self) { column in
-                                let cell = row.children.first { child in
-                                    if case .tableCell(let index) = child.kind {
-                                        return index == column
-                                    }
-                                    return false
-                                }
-                                MarkdownTableCell(
-                                    content: cell?.content ?? AttributedString(),
-                                    header: headerText(column: column),
-                                    alignment: columns[column],
-                                    isHeader: isHeader(row),
-                                    rowIndex: rowIndex,
-                                    isLastRow: rowIndex == rows.count - 1,
-                                    isLastColumn: column == columns.count - 1,
-                                    accent: accent
-                                )
-                                .accessibilityIdentifier(
-                                    "markdown.table.cell.\(rowIndex).\(column)"
-                                )
-                            }
-                        }
-                        .accessibilityElement(children: .contain)
-                        .accessibilityLabel(rowAccessibilityLabel(row, index: rowIndex))
-                    }
-                }
+        ViewThatFits(in: .horizontal) {
+            tableGrid
                 .fixedSize(horizontal: true, vertical: false)
-            }
-            .scrollIndicators(.visible)
-            .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
-            .frame(maxWidth: .infinity, alignment: .leading)
 
-            if columns.count > 2 {
+            VStack(alignment: .trailing, spacing: 0) {
+                ScrollView(.horizontal) {
+                    tableGrid
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+                .scrollIndicators(.visible)
+                .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
                 HStack(spacing: 4) {
                     Image(systemName: "arrow.left.and.right")
-                    Text("Scroll")
+                    Text("Swipe to see all columns")
                 }
                 .font(.caption2.weight(.medium))
                 .foregroundStyle(Color.companionMuted)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
                 .frame(maxWidth: .infinity, alignment: .trailing)
-                .background(Color.companionSurfaceRaised.opacity(0.34))
+                .background(Color.companionSurfaceRaised)
                 .overlay(alignment: .top) {
                     Rectangle()
                         .fill(Color.companionDivider)
@@ -599,15 +578,47 @@ private struct MarkdownTableView: View {
                 }
                 .accessibilityHidden(true)
             }
+            .accessibilityHint("Swipe horizontally to read every column.")
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .clipped()
         .companionMaterial(radius: 10)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(
             "Table, \(columns.count) columns, \(dataRowCount) rows"
         )
-        .accessibilityHint(
-            columns.count > 2 ? "Swipe horizontally to read every column." : ""
-        )
+    }
+
+    private var tableGrid: some View {
+        Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
+            ForEach(Array(rows.enumerated()), id: \.element.id) { rowIndex, row in
+                GridRow {
+                    ForEach(Array(columns.indices), id: \.self) { column in
+                        let cell = row.children.first { child in
+                            if case .tableCell(let index) = child.kind {
+                                return index == column
+                            }
+                            return false
+                        }
+                        MarkdownTableCell(
+                            content: cell?.content ?? AttributedString(),
+                            header: headerText(column: column),
+                            alignment: columns[column],
+                            isHeader: isHeader(row),
+                            rowIndex: rowIndex,
+                            isLastRow: rowIndex == rows.count - 1,
+                            isLastColumn: column == columns.count - 1,
+                            accent: accent
+                        )
+                        .accessibilityIdentifier(
+                            "markdown.table.cell.\(rowIndex).\(column)"
+                        )
+                    }
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel(rowAccessibilityLabel(row, index: rowIndex))
+            }
+        }
     }
 
     private var columns: [MarkdownNode.TableAlignment] {
@@ -659,11 +670,11 @@ private struct MarkdownTableCell: View {
     let isLastColumn: Bool
     let accent: Color
 
-    @ScaledMetric(relativeTo: .body) private var minimumWidth: CGFloat = 120
-    @ScaledMetric(relativeTo: .body) private var idealWidth: CGFloat = 152
-    @ScaledMetric(relativeTo: .body) private var maximumWidth: CGFloat = 280
-    @ScaledMetric(relativeTo: .body) private var horizontalPadding: CGFloat = 12
-    @ScaledMetric(relativeTo: .body) private var verticalPadding: CGFloat = 10
+    @ScaledMetric(relativeTo: .body) private var minimumWidth: CGFloat = 104
+    @ScaledMetric(relativeTo: .body) private var idealWidth: CGFloat = 144
+    @ScaledMetric(relativeTo: .body) private var maximumWidth: CGFloat = 240
+    @ScaledMetric(relativeTo: .body) private var horizontalPadding: CGFloat = 10
+    @ScaledMetric(relativeTo: .body) private var verticalPadding: CGFloat = 8
 
     var body: some View {
         MarkdownText(content: content, accent: accent, textAlignment: textAlignment)
@@ -675,9 +686,9 @@ private struct MarkdownTableCell: View {
                 minWidth: minimumWidth,
                 idealWidth: idealWidth,
                 maxWidth: maximumWidth,
-                maxHeight: .infinity,
                 alignment: frameAlignment
             )
+            .clipped()
             .background(cellBackground)
             .overlay(alignment: .bottom) {
                 if !isLastRow {
@@ -717,7 +728,7 @@ private struct MarkdownTableCell: View {
 
     private var cellBackground: Color {
         if isHeader { return .companionSurfaceRaised }
-        return rowIndex.isMultiple(of: 2) ? Color.clear : Color.companionSurfaceRaised.opacity(0.34)
+        return rowIndex.isMultiple(of: 2) ? Color.clear : Color.companionSurfaceRaised.opacity(0.62)
     }
 
     private var alignmentLabel: String {

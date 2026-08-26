@@ -69,8 +69,8 @@ struct ChatView: View {
 
     var body: some View {
         let visibleEntries = entries
-        let renderedEntries = visibleEntries.filter { !$0.queued }
-        let queuedEntries = thread?.entries.filter(\.queued) ?? []
+        let renderedEntries = visibleEntries
+        let queuedEntries = queuedEntries(in: thread)
         CompanionBackdrop(style: .companion(visualTheme.base)) {
             ScrollViewReader { proxy in
                 ScrollView {
@@ -170,20 +170,25 @@ struct ChatView: View {
                 .scrollDismissesKeyboard(.interactively)
                 .scrollIndicators(.hidden)
                 .safeAreaInset(edge: .bottom, spacing: 0) {
-                    bottomControls(queuedEntries: queuedEntries)
-                        .overlay(alignment: .topTrailing) {
-                            if !isNearBottom {
-                                scrollToBottomButton {
-                                    requestScroll(to: .bottom)
-                                }
-                                .offset(y: -58)
+                    VStack(spacing: 0) {
+                        if !isNearBottom {
+                            scrollToBottomButton {
+                                requestScroll(to: .bottom)
                             }
+                            .transition(
+                                reduceMotion
+                                    ? .identity
+                                    : .move(edge: .bottom).combined(with: .opacity)
+                            )
                         }
-                        .animation(
-                            reduceMotion ? nil : .easeOut(duration: 0.18),
-                            value: isNearBottom
-                        )
-                        .accessibilityIdentifier("chat.bottom-controls")
+
+                        bottomControls(queuedEntries: queuedEntries)
+                    }
+                    .animation(
+                        reduceMotion ? nil : .easeOut(duration: 0.18),
+                        value: isNearBottom
+                    )
+                    .accessibilityIdentifier("chat.bottom-controls")
                 }
                 .onScrollGeometryChange(for: CGFloat.self) { geometry in
                     max(0, geometry.contentSize.height - geometry.visibleRect.maxY)
@@ -289,7 +294,7 @@ struct ChatView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
-        .companionGlass(radius: 18)
+        .companionMaterial(radius: 18, tint: visualTheme.accent.opacity(0.06))
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("chat.replying-status")
     }
@@ -557,14 +562,15 @@ struct ChatView: View {
             }
             guard threadProjection.accepts(refresh: generation) else { return }
 
+            let nextEntries = transcriptEntries(in: next)
             var nextWindow = transcriptWindow
             nextWindow.refresh(
-                totalCount: next.entries.count,
+                totalCount: nextEntries.count,
                 preservingCurrentEntries: !isNearBottom
             )
-            let visibleRange = nextWindow.visibleRange(for: next.entries.count)
+            let visibleRange = nextWindow.visibleRange(for: nextEntries.count)
             let renderedMarkdown = await renderedMarkdown(
-                for: Array(next.entries[visibleRange])
+                for: Array(nextEntries[visibleRange])
             )
             guard threadProjection.accepts(refresh: generation) else { return }
 
@@ -618,7 +624,28 @@ struct ChatView: View {
 
     private var entries: [TranscriptEntry] {
         guard let thread else { return [] }
-        return Array(thread.entries[transcriptWindow.visibleRange(for: thread.entries.count)])
+        let visibleTranscript = transcriptEntries(in: thread)
+        return Array(
+            visibleTranscript[transcriptWindow.visibleRange(for: visibleTranscript.count)]
+        )
+    }
+
+    private func transcriptEntries(in thread: CompanionThread?) -> [TranscriptEntry] {
+        guard let thread else { return [] }
+        return thread.entries
+            .filter { !$0.queued }
+            .sorted(by: transcriptOrder)
+    }
+
+    private func queuedEntries(in thread: CompanionThread?) -> [TranscriptEntry] {
+        guard let thread else { return [] }
+        return thread.entries
+            .filter(\.queued)
+            .sorted(by: transcriptOrder)
+    }
+
+    private func transcriptOrder(_ lhs: TranscriptEntry, _ rhs: TranscriptEntry) -> Bool {
+        lhs.ordinal == rhs.ordinal ? lhs.eventID < rhs.eventID : lhs.ordinal < rhs.ordinal
     }
 
     private func refreshSelectedToolDetail(from entries: [TranscriptEntry]) {
@@ -697,9 +724,10 @@ struct ChatView: View {
         guard expandedWindow.loadEarlier() else { return }
         loadingEarlier = true
         threadProjection.invalidateRefreshes()
-        let visibleRange = expandedWindow.visibleRange(for: snapshot.entries.count)
+        let snapshotEntries = transcriptEntries(in: snapshot)
+        let visibleRange = expandedWindow.visibleRange(for: snapshotEntries.count)
         let renderedMarkdown = await renderedMarkdown(
-            for: Array(snapshot.entries[visibleRange])
+            for: Array(snapshotEntries[visibleRange])
         )
         guard thread?.entries == snapshot.entries else {
             loadingEarlier = false
@@ -847,10 +875,11 @@ struct ChatView: View {
             }
 
             threadProjection.replaceAfterMutation(with: next)
-            transcriptWindow.refresh(totalCount: next.entries.count)
-            let visibleRange = transcriptWindow.visibleRange(for: next.entries.count)
+            let nextEntries = transcriptEntries(in: next)
+            transcriptWindow.refresh(totalCount: nextEntries.count)
+            let visibleRange = transcriptWindow.visibleRange(for: nextEntries.count)
             let renderedMarkdown = await renderedMarkdown(
-                for: Array(next.entries[visibleRange])
+                for: Array(nextEntries[visibleRange])
             )
             markdownByEventID = renderedMarkdown
             await threadMutationGate.release(mutationID: mutationID)
@@ -896,10 +925,11 @@ struct ChatView: View {
                 )
             }
             threadProjection.replaceAfterMutation(with: next)
-            transcriptWindow.refresh(totalCount: next.entries.count)
-            let visibleRange = transcriptWindow.visibleRange(for: next.entries.count)
+            let nextEntries = transcriptEntries(in: next)
+            transcriptWindow.refresh(totalCount: nextEntries.count)
+            let visibleRange = transcriptWindow.visibleRange(for: nextEntries.count)
             let renderedMarkdown = await renderedMarkdown(
-                for: Array(next.entries[visibleRange])
+                for: Array(nextEntries[visibleRange])
             )
             markdownByEventID = renderedMarkdown
             await refreshCompanionProjection()
@@ -1184,7 +1214,7 @@ struct ChatMessageBubble: View {
                 .padding(.horizontal, 14)
                 .padding(.vertical, 11)
                 .frame(maxWidth: 340, alignment: .leading)
-                .companionGlass(radius: 18, tint: accent.opacity(0.10))
+                .companionMaterial(radius: 18, tint: accent.opacity(0.10))
         } else if kind == .assistant {
             contentView
                 .padding(.vertical, 3)

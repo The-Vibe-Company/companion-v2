@@ -75,8 +75,8 @@ extension View {
         modifier(CompanionGlassModifier(radius: radius, tint: tint, interactive: interactive))
     }
 
-    func companionMaterial(radius: CGFloat) -> some View {
-        modifier(CompanionMaterialModifier(radius: radius))
+    func companionMaterial(radius: CGFloat, tint: Color? = nil) -> some View {
+        modifier(CompanionMaterialModifier(radius: radius, tint: tint))
     }
 }
 
@@ -111,15 +111,24 @@ private struct CompanionGlassModifier: ViewModifier {
 private struct CompanionMaterialModifier: ViewModifier {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     let radius: CGFloat
+    let tint: Color?
 
     func body(content: Content) -> some View {
         content
-            .background(
-                reduceTransparency
-                    ? AnyShapeStyle(Color.companionSurfaceOpaque)
-                    : AnyShapeStyle(.ultraThinMaterial),
-                in: RoundedRectangle(cornerRadius: radius, style: .continuous)
-            )
+            .background {
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .fill(
+                        reduceTransparency
+                            ? AnyShapeStyle(Color.companionSurfaceOpaque)
+                            : AnyShapeStyle(.ultraThinMaterial)
+                    )
+                    .overlay {
+                        if let tint {
+                            RoundedRectangle(cornerRadius: radius, style: .continuous)
+                                .fill(tint)
+                        }
+                    }
+            }
             .overlay {
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
                     .stroke(
