@@ -363,9 +363,9 @@ struct CreateCompanionView: View {
         [CompanionPluginAccount]
     ) {
         if let services {
-            async let nextProviders = services.listProviders()
-            async let nextPlugins = services.listPlugins()
-            return try await (nextProviders, nextPlugins)
+            let nextProviders = try await services.listProviders()
+            let nextPlugins = try await services.listPlugins()
+            return (nextProviders, nextPlugins)
         }
 
         async let nextProviders = sessionStore.listCompanionProviders()
@@ -460,7 +460,7 @@ private enum CreateCompanionDemoFixtures {
     static let services = CreateCompanionServices(
         listProviders: { await providers },
         listPlugins: { [] },
-        createCompanion: { input in await companion(input: input) }
+        createCompanion: { input in companion(input: input) }
     )
 
     private static var providers: CompanionProvidersResponse {

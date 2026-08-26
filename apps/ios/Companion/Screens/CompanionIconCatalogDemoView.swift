@@ -35,7 +35,8 @@ struct CompanionIconCatalogDemoView: View {
 
                     CompanionIconGallery(
                         selection: $selectedIcon,
-                        accessibilityIdentifierPrefix: "demo.icon"
+                        accessibilityIdentifierPrefix: "demo.icon",
+                        reduceMotionOverride: reduceMotionOverride
                     )
 
                     VStack(alignment: .leading, spacing: 12) {
@@ -64,7 +65,6 @@ struct CompanionIconCatalogDemoView: View {
             .navigationTitle("Companion icon catalog")
             .navigationBarTitleDisplayMode(.inline)
         }
-        .environment(\.accessibilityReduceMotion, reduceMotion)
     }
 
     private func stateSample(

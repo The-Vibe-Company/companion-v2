@@ -5,12 +5,17 @@ import CompanionKit
 struct CompanionIconGallery: View {
     @Binding var selection: CompanionSummary.Icon
     var accessibilityIdentifierPrefix = "companion.icon"
+    var reduceMotionOverride: Bool? = nil
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
 
     private let columns = [
         GridItem(.adaptive(minimum: 68, maximum: 88), spacing: 10, alignment: .top),
     ]
+
+    private var reduceMotion: Bool {
+        reduceMotionOverride ?? systemReduceMotion
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
