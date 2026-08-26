@@ -16,7 +16,9 @@ struct RootView: View {
     var body: some View {
         Group {
 #if DEBUG
-            if ProcessInfo.processInfo.arguments.contains("-markdown-table-demo") {
+            if ProcessInfo.processInfo.arguments.contains("-companion-queued-demo") {
+                CompanionQueuedMessagesDemoView()
+            } else if ProcessInfo.processInfo.arguments.contains("-markdown-table-demo") {
                 MarkdownTableDemoView()
             } else if ProcessInfo.processInfo.arguments.contains("-companion-interruption-demo") {
                 CompanionInterruptedTurnDemoView()
@@ -49,7 +51,8 @@ struct RootView: View {
         .task {
 #if DEBUG
             let arguments = ProcessInfo.processInfo.arguments
-            guard !arguments.contains("-markdown-table-demo"),
+            guard !arguments.contains("-companion-queued-demo"),
+                  !arguments.contains("-markdown-table-demo"),
                   !arguments.contains("-companion-interruption-demo"),
                   !arguments.contains("-companion-decision-demo"),
                   !arguments.contains("-companion-icon-demo"),
