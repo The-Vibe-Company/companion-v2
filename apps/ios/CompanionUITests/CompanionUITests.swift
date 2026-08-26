@@ -669,7 +669,7 @@ final class CompanionUITests: XCTestCase {
             NSPredicate(format: "identifier == %@", "chat.composer-controls")
         ).firstMatch
         let thinking = app.descendants(matching: .any).matching(
-            NSPredicate(format: "identifier == %@", "chat.thinking-status")
+            NSPredicate(format: "label == %@", "Luna thinking")
         ).firstMatch
         XCTAssertTrue(queue.waitForExistence(timeout: 5))
         XCTAssertTrue(composer.exists)
@@ -685,7 +685,7 @@ final class CompanionUITests: XCTestCase {
         XCTAssertLessThanOrEqual(transcript.frame.maxY, scrollToBottom.frame.minY)
         XCTAssertLessThanOrEqual(scrollToBottom.frame.maxY, queue.frame.minY)
 
-        XCTAssertTrue(thinking.exists)
+        XCTAssertTrue(thinking.waitForExistence(timeout: 3))
         XCTAssertFalse(thinking.frame.intersects(queue.frame))
         XCTAssertFalse(thinking.frame.intersects(composer.frame))
 
