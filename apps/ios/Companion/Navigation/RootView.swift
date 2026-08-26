@@ -69,7 +69,6 @@ struct RootView: View {
         }
         .animation(.easeOut(duration: 0.24), value: sessionStore.phase)
         .tint(.companionAccent)
-        .preferredColorScheme(.light)
     }
 
     private var activeNotificationSessionID: String? {

@@ -5,7 +5,6 @@ import CompanionKit
 struct CompanionListServices {
     let listCompanions: () async throws -> [CompanionSummary]
     let deleteCompanion: (String, UUID) async throws -> CompanionOperationSummary
-    let connectedResources: (CompanionSummary) async throws -> CompanionConnectedResources
 }
 
 struct CompanionListView: View {
@@ -158,9 +157,6 @@ struct CompanionListView: View {
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("companion.row.\(companion.id)")
                     .contextMenu {
-                        Button("Connected resources", systemImage: "link") {
-                            path.append(.resources(companion.id))
-                        }
                         Button("Settings", systemImage: "gearshape") {
                             path.append(.settings(companion.id))
                         }
@@ -182,9 +178,6 @@ struct CompanionListView: View {
                     }
                     .accessibilityAction(named: "Settings") {
                         path.append(.settings(companion.id))
-                    }
-                    .accessibilityAction(named: "Connected resources") {
-                        path.append(.resources(companion.id))
                     }
                 }
             }
@@ -307,7 +300,6 @@ struct CompanionListView: View {
             case .chat(let companionID):
                 ChatView(
                     companion: companion,
-                    onResources: { path.append(.resources(companionID)) },
                     onPlugins: { showingPlugins = true },
                     onSettings: { path.append(.settings(companionID)) }
                 )
@@ -324,15 +316,6 @@ struct CompanionListView: View {
                     onDeletionAccepted: deletionAccepted,
                     onDeletionAmbiguous: { companionID, requestID in
                         deleteRequestIDs[companionID] = requestID
-                    }
-                )
-            case .resources:
-                CompanionConnectedResourcesView(
-                    companion: companion,
-                    services: services.map { services in
-                        CompanionConnectedResourcesServices(
-                            load: { try await services.connectedResources(companion) }
-                        )
                     }
                 )
             }
@@ -358,6 +341,7 @@ struct CompanionListView: View {
         companion.runtime.replying
             || companion.runtime.state == .provisioning
             || companion.runtime.state == .stopping
+            || companion.runtime.latestOperation?.isActive == true
             || deletingCompanionIDs.contains(companion.id)
             || deleteRequestIDs[companion.id] != nil
             || effectiveDeletion(for: companion)?.isActive == true
@@ -435,8 +419,7 @@ struct CompanionRosterDemoView: View {
                 },
                 deleteCompanion: { companionID, requestID in
                     try demoState.delete(companionID: companionID, requestID: requestID)
-                },
-                connectedResources: { _ in CompanionConnectedResourcesDemoFixtures.resources }
+                }
             )
         )
     }
@@ -509,12 +492,11 @@ private enum CompanionRosterDemoFixtures {
 
 private enum CompanionRoute: Hashable {
     case chat(String)
-    case resources(String)
     case settings(String)
 
     var companionID: String {
         switch self {
-        case .chat(let id), .resources(let id), .settings(let id): return id
+        case .chat(let id), .settings(let id): return id
         }
     }
 }
@@ -588,8 +570,9 @@ private struct CompanionRow: View {
         switch companion.runtime.state {
         case .running: return "online"
         case .provisioning: return "starting"
+        case .stopping: return "stopping"
         case .error: return "needs attention"
-        case .notCreated, .stopped, .stopping: return "asleep"
+        case .notCreated, .stopped: return "asleep"
         case .unknown: return "unknown status"
         }
     }
@@ -598,9 +581,9 @@ private struct CompanionRow: View {
         if companion.runtime.replying { return visualTheme.accent }
         switch companion.runtime.state {
         case .running: return .companionSuccess
-        case .provisioning: return .companionWarning
+        case .provisioning, .stopping: return .companionWarning
         case .error: return .companionDanger
-        case .notCreated, .stopped, .stopping, .unknown: return .companionMuted
+        case .notCreated, .stopped, .unknown: return .companionMuted
         }
     }
 

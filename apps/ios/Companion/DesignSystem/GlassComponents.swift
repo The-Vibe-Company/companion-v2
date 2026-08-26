@@ -91,12 +91,12 @@ private struct CompanionGlassModifier: ViewModifier {
         if reduceTransparency {
             content
                 .background(
-                    tint?.opacity(0.16) ?? Color.white,
+                    tint?.opacity(0.16) ?? Color.companionSurface,
                     in: RoundedRectangle(cornerRadius: radius, style: .continuous)
                 )
                 .overlay {
                     RoundedRectangle(cornerRadius: radius, style: .continuous)
-                        .stroke(Color.black.opacity(0.10), lineWidth: 0.7)
+                        .stroke(Color.companionDivider, lineWidth: 0.7)
                 }
         } else {
             let base = Glass.regular.tint(tint)
@@ -115,12 +115,12 @@ private struct CompanionMaterialModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
             .background(
-                reduceTransparency ? AnyShapeStyle(Color.white) : AnyShapeStyle(.ultraThinMaterial),
+                reduceTransparency ? AnyShapeStyle(Color.companionSurface) : AnyShapeStyle(.ultraThinMaterial),
                 in: RoundedRectangle(cornerRadius: radius, style: .continuous)
             )
             .overlay {
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .stroke(reduceTransparency ? Color.black.opacity(0.10) : Color.companionBorder, lineWidth: 0.7)
+                    .stroke(reduceTransparency ? Color.companionDivider : Color.companionBorder, lineWidth: 0.7)
             }
     }
 }
@@ -161,8 +161,9 @@ struct CompanionStatusBadge: View {
         switch runtime.state {
         case .running: return "Online"
         case .provisioning: return "Starting"
+        case .stopping: return "Stopping"
         case .error: return "Error"
-        case .notCreated, .stopped, .stopping: return "Asleep"
+        case .notCreated, .stopped: return "Asleep"
         case .unknown: return "Unknown"
         }
     }
@@ -171,9 +172,9 @@ struct CompanionStatusBadge: View {
         if runtime.replying { return replyingColor }
         switch runtime.state {
         case .running: return .companionSuccess
-        case .provisioning: return .companionWarning
+        case .provisioning, .stopping: return .companionWarning
         case .error: return .companionDanger
-        case .notCreated, .stopped, .stopping, .unknown: return .companionMuted
+        case .notCreated, .stopped, .unknown: return .companionMuted
         }
     }
 }

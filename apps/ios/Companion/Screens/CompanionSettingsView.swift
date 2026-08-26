@@ -6,6 +6,11 @@ struct CompanionSettingsServices {
     let listProviders: () async throws -> CompanionProvidersResponse
     let updateCompanion: (String, UpdateCompanionInput) async throws -> CompanionSummary
     let deleteCompanion: (String, UUID) async throws -> CompanionOperationSummary
+    let connectedResources: () async throws -> CompanionConnectedResources
+    let listPlugins: () async throws -> [CompanionPluginAccount]
+    let updatePluginSelection: ([String]) async throws -> CompanionSummary
+    let loadCompanion: () async throws -> CompanionSummary
+    let restart: (CompanionRuntimeRestartTarget, UUID) async throws -> CompanionOperationSummary
 }
 
 struct CompanionSettingsView: View {
@@ -66,6 +71,7 @@ struct CompanionSettingsView: View {
 
                 identitySection
                 intelligenceSection
+                resourcesSection
 
                 if canDelete {
                     deleteSection
@@ -106,6 +112,45 @@ struct CompanionSettingsView: View {
         .onChange(of: name) { enforceNameLimit() }
         .onChange(of: instructions) { enforceInstructionsLimit() }
         .onChange(of: companion) { _, updated in syncServerProjection(updated) }
+    }
+
+    private var resourcesSection: some View {
+        Section {
+            NavigationLink {
+                CompanionConnectedResourcesView(
+                    companion: currentCompanion,
+                    hasUnsavedSettings: changed,
+                    onCompanionUpdated: resourceCompanionUpdated,
+                    services: services.map { services in
+                        CompanionConnectedResourcesServices(
+                            load: services.connectedResources,
+                            listPlugins: services.listPlugins,
+                            updatePluginSelection: services.updatePluginSelection,
+                            loadCompanion: services.loadCompanion,
+                            restart: services.restart
+                        )
+                    }
+                )
+            } label: {
+                Label {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Connected resources")
+                        Text("Skills, plugins, routines, triggers, and runtime controls")
+                            .font(.caption)
+                            .foregroundStyle(Color.companionMuted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                } icon: {
+                    Image(systemName: "link")
+                }
+                .frame(minHeight: 44)
+            }
+            .accessibilityIdentifier("companion.settings.resources")
+        } header: {
+            Text("Resources")
+        } footer: {
+            Text("Plugin changes apply between turns. Detaching an account from this Companion does not disconnect it from Plugins.")
+        }
     }
 
     private var identitySection: some View {
@@ -432,6 +477,11 @@ struct CompanionSettingsView: View {
         if updated.deletionOperation != nil { deleteRequestID = nil }
     }
 
+    private func resourceCompanionUpdated(_ updated: CompanionSummary) {
+        currentCompanion = updated.preservingListProjection(from: currentCompanion)
+        onSaved(currentCompanion)
+    }
+
     private func randomizeIcon() {
         updateIcon {
             .init(
@@ -520,12 +570,14 @@ private enum CompanionSettingsDemoFixtures {
           "name":"Luna",
           "persona":"Keep releases calm",
           "model_id":"claude-sonnet",
+          "selected_skill_ids":["11111111-1111-4111-8111-111111111111"],
+          "selected_mcp_account_ids":["55555555-5555-4555-8555-555555555555"],
           "icon":{"shape":6,"mouth":1,"accessory":6,"color":2},
           "access":"\#(access.rawValue)",
           "hidden":false,
           "unread":false,
           "last_message":{"preview":"Release notes are ready.","role":"assistant","created_at":"2026-08-25T08:00:00.000Z"},
-          "runtime":{"state":"running","replying":false,"last_error":null,"provider_ids":["anthropic"],"latest_operation":null}
+          "runtime":{"state":"running","daemon_state":"running","replying":false,"last_error":null,"provider_ids":["anthropic"],"latest_operation":null}
         }
         """#)
     }
@@ -534,9 +586,21 @@ private enum CompanionSettingsDemoFixtures {
         CompanionSettingsServices(
             listProviders: { providers },
             updateCompanion: { _, input in updatedCompanion(input: input, access: access) },
-            deleteCompanion: { _, _ in deleteOperation }
+            deleteCompanion: { _, _ in deleteOperation },
+            connectedResources: { CompanionConnectedResourcesDemoFixtures.resources },
+            listPlugins: { plugins },
+            updatePluginSelection: { selectedIDs in
+                companion(access: access, selectedMCPAccountIDs: selectedIDs)
+            },
+            loadCompanion: { companion(access: access) },
+            restart: { target, _ in restartOperation(target) }
         )
     }
+
+    private static let plugins: [CompanionPluginAccount] = [
+        decode(#"{"id":"55555555-5555-4555-8555-555555555555","provider":"linear","label":"work","transport":"http","endpoint":"https://mcp.linear.app","connected":true,"created_at":"2026-08-25T08:00:00.000Z","updated_at":"2026-08-25T08:00:00.000Z"}"#),
+        decode(#"{"id":"66666666-6666-4666-8666-666666666666","provider":"github","label":"personal","transport":"http","endpoint":"https://api.githubcopilot.com/mcp","connected":true,"created_at":"2026-08-25T08:00:00.000Z","updated_at":"2026-08-25T08:00:00.000Z"}"#),
+    ]
 
     private static var providers: CompanionProvidersResponse {
         decode(#"""
@@ -572,6 +636,41 @@ private enum CompanionSettingsDemoFixtures {
         """#)
     }
 
+    private static func restartOperation(
+        _ target: CompanionRuntimeRestartTarget
+    ) -> CompanionOperationSummary {
+        decode(#"{"id":"77777777-7777-4777-8777-777777777777","kind":"\#(target == .pi ? "restart_pi" : "restart_box")","status":"pending","error":null}"#)
+    }
+
+    private static func companion(
+        access: CompanionAccess,
+        selectedMCPAccountIDs: [String]
+    ) -> CompanionSummary {
+        let object: [String: Any] = [
+            "id": "c96ab360-00f3-4497-a51a-51442db8add1",
+            "name": "Luna",
+            "persona": "Keep releases calm",
+            "model_id": "claude-sonnet",
+            "selected_skill_ids": ["11111111-1111-4111-8111-111111111111"],
+            "selected_mcp_account_ids": selectedMCPAccountIDs,
+            "icon": ["shape": 6, "mouth": 1, "accessory": 6, "color": 2],
+            "access": access.rawValue,
+            "hidden": false,
+            "unread": false,
+            "last_message": NSNull(),
+            "runtime": [
+                "state": "running",
+                "daemon_state": "running",
+                "replying": false,
+                "last_error": NSNull(),
+                "provider_ids": ["anthropic"],
+                "latest_operation": NSNull(),
+            ],
+        ]
+        let data = try! JSONSerialization.data(withJSONObject: object)
+        return try! JSONDecoder().decode(CompanionSummary.self, from: data)
+    }
+
     private static func updatedCompanion(
         input: UpdateCompanionInput,
         access: CompanionAccess
@@ -581,6 +680,8 @@ private enum CompanionSettingsDemoFixtures {
             "name": input.name,
             "persona": input.persona.map { $0 as Any } ?? NSNull(),
             "model_id": input.modelID,
+            "selected_skill_ids": ["11111111-1111-4111-8111-111111111111"],
+            "selected_mcp_account_ids": ["55555555-5555-4555-8555-555555555555"],
             "icon": [
                 "shape": input.icon.shape,
                 "mouth": input.icon.mouth,
@@ -593,6 +694,7 @@ private enum CompanionSettingsDemoFixtures {
             "last_message": NSNull(),
             "runtime": [
                 "state": "running",
+                "daemon_state": "running",
                 "replying": false,
                 "last_error": NSNull(),
                 "provider_ids": [input.providerID],
