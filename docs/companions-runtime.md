@@ -548,8 +548,14 @@ uniqueness makes replayed settlement and claim takeover idempotent.
 The success alert is `<name> replied` with the latest normalized assistant text, capped at 180
 characters; image-only output uses a generic preview. Decisions use `<name> needs your answer` and
 the bounded title. Failure/interruption use their stable expurgated runtime message. Reasoning,
-tools, provider payloads, credentials, and numeric badges are absent. Application data is exactly
-`{version:1, org_id, companion_id, event}` and APNs `thread-id` is the Companion id.
+tools, provider payloads, credentials, and numeric badges are absent. Base application data is
+`{version:1, org_id, companion_id, event}` and APNs `thread-id` is the Companion id. Reply payloads
+add the current `companion_name` and four-index `companion_icon`, and set `mutable-content: 1`;
+other events remain plain alerts. The iOS Notification Service Extension renders the closed blob
+catalog locally into a PNG and uses it as an `INSendMessageIntent` sender image for Apple's
+communication-notification avatar treatment. It performs no download. A failed intent donation
+falls back to the same PNG as a standard attachment, while extension timeout leaves the original
+bounded title and body intact.
 
 The worker claim function deletes expired deliveries and revalidates membership plus Owner or
 workspace access before returning any token or preview. Claims are leased and fenced. APNs `200`
