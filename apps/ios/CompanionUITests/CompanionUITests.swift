@@ -299,7 +299,17 @@ final class CompanionUITests: XCTestCase {
         XCTAssertTrue(status.waitForExistence(timeout: 5))
         XCTAssertTrue(composer.exists)
         XCTAssertEqual(status.label, "Companion thinking")
-        XCTAssertLessThan(status.frame.minY, composer.frame.minY)
+        XCTAssertLessThan(status.frame.maxY, composer.frame.minY)
+        XCTAssertLessThan(composer.frame.minY - status.frame.maxY, 20)
+
+        let legacyTopBanner = app.descendants(matching: .any).matching(
+            NSPredicate(
+                format: "label CONTAINS[c] %@ OR label CONTAINS[c] %@",
+                "is replying",
+                "écrit une réponse"
+            )
+        ).firstMatch
+        XCTAssertFalse(legacyTopBanner.exists)
 
         let disclosure = app.buttons["thinking.disclosure"]
         for _ in 0..<6 where !disclosure.exists {

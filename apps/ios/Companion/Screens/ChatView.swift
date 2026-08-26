@@ -298,6 +298,11 @@ struct ChatView: View {
                     isInteractive: liveReasoningEventID != nil,
                     onTap: onThinkingTap
                 )
+                .transition(
+                    reduceMotion
+                        ? .identity
+                        : .move(edge: .bottom).combined(with: .opacity)
+                )
             }
 
             if let error, thread != nil {
@@ -408,6 +413,7 @@ struct ChatView: View {
         .padding(.horizontal, 12)
         .padding(.top, 8)
         .padding(.bottom, 6)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: isReplying)
     }
 
     private var sendDisabled: Bool {
@@ -1090,23 +1096,29 @@ struct CompanionThinkingStatus: View {
             CompanionAvatar(name: companionName, icon: icon, size: 28, state: .thinking)
                 .accessibilityHidden(true)
 
-            Text(label)
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(statusTextColor)
-                .multilineTextAlignment(.leading)
-                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 0) {
+                Text(companionName)
+                    .foregroundStyle(statusTextColor)
+                    .fontWeight(.semibold)
+                Text(" thinking")
+                    .foregroundStyle(Color(uiColor: .secondaryLabel))
+            }
+            .font(.subheadline)
+            .multilineTextAlignment(.leading)
+            .fixedSize(horizontal: false, vertical: true)
 
             if isInteractive {
                 Image(systemName: "chevron.up")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(Color(uiColor: .secondaryLabel))
+                    .foregroundStyle(accent)
                     .accessibilityHidden(true)
             }
         }
         .frame(minHeight: 44, alignment: .leading)
         .padding(.horizontal, 12)
         .padding(.vertical, 4)
-        .companionGlass(radius: 17, tint: accent.opacity(0.08), interactive: isInteractive)
+        .contentShape(.rect(cornerRadius: 16))
+        .companionGlass(radius: 16, tint: accent.opacity(0.08), interactive: isInteractive)
     }
 }
 

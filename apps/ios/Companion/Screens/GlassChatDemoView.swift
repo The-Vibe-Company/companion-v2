@@ -230,6 +230,11 @@ struct GlassChatDemoView: View {
                     isInteractive: liveReasoningMessageID != nil,
                     onTap: onThinkingTap
                 )
+                .transition(
+                    reduceMotion
+                        ? .identity
+                        : .move(edge: .bottom).combined(with: .opacity)
+                )
             }
 
             GlassEffectContainer(spacing: 12) {
@@ -259,6 +264,7 @@ struct GlassChatDemoView: View {
         .padding(.horizontal, 12)
         .padding(.top, 8)
         .padding(.bottom, 6)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: replying)
     }
 
     private func send() {
