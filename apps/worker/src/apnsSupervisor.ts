@@ -13,6 +13,7 @@ import {
 import { db, type Db } from "@companion/db";
 
 import type { Supervisor } from "./billingSupervisor";
+import { plainTextNotificationBody } from "./notificationText";
 
 const CLAIM_INTERVAL_MS = 2_000;
 const CLAIM_LIMIT = 50;
@@ -111,7 +112,7 @@ export function apnsCollapseId(eventKey: string): string {
 export function apnsPayload(claim: CompanionNotificationDeliveryClaim): CompanionApnsPayload {
   return {
     aps: {
-      alert: { title: claim.title, body: claim.body },
+      alert: { title: claim.title, body: plainTextNotificationBody(claim.body) },
       sound: "default",
       "thread-id": claim.companionId,
     },

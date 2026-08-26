@@ -91,6 +91,14 @@ describe("APNs delivery", () => {
     expect(apnsCollapseId(claim.eventKey)).toHaveLength(64);
   });
 
+  it("builds a plain-text alert from a Markdown reply", () => {
+    const payload = apnsPayload({
+      ...claim,
+      body: "## Result\n\nThe **release** is ready. Read [the notes](https://example.com).",
+    });
+    expect(payload.aps.alert.body).toBe("Result The release is ready. Read the notes.");
+  });
+
   it("classifies successful, revoked, transient, and permanent responses", () => {
     expect(classifyApnsResponse({ status: 200 })).toBe("complete");
     expect(classifyApnsResponse({ status: 410, reason: "Unregistered" })).toBe("invalidate");
