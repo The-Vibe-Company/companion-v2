@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import XCTest
 
@@ -383,22 +384,19 @@ final class CompanionUITests: XCTestCase {
         app.launchArguments = ["-glass-chat-demo"]
         app.launch()
 
-        let shellDetails = app.buttons.matching(NSPredicate(
-            format: "identifier == %@ AND value CONTAINS %@",
-            "tool-run.open-details.tool:demo-shell-1",
-            "Preview available"
-        )).firstMatch
+        let shellDetails = app.buttons["tool-run.open-details.tool:demo-shell-1"]
         XCTAssertTrue(shellDetails.waitForExistence(timeout: 5))
-        XCTAssertTrue(shellDetails.label.contains("Shell command"))
+        XCTAssertEqual(shellDetails.label, "Tool operation: run_command, Done")
 
         let fileDetails = app.buttons["tool-run.open-details.tool:demo-file-1"]
         XCTAssertTrue(fileDetails.exists)
-        XCTAssertTrue(fileDetails.label.contains("File operation"))
-        XCTAssertEqual(fileDetails.value as? String, "Failed")
+        XCTAssertEqual(fileDetails.label, "Tool operation: file, Failed")
 
-        shellDetails.tap()
+        shellDetails.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)).tap()
         XCTAssertTrue(app.navigationBars["Tool details"].waitForExistence(timeout: 2))
-        XCTAssertTrue(app.staticTexts["run_command"].exists)
+        let toolName = app.staticTexts["tool-run.detail.name"]
+        XCTAssertTrue(toolName.exists)
+        XCTAssertEqual(toolName.label, "run_command")
         XCTAssertTrue(app.descendants(matching: .any)["tool-run.detail.timestamp"].exists)
         XCTAssertTrue(app.images["tool-run.detail.screenshot"].waitForExistence(timeout: 2))
         let shellPayload = app.staticTexts["tool-run.detail.payload"]
@@ -550,6 +548,66 @@ final class CompanionUITests: XCTestCase {
         composer.typeText("**Message membre littéral**")
         send.tap()
         XCTAssertTrue(app.staticTexts["**Message membre littéral**"].waitForExistence(timeout: 3))
+    }
+
+    @MainActor
+    func testTranscriptWindowDemoStartsWithOnlyTheNewestFiftyMessages() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-transcript-window-demo"]
+        app.launch()
+
+        XCTAssertTrue(app.staticTexts["Long-thread message 120"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["Long-thread message 1"].exists)
+        for _ in 0..<5 where !app.buttons["chat.load-earlier"].exists {
+            app.swipeDown()
+        }
+        XCTAssertTrue(app.buttons["chat.load-earlier"].waitForExistence(timeout: 3))
+    }
+
+    @MainActor
+    func testTranscriptWindowDemoLoadsEarlierMessages() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-transcript-window-demo"]
+        app.launch()
+
+        let loadEarlier = app.buttons["chat.load-earlier"]
+        for _ in 0..<5 where !loadEarlier.exists {
+            app.swipeDown()
+        }
+        XCTAssertTrue(loadEarlier.waitForExistence(timeout: 5))
+        let preservedAnchor = app.staticTexts["Long-thread message 71"]
+        XCTAssertTrue(preservedAnchor.isHittable)
+        loadEarlier.tap()
+
+        XCTAssertTrue(preservedAnchor.waitForExistence(timeout: 3))
+        XCTAssertTrue(preservedAnchor.isHittable)
+        let earlier = app.staticTexts["Long-thread message 21"]
+        for _ in 0..<5 where !earlier.exists {
+            app.swipeDown()
+        }
+        XCTAssertTrue(earlier.waitForExistence(timeout: 3))
+    }
+
+    @MainActor
+    func testTranscriptWindowDemoReturnsToLatestAfterScrollingAway() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-transcript-window-demo"]
+        app.launch()
+
+        let latest = app.staticTexts["Long-thread message 120"]
+        XCTAssertTrue(latest.waitForExistence(timeout: 5))
+        app.swipeDown()
+
+        let scrollToBottom = app.buttons["chat.scroll-to-bottom"]
+        XCTAssertTrue(scrollToBottom.waitForExistence(timeout: 3))
+        scrollToBottom.tap()
+
+        let latestVisible = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isHittable == true"),
+            object: latest
+        )
+        wait(for: [latestVisible], timeout: 3)
+        XCTAssertTrue(latest.isHittable)
     }
 
     @MainActor
@@ -778,6 +836,13 @@ final class CompanionUITests: XCTestCase {
         XCTAssertTrue(app.buttons["companion.settings.save"].exists)
         XCTAssertTrue(app.descendants(matching: .any)["companion.settings.name"].isEnabled)
         XCTAssertFalse(app.buttons["companion.settings.delete"].exists)
+
+        openConnectedResources(in: app)
+        XCTAssertFalse(app.buttons["companion.resources.plugins.add"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)[
+            "companion.resources.plugins.owner-only"
+        ].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.buttons["companion.resources.restart.companion"].exists)
     }
 
     @MainActor
@@ -791,14 +856,17 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
-    func testChatOpensConnectedResourcesWithNativeResourceDetails() throws {
+    func testSettingsOwnsConnectedResourcesWithNativeResourceDetails() throws {
         let app = launchCompanionRoster(access: "viewer")
         let row = app.descendants(matching: .any)["companion.row.c96ab360-00f3-4497-a51a-51442db8add1"]
         row.tap()
 
-        let resourcesButton = app.buttons["chat.resources"]
-        XCTAssertTrue(resourcesButton.waitForExistence(timeout: 5))
-        XCTAssertTrue(resourcesButton.label.contains("Connected resources"))
+        XCTAssertFalse(app.buttons["chat.resources"].exists)
+        let settingsButton = app.buttons["chat.settings"]
+        XCTAssertTrue(settingsButton.waitForExistence(timeout: 5))
+        settingsButton.tap()
+        let resourcesButton = app.descendants(matching: .any)["companion.settings.resources"]
+        XCTAssertTrue(resourcesButton.waitForExistence(timeout: 2))
         resourcesButton.tap()
 
         XCTAssertTrue(app.navigationBars["Connected resources"].waitForExistence(timeout: 2))
@@ -844,15 +912,87 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
-    func testRosterContextMenuOpensConnectedResources() throws {
+    func testRosterContextMenuRoutesConnectedResourcesThroughSettings() throws {
         let app = launchCompanionRoster(access: "editor")
         let row = app.descendants(matching: .any)["companion.row.c96ab360-00f3-4497-a51a-51442db8add1"]
         openRosterContextMenu(for: row, in: app)
 
-        let resources = app.buttons["Connected resources"]
+        XCTAssertFalse(app.buttons["Connected resources"].exists)
+        app.buttons["Settings"].tap()
+        let resources = app.descendants(matching: .any)["companion.settings.resources"]
         XCTAssertTrue(resources.waitForExistence(timeout: 2))
         resources.tap()
         XCTAssertTrue(app.navigationBars["Connected resources"].waitForExistence(timeout: 2))
+    }
+
+    @MainActor
+    func testOwnerCanAttachDetachPluginsAndConfirmCompanionRestart() throws {
+        let app = launchCompanionSettings(access: "owner")
+        openConnectedResources(in: app)
+
+        let linear = app.descendants(matching: .any)[
+            "companion.resources.plugin.55555555-5555-4555-8555-555555555555"
+        ]
+        XCTAssertTrue(linear.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["work"].exists)
+        XCTAssertTrue(app.staticTexts["Linear"].exists)
+
+        let detach = app.buttons["companion.resources.plugin.detach.55555555-5555-4555-8555-555555555555"]
+        XCTAssertTrue(detach.exists)
+        detach.tap()
+        XCTAssertTrue(app.staticTexts["Linear · work detached."].waitForExistence(timeout: 2))
+
+        let add = app.buttons["companion.resources.plugins.add"]
+        XCTAssertTrue(add.exists)
+        add.tap()
+        let github = app.sheets.buttons["GitHub · personal"]
+        XCTAssertTrue(github.waitForExistence(timeout: 2))
+        github.tap()
+        XCTAssertTrue(app.staticTexts["GitHub · personal attached."].waitForExistence(timeout: 2))
+
+        let restart = scrollToButton("companion.resources.restart.companion", in: app)
+        restart.tap()
+        let confirm = app.sheets.buttons["Restart Companion"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 2))
+        confirm.tap()
+        XCTAssertTrue(app.staticTexts[
+            "Companion restart accepted. It will run after earlier runtime work."
+        ].waitForExistence(timeout: 2))
+    }
+
+    @MainActor
+    func testOwnerConfirmsFullServerRestartWithInterruptionCopy() throws {
+        let app = launchCompanionSettings(access: "owner")
+        openConnectedResources(in: app)
+
+        let restart = scrollToButton("companion.resources.restart.server", in: app)
+        restart.tap()
+        XCTAssertTrue(app.staticTexts[
+            "This queues a full server restart. Active work is interrupted, but the Companion and its saved files remain."
+        ].waitForExistence(timeout: 2))
+        let confirm = app.sheets.buttons["Restart server"]
+        XCTAssertTrue(confirm.exists)
+    }
+
+    @MainActor
+    func testViewerResourcesAreReadOnlyInDarkMode() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-settings-demo", "-AppleInterfaceStyle", "Dark"]
+        app.launchEnvironment["COMPANION_SETTINGS_DEMO_ACCESS"] = "viewer"
+        app.launchEnvironment["COMPANION_API_URL"] = "http://127.0.0.1:9"
+        app.launch()
+
+        let settings = app.buttons["chat.settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        settings.tap()
+        openConnectedResources(in: app)
+
+        XCTAssertFalse(app.buttons["companion.resources.plugins.add"].exists)
+        XCTAssertFalse(app.buttons["companion.resources.restart.companion"].exists)
+        XCTAssertFalse(app.buttons["companion.resources.restart.server"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)[
+            "companion.resources.runtime.read-only"
+        ].waitForExistence(timeout: 2))
     }
 
     @MainActor
@@ -898,6 +1038,24 @@ final class CompanionUITests: XCTestCase {
     @MainActor
     func testViewerRosterOffersSettingsWithoutDelete() throws {
         assertRosterContextMenu(access: "viewer", canDelete: false)
+    }
+
+    @MainActor
+    private func openConnectedResources(in app: XCUIApplication) {
+        let resources = app.descendants(matching: .any)["companion.settings.resources"]
+        for _ in 0..<3 where !resources.exists { app.swipeUp() }
+        XCTAssertTrue(resources.waitForExistence(timeout: 5))
+        resources.tap()
+        XCTAssertTrue(app.navigationBars["Connected resources"].waitForExistence(timeout: 2))
+    }
+
+    @MainActor
+    private func scrollToButton(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
+        let button = app.buttons[identifier]
+        for _ in 0..<8 where !button.isHittable { app.swipeUp() }
+        XCTAssertTrue(button.waitForExistence(timeout: 2))
+        XCTAssertTrue(button.isHittable)
+        return button
     }
 
     @MainActor

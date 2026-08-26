@@ -37,9 +37,18 @@ extension Color {
         light: UIColor(white: 0, alpha: 0.08),
         dark: UIColor(white: 1, alpha: 0.12)
     )
-    static let companionDanger = Color(red: 0.76, green: 0.08, blue: 0.16)
-    static let companionSuccess = Color(red: 0.08, green: 0.56, blue: 0.31)
-    static let companionWarning = Color(red: 0.84, green: 0.45, blue: 0.03)
+    static let companionDanger = adaptive(
+        light: UIColor(red: 0.76, green: 0.08, blue: 0.16, alpha: 1),
+        dark: UIColor(red: 1.00, green: 0.43, blue: 0.48, alpha: 1)
+    )
+    static let companionSuccess = adaptive(
+        light: UIColor(red: 0.08, green: 0.56, blue: 0.31, alpha: 1),
+        dark: UIColor(red: 0.28, green: 0.80, blue: 0.49, alpha: 1)
+    )
+    static let companionWarning = adaptive(
+        light: UIColor(red: 0.84, green: 0.45, blue: 0.03, alpha: 1),
+        dark: UIColor(red: 1.00, green: 0.68, blue: 0.24, alpha: 1)
+    )
     static let companionAccentForeground = Color.white
 
     private static func adaptive(light: UIColor, dark: UIColor) -> Color {

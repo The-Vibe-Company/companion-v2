@@ -143,6 +143,24 @@ public enum CompanionRuntimeState: String, Codable, Hashable, Sendable {
     }
 }
 
+public enum CompanionDaemonState: String, Codable, Hashable, Sendable {
+    case unknown
+    case starting
+    case running
+    case stopped
+    case error
+
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = Self(rawValue: value) ?? .unknown
+    }
+}
+
+public enum CompanionRuntimeRestartTarget: String, Codable, Equatable, Hashable, Sendable {
+    case pi
+    case box
+}
+
 public enum CompanionAccess: String, Codable, Hashable, Sendable {
     case owner
     case editor
@@ -224,6 +242,7 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
     public let persona: String?
     public let modelID: String?
     public let selectedSkillIDs: [String]
+    public let selectedMCPAccountIDs: [String]
     public let icon: Icon?
     public let access: CompanionAccess
     public let hidden: Bool
@@ -259,6 +278,7 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
 
     public struct Runtime: Codable, Hashable, Sendable {
         public let state: CompanionRuntimeState
+        public let daemonState: CompanionDaemonState
         public let replying: Bool
         public let lastError: String?
         public let providerIDs: [String]
@@ -266,6 +286,7 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
 
         enum CodingKeys: String, CodingKey {
             case state
+            case daemonState = "daemon_state"
             case replying
             case lastError = "last_error"
             case providerIDs = "provider_ids"
@@ -275,6 +296,7 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
         public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             state = try container.decode(CompanionRuntimeState.self, forKey: .state)
+            daemonState = try container.decodeIfPresent(CompanionDaemonState.self, forKey: .daemonState) ?? .unknown
             replying = try container.decodeIfPresent(Bool.self, forKey: .replying) ?? false
             lastError = try container.decodeIfPresent(String.self, forKey: .lastError)
             providerIDs = try container.decodeIfPresent([String].self, forKey: .providerIDs) ?? []
@@ -283,6 +305,7 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
                 forKey: .latestOperation
             )
         }
+
     }
 
     enum CodingKeys: String, CodingKey {
@@ -291,6 +314,7 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
         case persona
         case modelID = "model_id"
         case selectedSkillIDs = "selected_skill_ids"
+        case selectedMCPAccountIDs = "selected_mcp_account_ids"
         case icon
         case access
         case hidden
@@ -306,6 +330,7 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
         persona = try container.decodeIfPresent(String.self, forKey: .persona)
         modelID = try container.decodeIfPresent(String.self, forKey: .modelID)
         selectedSkillIDs = try container.decodeIfPresent([String].self, forKey: .selectedSkillIDs) ?? []
+        selectedMCPAccountIDs = try container.decodeIfPresent([String].self, forKey: .selectedMCPAccountIDs) ?? []
         icon = try container.decodeIfPresent(Icon.self, forKey: .icon)
         access = try container.decodeIfPresent(CompanionAccess.self, forKey: .access) ?? .viewer
         hidden = try container.decodeIfPresent(Bool.self, forKey: .hidden) ?? false
@@ -326,6 +351,7 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
             persona: persona,
             modelID: modelID,
             selectedSkillIDs: selectedSkillIDs,
+            selectedMCPAccountIDs: selectedMCPAccountIDs,
             icon: icon,
             access: access,
             hidden: hidden,
@@ -335,12 +361,34 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
         )
     }
 
+    public func reconcilingParentProjection(from previous: CompanionSummary) -> CompanionSummary {
+        let incomingOperationID = runtime.latestOperation?.id
+        let previousOperation = previous.runtime.latestOperation
+        let parentRuntimeIsStale = previousOperation?.isActive == true
+            && incomingOperationID != previousOperation?.id
+        return CompanionSummary(
+            id: id,
+            name: name,
+            persona: persona,
+            modelID: modelID,
+            selectedSkillIDs: selectedSkillIDs,
+            selectedMCPAccountIDs: selectedMCPAccountIDs,
+            icon: icon,
+            access: access,
+            hidden: hidden,
+            unread: unread,
+            lastMessage: lastMessage,
+            runtime: parentRuntimeIsStale ? previous.runtime : runtime
+        )
+    }
+
     private init(
         id: String,
         name: String,
         persona: String?,
         modelID: String?,
         selectedSkillIDs: [String],
+        selectedMCPAccountIDs: [String],
         icon: Icon?,
         access: CompanionAccess,
         hidden: Bool,
@@ -353,6 +401,7 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
         self.persona = persona
         self.modelID = modelID
         self.selectedSkillIDs = selectedSkillIDs
+        self.selectedMCPAccountIDs = selectedMCPAccountIDs
         self.icon = icon
         self.access = access
         self.hidden = hidden
@@ -762,6 +811,19 @@ public struct UpdateCompanionInput: Encodable, Equatable, Sendable {
         try container.encode(providerID, forKey: .providerID)
         try container.encode(modelID, forKey: .modelID)
         try container.encode(icon, forKey: .icon)
+    }
+}
+
+/// The narrow Companion settings patch used when attaching or detaching MCP accounts.
+public struct UpdateCompanionPluginSelectionInput: Encodable, Equatable, Sendable {
+    public let selectedMCPAccountIDs: [String]
+
+    public init(selectedMCPAccountIDs: [String]) {
+        self.selectedMCPAccountIDs = selectedMCPAccountIDs
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case selectedMCPAccountIDs = "selected_mcp_account_ids"
     }
 }
 

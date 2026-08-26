@@ -23,18 +23,17 @@ struct CompanionToolRunCard: View {
             onOpenDetails()
         } label: {
             summaryRow
+                .background { cardBackground }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(borderColor, lineWidth: isFailure ? 1 : 0.7)
+                }
+                .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
-        .background { cardBackground }
-        .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(borderColor, lineWidth: isFailure ? 1 : 0.7)
-        }
-        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilitySummary)
-        .accessibilityValue(accessibilityValue)
-        .accessibilityHint("Double tap to view tool details.")
+        .accessibilityHint("Opens details")
         .accessibilityIdentifier("tool-run.open-details.\(eventID)")
         .task(id: tool.screenshot) {
             previewImage = ToolRunScreenshotCache.image(from: tool.screenshot)
@@ -89,19 +88,17 @@ struct CompanionToolRunCard: View {
 
     private var titleStack: some View {
         VStack(alignment: .leading, spacing: 2) {
+            Text("Tool · \(displayToolName)")
+                .font(.system(.caption, design: .monospaced).weight(.semibold))
+                .foregroundStyle(Color(uiColor: .secondaryLabel))
+                .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
+                .truncationMode(.middle)
+
             Text(summaryTitle)
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(Color(uiColor: .label))
                 .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
                 .truncationMode(.middle)
-
-            if !tool.name.isEmpty, tool.name != summaryTitle {
-                Text(tool.name)
-                    .font(.caption)
-                    .foregroundStyle(Color(uiColor: .secondaryLabel))
-                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
-                    .truncationMode(.middle)
-            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -159,14 +156,11 @@ struct CompanionToolRunCard: View {
     }
 
     private var accessibilitySummary: String {
-        let name = tool.name.isEmpty ? "unnamed tool" : tool.name
-        return "\(tool.kind.label) tool, \(summaryTitle), \(name)"
+        "Tool operation: \(displayToolName), \(tool.status.label)"
     }
 
-    private var accessibilityValue: String {
-        previewImage == nil
-            ? tool.status.label
-            : "\(tool.status.label). Preview available."
+    private var displayToolName: String {
+        tool.name.isEmpty ? "Unnamed tool" : tool.name
     }
 
     private var isFailure: Bool {
@@ -249,12 +243,12 @@ struct CompanionToolRunDetailView: View {
                 .accessibilityIdentifier("tool-run.detail.title")
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Tool")
+                Text("Tool name")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(Color(uiColor: .secondaryLabel))
 
                 Text(tool.name.isEmpty ? "Unnamed tool" : tool.name)
-                    .font(.system(.subheadline, design: .monospaced))
+                    .font(.system(.headline, design: .monospaced).weight(.semibold))
                     .foregroundStyle(Color(uiColor: .label))
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)

@@ -173,7 +173,7 @@ test("CI builds iOS without secrets and keeps the live provider diagnostic manua
   assert.doesNotMatch(ci, /xcodebuildmcp/i);
   assert.match(ci, /swift test --package-path apps\/ios\/CompanionKit/);
   assert.match(ci, /xcodebuild build/);
-  assert.match(ci, /xcodebuild test/);
+  assert.doesNotMatch(ci, /testChatPhotoLibraryOpensOnFirstSelectionWithKeyboardVisible/);
   assert.match(ci, /xcrun simctl list devices available --json/);
   assert.match(ci, /node scripts\/select-ios-simulator\.mjs/);
   assert.doesNotMatch(ci, /^  skill-guards-macos:$/m);

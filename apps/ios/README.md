@@ -18,7 +18,19 @@ menu, and request Owner-only durable deletion. A confirmed deletion removes the 
 local roster immediately while the durable request runs; request failure restores the row, and a
 later roster poll may honestly reintroduce a Companion the control plane still returns. Essential
 settings cover the Companion icon, name, instructions, provider, and model; Editor access is
-editable and Viewer access is read-only. The
+editable and Viewer access is read-only.
+Connected resources now lives inside those settings as one child management page. It retains the
+native Skills, routines, and triggers status views, lists the member's attached MCP plugin accounts
+by provider and label, and lets the Companion Owner attach or detach already-connected accounts.
+The existing projection returns only the viewing member's private account ids, so Editor attachment
+changes stay read-only in native iOS rather than risk dropping an Owner's hidden selection. Detach
+is the existing `selected_mcp_account_ids` replacement update: it removes the account from this
+Companion without disabling or deleting the underlying Plugins connection. The same page queues the
+existing Pi-only restart as **Restart Companion** and the existing full-Box restart as **Restart
+server**; both are confirmed, idempotent lifecycle intents whose PostgreSQL-projected
+queued/stopping/starting/completed state is polled without contacting Box or Pi. Viewer sees the
+page read-only, including redacted unavailable plugin selections, and never receives mutation or
+restart controls. The
 native thread renders every durable decision request. Owner and Editor can answer `ask_user`,
 approve or deny configuration, routine, and trigger proposals, and handle historical shell/file
 requests without leaving iOS. An interrupted turn is equally explicit: Owner and Editor can retry
@@ -70,7 +82,8 @@ Release builds ignore launch arguments and environment variables and always use
 
 The Debug-only `-glass-chat-demo`, `-glass-chat-thinking-demo`, `-companion-queued-demo`, `-markdown-table-demo`,
 `-glass-management-demo`, `-glass-management-demo-plugins`,
-`-companion-icon-demo`, `-companion-decision-demo`, `-companion-interruption-demo`, `-companion-resources-demo`,
+`-companion-icon-demo`, `-companion-decision-demo`, `-companion-interruption-demo`,
+`-companion-transcript-window-demo`, `-companion-resources-demo`,
 `-companion-settings-demo`, and
 `-companion-roster-demo` launch arguments
 open deterministic showcases without requiring a server or account. Add `-companion-reduce-motion`

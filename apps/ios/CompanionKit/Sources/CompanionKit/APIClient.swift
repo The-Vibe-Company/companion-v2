@@ -302,6 +302,46 @@ public actor APIClient {
         ).companion
     }
 
+    public func updateCompanionPluginSelection(
+        companionID: String,
+        selectedMCPAccountIDs: [String]
+    ) async throws -> CompanionSummary {
+        let id = Self.encodedPathComponent(companionID)
+        let body = try encoder.encode(
+            UpdateCompanionPluginSelectionInput(selectedMCPAccountIDs: selectedMCPAccountIDs)
+        )
+        return try await decode(
+            CompanionEnvelope.self,
+            path: "/v1/companions/\(id)",
+            method: "PATCH",
+            body: body
+        ).companion
+    }
+
+    public func companionRuntime(companionID: String) async throws -> CompanionSummary {
+        let id = Self.encodedPathComponent(companionID)
+        return try await decode(
+            CompanionEnvelope.self,
+            path: "/v1/companions/\(id)/runtime"
+        ).companion
+    }
+
+    public func restartCompanion(
+        companionID: String,
+        target: CompanionRuntimeRestartTarget,
+        requestID: UUID
+    ) async throws -> CompanionOperationSummary {
+        let id = Self.encodedPathComponent(companionID)
+        let body = try encoder.encode(["target": target.rawValue])
+        return try await decode(
+            OperationEnvelope.self,
+            path: "/v1/companions/\(id)/runtime/restart",
+            method: "POST",
+            body: body,
+            additionalHeaders: ["Idempotency-Key": requestID.uuidString.lowercased()]
+        ).operation
+    }
+
     public func deleteCompanion(
         companionID: String,
         requestID: UUID

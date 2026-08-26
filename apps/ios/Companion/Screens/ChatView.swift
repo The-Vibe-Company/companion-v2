@@ -16,11 +16,15 @@ struct ChatServices {
     let listProviders: () async throws -> CompanionProvidersResponse
 }
 
+private enum ChatScrollTarget: Equatable {
+    case bottom
+    case entry(String)
+}
+
 struct ChatView: View {
     @Environment(SessionStore.self) private var sessionStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let companion: CompanionSummary
-    let onResources: () -> Void
     let onSettings: () -> Void
     let onPlugins: () -> Void
     private let services: ChatServices?
@@ -42,12 +46,18 @@ struct ChatView: View {
     @State private var threadMutationGate = CompanionThreadMutationGate()
     @State private var decisionCatalog = CompanionDecisionCatalog.empty
     @State private var decisionCatalogLoaded = false
+    @State private var transcriptWindow = CompanionTranscriptWindow()
+    @State private var isNearBottom = true
+    @State private var loadingEarlier = false
+    @State private var pendingScrollTarget: ChatScrollTarget?
+    @State private var scrollContentRevision = 0
     @FocusState private var composerFocused: Bool
     @State private var selectedToolDetail: ToolRunDetailRoute?
 
+    private let bottomProximityThreshold: CGFloat = 80
+
     init(
         companion: CompanionSummary,
-        onResources: @escaping () -> Void = {},
         onPlugins: @escaping () -> Void = {},
         services: ChatServices? = nil,
         onSettings: @escaping () -> Void
@@ -55,12 +65,14 @@ struct ChatView: View {
         self.companion = companion
         self.onPlugins = onPlugins
         self.services = services
-        self.onResources = onResources
         self.onSettings = onSettings
         _currentCompanion = State(initialValue: companion)
     }
 
     var body: some View {
+        let visibleEntries = entries
+        let renderedEntries = visibleEntries.filter { !$0.queued }
+        let queuedEntries = thread?.entries.filter(\.queued) ?? []
         CompanionBackdrop(style: .companion(visualTheme.base)) {
             ScrollViewReader { proxy in
                 ScrollView {
@@ -70,11 +82,15 @@ struct ChatView: View {
                                 .padding(.top, 80)
                         } else if let error, thread == nil {
                             unavailableState(error)
-                        } else if entries.isEmpty && pendingMessages.isEmpty
+                        } else if visibleEntries.isEmpty && pendingMessages.isEmpty
                                     && thread?.interruptedTurn == nil {
                             emptyState
                         } else {
-                            ForEach(Array(renderedEntries.enumerated()), id: \.element.id) { index, entry in
+                            if transcriptWindow.hasEarlierEntries {
+                                loadEarlierButton
+                            }
+
+                            ForEach(Array(renderedEntries.enumerated()), id: \.element.eventID) { index, entry in
                                 if startsNewDay(
                                     entry,
                                     after: index > 0 ? renderedEntries[index - 1] : nil
@@ -151,17 +167,33 @@ struct ChatView: View {
                 }
                 .scrollDismissesKeyboard(.interactively)
                 .scrollIndicators(.hidden)
-                .safeAreaInset(edge: .bottom) {
-                    bottomControls(onThinkingTap: { revealLiveReasoning(using: proxy) })
-                }
-                .onChange(of: scrollContentCount) {
-                    if reduceMotion {
-                        proxy.scrollTo("bottom", anchor: .bottom)
-                    } else {
-                        withAnimation(.easeOut(duration: 0.18)) {
-                            proxy.scrollTo("bottom", anchor: .bottom)
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    bottomControls(
+                        queuedEntries: queuedEntries,
+                        onThinkingTap: { revealLiveReasoning(using: proxy) }
+                    )
+                        .overlay(alignment: .topTrailing) {
+                            if !isNearBottom {
+                                scrollToBottomButton {
+                                    requestScroll(to: .bottom)
+                                }
+                                .offset(y: -58)
+                            }
                         }
-                    }
+                        .animation(
+                            reduceMotion ? nil : .easeOut(duration: 0.18),
+                            value: isNearBottom
+                        )
+                }
+                .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                    max(0, geometry.contentSize.height - geometry.visibleRect.maxY)
+                } action: { _, bottomDistance in
+                    isNearBottom = bottomDistance <= bottomProximityThreshold
+                }
+                .onChange(of: scrollContentRevision) {
+                    guard let target = pendingScrollTarget else { return }
+                    pendingScrollTarget = nil
+                    performScroll(to: target, with: proxy)
                 }
             }
         }
@@ -184,7 +216,14 @@ struct ChatView: View {
             guard decisionCatalogTaskID != nil else { return }
             await loadDecisionCatalog()
         }
-        .onChange(of: companion) { currentCompanion = companion }
+        .onChange(of: companion) {
+            guard currentCompanion.id != companion.id else {
+                currentCompanion = companion
+                return
+            }
+            currentCompanion = companion
+            resetTranscriptState()
+        }
         .onChange(of: photoPickerItems) { _, items in
             guard !items.isEmpty else { return }
             loadSelectedPhotos(items)
@@ -234,15 +273,6 @@ struct ChatView: View {
         }
 
         ToolbarItem(placement: .topBarTrailing) {
-            Button(action: onResources) {
-                Image(systemName: "link")
-                    .frame(width: 44, height: 44)
-            }
-            .accessibilityLabel("Connected resources for \(currentCompanion.name)")
-            .accessibilityIdentifier("chat.resources")
-        }
-
-        ToolbarItem(placement: .topBarTrailing) {
             Button(action: onSettings) {
                 Image(systemName: "gearshape")
                     .frame(width: 44, height: 44)
@@ -250,6 +280,45 @@ struct ChatView: View {
             .accessibilityLabel("Settings for \(currentCompanion.name)")
             .accessibilityIdentifier("chat.settings")
         }
+    }
+
+    private var loadEarlierButton: some View {
+        Button {
+            Task { await loadEarlier() }
+        } label: {
+            Group {
+                if loadingEarlier {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Label("Load earlier messages", systemImage: "arrow.up")
+                }
+            }
+            .font(.caption.weight(.semibold))
+            .frame(minHeight: 44)
+            .padding(.horizontal, 14)
+        }
+        .buttonStyle(.glass)
+        .disabled(loadingEarlier)
+        .accessibilityLabel("Load earlier messages")
+        .accessibilityIdentifier("chat.load-earlier")
+    }
+
+    private func scrollToBottomButton(action: @escaping () -> Void) -> some View {
+        HStack {
+            Spacer()
+            Button(action: action) {
+                Image(systemName: "arrow.down")
+                    .font(.system(size: 17, weight: .semibold))
+                    .frame(width: 46, height: 46)
+            }
+            .buttonStyle(.glass)
+            .buttonBorderShape(.circle)
+            .accessibilityLabel("Scroll to latest message")
+            .accessibilityIdentifier("chat.scroll-to-bottom")
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
     }
 
     private func dayMarker(for date: Date) -> some View {
@@ -292,7 +361,10 @@ struct ChatView: View {
     }
 
     @ViewBuilder
-    private func bottomControls(onThinkingTap: @escaping () -> Void) -> some View {
+    private func bottomControls(
+        queuedEntries: [TranscriptEntry],
+        onThinkingTap: @escaping () -> Void
+    ) -> some View {
         VStack(spacing: 8) {
             if !queuedEntries.isEmpty {
                 CompanionQueuedMessagesView(
@@ -518,14 +590,17 @@ struct ChatView: View {
         switch currentCompanion.runtime.state {
         case .running: return "Online"
         case .provisioning: return "Starting"
+        case .stopping: return "Stopping"
         case .error: return "Needs attention"
-        case .notCreated, .stopped, .stopping: return "Asleep"
+        case .notCreated, .stopped: return "Asleep"
         case .unknown: return "Unknown"
         }
     }
 
     private func reload(silently: Bool = false) async {
+        if silently, loadingEarlier { return }
         let generation = threadProjection.beginRefresh()
+        let previousThread = threadProjection.thread
         if !silently { loading = true }
         do {
             let next: CompanionThread
@@ -534,16 +609,37 @@ struct ChatView: View {
             } else {
                 next = try await sessionStore.thread(companionID: companion.id)
             }
-            let renderedMarkdown = await renderedMarkdown(for: next.entries)
             guard threadProjection.accepts(refresh: generation) else { return }
-            markdownByEventID = renderedMarkdown
-            threadProjection.accept(next, refresh: generation)
-            refreshSelectedToolDetail(from: next.entries)
+
+            var nextWindow = transcriptWindow
+            nextWindow.refresh(
+                totalCount: next.entries.count,
+                preservingCurrentEntries: !isNearBottom
+            )
+            let visibleRange = nextWindow.visibleRange(for: next.entries.count)
+            let renderedMarkdown = await renderedMarkdown(
+                for: Array(next.entries[visibleRange])
+            )
+            guard threadProjection.accepts(refresh: generation) else { return }
+
             let persistedEventIDs = Set(next.entries.map(\.eventID))
+            let pendingCount = pendingMessages.count
             pendingMessages.removeAll { pending in
                 persistedEventIDs.contains("msg:\(pending.id.uuidString.lowercased())")
             }
+            let pendingChanged = pendingMessages.count != pendingCount
+            let shouldFollowTail = !loadingEarlier && (previousThread == nil
+                || (transcriptTailChanged(from: previousThread, to: next) || pendingChanged)
+                    && isNearBottom)
+
+            transcriptWindow = nextWindow
+            markdownByEventID = renderedMarkdown
+            threadProjection.accept(next, refresh: generation)
+            refreshSelectedToolDetail(from: next.entries)
             error = nil
+            if shouldFollowTail {
+                requestScroll(to: .bottom)
+            }
         } catch {
             guard threadProjection.accepts(refresh: generation) else { return }
             self.error = "The conversation could not be refreshed."
@@ -575,15 +671,8 @@ struct ChatView: View {
     }
 
     private var entries: [TranscriptEntry] {
-        thread?.entries ?? []
-    }
-
-    private var renderedEntries: [TranscriptEntry] {
-        entries.filter { !$0.queued }
-    }
-
-    private var queuedEntries: [TranscriptEntry] {
-        entries.filter(\.queued)
+        guard let thread else { return [] }
+        return Array(thread.entries[transcriptWindow.visibleRange(for: thread.entries.count)])
     }
 
     private func refreshSelectedToolDetail(from entries: [TranscriptEntry]) {
@@ -617,15 +706,10 @@ struct ChatView: View {
     }
 
     private var pendingStartsNewDay: Bool {
-        guard let last = renderedEntries.last,
+        guard let last = entries.last(where: { !$0.queued }),
               let date = transcriptDate(last.createdAt) else { return true }
         return !Calendar.autoupdatingCurrent.isDateInToday(date)
     }
-
-    private var scrollContentCount: Int {
-        renderedEntries.count + pendingMessages.count + (thread?.interruptedTurn == nil ? 0 : 1)
-    }
-
     private func startsNewDay(_ entry: TranscriptEntry, after previous: TranscriptEntry?) -> Bool {
         guard let previous else { return true }
         guard let date = transcriptDate(entry.createdAt),
@@ -647,6 +731,81 @@ struct ChatView: View {
         parseCompanionTimestamp(value)
     }
 
+    private func transcriptTailChanged(
+        from previous: CompanionThread?,
+        to next: CompanionThread
+    ) -> Bool {
+        guard let previous else { return true }
+        return previous.entries.count != next.entries.count
+            || previous.entries.last != next.entries.last
+            || previous.interruptedTurn != next.interruptedTurn
+            || previous.queuedCount != next.queuedCount
+    }
+
+    private func loadEarlier() async {
+        guard !loadingEarlier, transcriptWindow.hasEarlierEntries,
+              let firstEventID = entries.first?.eventID,
+              let snapshot = thread else { return }
+
+        var expandedWindow = transcriptWindow
+        guard expandedWindow.loadEarlier() else { return }
+        loadingEarlier = true
+        threadProjection.invalidateRefreshes()
+        let visibleRange = expandedWindow.visibleRange(for: snapshot.entries.count)
+        let renderedMarkdown = await renderedMarkdown(
+            for: Array(snapshot.entries[visibleRange])
+        )
+        guard thread?.entries == snapshot.entries else {
+            loadingEarlier = false
+            return
+        }
+
+        markdownByEventID = renderedMarkdown
+        transcriptWindow = expandedWindow
+        requestScroll(to: .entry(firstEventID))
+    }
+
+    private func requestScroll(to target: ChatScrollTarget) {
+        guard !(loadingEarlier && target == .bottom) else { return }
+        pendingScrollTarget = target
+        scrollContentRevision &+= 1
+    }
+
+    private func performScroll(to target: ChatScrollTarget, with proxy: ScrollViewProxy) {
+        switch target {
+        case .bottom:
+            if reduceMotion {
+                proxy.scrollTo("bottom", anchor: .bottom)
+            } else {
+                withAnimation(.easeOut(duration: 0.18)) {
+                    proxy.scrollTo("bottom", anchor: .bottom)
+                }
+            }
+        case .entry(let eventID):
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                proxy.scrollTo(eventID, anchor: .top)
+            }
+            loadingEarlier = false
+        }
+    }
+
+    private func resetTranscriptState() {
+        threadProjection.reset()
+        transcriptWindow.reset()
+        pendingMessages = []
+        markdownByEventID = [:]
+        decisionCatalog = .empty
+        decisionCatalogLoaded = false
+        selectedToolDetail = nil
+        loading = true
+        loadingEarlier = false
+        isNearBottom = true
+        pendingScrollTarget = nil
+        scrollContentRevision &+= 1
+    }
+
     private func send() {
         let content = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !content.isEmpty, !sending else { return }
@@ -658,6 +817,9 @@ struct ChatView: View {
             uploadProgress: draftAttachments.isEmpty ? nil : 0
         )
         pendingMessages.append(message)
+        if isNearBottom {
+            requestScroll(to: .bottom)
+        }
         draft = ""
         draftAttachments = []
         attachmentError = nil
@@ -739,7 +901,11 @@ struct ChatView: View {
             }
 
             threadProjection.replaceAfterMutation(with: next)
-            let renderedMarkdown = await renderedMarkdown(for: next.entries)
+            transcriptWindow.refresh(totalCount: next.entries.count)
+            let visibleRange = transcriptWindow.visibleRange(for: next.entries.count)
+            let renderedMarkdown = await renderedMarkdown(
+                for: Array(next.entries[visibleRange])
+            )
             markdownByEventID = renderedMarkdown
             await threadMutationGate.release(mutationID: mutationID)
         } catch {
@@ -784,7 +950,12 @@ struct ChatView: View {
                 )
             }
             threadProjection.replaceAfterMutation(with: next)
-            markdownByEventID = await renderedMarkdown(for: next.entries)
+            transcriptWindow.refresh(totalCount: next.entries.count)
+            let visibleRange = transcriptWindow.visibleRange(for: next.entries.count)
+            let renderedMarkdown = await renderedMarkdown(
+                for: Array(next.entries[visibleRange])
+            )
+            markdownByEventID = renderedMarkdown
             await refreshCompanionProjection()
             await threadMutationGate.release(mutationID: mutationID)
         } catch {

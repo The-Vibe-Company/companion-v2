@@ -45,6 +45,27 @@ private final class ManagementMockURLProtocol: URLProtocol, @unchecked Sendable 
     override func stopLoading() {}
 }
 
+private final class RuntimeManagementMockURLProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        do {
+            let handler = try #require(Self.handler)
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
 private final class NotificationMockURLProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
 
@@ -336,6 +357,47 @@ func decodesUnknownRuntimeStateWithoutRejectingTheRoster() throws {
     """#.utf8)
     let companion = try JSONDecoder().decode(CompanionSummary.self, from: data)
     #expect(companion.runtime.state == .unknown)
+}
+
+@Test
+func decodesAndPreservesCompanionPluginSelectionAndDaemonState() throws {
+    let selectedIDs = [
+        "b4d8a690-32d2-4dff-b6e0-3f742c056f95",
+        "c5e9b7a1-43e3-4eff-c7f1-4a853d1670a6",
+    ]
+    let selected = try JSONDecoder().decode(CompanionSummary.self, from: Data(#"""
+    {
+      "id":"companion-1",
+      "name":"Luna",
+      "persona":null,
+      "model_id":"claude-sonnet",
+      "selected_mcp_account_ids":["b4d8a690-32d2-4dff-b6e0-3f742c056f95","c5e9b7a1-43e3-4eff-c7f1-4a853d1670a6"],
+      "hidden":false,
+      "unread":false,
+      "last_message":null,
+      "runtime":{"state":"running","daemon_state":"running","replying":false,"last_error":null}
+    }
+    """#.utf8))
+    #expect(selected.selectedMCPAccountIDs == selectedIDs)
+    #expect(selected.runtime.daemonState == .running)
+
+    let missingSelectionAndDaemon = try JSONDecoder().decode(CompanionSummary.self, from: Data(#"""
+    {
+      "id":"companion-1",
+      "name":"Luna",
+      "persona":null,
+      "model_id":"claude-sonnet",
+      "hidden":false,
+      "unread":false,
+      "last_message":null,
+      "runtime":{"state":"running","replying":false,"last_error":null}
+    }
+    """#.utf8))
+    #expect(missingSelectionAndDaemon.selectedMCPAccountIDs == [])
+    #expect(missingSelectionAndDaemon.runtime.daemonState == .unknown)
+
+    let merged = selected.preservingListProjection(from: missingSelectionAndDaemon)
+    #expect(merged.selectedMCPAccountIDs == selectedIDs)
 }
 
 @Test
@@ -663,6 +725,186 @@ private func rosterDeletionOperation(status: String) throws -> CompanionOperatio
       "error":null
     }
     """#.utf8))
+}
+
+@Test
+func resourceScreenReconcilesParentRuntimeWithoutHidingFreshWork() throws {
+    let active = try JSONDecoder().decode(CompanionSummary.self, from: Data(#"""
+    {
+      "id":"companion-1",
+      "name":"Luna",
+      "persona":null,
+      "model_id":"claude-sonnet",
+      "access":"owner",
+      "hidden":false,
+      "unread":false,
+      "last_message":null,
+      "runtime":{
+        "state":"running",
+        "daemon_state":"running",
+        "replying":false,
+        "last_error":null,
+        "provider_ids":["anthropic"],
+        "latest_operation":{
+          "id":"14757274-8d64-455c-a394-334665a258f0",
+          "source_turn_id":null,
+          "kind":"restart_box",
+          "status":"pending",
+          "error":null
+        }
+      }
+    }
+    """#.utf8))
+    let stale = try JSONDecoder().decode(CompanionSummary.self, from: Data(#"""
+    {
+      "id":"companion-1",
+      "name":"Luna",
+      "persona":null,
+      "model_id":"claude-sonnet",
+      "access":"owner",
+      "hidden":false,
+      "unread":false,
+      "last_message":null,
+      "runtime":{
+        "state":"running",
+        "daemon_state":"running",
+        "replying":false,
+        "last_error":null,
+        "provider_ids":["anthropic"],
+        "latest_operation":null
+      }
+    }
+    """#.utf8))
+    let protected = stale.reconcilingParentProjection(from: active)
+    #expect(protected.runtime.latestOperation?.status == .pending)
+
+    let fresh = active.reconcilingParentProjection(from: stale)
+    #expect(fresh.runtime.latestOperation?.status == .pending)
+}
+
+@Test
+func usesCompanionPluginSelectionAndRuntimeLifecycleRoutes() async throws {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [RuntimeManagementMockURLProtocol.self]
+    let companionID = "c96ab360-00f3-4497-a51a-51442db8add1"
+    let selectedIDs = [
+        "b4d8a690-32d2-4dff-b6e0-3f742c056f95",
+        "c5e9b7a1-43e3-4eff-c7f1-4a853d1670a6",
+    ]
+    let summaryData = Data(#"""
+    {"companion":{
+      "id":"c96ab360-00f3-4497-a51a-51442db8add1",
+      "name":"Luna",
+      "persona":"Keep releases calm",
+      "model_id":"claude-sonnet",
+      "selected_mcp_account_ids":["b4d8a690-32d2-4dff-b6e0-3f742c056f95","c5e9b7a1-43e3-4eff-c7f1-4a853d1670a6"],
+      "access":"owner",
+      "hidden":false,
+      "unread":false,
+      "last_message":null,
+      "runtime":{"state":"running","daemon_state":"running","replying":false,"last_error":null,"provider_ids":["anthropic"]}
+    }}
+    """#.utf8)
+    RuntimeManagementMockURLProtocol.handler = { request in
+        let requestURL = try #require(request.url)
+        let response: HTTPURLResponse
+        let data: Data
+        switch (requestURL.path, request.httpMethod) {
+        case ("/v1/companions/\(companionID)", "PATCH"):
+            let body = try requestBody(request)
+            let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+            #expect(Set(json.keys) == Set(["selected_mcp_account_ids"]))
+            #expect(json["selected_mcp_account_ids"] as? [String] == selectedIDs)
+            response = try #require(HTTPURLResponse(
+                url: requestURL,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            ))
+            data = summaryData
+
+        case ("/v1/companions/\(companionID)/runtime", "GET"):
+            #expect(request.httpBody == nil)
+            response = try #require(HTTPURLResponse(
+                url: requestURL,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            ))
+            data = summaryData
+
+        case ("/v1/companions/\(companionID)/runtime/restart", "POST"):
+            let body = try requestBody(request)
+            let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: String])
+            let target = try #require(json["target"])
+            #expect(Set(json.keys) == Set(["target"]))
+            #expect(target == "pi" || target == "box")
+            let expectedRequestID = target == "pi"
+                ? "14f2690b-9e55-4d45-9d0c-3f9e20bc4888"
+                : "25f3701c-af66-4e56-ae1d-4a0f31cd5999"
+            #expect(request.value(forHTTPHeaderField: "Idempotency-Key") == expectedRequestID)
+            let operationKind = target == "pi" ? "restart_pi" : "restart_box"
+            response = try #require(HTTPURLResponse(
+                url: requestURL,
+                statusCode: 202,
+                httpVersion: nil,
+                headerFields: nil
+            ))
+            data = Data(#"{"operation":{"id":"14757274-8d64-455c-a394-334665a258f0","source_turn_id":null,"kind":"\#(operationKind)","status":"pending","error":null}}"#.utf8)
+
+        default:
+            Issue.record("Unexpected Companion management route: \(requestURL.absoluteString)")
+            response = try #require(HTTPURLResponse(
+                url: requestURL,
+                statusCode: 404,
+                httpVersion: nil,
+                headerFields: nil
+            ))
+            data = Data()
+        }
+        return (response, data)
+    }
+    defer { RuntimeManagementMockURLProtocol.handler = nil }
+
+    let client = APIClient(
+        baseURL: URL(string: "http://127.0.0.1:3001")!,
+        session: URLSession(configuration: configuration)
+    )
+    await client.setAuthority(Session(
+        cookie: "better-auth.session_token=session",
+        orgID: "org-1",
+        needsOnboarding: false,
+        user: .init(id: "user-1", email: "stan@example.com", name: "Stan")
+    ))
+
+    let updated = try await client.updateCompanionPluginSelection(
+        companionID: companionID,
+        selectedMCPAccountIDs: selectedIDs
+    )
+    #expect(updated.selectedMCPAccountIDs == selectedIDs)
+    #expect(updated.runtime.daemonState == .running)
+
+    let runtime = try await client.companionRuntime(companionID: companionID)
+    #expect(runtime.selectedMCPAccountIDs == selectedIDs)
+    #expect(runtime.runtime.daemonState == .running)
+
+    let piRequestID = try #require(UUID(uuidString: "14f2690b-9e55-4d45-9d0c-3f9e20bc4888"))
+    let piOperation = try await client.restartCompanion(
+        companionID: companionID,
+        target: .pi,
+        requestID: piRequestID
+    )
+    #expect(piOperation.kind == .restartPi)
+    #expect(piOperation.status == .pending)
+
+    let boxRequestID = try #require(UUID(uuidString: "25f3701c-af66-4e56-ae1d-4a0f31cd5999"))
+    let boxOperation = try await client.restartCompanion(
+        companionID: companionID,
+        target: .box,
+        requestID: boxRequestID
+    )
+    #expect(boxOperation.kind == .restartBox)
+    #expect(boxOperation.status == .pending)
 }
 
 @Test
@@ -1275,6 +1517,103 @@ func decisionResponseInvalidatesAnOlderThreadPoll() throws {
 
     #expect(!projection.accept(try thread(status: "pending"), refresh: oldPoll))
     #expect(projection.thread?.entries.first?.decision?.status == .allowed)
+}
+
+@Test
+func resettingAThreadProjectionKeepsRefreshGenerationsMonotonic() {
+    var projection = CompanionThreadProjection()
+    let staleRefresh = projection.beginRefresh()
+
+    projection.reset()
+    let currentRefresh = projection.beginRefresh()
+
+    #expect(!projection.accepts(refresh: staleRefresh))
+    #expect(projection.accepts(refresh: currentRefresh))
+    #expect(projection.thread == nil)
+}
+
+@Test
+func transcriptWindowStartsWithNewestFiftyEntries() {
+    var window = CompanionTranscriptWindow()
+
+    window.refresh(totalCount: 120)
+
+    #expect(window.totalCount == 120)
+    #expect(window.exposedCount == 50)
+    #expect(window.visibleRange == (70..<120))
+    #expect(window.hasEarlierEntries)
+}
+
+@Test
+func transcriptWindowExpandsByFiftyUntilEverythingIsExposed() {
+    var window = CompanionTranscriptWindow(totalCount: 120)
+
+    let firstExpansion = window.loadEarlier()
+    #expect(firstExpansion)
+    #expect(window.exposedCount == 100)
+    #expect(window.visibleRange == (20..<120))
+    let secondExpansion = window.loadEarlier()
+    #expect(secondExpansion)
+    #expect(window.exposedCount == 120)
+    #expect(window.visibleRange == (0..<120))
+    #expect(!window.hasEarlierEntries)
+    let exhaustedExpansion = window.loadEarlier()
+    #expect(!exhaustedExpansion)
+}
+
+@Test
+func transcriptWindowKeepsSmallTranscriptsFullyExposed() {
+    var window = CompanionTranscriptWindow()
+
+    window.refresh(totalCount: 12)
+
+    #expect(window.exposedCount == 12)
+    #expect(window.visibleRange == (0..<12))
+    #expect(!window.hasEarlierEntries)
+    let expansion = window.loadEarlier()
+    #expect(!expansion)
+}
+
+@Test
+func transcriptWindowRefreshGrowthPreservesExposedCount() {
+    var window = CompanionTranscriptWindow(totalCount: 120)
+    let expansion = window.loadEarlier()
+    #expect(expansion)
+
+    window.refresh(totalCount: 150)
+
+    #expect(window.exposedCount == 100)
+    #expect(window.visibleRange == (50..<150))
+    #expect(window.hasEarlierEntries)
+}
+
+@Test
+func transcriptWindowRefreshCanPreserveEntriesWhileReadingHistory() {
+    var window = CompanionTranscriptWindow(totalCount: 120)
+
+    window.refresh(totalCount: 123, preservingCurrentEntries: true)
+
+    #expect(window.exposedCount == 53)
+    #expect(window.visibleRange == (70..<123))
+    #expect(window.hasEarlierEntries)
+}
+
+@Test
+func transcriptWindowResetStartsDisclosureOver() {
+    var window = CompanionTranscriptWindow(totalCount: 120)
+    let expansion = window.loadEarlier()
+    #expect(expansion)
+
+    window.reset()
+
+    #expect(window.totalCount == 0)
+    #expect(window.exposedCount == 0)
+    #expect(window.visibleRange == (0..<0))
+    #expect(!window.hasEarlierEntries)
+
+    window.refresh(totalCount: 80)
+    #expect(window.exposedCount == 50)
+    #expect(window.visibleRange == (30..<80))
 }
 
 @Test
