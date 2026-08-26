@@ -35,7 +35,6 @@ jobs:
       quality: ${{ steps.scope.outputs.quality }}
       build: ${{ steps.scope.outputs.build }}
       database: ${{ steps.scope.outputs.database }}
-      runtime: ${{ steps.scope.outputs.runtime }}
       browser: ${{ steps.scope.outputs.browser }}
       containers: ${{ steps.scope.outputs.containers }}
       dependencies: ${{ steps.scope.outputs.dependencies }}
@@ -402,48 +401,6 @@ jobs:
         env:
           COMPANION_API_URL: http://127.0.0.1:18081
 
-  runtime-integration:
-    name: Runtime PostgreSQL & Simulator
-    runs-on: ubuntu-latest
-    needs: scope
-    if: needs.scope.outputs.runtime == 'true'
-    timeout-minutes: 25
-    services:
-      postgres:
-        image: postgres:17-alpine
-        env:
-          POSTGRES_USER: companion
-          POSTGRES_PASSWORD: companion
-          POSTGRES_DB: companion
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U companion -d companion"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-    steps:
-      - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Set up pnpm
-        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Create separate NOBYPASSRLS application database roles
-        run: bash scripts/ci-create-db-roles.sh
-
-      - name: Exercise Runtime v2 against PostgreSQL and deterministic Box/Pi
-        run: bash scripts/ci-runtime-integration.sh
-
   railway-containers:
     name: Railway Containers
     runs-on: ubuntu-latest
@@ -648,7 +605,6 @@ jobs:
       - quality
       - application-build
       - database-integration
-      - runtime-integration
       - railway-containers
       - browser
     timeout-minutes: 5

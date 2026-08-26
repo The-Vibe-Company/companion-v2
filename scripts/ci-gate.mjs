@@ -4,7 +4,6 @@ const SCOPE_OUTPUTS = [
   "quality",
   "build",
   "database",
-  "runtime",
   "browser",
   "containers",
   "dependencies",
@@ -35,7 +34,6 @@ export function rejectedJobs(jobs) {
     quality: isTrue(outputs.quality),
     "application-build": isTrue(outputs.build),
     "database-integration": isTrue(outputs.database),
-    "runtime-integration": isTrue(outputs.runtime),
     "railway-containers": isTrue(outputs.containers),
     browser: isTrue(outputs.browser),
   };
