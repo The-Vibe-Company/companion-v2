@@ -308,6 +308,7 @@ struct CompanionListView: View {
                 ChatView(
                     companion: companion,
                     onResources: { path.append(.resources(companionID)) },
+                    onPlugins: { showingPlugins = true },
                     onSettings: { path.append(.settings(companionID)) }
                 )
                 .onAppear { notifications.activeCompanionID = companionID }
