@@ -353,6 +353,37 @@ describe("a Companion reply as markdown", () => {
 
     expect(container.querySelector("a")?.getAttribute("href") ?? "").not.toContain("javascript:");
   });
+
+  it("offers allowlisted Conductor deep links to the current browsing context", () => {
+    const container = mount(thread([
+      entry({ content: "[Open workspace](conductor://workspace?id=workspace-1)" }),
+    ]));
+    const link = container.querySelector("a");
+
+    expect(link?.getAttribute("href")).toBe("conductor://workspace?id=workspace-1");
+    expect(link?.getAttribute("target")).toBeNull();
+    expect(link?.classList.contains("aui-md-deep-link")).toBe(true);
+  });
+
+  it("leaves a plain-text Conductor URL as text", () => {
+    const container = mount(thread([
+      entry({ content: "Open conductor://workspace?id=workspace-1" }),
+    ]));
+
+    expect(container.querySelector("a")).toBeNull();
+    expect(container.textContent).toContain("conductor://workspace?id=workspace-1");
+  });
+
+  it("keeps web links isolated and refuses other custom schemes", () => {
+    const container = mount(thread([
+      entry({ content: "[Docs](https://example.com) [unsafe](other-app://open)" }),
+    ]));
+    const links = [...container.querySelectorAll("a")];
+
+    expect(links[0]?.getAttribute("href")).toBe("https://example.com");
+    expect(links[0]?.getAttribute("target")).toBe("_blank");
+    expect(links[1]?.getAttribute("href") ?? "").not.toContain("other-app:");
+  });
 });
 
 describe("a tool run in the thread", () => {

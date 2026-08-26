@@ -187,6 +187,16 @@ describe("Companions mobile viewport", () => {
       .toContain("color: var(--color-fg);");
   });
 
+  it("gives app deep links a 44px touch target without changing ordinary prose links", () => {
+    const coarseDeepLink = chatCss.match(
+      /@media \(pointer: coarse\), \(max-width: 560px\) \{[\s\S]*?\.aui-scope \.aui-md-deep-link \{([\s\S]*?)\n  \}/,
+    )?.[1];
+
+    expect(coarseDeepLink).toContain("display: inline-flex;");
+    expect(coarseDeepLink).toContain("min-height: 44px;");
+    expect(coarseDeepLink).toContain("touch-action: manipulation;");
+  });
+
   it("sizes every dialog against its scrim instead of the viewport width", () => {
     // `100vw` counts the scrollbar and the overscroll gutter, so a dialog came out wider than what is
     // on screen and the page could be dragged sideways behind it.
