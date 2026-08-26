@@ -8,7 +8,6 @@ struct CompanionTranscriptWindowDemoView: View {
         NavigationStack {
             ChatView(
                 companion: CompanionTranscriptWindowDemoFixtures.companion,
-                onResources: {},
                 onPlugins: {},
                 services: CompanionTranscriptWindowDemoFixtures.services,
                 onSettings: {}
