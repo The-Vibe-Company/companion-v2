@@ -21,7 +21,7 @@ import {
   type AppendMessage,
   type AssistantRuntime,
 } from "@assistant-ui/react";
-import { ArrowUpIcon, PaperclipIcon, SquareIcon, XIcon } from "lucide-react";
+import { ArrowUpIcon, PaperclipIcon, PlusIcon, SquareIcon, XIcon } from "lucide-react";
 import type {
   Companion,
   CompanionThread as Thread,
@@ -806,6 +806,52 @@ function Trailer() {
   );
 }
 
+/** Thumbnail chip for a staged image file; manages its own object-URL lifecycle. */
+function ComposerImageChip({
+  file,
+  index,
+  onRemove,
+  restoreFocusRef,
+}: {
+  file: File;
+  index: number;
+  onRemove: (index: number) => void;
+  restoreFocusRef: { current: boolean };
+}) {
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => {
+    const url = URL.createObjectURL(file);
+    setSrc(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+  return (
+    <li
+      className="relative shrink-0"
+      title={`${file.name} · ${readableSize(file.size)}`}
+    >
+      <div className="border-border bg-muted h-16 w-16 overflow-hidden rounded-lg border">
+        {src ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={src} alt="" className="h-full w-full object-cover" />
+        ) : null}
+      </div>
+      {/* Carries the filename for screen readers (the img is decorative) and textContent checks. */}
+      <span className="sr-only">{file.name}</span>
+      <button
+        type="button"
+        onClick={() => {
+          restoreFocusRef.current = true;
+          onRemove(index);
+        }}
+        aria-label={`Remove ${file.name}`}
+        className="bg-background/90 text-foreground hover:bg-background pointer-coarse:size-9 absolute -right-1 -top-1 grid size-6 place-items-center rounded-full shadow-sm"
+      >
+        <XIcon className="size-3" />
+      </button>
+    </li>
+  );
+}
+
 /** The files staged for the next send, above the field they will be sent from. */
 function ComposerAttachments() {
   const { attachments, attachmentError, onRemoveAttachment } = useChrome();
@@ -830,32 +876,46 @@ function ComposerAttachments() {
           aria-label={`${attachments.length} file${attachments.length === 1 ? "" : "s"} attached`}
           className="flex flex-wrap gap-1.5"
         >
-          {attachments.map((file, index) => (
+          {attachments.map((file, index) => {
             // The same file can legitimately be staged twice, so position is part of the identity.
-            <li
-              key={`${index}:${file.name}:${file.size}:${file.lastModified}`}
-              className="border-border bg-card flex min-w-0 items-center gap-1.5 rounded-lg border py-1 pe-1 ps-2 text-xs"
-            >
-              <PaperclipIcon aria-hidden="true" className="size-3.5 shrink-0" />
-              <span className="max-w-40 truncate" title={file.name}>{file.name}</span>
-              <span className="text-muted-foreground shrink-0 tabular-nums">
-                {readableSize(file.size)}
-              </span>
-              <button
-                type="button"
-                onClick={() => {
-                  // Removing the last chip unmounts this list, so hand focus to the control that
-                  // put the file here rather than dropping the reader onto the document body.
-                  restoreFocus.current = true;
-                  onRemoveAttachment(index);
-                }}
-                aria-label={`Remove ${file.name}`}
-                className="text-muted-foreground hover:text-foreground hover:bg-muted grid size-6 shrink-0 place-items-center rounded transition-colors"
+            const key = `${index}:${file.name}:${file.size}:${file.lastModified}`;
+            if (file.type.startsWith("image/")) {
+              return (
+                <ComposerImageChip
+                  key={key}
+                  file={file}
+                  index={index}
+                  onRemove={onRemoveAttachment}
+                  restoreFocusRef={restoreFocus}
+                />
+              );
+            }
+            return (
+              <li
+                key={key}
+                className="border-border bg-card flex min-w-0 items-center gap-1.5 rounded-lg border py-1 pe-1 ps-2 text-xs"
               >
-                <XIcon className="size-3.5" />
-              </button>
-            </li>
-          ))}
+                <PaperclipIcon aria-hidden="true" className="size-3.5 shrink-0" />
+                <span className="max-w-40 truncate" title={file.name}>{file.name}</span>
+                <span className="text-muted-foreground shrink-0 tabular-nums">
+                  {readableSize(file.size)}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    // Removing the last chip unmounts this list, so hand focus to the control that
+                    // put the file here rather than dropping the reader onto the document body.
+                    restoreFocus.current = true;
+                    onRemoveAttachment(index);
+                  }}
+                  aria-label={`Remove ${file.name}`}
+                  className="text-muted-foreground hover:text-foreground hover:bg-muted grid size-6 shrink-0 place-items-center rounded transition-colors"
+                >
+                  <XIcon className="size-3.5" />
+                </button>
+              </li>
+            );
+          })}
         </ul>
       )}
       {/* `alert` rather than `status`: this line mounts in response to the reader's own action, and
@@ -961,7 +1021,7 @@ function Footer() {
               : "Attach files"}
             className="text-muted-foreground hover:text-foreground hover:bg-muted disabled:hover:bg-transparent pointer-coarse:size-11 grid size-8 shrink-0 place-items-center self-end rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <PaperclipIcon className="size-4" />
+            <PlusIcon className="size-4" />
           </button>
           <ComposerPrimitive.Input
             className="text-foreground max-h-42 min-h-8 flex-1 resize-none overscroll-contain bg-transparent py-1 outline-none"
