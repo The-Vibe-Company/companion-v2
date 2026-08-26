@@ -97,6 +97,8 @@ the adaptive Companion color tokens in dark appearance.
 The interruption demo accepts `COMPANION_INTERRUPTION_DEMO_ACCESS=owner|editor|viewer`; set
 `COMPANION_INTERRUPTION_DEMO_FAIL_RETRY_ONCE=1` to verify that an uncertain submission keeps the
 same safe retry action available.
+Set `COMPANION_TRANSCRIPT_DEMO_SHORT=1` with `-companion-transcript-window-demo` to exercise the
+same mixed chat surface in a short thread; the default fixture keeps the 120-entry load-more path.
 The queued-message demo accepts `COMPANION_QUEUED_DEMO_ACCESS=owner|editor|viewer`; set
 `COMPANION_QUEUED_DEMO_FAIL_ONCE=1` to verify that a failed removal remains retryable.
 The roster demo accepts the equivalent `COMPANION_ROSTER_DEMO_ACCESS` value and simulates immediate
