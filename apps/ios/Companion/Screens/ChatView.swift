@@ -41,6 +41,7 @@ struct ChatView: View {
     @State private var decisionCatalog = CompanionDecisionCatalog.empty
     @State private var decisionCatalogLoaded = false
     @FocusState private var composerFocused: Bool
+    @State private var selectedToolDetail: ToolRunDetailRoute?
 
     init(
         companion: CompanionSummary,
@@ -105,7 +106,8 @@ struct ChatView: View {
                                             own: entry.role == "user" && entry.authorID == thread?.viewerID,
                                             companion: currentCompanion,
                                             accent: visualTheme.accent,
-                                            markdown: markdownByEventID[entry.eventID]?.document
+                                            markdown: markdownByEventID[entry.eventID]?.document,
+                                            onOpenToolDetails: { selectedToolDetail = $0 }
                                         )
                                     }
                                 }
@@ -165,6 +167,11 @@ struct ChatView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { headerToolbar }
         .tint(visualTheme.accent)
+        .sheet(item: $selectedToolDetail) { route in
+            CompanionToolRunDetailView(tool: route.tool, timestamp: route.timestamp)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+        }
         .task(id: companion.id) {
             await reload()
             while !Task.isCancelled {
@@ -476,6 +483,7 @@ struct ChatView: View {
             guard threadProjection.accepts(refresh: generation) else { return }
             markdownByEventID = renderedMarkdown
             threadProjection.accept(next, refresh: generation)
+            refreshSelectedToolDetail(from: next.entries)
             let persistedEventIDs = Set(next.entries.map(\.eventID))
             pendingMessages.removeAll { pending in
                 persistedEventIDs.contains("msg:\(pending.id.uuidString.lowercased())")
@@ -521,6 +529,25 @@ struct ChatView: View {
 
     private var queuedEntries: [TranscriptEntry] {
         entries.filter(\.queued)
+    }
+
+    private func refreshSelectedToolDetail(from entries: [TranscriptEntry]) {
+        guard let selectedToolDetail else { return }
+        guard let entry = entries.first(where: { $0.eventID == selectedToolDetail.id }),
+              let tool = entry.tool else {
+            self.selectedToolDetail = nil
+            return
+        }
+        self.selectedToolDetail = ToolRunDetailRoute(
+            id: entry.eventID,
+            tool: tool,
+            timestamp: toolTimestamp(for: entry)
+        )
+    }
+
+    private func toolTimestamp(for entry: TranscriptEntry) -> String? {
+        guard let date = parseCompanionTimestamp(entry.createdAt) else { return nil }
+        return date.formatted(date: .omitted, time: .shortened)
     }
 
     private var thread: CompanionThread? {
@@ -1006,11 +1033,18 @@ private struct MessageEntryView: View {
     let companion: CompanionSummary
     let accent: Color
     let markdown: MarkdownDocument?
+    let onOpenToolDetails: (ToolRunDetailRoute) -> Void
 
     @ViewBuilder
     var body: some View {
         if entry.role == "tool", let tool = entry.tool {
-            CompanionToolRunCard(tool: tool)
+            CompanionToolRunCard(tool: tool, eventID: entry.eventID) {
+                onOpenToolDetails(ToolRunDetailRoute(
+                    id: entry.eventID,
+                    tool: tool,
+                    timestamp: timeLabel
+                ))
+            }
         } else {
             ChatMessageBubble(
                 content: entry.content,

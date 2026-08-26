@@ -82,15 +82,33 @@ jobs:
           IOS_DISTRIBUTION_P12: ${{ secrets.IOS_DISTRIBUTION_P12 }}
           IOS_DISTRIBUTION_P12_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_P12_PASSWORD }}
           IOS_PROVISIONING_PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE }}
+          IOS_NOTIFICATION_EXTENSION_PROVISIONING_PROFILE: ${{ secrets.IOS_NOTIFICATION_EXTENSION_PROVISIONING_PROFILE }}
         run: |
           keychain_path="$RUNNER_TEMP/companion-signing.keychain-db"
           certificate_path="$RUNNER_TEMP/companion-distribution.p12"
-          profile_path="$HOME/Library/MobileDevice/Provisioning Profiles/e2dfd6f6-3e07-4168-bdf4-19adfc4c2c46.mobileprovision"
+          profile_dir="$HOME/Library/MobileDevice/Provisioning Profiles"
+          profile_manifest="$RUNNER_TEMP/companion-signing-profile-paths"
           keychain_password="$(openssl rand -hex 32)"
 
           printf '%s' "$IOS_DISTRIBUTION_P12" | base64 --decode > "$certificate_path"
-          mkdir -p "$(dirname "$profile_path")"
-          printf '%s' "$IOS_PROVISIONING_PROFILE" | base64 --decode > "$profile_path"
+          mkdir -p "$profile_dir"
+          : > "$profile_manifest"
+          install_profile() {
+            encoded_profile="$1"
+            label="$2"
+            temporary_profile="$RUNNER_TEMP/$label.mobileprovision"
+            printf '%s' "$encoded_profile" | base64 --decode > "$temporary_profile"
+            profile_uuid="$(security cms -D -i "$temporary_profile" | plutil -extract UUID raw -o - -)"
+            if [[ ! "$profile_uuid" =~ ^[A-Fa-f0-9-]{36}$ ]]; then
+              echo "Invalid provisioning profile UUID for $label" >&2
+              exit 1
+            fi
+            installed_profile="$profile_dir/$profile_uuid.mobileprovision"
+            mv "$temporary_profile" "$installed_profile"
+            printf '%s\n' "$installed_profile" >> "$profile_manifest"
+          }
+          install_profile "$IOS_PROVISIONING_PROFILE" companion-app
+          install_profile "$IOS_NOTIFICATION_EXTENSION_PROVISIONING_PROFILE" companion-notification-extension
 
           security create-keychain -p "$keychain_password" "$keychain_path"
           security set-keychain-settings -lut 21600 "$keychain_path"
@@ -105,6 +123,7 @@ jobs:
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
           IOS_PROVISIONING_PROFILE_SPECIFIER: Companion Native App Store 2026-08-24
+          IOS_NOTIFICATION_EXTENSION_PROVISIONING_PROFILE_SPECIFIER: Companion Notification Service App Store 2026-08-26
           RELEASE_OUTPUT_DIR: ${{ runner.temp }}/companion-ios-release-${{ github.run_id }}-${{ github.run_attempt }}
         run: bash apps/ios/scripts/release.sh
 
@@ -113,7 +132,17 @@ jobs:
         run: |
           security delete-keychain "$RUNNER_TEMP/companion-signing.keychain-db" 2>/dev/null || true
           rm -f "$RUNNER_TEMP/companion-distribution.p12"
-          rm -f "$HOME/Library/MobileDevice/Provisioning Profiles/e2dfd6f6-3e07-4168-bdf4-19adfc4c2c46.mobileprovision"
+          profile_manifest="$RUNNER_TEMP/companion-signing-profile-paths"
+          if [[ -f "$profile_manifest" ]]; then
+            while IFS= read -r installed_profile; do
+              case "$installed_profile" in
+                "$HOME/Library/MobileDevice/Provisioning Profiles/"*.mobileprovision)
+                  rm -f -- "$installed_profile"
+                  ;;
+              esac
+            done < "$profile_manifest"
+            rm -f "$profile_manifest"
+          fi
 
       - name: Upload release diagnostics
         if: failure()

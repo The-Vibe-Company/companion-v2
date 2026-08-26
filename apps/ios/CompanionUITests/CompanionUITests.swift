@@ -378,37 +378,74 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
-    func testCompanionToolRunCardShowsStatusAndExpandsLiteralDetail() throws {
+    func testCompanionToolRunCardOpensCompleteDetailsAndScreenshotPreview() throws {
         let app = XCUIApplication()
         app.launchArguments = ["-glass-chat-demo"]
         app.launch()
 
-        let shellCard = app.descendants(matching: .any)["demo.tool-run.shell"]
-        XCTAssertTrue(shellCard.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Shell command"].exists)
-        XCTAssertTrue(app.staticTexts["Done"].exists)
-        XCTAssertTrue(app.staticTexts["File operation"].exists)
-        XCTAssertTrue(app.staticTexts["Failed"].exists)
+        let shellDetails = app.buttons.matching(NSPredicate(
+            format: "identifier == %@ AND value CONTAINS %@",
+            "tool-run.open-details.tool:demo-shell-1",
+            "Preview available"
+        )).firstMatch
+        XCTAssertTrue(shellDetails.waitForExistence(timeout: 5))
+        XCTAssertTrue(shellDetails.label.contains("Shell command"))
 
-        let subagentCard = app.descendants(matching: .any)["demo.tool-run.subagent"]
-        XCTAssertTrue(subagentCard.exists)
-        let disclosure = app.buttons["tool-run.disclosure"]
-        XCTAssertTrue(disclosure.exists)
-        disclosure.tap()
+        let fileDetails = app.buttons["tool-run.open-details.tool:demo-file-1"]
+        XCTAssertTrue(fileDetails.exists)
+        XCTAssertTrue(fileDetails.label.contains("File operation"))
+        XCTAssertEqual(fileDetails.value as? String, "Failed")
 
-        let detail = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS %@", "Reviewing the transcript model")
-        ).firstMatch
+        shellDetails.tap()
+        XCTAssertTrue(app.navigationBars["Tool details"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["run_command"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["tool-run.detail.timestamp"].exists)
+        XCTAssertTrue(app.images["tool-run.detail.screenshot"].waitForExistence(timeout: 2))
+        let shellPayload = app.staticTexts["tool-run.detail.payload"]
+        XCTAssertTrue(shellPayload.exists)
+        XCTAssertTrue(shellPayload.label.contains("not interpreted as HTML"))
+        try captureScreenshot(named: "chat-tool-operation-preview.png")
+        app.buttons["tool-run.detail.done"].tap()
+        XCTAssertTrue(app.navigationBars["Tool details"].waitForNonExistence(timeout: 2))
+
+        fileDetails.tap()
+        XCTAssertTrue(app.navigationBars["Tool details"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["tool-run.detail.empty"].exists)
+        XCTAssertTrue(app.staticTexts["tool-run.detail.empty"].label.contains("No detail payload"))
+        app.buttons["tool-run.detail.done"].tap()
+        XCTAssertTrue(app.navigationBars["Tool details"].waitForNonExistence(timeout: 2))
+
+        let subagentDetails = app.buttons["tool-run.open-details.tool:demo-subagent-1"]
+        for _ in 0..<3 where !subagentDetails.isHittable { app.swipeUp() }
+        XCTAssertTrue(subagentDetails.isHittable)
+        subagentDetails.tap()
+
+        let detail = app.staticTexts["tool-run.detail.payload"]
         XCTAssertTrue(detail.waitForExistence(timeout: 2))
-        let showMore = app.buttons["tool-run.show-more"]
-        XCTAssertTrue(showMore.exists)
-        showMore.tap()
-        let fullDetail = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS %@", "Finishing the native tool-operation review")
-        ).firstMatch
-        XCTAssertTrue(fullDetail.waitForExistence(timeout: 2))
-        XCTAssertTrue(app.buttons["Show less detail"].exists)
-        try captureScreenshot(named: "chat-tool-operations.png")
+        XCTAssertTrue(detail.label.contains("Reviewing the transcript model"))
+        XCTAssertTrue(detail.label.contains("Finishing the native tool-operation review"))
+        XCTAssertTrue(app.descendants(matching: .any)["tool-run.detail.status"].exists)
+        try captureScreenshot(named: "chat-tool-operation-details.png")
+    }
+
+    @MainActor
+    func testCompanionToolRunDetailsSupportAccessibilityDynamicType() throws {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-glass-chat-demo",
+            "-UIPreferredContentSizeCategoryName",
+            "UICTContentSizeCategoryAccessibilityExtraExtraExtraLarge",
+        ]
+        app.launch()
+
+        let shellDetails = app.buttons["tool-run.open-details.tool:demo-shell-1"]
+        for _ in 0..<4 where !shellDetails.isHittable { app.swipeDown() }
+        XCTAssertTrue(shellDetails.waitForExistence(timeout: 5))
+        XCTAssertGreaterThanOrEqual(shellDetails.frame.height, 44)
+        shellDetails.tap()
+        XCTAssertTrue(app.navigationBars["Tool details"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["tool-run.detail.payload"].exists)
+        XCTAssertTrue(app.buttons["tool-run.detail.done"].isHittable)
     }
 
     @MainActor
