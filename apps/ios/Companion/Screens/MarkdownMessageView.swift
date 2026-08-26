@@ -1,4 +1,5 @@
 import SwiftUI
+import CompanionKit
 
 struct MarkdownDocument: Equatable, Sendable {
     let blocks: [MarkdownNode]
@@ -120,6 +121,21 @@ struct MarkdownMessageView: View {
         MarkdownNodesView(nodes: document.blocks, accent: accent)
             .textSelection(.enabled)
             .tint(accent)
+            .environment(
+                \.openURL,
+                OpenURLAction { url in
+                    switch CompanionLinkPolicy.route(for: url) {
+                    case .system:
+                        return .systemAction
+                    case .conductor:
+                        // Companion has no Conductor workspace route, so let iOS hand this URL to
+                        // whichever installed app has registered the explicit scheme.
+                        return .systemAction
+                    case .blocked:
+                        return .discarded
+                    }
+                }
+            )
     }
 }
 
@@ -215,9 +231,203 @@ private struct MarkdownText: View {
     let accent: Color
 
     var body: some View {
-        Text(content)
+        text
             .foregroundStyle(Color.companionInk)
             .tint(accent)
+    }
+
+    @ViewBuilder
+    private var text: some View {
+        if containsConductorLink {
+            MarkdownInlineFlow(content: content, accent: accent)
+        } else {
+            Text(content)
+        }
+    }
+
+    private var containsConductorLink: Bool {
+        content.runs.contains { run in
+            guard let link = run.link else { return false }
+            return CompanionLinkPolicy.isConductor(link)
+        }
+    }
+}
+
+private struct MarkdownInlineRun: Identifiable {
+    let id: Int
+    var content: AttributedString
+    let link: URL?
+
+    var isConductorLink: Bool {
+        guard let link else { return false }
+        return CompanionLinkPolicy.isConductor(link)
+    }
+}
+
+private struct MarkdownInlineFlow: View {
+    let runs: [MarkdownInlineRun]
+    let accent: Color
+
+    init(content: AttributedString, accent: Color) {
+        self.accent = accent
+        var inlineRuns: [MarkdownInlineRun] = []
+        for run in content.runs {
+            var fragment = AttributedString(content[run.range])
+            let link = run.link
+            if let link, CompanionLinkPolicy.isConductor(link) {
+                // The native Link below owns the interaction and accessibility semantics.
+                fragment.link = nil
+            }
+            if let lastIndex = inlineRuns.indices.last, inlineRuns[lastIndex].link == link {
+                inlineRuns[lastIndex].content.append(fragment)
+            } else {
+                inlineRuns.append(
+                    MarkdownInlineRun(id: inlineRuns.count, content: fragment, link: link)
+                )
+            }
+        }
+        self.runs = inlineRuns
+    }
+
+    var body: some View {
+        MarkdownInlineFlowLayout {
+            ForEach(runs) { run in
+                if run.isConductorLink, let link = run.link {
+                    Link(destination: link) {
+                        Text(run.content)
+                            .foregroundStyle(accent)
+                            .underline()
+                            .frame(minWidth: 44, minHeight: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .tint(accent)
+                } else {
+                    Text(run.content)
+                }
+            }
+        }
+    }
+}
+
+private struct MarkdownInlineFlowLayout: Layout {
+    private struct RawPlacement {
+        let index: Int
+        let size: CGSize
+        let x: CGFloat
+        let line: Int
+    }
+
+    private struct Placement {
+        let index: Int
+        let size: CGSize
+        let origin: CGPoint
+    }
+
+    private struct Result {
+        let placements: [Placement]
+        let size: CGSize
+    }
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) -> CGSize {
+        layout(subviews: subviews, width: proposal.width).size
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        let result = layout(subviews: subviews, width: bounds.width)
+        for placement in result.placements {
+            subviews[placement.index].place(
+                at: CGPoint(
+                    x: bounds.minX + placement.origin.x,
+                    y: bounds.minY + placement.origin.y
+                ),
+                anchor: .topLeading,
+                proposal: ProposedViewSize(
+                    width: placement.size.width,
+                    height: placement.size.height
+                )
+            )
+        }
+    }
+
+    private func layout(subviews: Subviews, width proposedWidth: CGFloat?) -> Result {
+        guard !subviews.isEmpty else {
+            return Result(placements: [], size: CGSize(width: proposedWidth ?? 0, height: 0))
+        }
+
+        let width = max(
+            proposedWidth.flatMap { $0.isFinite ? $0 : nil } ?? .greatestFiniteMagnitude,
+            1
+        )
+        var rawPlacements: [RawPlacement] = []
+        var lineHeights: [CGFloat] = []
+        var lineWidth: CGFloat = 0
+        var lineHeight: CGFloat = 0
+        var line = 0
+        var maxLineWidth: CGFloat = 0
+
+        for (index, subview) in subviews.enumerated() {
+            let idealSize = subview.sizeThatFits(.unspecified)
+            if lineWidth > 0, idealSize.width > width - lineWidth {
+                maxLineWidth = max(maxLineWidth, lineWidth)
+                lineHeights.append(lineHeight)
+                line += 1
+                lineWidth = 0
+                lineHeight = 0
+            }
+
+            let availableWidth = max(width - lineWidth, 1)
+            let measuredSize: CGSize
+            if idealSize.width > availableWidth {
+                measuredSize = subview.sizeThatFits(
+                    ProposedViewSize(width: availableWidth, height: nil)
+                )
+            } else {
+                measuredSize = idealSize
+            }
+            rawPlacements.append(
+                RawPlacement(index: index, size: measuredSize, x: lineWidth, line: line)
+            )
+            lineWidth += measuredSize.width
+            lineHeight = max(lineHeight, measuredSize.height)
+        }
+
+        maxLineWidth = max(maxLineWidth, lineWidth)
+        lineHeights.append(lineHeight)
+
+        var lineOrigins: [CGFloat] = []
+        var y: CGFloat = 0
+        for height in lineHeights {
+            lineOrigins.append(y)
+            y += height
+        }
+
+        let placements = rawPlacements.map { raw in
+            Placement(
+                index: raw.index,
+                size: raw.size,
+                origin: CGPoint(
+                    x: raw.x,
+                    y: lineOrigins[raw.line] + (lineHeights[raw.line] - raw.size.height) / 2
+                )
+            )
+        }
+        return Result(
+            placements: placements,
+            size: CGSize(
+                width: proposedWidth.flatMap { $0.isFinite ? $0 : nil } ?? maxLineWidth,
+                height: y
+            )
+        )
     }
 }
 
@@ -432,7 +642,7 @@ private enum MarkdownTreeBuilder {
         }
 
         var fragment = AttributedString(source)
-        if let link = attributes.link, !isAllowed(link) {
+        if let link = attributes.link, CompanionLinkPolicy.route(for: link) == .blocked {
             fragment.link = nil
         }
         if attributes.inlinePresentationIntent?.contains(.code) == true {
@@ -440,11 +650,6 @@ private enum MarkdownTreeBuilder {
             fragment.backgroundColor = Color.companionSurfaceRaised
         }
         return fragment
-    }
-
-    private static func isAllowed(_ url: URL) -> Bool {
-        guard let scheme = url.scheme?.lowercased() else { return false }
-        return scheme == "http" || scheme == "https" || scheme == "mailto"
     }
 
     private static func kind(_ kind: PresentationIntent.Kind) -> MarkdownNode.Kind {

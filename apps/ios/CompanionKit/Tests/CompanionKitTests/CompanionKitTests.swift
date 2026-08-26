@@ -88,6 +88,54 @@ func usesTheSharedAPIContract() {
 }
 
 @Test
+func classifiesAssistantMarkdownLinksWithTheSharedPolicy() throws {
+    struct LinkCase {
+        let source: String
+        let expected: CompanionLinkRoute
+    }
+
+    let cases = [
+        LinkCase(source: "https://example.com/docs", expected: .system),
+        LinkCase(source: "HTTP://EXAMPLE.COM/docs", expected: .system),
+        LinkCase(source: "mailto:ops@example.com", expected: .system),
+        LinkCase(source: "ConDuCtOr://workspace?id=workspace-1", expected: .conductor),
+        LinkCase(source: "javascript:alert(1)", expected: .blocked),
+        LinkCase(source: "custom://workspace?id=workspace-1", expected: .blocked),
+        LinkCase(source: "workspace?id=workspace-1", expected: .blocked),
+    ]
+
+    for linkCase in cases {
+        let url = try #require(CompanionLinkPolicy.parse(linkCase.source))
+        #expect(CompanionLinkPolicy.route(for: url) == linkCase.expected)
+        #expect(CompanionLinkPolicy.route(for: linkCase.source) == linkCase.expected)
+    }
+
+    #expect(CompanionLinkPolicy.route(for: "not a valid URL") == .blocked)
+}
+
+@Test
+func keepsTheLinkSchemeAllowlistCaseInsensitiveAndFailClosed() throws {
+    let cases: [(scheme: String?, allowed: Bool)] = [
+        ("http", true),
+        ("HTTPS", true),
+        ("MailTo", true),
+        ("CONDUCTOR", true),
+        ("javascript", false),
+        ("tel", false),
+        ("unknown", false),
+        (nil, false),
+        ("", false),
+    ]
+
+    for linkCase in cases {
+        #expect(CompanionLinkPolicy.isAllowedScheme(linkCase.scheme) == linkCase.allowed)
+    }
+
+    let conductorURL = try #require(CompanionLinkPolicy.parse("CONDUCTOR://workspace?id=workspace-1"))
+    #expect(CompanionLinkPolicy.isConductor(conductorURL))
+}
+
+@Test
 func decodesTheVersionedCompanionNotificationPayload() throws {
     let payload = try JSONDecoder().decode(CompanionNotificationPayload.self, from: Data(#"""
     {
