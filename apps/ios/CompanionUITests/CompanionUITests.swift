@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import XCTest
 
@@ -383,22 +384,19 @@ final class CompanionUITests: XCTestCase {
         app.launchArguments = ["-glass-chat-demo"]
         app.launch()
 
-        let shellDetails = app.buttons.matching(NSPredicate(
-            format: "identifier == %@ AND value CONTAINS %@",
-            "tool-run.open-details.tool:demo-shell-1",
-            "Preview available"
-        )).firstMatch
+        let shellDetails = app.buttons["tool-run.open-details.tool:demo-shell-1"]
         XCTAssertTrue(shellDetails.waitForExistence(timeout: 5))
-        XCTAssertTrue(shellDetails.label.contains("Shell command"))
+        XCTAssertEqual(shellDetails.label, "Tool operation: run_command, Done")
 
         let fileDetails = app.buttons["tool-run.open-details.tool:demo-file-1"]
         XCTAssertTrue(fileDetails.exists)
-        XCTAssertTrue(fileDetails.label.contains("File operation"))
-        XCTAssertEqual(fileDetails.value as? String, "Failed")
+        XCTAssertEqual(fileDetails.label, "Tool operation: file, Failed")
 
-        shellDetails.tap()
+        shellDetails.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)).tap()
         XCTAssertTrue(app.navigationBars["Tool details"].waitForExistence(timeout: 2))
-        XCTAssertTrue(app.staticTexts["run_command"].exists)
+        let toolName = app.staticTexts["tool-run.detail.name"]
+        XCTAssertTrue(toolName.exists)
+        XCTAssertEqual(toolName.label, "run_command")
         XCTAssertTrue(app.descendants(matching: .any)["tool-run.detail.timestamp"].exists)
         XCTAssertTrue(app.images["tool-run.detail.screenshot"].waitForExistence(timeout: 2))
         let shellPayload = app.staticTexts["tool-run.detail.payload"]
