@@ -22,6 +22,7 @@ struct CompanionListView: View {
     @State private var showingCreateCompanion = false
     @State private var showingProviders = false
     @State private var showingPlugins = false
+    @State private var showingMemberSettings = false
     @State private var companionToDelete: CompanionSummary?
     @State private var deleteRequestIDs: [String: UUID] = [:]
     @State private var deletingCompanionIDs: Set<String> = []
@@ -65,6 +66,9 @@ struct CompanionListView: View {
                     Menu {
                         Text(session.user.email)
                         Divider()
+                        Button("Member settings", systemImage: "person.crop.circle") {
+                            showingMemberSettings = true
+                        }
                         Button("Model providers", systemImage: "cpu") {
                             showingProviders = true
                         }
@@ -79,6 +83,7 @@ struct CompanionListView: View {
                         Image(systemName: "person.crop.circle")
                     }
                     .accessibilityLabel("Account for \(session.user.email)")
+                    .accessibilityIdentifier("account.menu")
                 }
             }
             .sheet(isPresented: $showingCreateCompanion) {
@@ -94,6 +99,10 @@ struct CompanionListView: View {
             }
             .sheet(isPresented: $showingPlugins) {
                 PluginManagementView()
+                    .tint(Color.companionAccent)
+            }
+            .sheet(isPresented: $showingMemberSettings) {
+                MemberSettingsView(session: session)
                     .tint(Color.companionAccent)
             }
             .confirmationDialog(

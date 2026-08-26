@@ -5,8 +5,9 @@ import CompanionKit
 struct GlassChatDemoView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var draft = ""
-    @State private var replying = false
+    @State private var replying = ProcessInfo.processInfo.arguments.contains("-glass-chat-thinking-demo")
     @State private var messages = DemoMessage.samples
+    @State private var expandedReasoningEventIDs: Set<String> = []
     @State private var showRoster = false
     @State private var showDesignInfo = false
     @State private var markdownByEventID: [String: CachedMarkdownDocument] = [:]
@@ -19,6 +20,9 @@ struct GlassChatDemoView: View {
     )
     private let exposesMarkdownCacheTest = ProcessInfo.processInfo.arguments.contains(
         "-markdown-cache-ui-test"
+    )
+    private let exposesThinkingDemo = ProcessInfo.processInfo.arguments.contains(
+        "-glass-chat-thinking-demo"
     )
 
     private var visualTheme: CompanionVisualTheme {
@@ -56,17 +60,14 @@ struct GlassChatDemoView: View {
                                             timestamp: message.timestamp,
                                             companionName: companionName,
                                             icon: icon,
-                                            markdown: markdownByEventID[message.eventID]?.document
+                                            markdown: markdownByEventID[message.eventID]?.document,
+                                            reasoning: message.reasoning,
+                                            reasoningExpansion: reasoningBinding(for: message.eventID)
                                         )
                                     }
                                 }
                                 .accessibilityIdentifier(message.accessibilityIdentifier)
                                 .id(message.id)
-                            }
-
-                            if replying {
-                                replyingBubble
-                                    .id("replying")
                             }
 
                             Color.clear.frame(height: 1).id("bottom")
@@ -77,7 +78,9 @@ struct GlassChatDemoView: View {
                     .scrollDismissesKeyboard(.interactively)
                     .scrollIndicators(.hidden)
                     .defaultScrollAnchor(.bottom)
-                    .safeAreaInset(edge: .bottom) { composer }
+                    .safeAreaInset(edge: .bottom) {
+                        composer(onThinkingTap: { revealLiveReasoning(using: proxy) })
+                    }
                     .onChange(of: messages.count + (replying ? 1 : 0)) {
                         if reduceMotion {
                             proxy.scrollTo("bottom", anchor: .bottom)
@@ -131,6 +134,7 @@ struct GlassChatDemoView: View {
                             messages = DemoMessage.samples
                             draft = ""
                             replying = false
+                            expandedReasoningEventIDs.removeAll()
                         }
                         if exposesMarkdownCacheTest {
                             Button("Actualiser le Markdown", systemImage: "arrow.triangle.2.circlepath") {
@@ -168,6 +172,11 @@ struct GlassChatDemoView: View {
                 guard !Task.isCancelled else { return }
                 markdownByEventID = rendered
             }
+            .onChange(of: replying) { oldValue, newValue in
+                if oldValue && !newValue {
+                    expandedReasoningEventIDs.removeAll()
+                }
+            }
         }
     }
 
@@ -187,63 +196,87 @@ struct GlassChatDemoView: View {
         """
     }
 
-    private var replyingBubble: some View {
-        HStack(alignment: .bottom, spacing: 9) {
-            CompanionAvatar(name: companionName, icon: icon, size: 30, state: .thinking)
-                .accessibilityHidden(true)
-            HStack(spacing: 5) {
-                ForEach(0..<3, id: \.self) { index in
-                    if reduceMotion {
-                        Circle()
-                            .fill(Color.companionMuted.opacity(0.72))
-                            .frame(width: 6, height: 6)
-                    } else {
-                        Circle()
-                            .fill(Color.companionMuted.opacity(0.72))
-                            .frame(width: 6, height: 6)
-                            .phaseAnimator([false, true]) { view, raised in
-                                view.offset(y: raised ? -2 : 2)
-                            } animation: { _ in
-                                .easeInOut(duration: 0.5).delay(Double(index) * 0.12)
-                            }
-                    }
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 14)
-            .companionMaterial(radius: 18)
-            Spacer(minLength: 60)
-        }
-        .accessibilityLabel("Companion écrit une réponse")
+    private var liveReasoningMessageID: String? {
+        guard replying, exposesThinkingDemo else { return nil }
+        return messages.reversed().first { message in
+            message.kind == .assistant
+                && message.tool == nil
+                && !message.displayReasoning.isEmpty
+        }?.eventID
     }
 
-    private var composer: some View {
-        GlassEffectContainer(spacing: 12) {
-            HStack(alignment: .bottom, spacing: 10) {
-                TextField("Écrire un message…", text: $draft, axis: .vertical)
-                    .lineLimit(1...5)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 13)
-                    .companionGlass(radius: 23, interactive: true)
-                    .accessibilityIdentifier("demo.composer")
-
-                Button(action: send) {
-                    Image(systemName: "arrow.up")
-                        .font(.system(size: 17, weight: .bold))
-                        .foregroundStyle(visualTheme.accentForeground)
-                        .frame(width: 46, height: 46)
+    private func reasoningBinding(for eventID: String) -> Binding<Bool> {
+        Binding(
+            get: { expandedReasoningEventIDs.contains(eventID) },
+            set: { isExpanded in
+                if isExpanded {
+                    expandedReasoningEventIDs.insert(eventID)
+                } else {
+                    expandedReasoningEventIDs.remove(eventID)
                 }
-                .buttonStyle(.glassProminent)
-                .buttonBorderShape(.circle)
-                .tint(visualTheme.accent)
-                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || replying)
-                .accessibilityLabel("Envoyer")
-                .accessibilityIdentifier("demo.send")
+            }
+        )
+    }
+
+    private func revealLiveReasoning(using proxy: ScrollViewProxy) {
+        guard let eventID = liveReasoningMessageID else { return }
+        if reduceMotion {
+            expandedReasoningEventIDs.insert(eventID)
+            proxy.scrollTo(eventID, anchor: .center)
+        } else {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                expandedReasoningEventIDs.insert(eventID)
+                proxy.scrollTo(eventID, anchor: .center)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func composer(onThinkingTap: @escaping () -> Void) -> some View {
+        VStack(spacing: 8) {
+            if replying {
+                CompanionThinkingStatus(
+                    companionName: companionName,
+                    icon: icon,
+                    accent: visualTheme.accent,
+                    isInteractive: liveReasoningMessageID != nil,
+                    onTap: onThinkingTap
+                )
+                .transition(
+                    reduceMotion
+                        ? .identity
+                        : .move(edge: .bottom).combined(with: .opacity)
+                )
+            }
+
+            GlassEffectContainer(spacing: 12) {
+                HStack(alignment: .bottom, spacing: 10) {
+                    TextField("Écrire un message…", text: $draft, axis: .vertical)
+                        .lineLimit(1...5)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 13)
+                        .companionGlass(radius: 23, interactive: true)
+                        .accessibilityIdentifier("demo.composer")
+
+                    Button(action: send) {
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 17, weight: .bold))
+                            .foregroundStyle(visualTheme.accentForeground)
+                            .frame(width: 46, height: 46)
+                    }
+                    .buttonStyle(.glassProminent)
+                    .buttonBorderShape(.circle)
+                    .tint(visualTheme.accent)
+                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || replying)
+                    .accessibilityLabel("Envoyer")
+                    .accessibilityIdentifier("demo.send")
+                }
             }
         }
         .padding(.horizontal, 12)
         .padding(.top, 8)
         .padding(.bottom, 6)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: replying)
     }
 
     private func send() {
@@ -358,6 +391,7 @@ private struct DemoMessage: Identifiable {
     var author: String?
     var timestamp: String?
     var tool: CompanionToolRun?
+    var reasoning: String?
 
     var eventID: String {
         if let callID = tool?.callID { return "tool:\(callID)" }
@@ -366,6 +400,10 @@ private struct DemoMessage: Identifiable {
 
     var isMarkdownFixture: Bool {
         content.hasPrefix("## Rapport")
+    }
+
+    var displayReasoning: String {
+        reasoning?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
     var accessibilityIdentifier: String {
@@ -378,13 +416,15 @@ private struct DemoMessage: Identifiable {
         kind: ChatMessageBubble.Kind,
         author: String? = nil,
         timestamp: String? = nil,
-        tool: CompanionToolRun? = nil
+        tool: CompanionToolRun? = nil,
+        reasoning: String? = nil
     ) {
         self.content = content
         self.kind = kind
         self.author = author
         self.timestamp = timestamp
         self.tool = tool
+        self.reasoning = reasoning
     }
 
     static let samples: [DemoMessage] = [
@@ -392,7 +432,12 @@ private struct DemoMessage: Identifiable {
             content: "Salut Stan. J’ai préparé une direction claire inspirée du rythme de Grok, mais pensée pour iOS 26 et son Liquid Glass natif.",
             kind: .assistant,
             author: "Companion",
-            timestamp: "09:41"
+            timestamp: "09:41",
+            reasoning: """
+            Checking the transcript contract before presenting the reply.
+            Keeping reasoning separate from the answer preserves literal Markdown rendering.
+            The enclosure stays collapsed until the reader asks to see it.
+            """
         ),
         .init(
             content: "",

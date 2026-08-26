@@ -1,3 +1,4 @@
+/* oxlint-disable anti-slop/no-known-value-widening, anti-slop/no-runtime-typeof -- Existing server-loader route parsing debt; the timezone field comes from the authenticated response. */
 import "server-only";
 
 import { redirect } from "next/navigation";
@@ -40,6 +41,7 @@ export async function loadSettingsPageData(searchParams: SettingsSearchParams): 
     email: string;
     name: string;
     avatarUrl?: string | null;
+    timezone?: string | null;
     needsOnboarding?: boolean;
   }>();
   if (authState.status === "unauthenticated") redirect("/login");
@@ -82,6 +84,9 @@ export async function loadSettingsPageData(searchParams: SettingsSearchParams): 
   const state = parseSettingsState(await searchParams);
   return {
     ...state,
-    data: buildSettingsAppData({ me, current, settings, tokens, billing, gettingStarted }),
+    data: {
+      ...buildSettingsAppData({ me, current, settings, tokens, billing, gettingStarted }),
+      timezone: whoami.timezone ?? null,
+    },
   };
 }

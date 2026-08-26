@@ -47,6 +47,7 @@ function trigger(overrides: Partial<CompanionTrigger> = {}): CompanionTrigger {
 async function mount(input: {
   triggers?: CompanionTrigger[];
   canEdit?: boolean;
+  memberTimezone?: string | null;
   onChange?: (triggers: CompanionTrigger[]) => void;
 } = {}) {
   const container = document.createElement("div");
@@ -58,6 +59,7 @@ async function mount(input: {
       orgId: "org-1",
       companionId,
       triggers: input.triggers ?? [],
+      memberTimezone: input.memberTimezone,
       canEdit: input.canEdit ?? true,
       onChange: input.onChange ?? (() => undefined),
       api: companionsApi,
@@ -148,6 +150,17 @@ describe("Companion triggers panel", () => {
     expect(container.textContent).toContain("Ticket opened");
     expect(container.textContent).toContain("Linear");
     expect(container.textContent).toContain("This trigger was disabled after repeated failures.");
+  });
+
+  it("shows trigger activity in the stored member timezone", async () => {
+    const container = await mount({
+      triggers: [trigger({ last_fired_at: "2026-08-14T09:00:00.000Z" })],
+      memberTimezone: "Pacific/Auckland",
+    });
+
+    expect(container.textContent).toContain("Last fired");
+    expect(container.textContent).toContain("Pacific/Auckland");
+    expect(container.textContent).toContain("9:00 PM");
   });
 
   it("toggles a trigger off through the update endpoint", async () => {

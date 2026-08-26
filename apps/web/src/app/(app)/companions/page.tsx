@@ -36,6 +36,7 @@ export default async function CompanionsPage({
     email: string;
     name?: string | null;
     avatarUrl?: string | null;
+    timezone?: string | null;
     needsOnboarding?: boolean;
   }>();
   if (authState.status === "unauthenticated") redirect("/login");
@@ -107,6 +108,7 @@ export default async function CompanionsPage({
       initialCompanionId={initialCompanionId}
       initialSettingsCompanionId={initialSettingsCompanionId}
       initialPluginsOpen={initialPluginsOpen}
+      memberTimezone={authState.user.timezone ?? null}
       navigation={{
         // These fields belong to Skills mode and are deliberately absent from the Companions-mode
         // DOM. Keep the shared Sidebar contract without paying for hidden data on every switch.

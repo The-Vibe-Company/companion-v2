@@ -38,6 +38,10 @@ Every tenant-owned row carries `org_id`; `packages/db/src/schema.ts` is the data
 Every service decision combines exact-organization membership, org-role capability, and resource
 ownership/ACL. Forced RLS is defense in depth, not a substitute for service authorization.
 
+The global `profiles` row carries the member's optional IANA timezone because it is personal data
+shared across organizations and Companions. `GET /v1/auth/whoami` exposes it and `PUT /v1/users/me`
+updates it for both web and native iOS. It is never supplied as a client-surface or message header.
+
 Organization skills are member-wide. Personal skills, personal labels, personal Skill Database
 realms, and member MCP accounts are creator-only with no Owner/Admin override. Cross-tenant access
 fails closed.
@@ -191,6 +195,13 @@ ambiguous external effect. If no matching
 ledger fact can be recovered, the attempt becomes `interrupted`, no exec fallback or new prompt is
 sent, and later turns remain blocked. Retry warns that an earlier external effect may have succeeded;
 Cancel explicitly accepts that uncertainty and releases the queue.
+
+Immediately before dispatch, runtime adds one fixed-format metadata block to the newest user
+message: the attempt's durable `started_at` rendered with an offset plus the initiating member's
+IANA timezone pinned on that attempt's first authorized material read. The staged system prompt and prior transcript stay a stable cache prefix; the
+changing time therefore lives only in the per-turn suffix. Takeover reconstructs the same bytes
+from durable data. Exact seconds are retained because rounding provides no additional prefix-cache
+reuse at that position, and an unset profile deterministically falls back to UTC.
 
 Disabling the existing Companions flag blocks new claims. Active work reaches a safe checkpoint and
 becomes interrupted. This kill switch is the operational rollback after v2 data exists; a legacy
@@ -363,6 +374,12 @@ SSE or Box push agent. “Companion is replying…” derives only from an ackno
 attempt; the companion read model carries the same ACK-gated fact as `runtime.replying`, so roster
 surfaces animate a working Companion without a thread read. Viewer/list/thread/status reads remain
 PostgreSQL-only.
+
+Personal settings on web and native iOS offer a searchable IANA timezone picker initialized from
+the browser or device zone when no value has been saved. The same stored value drives routine
+creation and all routine-next-fire and trigger-last-fire presentation. Routine rows retain and show
+their own cron timezone as server truth while absolute activity instants are formatted for the
+member; triggers remain event-driven and have no schedule timezone.
 
 Each Companion carries a cosmetic blob icon — four smallint indexes (`icon_shape`, `icon_mouth`,
 `icon_accessory`, `icon_color`) into fixed client-side catalogs rendered as inline SVG. Create and

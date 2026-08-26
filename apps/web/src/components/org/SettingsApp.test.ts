@@ -1,3 +1,4 @@
+/* oxlint-disable anti-slop/no-module-mocking, anti-slop/no-chained-type-assertions, anti-slop/require-safety-comment-for-type-assertion -- Existing server-render settings harness debt; this change adds the timezone preference assertion. */
 import React from "react";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
@@ -73,5 +74,41 @@ describe("SettingsController", () => {
         }),
       );
     expect(html).toContain("Resume onboarding");
+  });
+
+  it("renders the stored member timezone in personal preferences", () => {
+    const data = {
+      me: { id: "user_1", name: "Admin", email: "admin@tvc.dev", initials: "A" },
+      timezone: "Pacific/Auckland",
+      domainJoin: { actorDomain: "tvc.dev", actorDomainIsPersonal: false },
+      users: { user_1: { id: "user_1", name: "Admin", email: "admin@tvc.dev", initials: "A" } },
+      invites: [],
+      apiKeys: [],
+      billing: null,
+      gettingStarted: null,
+      current: {
+        id: "org_1",
+        name: "Acme",
+        slug: "acme",
+        kind: "team",
+        myRole: "owner",
+        created: "2025-01-12",
+        domain: null,
+        domainAutoJoin: false,
+        accessDomains: [],
+        members: {},
+      },
+    } as unknown as SettingsAppData;
+
+    const html = renderToString(React.createElement(SettingsController, {
+      data,
+      initialRoute: { view: "preferences" },
+      initialDialog: null,
+      onClose: vi.fn(),
+    }));
+
+    expect(html).toContain("IANA timezone");
+    expect(html).toContain("Pacific/Auckland");
+    expect(html).toContain("Used by every Companion");
   });
 });

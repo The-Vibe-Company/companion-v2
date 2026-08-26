@@ -123,7 +123,7 @@ test("chat content stays neutral while Companion accents remain on actions and i
   const chat = read("apps/ios/Companion/Screens/ChatView.swift");
   const bubble = chat.slice(
     chat.indexOf("struct ChatMessageBubble"),
-    chat.indexOf("private struct MessageEntryView"),
+    chat.indexOf("struct CompanionThinkingDisclosure"),
   );
   const decisionCard = read("apps/ios/Companion/Screens/CompanionDecisionCard.swift");
   const glassChatDemo = read("apps/ios/Companion/Screens/GlassChatDemoView.swift");

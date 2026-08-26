@@ -1,3 +1,4 @@
+/* oxlint-disable anti-slop/no-chained-type-assertions, anti-slop/no-known-value-widening, anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unknown-returns, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Existing fake database harness accepts generic test rows; timezone cases use concrete fixtures. */
 import { describe, expect, it, vi } from "vitest";
 import type { Db } from "@companion/db";
 import { apiTokenRowSchema, TEAM_BRAND_COLORS } from "@companion/contracts";
@@ -640,10 +641,12 @@ describe("listApiTokens", () => {
 
 describe("updateUserProfile", () => {
   it("trims the name and recomputes initials", async () => {
-    const { database, calls } = fakeDb();
+    const { database, calls } = fakeDb({
+      updateReturning: [{ id: developer.id, name: "Devon  Dev", initials: "DD", timezone: null }],
+    });
     await expect(
       updateUserProfile({ actor: developer, name: "  Devon  Dev  ", database }),
-    ).resolves.toEqual({ id: developer.id, name: "Devon  Dev", initials: "DD" });
+    ).resolves.toEqual({ id: developer.id, name: "Devon  Dev", initials: "DD", timezone: null });
     const profileUpdate = calls.updates.at(-1);
     expect(profileUpdate?.patch).toMatchObject({ name: "Devon  Dev", initials: "DD" });
   });
@@ -651,5 +654,21 @@ describe("updateUserProfile", () => {
   it("rejects an empty name", async () => {
     const { database } = fakeDb();
     await expect(updateUserProfile({ actor: developer, name: "   ", database })).rejects.toThrow("name is required");
+  });
+
+  it("stores a valid IANA timezone without changing the member name", async () => {
+    const { database, calls } = fakeDb({
+      updateReturning: [{ id: developer.id, name: "Devon Dev", initials: "DD", timezone: "Asia/Tokyo" }],
+    });
+    await expect(updateUserProfile({ actor: developer, timezone: "Asia/Tokyo", database }))
+      .resolves.toMatchObject({ timezone: "Asia/Tokyo" });
+    expect(calls.updates.at(-1)?.patch).toMatchObject({ timezone: "Asia/Tokyo" });
+    expect(calls.updates.at(-1)?.patch).not.toHaveProperty("name");
+  });
+
+  it("rejects a timezone the runtime does not support", async () => {
+    const { database } = fakeDb();
+    await expect(updateUserProfile({ actor: developer, timezone: "Mars/Olympus", database }))
+      .rejects.toThrow("valid IANA timezone");
   });
 });

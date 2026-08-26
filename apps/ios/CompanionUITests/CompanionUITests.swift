@@ -447,6 +447,50 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    func testThinkingStatusRevealsCollapsedReasoningDisclosure() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-glass-chat-demo", "-glass-chat-thinking-demo"]
+        app.launch()
+
+        let status = app.buttons["chat.thinking-status"]
+        let composer = app.descendants(matching: .any)["demo.composer"]
+        XCTAssertTrue(status.waitForExistence(timeout: 5))
+        XCTAssertTrue(composer.exists)
+        XCTAssertEqual(status.label, "Companion thinking")
+        XCTAssertLessThan(status.frame.maxY, composer.frame.minY)
+        XCTAssertLessThan(composer.frame.minY - status.frame.maxY, 20)
+
+        let legacyTopBanner = app.descendants(matching: .any).matching(
+            NSPredicate(
+                format: "label CONTAINS[c] %@ OR label CONTAINS[c] %@",
+                "is replying",
+                "écrit une réponse"
+            )
+        ).firstMatch
+        XCTAssertFalse(legacyTopBanner.exists)
+
+        let disclosure = app.buttons["thinking.disclosure"]
+        for _ in 0..<6 where !disclosure.exists {
+            app.swipeUp()
+        }
+        XCTAssertTrue(disclosure.waitForExistence(timeout: 2))
+        XCTAssertEqual(disclosure.value as? String, "Collapsed")
+        XCTAssertFalse(app.descendants(matching: .any)["thinking.content"].exists)
+
+        status.tap()
+        let content = app.descendants(matching: .any)["thinking.content"]
+        XCTAssertTrue(content.waitForExistence(timeout: 2))
+        XCTAssertEqual(disclosure.value as? String, "Expanded")
+        XCTAssertTrue(app.staticTexts[
+            "Salut Stan. J’ai préparé une direction claire inspirée du rythme de Grok, mais pensée pour iOS 26 et son Liquid Glass natif."
+        ].exists)
+
+        disclosure.tap()
+        XCTAssertEqual(disclosure.value as? String, "Collapsed")
+        XCTAssertFalse(content.exists)
+    }
+
+    @MainActor
     private func decisionAnswerField(in app: XCUIApplication) -> XCUIElement {
         app.descendants(matching: .any).matching(
             NSPredicate(
@@ -790,8 +834,30 @@ final class CompanionUITests: XCTestCase {
         let app = launchCompanionSettings(access: "editor")
 
         XCTAssertTrue(app.buttons["companion.settings.save"].exists)
-        XCTAssertTrue(app.descendants(matching: .any)["companion.settings.name"].isEnabled)
+        XCTAssertFalse(app.descendants(matching: .any)["companion.settings.name"].exists)
         XCTAssertFalse(app.buttons["companion.settings.delete"].exists)
+
+        let editIdentity = app.descendants(matching: .any)["companion.settings.identity.edit"]
+        XCTAssertTrue(editIdentity.waitForExistence(timeout: 2))
+        editIdentity.tap()
+
+        XCTAssertTrue(app.navigationBars["Edit identity"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.descendants(matching: .any)["companion.identity.name"].isEnabled)
+        let selectedShape = app.descendants(matching: .any)["companion.identity.icon.shape.6"]
+        for _ in 0..<4 where !selectedShape.exists { app.swipeUp() }
+        XCTAssertTrue(selectedShape.waitForExistence(timeout: 2))
+        XCTAssertEqual(selectedShape.value as? String, "Selected")
+
+        let firstShape = app.descendants(matching: .any)["companion.identity.icon.shape.0"]
+        XCTAssertTrue(firstShape.exists)
+        firstShape.tap()
+        XCTAssertEqual(firstShape.value as? String, "Selected")
+        let identitySave = app.buttons["companion.identity.save"]
+        XCTAssertTrue(identitySave.isEnabled)
+        identitySave.tap()
+
+        XCTAssertTrue(app.navigationBars["Companion settings"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["Identity saved."].waitForExistence(timeout: 2))
 
         openConnectedResources(in: app)
         XCTAssertFalse(app.buttons["companion.resources.plugins.add"].exists)
@@ -806,9 +872,35 @@ final class CompanionUITests: XCTestCase {
         let app = launchCompanionSettings(access: "viewer")
 
         XCTAssertFalse(app.buttons["companion.settings.save"].exists)
-        XCTAssertFalse(app.descendants(matching: .any)["companion.settings.name"].isEnabled)
+        XCTAssertTrue(app.descendants(matching: .any)["companion.settings.identity.summary"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["companion.settings.identity.edit"].exists)
         XCTAssertFalse(app.buttons["companion.settings.delete"].exists)
         XCTAssertTrue(app.staticTexts["You have read-only access to this Companion."].exists)
+    }
+
+    @MainActor
+    func testOwnerCanDiscardAnIdentityDraft() throws {
+        let app = launchCompanionSettings(access: "owner")
+
+        let editIdentity = app.descendants(matching: .any)["companion.settings.identity.edit"]
+        editIdentity.tap()
+
+        let originalShape = app.descendants(matching: .any)["companion.identity.icon.shape.6"]
+        for _ in 0..<4 where !originalShape.exists { app.swipeUp() }
+        XCTAssertEqual(originalShape.value as? String, "Selected")
+
+        let draftShape = app.descendants(matching: .any)["companion.identity.icon.shape.0"]
+        draftShape.tap()
+        XCTAssertEqual(draftShape.value as? String, "Selected")
+
+        app.navigationBars["Edit identity"].buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(app.navigationBars["Companion settings"].waitForExistence(timeout: 2))
+        XCTAssertFalse(app.staticTexts["Identity saved."].exists)
+
+        editIdentity.tap()
+        let reopenedShape = app.descendants(matching: .any)["companion.identity.icon.shape.6"]
+        for _ in 0..<4 where !reopenedShape.exists { app.swipeUp() }
+        XCTAssertEqual(reopenedShape.value as? String, "Selected")
     }
 
     @MainActor
@@ -840,6 +932,8 @@ final class CompanionUITests: XCTestCase {
         XCTAssertTrue(routine.exists)
         XCTAssertTrue(routine.label.contains("Weekdays at 09:00"))
         XCTAssertTrue(routine.label.contains("America/New_York"))
+        XCTAssertTrue(routine.label.contains("Next"))
+        XCTAssertTrue(routine.label.contains("in \(expectedDeviceTimezone)"))
         XCTAssertTrue(routine.label.contains("Active"))
 
         let trigger = app.descendants(matching: .any)[
@@ -850,6 +944,43 @@ final class CompanionUITests: XCTestCase {
         XCTAssertTrue(trigger.label.contains("GitHub"))
         XCTAssertTrue(trigger.label.contains("Webhook registered"))
         XCTAssertTrue(trigger.label.contains("Active"))
+    }
+
+    @MainActor
+    func testOwnerCreatesResourcesInTheDeviceTimezoneByDefault() throws {
+        let app = launchCompanionRoster(access: "owner")
+        let row = app.descendants(matching: .any)["companion.row.c96ab360-00f3-4497-a51a-51442db8add1"]
+        row.tap()
+        let settingsButton = app.buttons["chat.settings"]
+        XCTAssertTrue(settingsButton.waitForExistence(timeout: 5))
+        settingsButton.tap()
+        let resourcesButton = app.descendants(matching: .any)["companion.settings.resources"]
+        XCTAssertTrue(resourcesButton.waitForExistence(timeout: 2))
+        resourcesButton.tap()
+
+        let addRoutine = app.buttons["companion.resources.routines.add"]
+        XCTAssertTrue(addRoutine.waitForExistence(timeout: 2))
+        XCTAssertTrue(app.buttons["companion.resources.triggers.add"].exists)
+        addRoutine.tap()
+
+        XCTAssertTrue(app.navigationBars["New routine"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts[expectedDeviceTimezone].exists)
+        XCTAssertTrue(app.staticTexts["Cron is evaluated as local wall-clock time in this timezone. Change your member timezone from Account › Member settings."].exists)
+    }
+
+    @MainActor
+    func testMemberSettingsUsesADeviceDefaultAndSearchableTimezonePicker() throws {
+        let app = launchCompanionRoster(access: "owner")
+        app.buttons["account.menu"].tap()
+        let settings = app.buttons["Member settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 2))
+        settings.tap()
+
+        XCTAssertTrue(app.navigationBars["Member settings"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts[expectedDeviceTimezone].exists)
+        app.buttons["member-settings.timezone"].tap()
+        XCTAssertTrue(app.navigationBars["Choose timezone"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.searchFields["Search timezones"].exists)
     }
 
     @MainActor
@@ -1029,6 +1160,13 @@ final class CompanionUITests: XCTestCase {
         return app
     }
 
+    private var expectedDeviceTimezone: String {
+        let identifier = TimeZone.current.identifier
+        return identifier == "UTC" || TimeZone.knownTimeZoneIdentifiers.contains(identifier)
+            ? identifier
+            : "UTC"
+    }
+
     @MainActor
     private func launchCompanionRoster(access: String) -> XCUIApplication {
         let app = XCUIApplication()
@@ -1078,37 +1216,26 @@ final class CompanionUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Companion icon catalog"].waitForExistence(timeout: 5))
         try captureScreenshot(named: "catalog-top.png")
 
-        for shape in 0..<8 {
-            let element = app.descendants(matching: .any)["demo.icon.shape.\(shape)"]
-            XCTAssertTrue(element.exists)
-            XCTAssertTrue(element.label.contains("Companion"), "Shape \(shape) should have a Companion VoiceOver label")
-        }
-        for mouth in 0..<5 {
-            let element = app.descendants(matching: .any)["demo.icon.mouth.\(mouth)"]
-            XCTAssertTrue(element.exists)
-            XCTAssertTrue(element.label.contains("Companion"), "Mouth \(mouth) should have a Companion VoiceOver label")
-        }
-        for accessory in 0..<7 {
-            let element = app.descendants(matching: .any)["demo.icon.accessory.\(accessory)"]
-            XCTAssertTrue(element.exists)
-            XCTAssertTrue(element.label.contains("Companion"), "Accessory \(accessory) should have a Companion VoiceOver label")
-        }
+        assertIconOptions(in: app, prefix: "demo.icon.shape", count: 8)
+        assertIconOptions(in: app, prefix: "demo.icon.mouth", count: 5)
+        assertIconOptions(in: app, prefix: "demo.icon.accessory", count: 7)
+        assertIconOptions(in: app, prefix: "demo.icon.color", count: 11)
 
-        app.swipeUp()
-        app.swipeUp()
-        for color in 0..<11 {
-            let element = app.descendants(matching: .any)["demo.icon.color.\(color)"]
-            XCTAssertTrue(element.exists)
-            XCTAssertTrue(element.label.contains("Companion"), "Color \(color) should have a Companion VoiceOver label")
-        }
+        let colorChoice = app.descendants(matching: .any)["demo.icon.color.10"]
+        XCTAssertTrue(colorChoice.exists)
+        colorChoice.tap()
+        XCTAssertEqual(colorChoice.value as? String, "Selected")
+
         for (identifier, label) in [("idle", "Idle"), ("thinking", "Thinking"), ("still", "Still")] {
             let element = app.descendants(matching: .any)["demo.icon.state.\(identifier)"]
+            for _ in 0..<4 where !element.exists { app.swipeUp() }
             XCTAssertTrue(element.exists)
             XCTAssertTrue(element.label.contains(label))
             XCTAssertTrue(element.label.contains("Companion"), "\(label) should have a Companion VoiceOver label")
         }
         for size in [30, 52, 86] {
             let element = app.descendants(matching: .any)["demo.icon.size.\(size)"]
+            for _ in 0..<4 where !element.exists { app.swipeUp() }
             XCTAssertTrue(element.exists)
             XCTAssertTrue(element.label.contains("Companion"), "Size \(size) should have a Companion VoiceOver label")
         }
@@ -1130,6 +1257,28 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    func testCreateCompanionUsesTheSharedVisualIconSelector() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-create-demo"]
+        app.launch()
+
+        XCTAssertTrue(app.navigationBars["New Companion"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["companion.create.icon.shape.grid"].waitForExistence(timeout: 2))
+
+        let initialShape = app.descendants(matching: .any)["companion.create.icon.shape.6"]
+        XCTAssertTrue(initialShape.exists)
+        XCTAssertEqual(initialShape.value as? String, "Selected")
+
+        let nextShape = app.descendants(matching: .any)["companion.create.icon.shape.0"]
+        nextShape.tap()
+        XCTAssertEqual(nextShape.value as? String, "Selected")
+        assertIconOptions(in: app, prefix: "companion.create.icon.shape", count: 8)
+        assertIconOptions(in: app, prefix: "companion.create.icon.mouth", count: 5)
+        assertIconOptions(in: app, prefix: "companion.create.icon.accessory", count: 7)
+        assertIconOptions(in: app, prefix: "companion.create.icon.color", count: 11)
+    }
+
+    @MainActor
     func testCompanionAvatarScreenshotsAcrossDemos() throws {
         let chat = XCUIApplication()
         chat.launchArguments = ["-glass-chat-demo", "-companion-avatar-ui-evidence"]
@@ -1143,9 +1292,7 @@ final class CompanionUITests: XCTestCase {
         composer.typeText("Prépare une réponse.")
         send.tap()
 
-        let replying = chat.descendants(matching: .any).matching(
-            NSPredicate(format: "label CONTAINS %@", "Companion écrit une réponse")
-        ).firstMatch
+        let replying = chat.descendants(matching: .any)["chat.thinking-status"]
         XCTAssertTrue(replying.waitForExistence(timeout: 2))
         XCTAssertTrue(replying.label.contains("Companion"))
         try captureScreenshot(named: "chat-thinking.png")
@@ -1173,6 +1320,24 @@ final class CompanionUITests: XCTestCase {
         XCTAssertTrue(creationAvatar.label.contains("Nova"))
         XCTAssertTrue(creationAvatar.label.contains("Companion"))
         try captureScreenshot(named: "creation-thinking.png")
+    }
+
+    @MainActor
+    private func assertIconOptions(
+        in app: XCUIApplication,
+        prefix: String,
+        count: Int
+    ) {
+        for index in 0..<count {
+            let element = app.descendants(matching: .any)["\(prefix).\(index)"]
+            for _ in 0..<5 where !element.exists { app.swipeUp() }
+            XCTAssertTrue(element.exists, "Missing icon option \(prefix).\(index)")
+            XCTAssertTrue(
+                element.label.contains("Companion"),
+                "Icon option \(prefix).\(index) should have a Companion VoiceOver label"
+            )
+            XCTAssertTrue(["Selected", "Not selected"].contains(element.value as? String ?? ""))
+        }
     }
 
     @MainActor

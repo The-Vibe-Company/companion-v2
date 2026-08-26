@@ -1,3 +1,4 @@
+/* oxlint-disable anti-slop/no-module-mocking, anti-slop/require-safety-comment-for-type-assertion -- This existing route harness uses module seams and one inspected Request cast; the timezone assertion extends the same test boundary. */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const serviceMocks = vi.hoisted(() => {
@@ -9,11 +10,14 @@ const serviceMocks = vi.hoisted(() => {
     listOrgs: vi.fn(),
     getOnboardingState: vi.fn(),
     getMyAvatarUrl: vi.fn(),
+    getUserTimezone: vi.fn(),
+    updateUserProfile: vi.fn(),
   };
 });
 
 const authMocks = vi.hoisted(() => ({
   getSession: vi.fn(),
+  updateUser: vi.fn(),
   handler: vi.fn(),
   guardAgentAuthRemoteKeys: vi.fn<() => Promise<"allowed" | "remote-jwks" | "body-too-large">>(
     async () => "allowed",
@@ -23,7 +27,7 @@ const authMocks = vi.hoisted(() => ({
 vi.mock("@hono/node-server", () => ({ serve: vi.fn() }));
 vi.mock("@companion/auth", () => ({
   auth: {
-    api: { getSession: authMocks.getSession },
+    api: { getSession: authMocks.getSession, updateUser: authMocks.updateUser },
     handler: authMocks.handler,
     $Infer: {},
   },
@@ -39,6 +43,7 @@ describe("GET /v1/auth/whoami", () => {
     vi.clearAllMocks();
     authMocks.getSession.mockResolvedValue(null);
     authMocks.guardAgentAuthRemoteKeys.mockResolvedValue("allowed");
+    serviceMocks.getUserTimezone.mockResolvedValue(null);
   });
 
   it("returns 401 only when no authenticated actor exists", async () => {
@@ -57,6 +62,58 @@ describe("GET /v1/auth/whoami", () => {
     const response = await app.request("/v1/auth/whoami");
 
     expect(response.status).toBe(500);
+  });
+
+  it("exposes the stored member timezone to every first-party client", async () => {
+    authMocks.getSession.mockResolvedValue({
+      user: { id: "user-1", email: "user@example.test", name: "User" },
+      session: { id: "session-1" },
+    });
+    serviceMocks.listOrgs.mockResolvedValue([{ org_id: "org-1", org_role: "developer" }]);
+    serviceMocks.getOnboardingState.mockResolvedValue({ onboarded: true });
+    serviceMocks.getMyAvatarUrl.mockResolvedValue(null);
+    serviceMocks.getUserTimezone.mockResolvedValue("Pacific/Auckland");
+
+    const response = await app.request("/v1/auth/whoami");
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      userId: "user-1",
+      timezone: "Pacific/Auckland",
+    });
+  });
+});
+
+describe("PUT /v1/users/me", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    authMocks.getSession.mockResolvedValue({
+      user: { id: "user-1", email: "user@example.test", name: "User" },
+      session: { id: "session-1" },
+    });
+    serviceMocks.updateUserProfile.mockResolvedValue({
+      id: "user-1",
+      name: "User",
+      initials: "U",
+      timezone: "Pacific/Auckland",
+    });
+  });
+
+  it("persists a timezone through the shared self-service profile endpoint", async () => {
+    const response = await app.request("/v1/users/me", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ timezone: "Pacific/Auckland" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(serviceMocks.updateUserProfile).toHaveBeenCalledWith(expect.objectContaining({
+      actor: expect.objectContaining({ id: "user-1" }),
+      name: undefined,
+      timezone: "Pacific/Auckland",
+    }));
+    await expect(response.json()).resolves.toMatchObject({ timezone: "Pacific/Auckland" });
+    expect(authMocks.updateUser).not.toHaveBeenCalled();
   });
 });
 

@@ -6,6 +6,10 @@ import type { MeVM, OrgVM } from "./types";
 import { apiFetch } from "./apiClient";
 import { buildSettingsAppData, parseApiTokensResponse, parseBillingOverview, parseOrgSettingsResponse } from "./settingsViewModel";
 
+export function settingsMemberTimezone(me: Pick<MeVM, "timezone">): string | null {
+  return me.timezone ?? null;
+}
+
 export async function fetchSettingsAppData(input: {
   me: MeVM;
   currentOrg: OrgVM;
@@ -26,12 +30,15 @@ export async function fetchSettingsAppData(input: {
   const billing = parseBillingOverview(billingRaw);
   const gettingStartedResult = gettingStartedStateSchema.safeParse(gettingStartedRaw);
   const gettingStarted = gettingStartedResult.success ? gettingStartedResult.data : null;
-  return buildSettingsAppData({
-    me: input.me,
-    current: input.currentOrg,
-    settings,
-    tokens,
-    billing,
-    gettingStarted,
-  });
+  return {
+    ...buildSettingsAppData({
+      me: input.me,
+      current: input.currentOrg,
+      settings,
+      tokens,
+      billing,
+      gettingStarted,
+    }),
+    timezone: settingsMemberTimezone(input.me),
+  };
 }

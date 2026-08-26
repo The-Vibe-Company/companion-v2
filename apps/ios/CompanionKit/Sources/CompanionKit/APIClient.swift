@@ -85,8 +85,16 @@ public actor APIClient {
         let routines: [CompanionRoutine]
     }
 
+    private struct RoutineEnvelope: Decodable {
+        let routine: CompanionRoutine
+    }
+
     private struct TriggerListEnvelope: Decodable {
         let triggers: [CompanionTrigger]
+    }
+
+    private struct TriggerEnvelope: Decodable {
+        let trigger: CompanionTrigger
     }
 
     private struct SocialSignInResponse: Decodable {
@@ -220,6 +228,19 @@ public actor APIClient {
         try await decode(WhoAmI.self, path: "/v1/auth/whoami")
     }
 
+    public func updateUserProfile(
+        name: String? = nil,
+        timezone: String? = nil
+    ) async throws -> UserProfile {
+        let body = try encoder.encode(UpdateUserProfileInput(name: name, timezone: timezone))
+        return try await decode(
+            UserProfile.self,
+            path: "/v1/users/me",
+            method: "PUT",
+            body: body
+        )
+    }
+
     public func listCompanions() async throws -> [CompanionSummary] {
         try await decode(CompanionListEnvelope.self, path: "/v1/companions").companions
     }
@@ -256,6 +277,122 @@ public actor APIClient {
             routines: routineResult.routines,
             triggers: triggerResult.triggers
         )
+    }
+
+    public func listCompanionRoutines(companionID: String) async throws -> [CompanionRoutine] {
+        let companion = Self.encodedPathComponent(companionID)
+        return try await decode(
+            RoutineListEnvelope.self,
+            path: "/v1/companions/\(companion)/routines"
+        ).routines
+    }
+
+    public func listCompanionTriggers(companionID: String) async throws -> [CompanionTrigger] {
+        let companion = Self.encodedPathComponent(companionID)
+        return try await decode(
+            TriggerListEnvelope.self,
+            path: "/v1/companions/\(companion)/triggers"
+        ).triggers
+    }
+
+    public func createCompanionRoutine(
+        companionID: String,
+        input: CreateCompanionRoutineInput
+    ) async throws -> CompanionRoutine {
+        let companion = Self.encodedPathComponent(companionID)
+        let body = try encoder.encode(input)
+        return try await decode(
+            RoutineEnvelope.self,
+            path: "/v1/companions/\(companion)/routines",
+            method: "POST",
+            body: body
+        ).routine
+    }
+
+    public func updateCompanionRoutine(
+        companionID: String,
+        routineID: String,
+        input: UpdateCompanionRoutineInput
+    ) async throws -> CompanionRoutine {
+        let companion = Self.encodedPathComponent(companionID)
+        let routine = Self.encodedPathComponent(routineID)
+        let body = try encoder.encode(input)
+        return try await decode(
+            RoutineEnvelope.self,
+            path: "/v1/companions/\(companion)/routines/\(routine)",
+            method: "PATCH",
+            body: body
+        ).routine
+    }
+
+    public func deleteCompanionRoutine(
+        companionID: String,
+        routineID: String
+    ) async throws {
+        let companion = Self.encodedPathComponent(companionID)
+        let routine = Self.encodedPathComponent(routineID)
+        _ = try await perform(
+            path: "/v1/companions/\(companion)/routines/\(routine)",
+            method: "DELETE",
+            body: nil
+        )
+    }
+
+    public func createCompanionTrigger(
+        companionID: String,
+        input: CreateCompanionTriggerInput
+    ) async throws -> CompanionTrigger {
+        let companion = Self.encodedPathComponent(companionID)
+        let body = try encoder.encode(input)
+        return try await decode(
+            TriggerEnvelope.self,
+            path: "/v1/companions/\(companion)/triggers",
+            method: "POST",
+            body: body
+        ).trigger
+    }
+
+    public func updateCompanionTrigger(
+        companionID: String,
+        triggerID: String,
+        input: UpdateCompanionTriggerInput
+    ) async throws -> CompanionTrigger {
+        let companion = Self.encodedPathComponent(companionID)
+        let trigger = Self.encodedPathComponent(triggerID)
+        let body = try encoder.encode(input)
+        return try await decode(
+            TriggerEnvelope.self,
+            path: "/v1/companions/\(companion)/triggers/\(trigger)",
+            method: "PATCH",
+            body: body
+        ).trigger
+    }
+
+    public func deleteCompanionTrigger(
+        companionID: String,
+        triggerID: String
+    ) async throws {
+        let companion = Self.encodedPathComponent(companionID)
+        let trigger = Self.encodedPathComponent(triggerID)
+        _ = try await perform(
+            path: "/v1/companions/\(companion)/triggers/\(trigger)",
+            method: "DELETE",
+            body: nil
+        )
+    }
+
+    public func rotateCompanionTriggerSecret(
+        companionID: String,
+        triggerID: String
+    ) async throws -> CompanionTrigger {
+        let companion = Self.encodedPathComponent(companionID)
+        let trigger = Self.encodedPathComponent(triggerID)
+        return try await decode(
+            TriggerEnvelope.self,
+            path: "/v1/companions/\(companion)/triggers/\(trigger)/rotate-secret",
+            method: "POST",
+            body: Data("{}".utf8)
+        ).trigger
     }
 
     public func registerNotificationDevice(

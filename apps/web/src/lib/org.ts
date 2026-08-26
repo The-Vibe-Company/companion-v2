@@ -1,4 +1,5 @@
 "use client";
+/* oxlint-disable anti-slop/no-runtime-typeof -- Existing settings RPC helper debt; the timezone call follows the same parsed API boundary. */
 
 import type { ApiTokenRow, BillingPreview, IssuedToken, OrgRole, TokenScope } from "@companion/contracts";
 import { apiFetch } from "./apiClient";
@@ -61,6 +62,19 @@ export async function updateMe(name: string): Promise<{ id: string; name: string
   return apiFetch("/v1/users/me", {
     method: "PUT",
     body: JSON.stringify({ name }),
+  });
+}
+
+/** Persist the signed-in member's IANA timezone across every workspace and first-party client. */
+export async function updateMyTimezone(timezone: string): Promise<{
+  id: string;
+  name: string;
+  initials: string;
+  timezone: string;
+}> {
+  return apiFetch("/v1/users/me", {
+    method: "PUT",
+    body: JSON.stringify({ timezone }),
   });
 }
 

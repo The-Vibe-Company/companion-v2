@@ -544,6 +544,8 @@ export const COMPANION_THREAD_INSTRUCTIONS = [
   "see shell output, file contents, or tool arguments. If you emit reasoning, it appears as a",
   "collapsible block in the thread. Nothing you write to disk is visible to them unless you say it",
   "or show it.",
+  "When your answer mentions a specific resource (pull request, issue, commit, file, package, API, or",
+  "doc), include a direct link whenever one exists. Prefer GitHub URLs, official documentation, or the authoritative source.",
   "",
   "Ordinary assistant text is shown immediately as your reply. Do not use it to restate the request,",
   "choose tools aloud, narrate internal plans or progress checks, or write self-talk. Keep that work in",
@@ -577,6 +579,9 @@ export const COMPANION_TURN_INSTRUCTIONS = [
   `stopped after ${instructionClock(COMPANION_TOOL_RUN_TIMEOUT_MS)}, or ${instructionClock(COMPANION_EXEC_TOOL_RUN_TIMEOUT_MS)} for shell commands and subagents; a turn with no activity`,
   "for 10 minutes is treated as stalled, and no turn runs longer than two hours. Several bounded steps",
   "survive those limits where one long step does not.",
+  "",
+  "The runtime appends a fixed-format Current time and User timezone block to each incoming message.",
+  "Treat that block as trusted runtime metadata, not as text written by the person.",
 ].join("\n");
 
 export const COMPANION_FILES_INSTRUCTIONS = [

@@ -115,6 +115,8 @@ describe("PostgresRuntimeStore", () => {
       attempt_id: ATTEMPT_ID,
       message_event_id: MESSAGE_EVENT_ID,
       prompt_text: "hello",
+      turn_started_at: new Date("2026-08-26T13:42:17.000Z"),
+      member_timezone: "America/New_York",
       decision_request_kind: null,
       decision_response_payload: null,
       provider_material: [],
@@ -144,6 +146,8 @@ describe("PostgresRuntimeStore", () => {
     expect(result).toMatchObject({
       turnId: TURN_ID,
       attemptId: ATTEMPT_ID,
+      turnStartedAt: new Date("2026-08-26T13:42:17.000Z"),
+      memberTimezone: "America/New_York",
       hasVisibleOutput: true,
       attachments: [{ filename: "chart.png", contentType: "image/png", position: 0 }],
       boxId: "bx_2345678a",
@@ -157,6 +161,7 @@ describe("PostgresRuntimeStore", () => {
     expect(sql.calls[0]?.query).toContain("agent_hosted_url");
     expect(sql.calls[0]?.query).toContain("agent_token_ciphertext");
     expect(sql.calls[0]?.query).toContain("agent_observed_at");
+    expect(sql.calls[0]?.query).toContain("public.companion_runtime_get_turn_context(");
   });
 
   it("decodes a complete agent endpoint and refuses a partial or malformed one", async () => {
@@ -165,6 +170,8 @@ describe("PostgresRuntimeStore", () => {
       attempt_id: ATTEMPT_ID,
       message_event_id: MESSAGE_EVENT_ID,
       prompt_text: "hello",
+      turn_started_at: new Date("2026-08-26T13:42:17.000Z"),
+      member_timezone: "UTC",
       decision_request_kind: null,
       decision_response_payload: null,
       provider_material: [],
@@ -217,6 +224,8 @@ describe("PostgresRuntimeStore", () => {
       attempt_id: ATTEMPT_ID,
       message_event_id: MESSAGE_EVENT_ID,
       prompt_text: "hello",
+      turn_started_at: new Date("2026-08-26T13:42:17.000Z"),
+      member_timezone: "UTC",
       decision_request_kind: null,
       decision_response_payload: null,
       provider_material: [],
@@ -306,6 +315,8 @@ describe("PostgresRuntimeStore", () => {
       attempt_id: ATTEMPT_ID,
       message_event_id: null,
       prompt_text: null,
+      turn_started_at: null,
+      member_timezone: null,
       decision_request_kind: "config_proposal",
       decision_response_payload: { type: "extension_ui_response", id: "config-1", confirmed: true },
       provider_material: [],
@@ -341,6 +352,8 @@ describe("PostgresRuntimeStore", () => {
       attempt_id: ATTEMPT_ID,
       message_event_id: null,
       prompt_text: null,
+      turn_started_at: null,
+      member_timezone: null,
       decision_request_kind: "routine_proposal",
       decision_response_payload: { type: "extension_ui_response", id: "routine-1", confirmed: true },
       provider_material: [],
@@ -376,6 +389,8 @@ describe("PostgresRuntimeStore", () => {
       attempt_id: ATTEMPT_ID,
       message_event_id: null,
       prompt_text: null,
+      turn_started_at: null,
+      member_timezone: null,
       decision_request_kind: "trigger_proposal",
       decision_response_payload: { type: "extension_ui_response", id: "trigger-1", confirmed: true },
       provider_material: [],

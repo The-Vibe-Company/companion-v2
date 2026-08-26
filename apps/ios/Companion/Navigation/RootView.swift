@@ -30,6 +30,8 @@ struct RootView: View {
                 CompanionIconCatalogDemoView(
                     forceReduceMotion: ProcessInfo.processInfo.arguments.contains("-companion-reduce-motion")
                 )
+            } else if ProcessInfo.processInfo.arguments.contains("-companion-create-demo") {
+                CreateCompanionDemoView()
             } else if ProcessInfo.processInfo.arguments.contains("-companion-resources-demo") {
                 CompanionConnectedResourcesDemoView()
             } else if ProcessInfo.processInfo.arguments.contains("-glass-chat-demo") {
@@ -59,6 +61,7 @@ struct RootView: View {
                   !arguments.contains("-companion-transcript-window-demo"),
                   !arguments.contains("-companion-decision-demo"),
                   !arguments.contains("-companion-icon-demo"),
+                  !arguments.contains("-companion-create-demo"),
                   !arguments.contains("-companion-resources-demo"),
                   !arguments.contains("-glass-chat-demo"),
                   !arguments.contains("-companion-settings-demo"),
