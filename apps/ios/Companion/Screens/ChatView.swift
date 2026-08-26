@@ -75,8 +75,9 @@ struct ChatView: View {
         let queuedEntries = queuedEntries(in: thread)
         CompanionBackdrop(style: .companion(visualTheme.base)) {
             ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 16) {
+                VStack(spacing: 0) {
+                    ScrollView {
+                        LazyVStack(spacing: 16) {
                         if loading && thread == nil {
                             ProgressView("Loading conversation…")
                                 .padding(.top, 80)
@@ -159,42 +160,40 @@ struct ChatView: View {
                             }
                         }
 
-                        Color.clear.frame(height: 1).id("bottom")
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.top, 16)
-                    .padding(.bottom, 22)
-                }
-                .scrollDismissesKeyboard(.interactively)
-                .scrollIndicators(.hidden)
-                .safeAreaInset(edge: .bottom, spacing: 0) {
-                    VStack(spacing: 0) {
-                        if !isNearBottom {
-                            scrollToBottomButton {
-                                requestScroll(to: .bottom)
-                            }
-                            .transition(
-                                reduceMotion
-                                    ? .identity
-                                    : .move(edge: .bottom).combined(with: .opacity)
-                            )
+                            Color.clear.frame(height: 1).id("bottom")
                         }
+                        .padding(.horizontal, 16)
+                        .padding(.top, 16)
+                        .padding(.bottom, 22)
+                    }
+                    .scrollDismissesKeyboard(.interactively)
+                    .scrollIndicators(.hidden)
+                    .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                        max(0, geometry.contentSize.height - geometry.visibleRect.maxY)
+                    } action: { _, bottomDistance in
+                        isNearBottom = bottomDistance <= bottomProximityThreshold
+                    }
 
-                        bottomControls(
-                            queuedEntries: queuedEntries,
-                            onThinkingTap: { revealLiveReasoning(using: proxy) }
+                    if !isNearBottom {
+                        scrollToBottomButton {
+                            requestScroll(to: .bottom)
+                        }
+                        .transition(
+                            reduceMotion
+                                ? .identity
+                                : .move(edge: .bottom).combined(with: .opacity)
                         )
                     }
-                    .animation(
-                        reduceMotion ? nil : .easeOut(duration: 0.18),
-                        value: isNearBottom
+
+                    bottomControls(
+                        queuedEntries: queuedEntries,
+                        onThinkingTap: { revealLiveReasoning(using: proxy) }
                     )
                 }
-                .onScrollGeometryChange(for: CGFloat.self) { geometry in
-                    max(0, geometry.contentSize.height - geometry.visibleRect.maxY)
-                } action: { _, bottomDistance in
-                    isNearBottom = bottomDistance <= bottomProximityThreshold
-                }
+                .animation(
+                    reduceMotion ? nil : .easeOut(duration: 0.18),
+                    value: isNearBottom
+                )
                 .onChange(of: scrollContentRevision) {
                     guard let target = pendingScrollTarget else { return }
                     pendingScrollTarget = nil
