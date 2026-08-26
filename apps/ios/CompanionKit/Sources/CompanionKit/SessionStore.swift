@@ -180,6 +180,20 @@ public final class SessionStore {
         }
     }
 
+    public func connectedResources(for companion: CompanionSummary) async throws -> CompanionConnectedResources {
+        do {
+            let resources = try await client.connectedResources(
+                companionID: companion.id,
+                selectedSkillIDs: companion.selectedSkillIDs
+            )
+            await persistRollingAuthority()
+            return resources
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
     public func createCompanion(_ input: CreateCompanionInput) async throws -> CompanionSummary {
         do {
             let companion = try await client.createCompanion(input)
