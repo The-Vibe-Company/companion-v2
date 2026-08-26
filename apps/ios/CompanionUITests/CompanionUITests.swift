@@ -289,6 +289,40 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    func testThinkingStatusRevealsCollapsedReasoningDisclosure() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-glass-chat-demo", "-glass-chat-thinking-demo"]
+        app.launch()
+
+        let status = app.buttons["chat.thinking-status"]
+        let composer = app.descendants(matching: .any)["demo.composer"]
+        XCTAssertTrue(status.waitForExistence(timeout: 5))
+        XCTAssertTrue(composer.exists)
+        XCTAssertEqual(status.label, "Companion thinking")
+        XCTAssertLessThan(status.frame.minY, composer.frame.minY)
+
+        let disclosure = app.buttons["thinking.disclosure"]
+        for _ in 0..<6 where !disclosure.exists {
+            app.swipeUp()
+        }
+        XCTAssertTrue(disclosure.waitForExistence(timeout: 2))
+        XCTAssertEqual(disclosure.value as? String, "Collapsed")
+        XCTAssertFalse(app.descendants(matching: .any)["thinking.content"].exists)
+
+        status.tap()
+        let content = app.descendants(matching: .any)["thinking.content"]
+        XCTAssertTrue(content.waitForExistence(timeout: 2))
+        XCTAssertEqual(disclosure.value as? String, "Expanded")
+        XCTAssertTrue(app.staticTexts[
+            "Salut Stan. J’ai préparé une direction claire inspirée du rythme de Grok, mais pensée pour iOS 26 et son Liquid Glass natif."
+        ].exists)
+
+        disclosure.tap()
+        XCTAssertEqual(disclosure.value as? String, "Collapsed")
+        XCTAssertFalse(content.exists)
+    }
+
+    @MainActor
     private func decisionAnswerField(in app: XCUIApplication) -> XCUIElement {
         app.descendants(matching: .any).matching(
             NSPredicate(
@@ -729,9 +763,7 @@ final class CompanionUITests: XCTestCase {
         composer.typeText("Prépare une réponse.")
         send.tap()
 
-        let replying = chat.descendants(matching: .any).matching(
-            NSPredicate(format: "label CONTAINS %@", "Companion écrit une réponse")
-        ).firstMatch
+        let replying = chat.descendants(matching: .any)["chat.thinking-status"]
         XCTAssertTrue(replying.waitForExistence(timeout: 2))
         XCTAssertTrue(replying.label.contains("Companion"))
         try captureScreenshot(named: "chat-thinking.png")

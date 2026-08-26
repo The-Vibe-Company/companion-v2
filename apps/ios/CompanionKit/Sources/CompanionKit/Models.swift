@@ -1139,6 +1139,8 @@ public struct TranscriptEntry: Codable, Identifiable, Equatable, Sendable {
     public let ordinal: Int
     public let role: String
     public let content: String
+    public let reasoning: String?
+    public let turnID: String?
     public let authorID: String?
     public let authorName: String?
     public let decision: CompanionDecision?
@@ -1154,6 +1156,8 @@ public struct TranscriptEntry: Codable, Identifiable, Equatable, Sendable {
         case ordinal
         case role
         case content
+        case reasoning
+        case turnID = "turn_id"
         case authorID = "author_id"
         case authorName = "author_name"
         case decision
@@ -1169,6 +1173,8 @@ public struct TranscriptEntry: Codable, Identifiable, Equatable, Sendable {
         ordinal = try container.decode(Int.self, forKey: .ordinal)
         role = try container.decode(String.self, forKey: .role)
         content = try container.decode(String.self, forKey: .content)
+        reasoning = try container.decodeIfPresent(String.self, forKey: .reasoning)
+        turnID = try container.decodeIfPresent(String.self, forKey: .turnID)
         authorID = try container.decodeIfPresent(String.self, forKey: .authorID)
         authorName = try container.decodeIfPresent(String.self, forKey: .authorName)
         decision = try container.decodeIfPresent(CompanionDecision.self, forKey: .decision)
@@ -1292,6 +1298,7 @@ public struct CompanionThread: Codable, Equatable, Sendable {
     public let readOnly: Bool
     public let canSend: Bool
     public let entries: [TranscriptEntry]
+    public let activeTurn: CompanionTurn?
     public let queuedCount: Int
     public let interruptedTurn: CompanionTurn?
 
@@ -1301,6 +1308,7 @@ public struct CompanionThread: Codable, Equatable, Sendable {
         case readOnly = "read_only"
         case canSend = "can_send"
         case entries
+        case activeTurn = "active_turn"
         case queuedCount = "queued_count"
         case interruptedTurn = "interrupted_turn"
     }

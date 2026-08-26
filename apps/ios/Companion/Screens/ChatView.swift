@@ -1,6 +1,7 @@
 import CompanionKit
 import PhotosUI
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 @MainActor
@@ -37,6 +38,7 @@ struct ChatView: View {
     @State private var error: String?
     @State private var pendingMessages: [PendingMessage] = []
     @State private var markdownByEventID: [String: CachedMarkdownDocument] = [:]
+    @State private var expandedReasoningEventIDs: Set<String> = []
     @State private var decisionSubmissionGate = CompanionDecisionSubmissionGate()
     @State private var decisionCatalog = CompanionDecisionCatalog.empty
     @State private var decisionCatalogLoaded = false
@@ -61,10 +63,6 @@ struct ChatView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 16) {
-                        if currentCompanion.runtime.replying {
-                            replyingBanner
-                        }
-
                         if loading && thread == nil {
                             ProgressView("Loading conversation…")
                                 .padding(.top, 80)
@@ -101,7 +99,8 @@ struct ChatView: View {
                                             own: entry.role == "user" && entry.authorID == thread?.viewerID,
                                             companion: currentCompanion,
                                             accent: visualTheme.accent,
-                                            markdown: markdownByEventID[entry.eventID]?.document
+                                            markdown: markdownByEventID[entry.eventID]?.document,
+                                            reasoningExpansion: reasoningBinding(for: entry.eventID)
                                         )
                                     }
                                 }
@@ -146,7 +145,9 @@ struct ChatView: View {
                 }
                 .scrollDismissesKeyboard(.interactively)
                 .scrollIndicators(.hidden)
-                .safeAreaInset(edge: .bottom) { composer }
+                .safeAreaInset(edge: .bottom) {
+                    composer(onThinkingTap: { revealLiveReasoning(using: proxy) })
+                }
                 .onChange(of: scrollContentCount) {
                     if reduceMotion {
                         proxy.scrollTo("bottom", anchor: .bottom)
@@ -190,6 +191,11 @@ struct ChatView: View {
             allowsMultipleSelection: true,
             onCompletion: importDocuments
         )
+        .onChange(of: liveReasoningEventID) { oldValue, newValue in
+            if oldValue != newValue, let oldValue {
+                expandedReasoningEventIDs.remove(oldValue)
+            }
+        }
     }
 
     @ToolbarContentBuilder
@@ -200,7 +206,7 @@ struct ChatView: View {
                     name: currentCompanion.name,
                     icon: currentCompanion.icon,
                     size: 32,
-                    state: currentCompanion.runtime.replying ? .thinking : .idle
+                    state: isReplying ? .thinking : .idle
                 )
                 VStack(alignment: .leading, spacing: 1) {
                     Text(currentCompanion.name)
@@ -240,22 +246,6 @@ struct ChatView: View {
             .accessibilityLabel("Settings for \(currentCompanion.name)")
             .accessibilityIdentifier("chat.settings")
         }
-    }
-
-    private var replyingBanner: some View {
-        HStack(spacing: 10) {
-            ProgressView()
-                .controlSize(.small)
-                .tint(visualTheme.accent)
-            Text("\(currentCompanion.name) is replying…")
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(Color.companionInk.opacity(0.76))
-            Spacer()
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 11)
-        .companionGlass(radius: 18)
-        .accessibilityElement(children: .combine)
     }
 
     private func dayMarker(for date: Date) -> some View {
@@ -298,8 +288,18 @@ struct ChatView: View {
     }
 
     @ViewBuilder
-    private var composer: some View {
+    private func composer(onThinkingTap: @escaping () -> Void) -> some View {
         VStack(spacing: 8) {
+            if isReplying {
+                CompanionThinkingStatus(
+                    companionName: currentCompanion.name,
+                    icon: currentCompanion.icon,
+                    accent: visualTheme.accent,
+                    isInteractive: liveReasoningEventID != nil,
+                    onTap: onThinkingTap
+                )
+            }
+
             if let error, thread != nil {
                 Text(error)
                     .font(.caption)
@@ -429,8 +429,57 @@ struct ChatView: View {
         CompanionVisualTheme(icon: currentCompanion.icon)
     }
 
+    private var isReplying: Bool {
+        guard let thread else { return currentCompanion.runtime.replying }
+        return thread.activeTurn?.replying == true
+    }
+
+    private var liveReasoningEventID: String? {
+        guard isReplying,
+              let attemptID = thread?.activeTurn?.latestAttempt?.id.lowercased() else {
+            return nil
+        }
+        let eventPrefix = "v2:\(attemptID):"
+        return entries.last(where: { entry in
+            entry.role == "assistant"
+                && entry.eventID.lowercased().hasPrefix(eventPrefix)
+                && nonEmptyReasoning(entry.reasoning)
+        })?.eventID
+    }
+
+    private func nonEmptyReasoning(_ value: String?) -> Bool {
+        guard let value else { return false }
+        return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func reasoningBinding(for eventID: String) -> Binding<Bool> {
+        Binding(
+            get: { expandedReasoningEventIDs.contains(eventID) },
+            set: { isExpanded in
+                if isExpanded {
+                    expandedReasoningEventIDs.insert(eventID)
+                } else {
+                    expandedReasoningEventIDs.remove(eventID)
+                }
+            }
+        )
+    }
+
+    private func revealLiveReasoning(using proxy: ScrollViewProxy) {
+        guard let eventID = liveReasoningEventID else { return }
+        if reduceMotion {
+            expandedReasoningEventIDs.insert(eventID)
+            proxy.scrollTo(eventID, anchor: .center)
+        } else {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                expandedReasoningEventIDs.insert(eventID)
+                proxy.scrollTo(eventID, anchor: .center)
+            }
+        }
+    }
+
     private var statusLabel: String {
-        if currentCompanion.runtime.replying { return "Replying" }
+        if isReplying { return "Replying" }
         switch currentCompanion.runtime.state {
         case .running: return "Online"
         case .provisioning: return "Starting"
@@ -851,8 +900,12 @@ struct ChatMessageBubble: View {
     var icon: CompanionSummary.Icon?
     var accent = Color.companionAccent
     var markdown: MarkdownDocument?
+    var reasoning: String? = nil
+    var reasoningExpansion: Binding<Bool>? = nil
     var attachments: [CompanionAttachment] = []
     var localAttachments: [CompanionMessageAttachment] = []
+
+    @State private var localReasoningExpanded = false
 
     @ViewBuilder
     var body: some View {
@@ -886,6 +939,13 @@ struct ChatMessageBubble: View {
                 Text(authorName)
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(Color.companionMuted)
+            }
+
+            if kind == .assistant, let reasoning = displayReasoning {
+                CompanionThinkingDisclosure(
+                    reasoning: reasoning,
+                    isExpanded: reasoningExpansion ?? $localReasoningExpanded
+                )
             }
 
             if kind == .assistant, let markdown {
@@ -940,6 +1000,114 @@ struct ChatMessageBubble: View {
                 .companionMaterial(radius: 18)
         }
     }
+
+    private var displayReasoning: String? {
+        guard let reasoning else { return nil }
+        guard !reasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return reasoning
+    }
+}
+
+struct CompanionThinkingDisclosure: View {
+    let reasoning: String
+    @Binding var isExpanded: Bool
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var secondaryStyle: Color { Color(uiColor: .secondaryLabel) }
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            Text(reasoning)
+                .font(.footnote)
+                .foregroundStyle(secondaryStyle)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, 4)
+                .padding(.top, 2)
+                .accessibilityIdentifier("thinking.content")
+        } label: {
+            Text("Thinking")
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(secondaryStyle)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+        }
+        .tint(secondaryStyle)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityLabel("Thinking")
+        .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+        .accessibilityHint(
+            isExpanded
+                ? "Double tap to collapse thinking."
+                : "Double tap to expand thinking."
+        )
+        .accessibilityIdentifier("thinking.disclosure")
+        .transaction { transaction in
+            if reduceMotion {
+                transaction.animation = nil
+            }
+        }
+    }
+}
+
+struct CompanionThinkingStatus: View {
+    let companionName: String
+    let icon: CompanionSummary.Icon?
+    let accent: Color
+    let isInteractive: Bool
+    let onTap: () -> Void
+
+    private var label: String { "\(companionName) thinking" }
+
+    private var statusTextColor: Color { Color(uiColor: .label) }
+
+    @ViewBuilder
+    var body: some View {
+        if isInteractive {
+            Button(action: onTap) {
+                statusContent
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(label)
+            .accessibilityValue("Details available")
+            .accessibilityHint("Double tap to show current thinking.")
+            .accessibilityIdentifier("chat.thinking-status")
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            statusContent
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(label)
+                .accessibilityValue("Thinking details not available yet")
+                .accessibilityHint("Thinking details are not available yet.")
+                .accessibilityIdentifier("chat.thinking-status")
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var statusContent: some View {
+        HStack(spacing: 9) {
+            CompanionAvatar(name: companionName, icon: icon, size: 28, state: .thinking)
+                .accessibilityHidden(true)
+
+            Text(label)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(statusTextColor)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if isInteractive {
+                Image(systemName: "chevron.up")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color(uiColor: .secondaryLabel))
+                    .accessibilityHidden(true)
+            }
+        }
+        .frame(minHeight: 44, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+        .companionGlass(radius: 17, tint: accent.opacity(0.08), interactive: isInteractive)
+    }
 }
 
 private struct MessageEntryView: View {
@@ -948,6 +1116,7 @@ private struct MessageEntryView: View {
     let companion: CompanionSummary
     let accent: Color
     let markdown: MarkdownDocument?
+    let reasoningExpansion: Binding<Bool>
 
     @ViewBuilder
     var body: some View {
@@ -965,6 +1134,8 @@ private struct MessageEntryView: View {
                 icon: companion.icon,
                 accent: accent,
                 markdown: entry.role == "assistant" ? markdown : nil,
+                reasoning: entry.role == "assistant" ? entry.reasoning : nil,
+                reasoningExpansion: reasoningExpansion,
                 attachments: entry.attachments
             )
         }
