@@ -1136,6 +1136,31 @@ describe("Companions Runtime v2 API", () => {
     expect(coreMocks.answerCompanionDecisionV2).not.toHaveBeenCalled();
   });
 
+  it("treats deny as successful when expiry already closed the decision", async () => {
+    coreMocks.getCompanionDecisionV2.mockResolvedValue({
+      requestKey: "routine-expired",
+      requestKind: "routine_proposal",
+      decisionStatus: "expired",
+      proposal: {
+        kind: "routine",
+        name: "Standup",
+        prompt: "Write the standup.",
+        cron: "0 9 * * 1-5",
+        timezone: "UTC",
+      },
+      expiresAt: NOW,
+    });
+    const response = await appWithRoutes().request(
+      jsonPost(`/v1/companions/${COMPANION_ID}/decisions/routine-expired`, {
+        action: "deny",
+      }),
+    );
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toEqual({ thread });
+    expect(coreMocks.answerCompanionRoutineDecisionV2).not.toHaveBeenCalled();
+    expect(coreMocks.answerCompanionDecisionV2).not.toHaveBeenCalled();
+  });
+
   it("lists and creates Companion routines", async () => {
     const routine = {
       id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
