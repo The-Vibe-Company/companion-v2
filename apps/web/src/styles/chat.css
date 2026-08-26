@@ -184,3 +184,18 @@
 .aui-scope [data-slot="composer-field"] textarea:focus-visible {
   box-shadow: none;
 }
+
+/* A custom-scheme link is an app-launch control on touch devices, not merely inline prose. Keep its
+   familiar link treatment while giving the finger an honest 44px target. */
+@media (pointer: coarse), (max-width: 560px) {
+  .aui-scope .aui-md-deep-link {
+    display: inline-flex;
+    min-height: 44px;
+    max-width: 100%;
+    align-items: center;
+    margin: -10px -4px;
+    padding: 10px 4px;
+    overflow-wrap: anywhere;
+    touch-action: manipulation;
+  }
+}
