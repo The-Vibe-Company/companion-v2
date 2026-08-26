@@ -1,0 +1,448 @@
+import SwiftUI
+import CompanionKit
+
+struct CompanionDecisionCatalog: Equatable {
+    var skills: [String: String] = [:]
+    var plugins: [String: String] = [:]
+    var models: [String: String] = [:]
+
+    static let empty = CompanionDecisionCatalog()
+}
+
+struct CompanionDecisionCard: View {
+    let decision: CompanionDecision
+    let companionName: String
+    let canAct: Bool
+    let catalog: CompanionDecisionCatalog
+    let accent: Color
+    let accentForeground: Color
+    let onDecide: @MainActor (CompanionDecisionAction) async throws -> Void
+    let onOpenPlugins: () -> Void
+
+    @State private var answer = ""
+    @State private var busy = false
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            header
+            requestContent
+            settledContent
+
+            if let error {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(Color.companionDanger)
+                    .accessibilityLabel("Error. \(error)")
+                    .accessibilityIdentifier("decision.error.\(decision.requestID)")
+            }
+
+            actions
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .companionMaterial(radius: 12)
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(borderColor, lineWidth: pending ? 1.4 : 0.7)
+        }
+    }
+
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: symbol)
+                .foregroundStyle(Color.companionMuted)
+                .accessibilityHidden(true)
+
+            Text(heading)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Color.companionInk)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer(minLength: 4)
+
+            Label(statusLabel, systemImage: statusSymbol)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(statusColor)
+                .labelStyle(.titleAndIcon)
+                .fixedSize()
+        }
+        .accessibilityIdentifier("decision.card.\(decision.requestID)")
+    }
+
+    @ViewBuilder
+    private var requestContent: some View {
+        if decision.proposal != nil, !decision.title.isEmpty {
+            Text(decision.title)
+                .font(.footnote)
+                .foregroundStyle(Color.companionInk)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+
+        switch decision.proposal {
+        case .config(let proposal):
+            configContent(proposal)
+        case .routine(let proposal):
+            routineContent(proposal)
+        case .trigger(let proposal):
+            triggerContent(proposal)
+        case nil:
+            Text(decision.title)
+                .font(.system(.footnote, design: .monospaced))
+                .foregroundStyle(Color.companionInk)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+
+        if let detail = decision.detail, !detail.isEmpty {
+            DisclosureGroup("Details") {
+                Text(detail)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(Color.companionInk)
+                    .textSelection(.enabled)
+                    .padding(.top, 6)
+            }
+            .font(.caption.weight(.semibold))
+            .tint(Color.companionMuted)
+        }
+    }
+
+    @ViewBuilder
+    private var settledContent: some View {
+        if decision.kind == .question, let value = decision.answer, !value.isEmpty {
+            Text(value)
+                .font(.body)
+                .foregroundStyle(Color.companionInk)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+
+        if !pending, let name = decision.decidedByName, !name.isEmpty {
+            Text("\(statusLabel.lowercased()) by \(name)")
+                .font(.caption)
+                .foregroundStyle(Color.companionMuted)
+        } else if decision.status == .expired {
+            Text("Timed out, denied")
+                .font(.caption)
+                .foregroundStyle(Color.companionMuted)
+        }
+    }
+
+    @ViewBuilder
+    private var actions: some View {
+        if interactive, decision.kind == .question {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Your answer")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.companionInk)
+
+                TextField("Type an answer", text: $answer, axis: .vertical)
+                    .lineLimit(1...5)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(busy)
+                    .onChange(of: answer) { _, value in
+                        if value.count > 8_000 { answer = String(value.prefix(8_000)) }
+                    }
+                    .accessibilityLabel("Answer")
+                    .accessibilityIdentifier("decision.answer-field.\(decision.requestID)")
+
+                HStack(spacing: 8) {
+                    decisionButton("Answer", prominent: true, disabled: answerValue.isEmpty) {
+                        perform(.answer(answerValue))
+                    }
+                    decisionButton("Deny", prominent: false) { perform(.deny) }
+                }
+            }
+        } else if interactive {
+            HStack(spacing: 8) {
+                decisionButton(primaryActionLabel, prominent: true) { perform(.allow) }
+                decisionButton("Deny", prominent: false) { perform(.deny) }
+            }
+        } else if pending, !canAct {
+            Text("Waiting for an Owner or Editor")
+                .font(.caption)
+                .foregroundStyle(Color.companionMuted)
+        } else if pending, decision.kind == .unknown {
+            Text("Update Companion to respond to this request.")
+                .font(.caption)
+                .foregroundStyle(Color.companionMuted)
+        }
+    }
+
+    @ViewBuilder
+    private func decisionButton(
+        _ title: String,
+        prominent: Bool,
+        disabled: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        if prominent {
+            Button(action: action) {
+                Group {
+                    if busy {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Text(title)
+                    }
+                }
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .foregroundStyle(busy || disabled ? Color.companionMuted : accentForeground)
+            }
+            .buttonStyle(.glassProminent)
+            .tint(accent)
+            .disabled(busy || disabled)
+            .accessibilityLabel("\(title) request")
+            .accessibilityIdentifier("decision.\(title.lowercased()).\(decision.requestID)")
+        } else {
+            Button(action: action) {
+                Group {
+                    if busy {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Text(title)
+                    }
+                }
+                .frame(maxWidth: .infinity, minHeight: 44)
+            }
+            .buttonStyle(.glass)
+            .disabled(busy || disabled)
+            .accessibilityLabel("\(title) request")
+            .accessibilityIdentifier("decision.\(title.lowercased()).\(decision.requestID)")
+        }
+    }
+
+    @ViewBuilder
+    private func configContent(_ proposal: CompanionConfigProposal) -> some View {
+        if let connection = proposal.connectPlugin {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Connect \(connection.serverName.capitalized)")
+                    .font(.footnote.weight(.medium))
+                if let reason = connection.reason {
+                    Text(reason)
+                        .font(.footnote)
+                        .foregroundStyle(Color.companionMuted)
+                }
+                Button("Open Plugins", systemImage: "puzzlepiece.extension", action: onOpenPlugins)
+                    .buttonStyle(.glass)
+                    .frame(minHeight: 44)
+                    .accessibilityIdentifier("decision.open-plugins.\(decision.requestID)")
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 5) {
+                let rows = configRows(proposal)
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(row.sign)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(Color.companionMuted)
+                            .frame(width: 14, alignment: .leading)
+                        Text(row.label)
+                            .font(.footnote)
+                            .foregroundStyle(row.known ? Color.companionInk : Color.companionMuted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                if proposal.includesPersona {
+                    DisclosureGroup("Instructions") {
+                        Text(personaText(proposal))
+                            .font(.footnote)
+                            .foregroundStyle(Color.companionInk)
+                            .textSelection(.enabled)
+                            .padding(.top, 6)
+                    }
+                    .font(.caption.weight(.semibold))
+                    .tint(Color.companionMuted)
+                }
+            }
+        }
+    }
+
+    private func routineContent(_ proposal: CompanionRoutineProposal) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(proposal.name)
+                .font(.footnote.weight(.medium))
+            Text("\(proposal.cron) · \(proposal.timezone)")
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(Color.companionMuted)
+                .textSelection(.enabled)
+            promptDisclosure(proposal.prompt)
+        }
+    }
+
+    private func triggerContent(_ proposal: CompanionTriggerProposal) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(proposal.name)
+                .font(.footnote.weight(.medium))
+            Text(proposal.provider)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(Color.companionMuted)
+            if let repo = proposal.target?.repo {
+                Text(repo)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+            }
+            if let events = proposal.target?.events, !events.isEmpty {
+                Text(events.joined(separator: ", "))
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(Color.companionMuted)
+                    .textSelection(.enabled)
+            }
+            promptDisclosure(proposal.prompt)
+        }
+    }
+
+    private func promptDisclosure(_ prompt: String) -> some View {
+        DisclosureGroup("Prompt") {
+            Text(prompt)
+                .font(.footnote)
+                .foregroundStyle(Color.companionInk)
+                .textSelection(.enabled)
+                .padding(.top, 6)
+        }
+        .font(.caption.weight(.semibold))
+        .tint(Color.companionMuted)
+    }
+
+    private func personaText(_ proposal: CompanionConfigProposal) -> String {
+        guard let persona = proposal.persona, !persona.isEmpty else { return "(empty)" }
+        return persona
+    }
+
+    private var pending: Bool { decision.status == .pending }
+
+    private var interactive: Bool {
+        pending && canAct && !busy && decision.kind != .unknown
+    }
+
+    private var answerValue: String {
+        answer.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var primaryActionLabel: String {
+        switch decision.kind {
+        case .config, .routine, .trigger: "Approve"
+        default: "Allow"
+        }
+    }
+
+    private var heading: String {
+        switch decision.kind {
+        case .question: "Question"
+        case .config: "\(companionName) proposes these changes"
+        case .routine: "\(companionName) proposes this routine"
+        case .trigger: "\(companionName) proposes this trigger"
+        case .shell: "Allow run a command"
+        case .file: "Allow edit a file"
+        case .unknown: "Unsupported request"
+        }
+    }
+
+    private var symbol: String {
+        switch decision.kind {
+        case .shell: "terminal"
+        case .file: "doc.badge.gearshape"
+        case .question: "questionmark.bubble"
+        case .config: "gearshape.2"
+        case .routine: "calendar.badge.clock"
+        case .trigger: "bolt.horizontal.circle"
+        case .unknown: "questionmark.diamond"
+        }
+    }
+
+    private var statusLabel: String {
+        switch decision.status {
+        case .pending: "Waiting"
+        case .allowed: "Allowed"
+        case .denied: "Denied"
+        case .answered: "Answered"
+        case .expired: "Timed out"
+        case .unknown: "Unknown"
+        }
+    }
+
+    private var statusSymbol: String {
+        switch decision.status {
+        case .pending: "clock"
+        case .allowed, .answered: "checkmark"
+        case .denied, .expired: "exclamationmark.triangle"
+        case .unknown: "questionmark"
+        }
+    }
+
+    private var statusColor: Color {
+        switch decision.status {
+        case .pending: Color.companionWarning
+        case .allowed, .answered: Color.companionSuccess
+        case .denied, .expired: Color.companionDanger
+        case .unknown: Color.companionMuted
+        }
+    }
+
+    private var borderColor: Color {
+        pending ? accent.opacity(0.62) : Color.companionDivider
+    }
+
+    private func perform(_ action: CompanionDecisionAction) {
+        guard interactive else { return }
+        busy = true
+        error = nil
+        Task {
+            defer { busy = false }
+            do {
+                try await onDecide(action)
+            } catch {
+                self.error = companionDisplayMessage(
+                    error,
+                    fallback: "This request could not be updated."
+                )
+            }
+        }
+    }
+
+    private func configRows(_ proposal: CompanionConfigProposal) -> [ConfigRow] {
+        var rows: [ConfigRow] = []
+        rows += proposal.addSkillIDs.map { resourceRow(sign: "+", id: $0, catalog: catalog.skills) }
+        rows += proposal.removeSkillIDs.map { resourceRow(sign: "−", id: $0, catalog: catalog.skills) }
+        rows += proposal.attachPluginIDs.map {
+            let row = resourceRow(sign: "+", id: $0, catalog: catalog.plugins)
+            return ConfigRow(sign: row.sign, label: "plugin \(row.label)", known: row.known)
+        }
+        rows += proposal.detachPluginIDs.map {
+            let row = resourceRow(sign: "−", id: $0, catalog: catalog.plugins)
+            return ConfigRow(sign: row.sign, label: "plugin \(row.label)", known: row.known)
+        }
+        if let modelID = proposal.modelID {
+            let row = resourceRow(sign: "→", id: modelID, catalog: catalog.models)
+            rows.append(ConfigRow(
+                sign: row.sign,
+                label: "model \(row.label)",
+                known: row.known
+            ))
+        }
+        return rows
+    }
+
+    private func resourceRow(
+        sign: String,
+        id: String,
+        catalog: [String: String]
+    ) -> ConfigRow {
+        guard let label = catalog[id] else {
+            return ConfigRow(
+                sign: sign,
+                label: "a resource owned by another member",
+                known: false
+            )
+        }
+        return ConfigRow(sign: sign, label: label, known: true)
+    }
+}
+
+private struct ConfigRow {
+    let sign: String
+    let label: String
+    let known: Bool
+}

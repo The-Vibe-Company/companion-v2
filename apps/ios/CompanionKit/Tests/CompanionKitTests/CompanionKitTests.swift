@@ -66,6 +66,40 @@ private final class NotificationMockURLProtocol: URLProtocol, @unchecked Sendabl
     override func stopLoading() {}
 }
 
+private final class DecisionMockURLProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+    nonisolated(unsafe) static var expectedActions: [[String: String]] = []
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        do {
+            let handler = try #require(Self.handler)
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
+private actor AsyncBooleanProbe {
+    private var value = false
+
+    func mark() {
+        value = true
+    }
+
+    func read() -> Bool {
+        value
+    }
+}
+
 private func requestBody(_ request: URLRequest) throws -> Data {
     if let body = request.httpBody { return body }
     let stream = try #require(request.httpBodyStream)
@@ -317,6 +351,256 @@ func decodesViewerAndAuthorIdentityForSharedThreads() throws {
     #expect(thread.viewerID == "viewer-1")
     #expect(thread.entries.first?.authorID == "editor-2")
     #expect(thread.entries.first?.authorName == "Morgan")
+}
+
+@Test
+func decodesEveryCompanionDecisionKindAndProposal() throws {
+    let data = Data(#"""
+    {
+      "companion_id":"5b7d655e-36bb-4fbe-9acd-e56103759911",
+      "viewer_id":"owner-1",
+      "read_only":false,
+      "can_send":true,
+      "entries":[
+        {
+          "event_id":"decision:shell","ordinal":1,"role":"decision","content":"pnpm test",
+          "author_id":null,"author_name":null,"queued":false,"created_at":"2026-08-26T06:00:00.000Z",
+          "decision":{"request_id":"shell-1","kind":"shell","name":"shell","title":"pnpm test","detail":"Runs the test suite","status":"pending","answer":null,"decided_by_id":null,"decided_by_name":null,"decided_at":null,"expires_at":"2026-08-26T06:10:00.000Z","proposal":null}
+        },
+        {
+          "event_id":"decision:file","ordinal":2,"role":"decision","content":"Package.swift",
+          "author_id":null,"author_name":null,"queued":false,"created_at":"2026-08-26T06:00:01.000Z",
+          "decision":{"request_id":"file-1","kind":"file","name":"edit","title":"Package.swift","detail":null,"status":"denied","answer":null,"decided_by_id":"owner-1","decided_by_name":"Stan","decided_at":"2026-08-26T06:00:02.000Z","expires_at":"2026-08-26T06:10:00.000Z","proposal":null}
+        },
+        {
+          "event_id":"decision:question","ordinal":3,"role":"decision","content":"Which release?",
+          "author_id":null,"author_name":null,"queued":false,"created_at":"2026-08-26T06:00:03.000Z",
+          "decision":{"request_id":"question-1","kind":"question","name":"ask_user","title":"Which release?","detail":null,"status":"answered","answer":"The stable release","decided_by_id":"owner-1","decided_by_name":"Stan","decided_at":"2026-08-26T06:00:04.000Z","expires_at":"2026-08-26T06:10:00.000Z","proposal":null}
+        },
+        {
+          "event_id":"decision:config","ordinal":4,"role":"decision","content":"Update configuration",
+          "author_id":null,"author_name":null,"queued":false,"created_at":"2026-08-26T06:00:05.000Z",
+          "decision":{"request_id":"config-1","kind":"config","name":"config","title":"Update configuration","detail":null,"status":"allowed","answer":null,"decided_by_id":"owner-1","decided_by_name":"Stan","decided_at":"2026-08-26T06:00:06.000Z","expires_at":"2026-08-26T06:10:00.000Z","proposal":{"kind":"config","add_skill_ids":["11111111-1111-4111-8111-111111111111"],"remove_skill_ids":[],"attach_plugin_ids":["22222222-2222-4222-8222-222222222222"],"detach_plugin_ids":[],"model_id":"claude-sonnet","persona":null}}
+        },
+        {
+          "event_id":"decision:routine","ordinal":5,"role":"decision","content":"Progress check",
+          "author_id":null,"author_name":null,"queued":false,"created_at":"2026-08-26T06:00:07.000Z",
+          "decision":{"request_id":"routine-1","kind":"routine","name":"routine","title":"Progress check","detail":null,"status":"pending","answer":null,"decided_by_id":null,"decided_by_name":null,"decided_at":null,"expires_at":"2026-08-26T06:10:00.000Z","proposal":{"kind":"routine","name":"conductor-progress-check","prompt":"Check progress","cron":"*/30 * * * *","timezone":"Europe/Paris"}}
+        },
+        {
+          "event_id":"decision:trigger","ordinal":6,"role":"decision","content":"GitHub release",
+          "author_id":null,"author_name":null,"queued":false,"created_at":"2026-08-26T06:00:08.000Z",
+          "decision":{"request_id":"trigger-1","kind":"trigger","name":"trigger","title":"GitHub release","detail":null,"status":"expired","answer":null,"decided_by_id":null,"decided_by_name":null,"decided_at":"2026-08-26T06:10:00.000Z","expires_at":"2026-08-26T06:10:00.000Z","proposal":{"kind":"trigger","name":"release-watch","prompt":"Review releases","provider":"github","target":{"repo":"companion/app","events":["release"]}}}
+        }
+      ],
+      "queued_count":0
+    }
+    """#.utf8)
+
+    let thread = try JSONDecoder().decode(CompanionThread.self, from: data)
+    #expect(thread.entries.compactMap { $0.decision?.kind } == [
+        .shell, .file, .question, .config, .routine, .trigger,
+    ])
+    #expect(thread.entries[1].decision?.status == .denied)
+    #expect(thread.entries[2].decision?.answer == "The stable release")
+
+    guard case .config(let config) = thread.entries[3].decision?.proposal else {
+        Issue.record("Expected a config proposal")
+        return
+    }
+    #expect(config.addSkillIDs == ["11111111-1111-4111-8111-111111111111"])
+    #expect(config.includesPersona)
+    #expect(config.persona == nil)
+
+    guard case .routine(let routine) = thread.entries[4].decision?.proposal else {
+        Issue.record("Expected a routine proposal")
+        return
+    }
+    #expect(routine.cron == "*/30 * * * *")
+    #expect(routine.timezone == "Europe/Paris")
+
+    guard case .trigger(let trigger) = thread.entries[5].decision?.proposal else {
+        Issue.record("Expected a trigger proposal")
+        return
+    }
+    #expect(trigger.target?.repo == "companion/app")
+    #expect(trigger.target?.events == ["release"])
+}
+
+@Test
+func decodesAPluginConnectionDecisionWithoutTrustingPayloadLabels() throws {
+    let data = Data(#"""
+    {
+      "request_id":"config-connect-1",
+      "kind":"config",
+      "name":"config",
+      "title":"Connect GitHub",
+      "detail":null,
+      "status":"pending",
+      "answer":null,
+      "decided_by_id":null,
+      "decided_by_name":null,
+      "decided_at":null,
+      "expires_at":"2026-08-26T06:10:00.000Z",
+      "proposal":{"kind":"config","connect_plugin":{"server_name":"github","reason":"Watch releases"}}
+    }
+    """#.utf8)
+
+    let decision = try JSONDecoder().decode(CompanionDecision.self, from: data)
+    guard case .config(let proposal) = decision.proposal else {
+        Issue.record("Expected a config proposal")
+        return
+    }
+    #expect(proposal.connectPlugin?.serverName == "github")
+    #expect(proposal.connectPlugin?.reason == "Watch releases")
+    #expect(proposal.addSkillIDs.isEmpty)
+}
+
+@Test
+func keepsUnknownTranscriptAndDecisionKindsReadable() throws {
+    let data = Data(#"""
+    {
+      "companion_id":"5b7d655e-36bb-4fbe-9acd-e56103759911",
+      "viewer_id":"viewer-1",
+      "read_only":true,
+      "can_send":false,
+      "entries":[
+        {
+          "event_id":"future:1","ordinal":1,"role":"future_role","content":"Future content",
+          "author_id":null,"author_name":null,"queued":false,"created_at":"2026-08-26T06:00:00.000Z"
+        },
+        {
+          "event_id":"decision:future","ordinal":2,"role":"decision","content":"Future request",
+          "author_id":null,"author_name":null,"queued":false,"created_at":"2026-08-26T06:00:01.000Z",
+          "decision":{"request_id":"future-1","kind":"future_kind","name":"future","title":"Future request","detail":null,"status":"future_status","answer":null,"decided_by_id":null,"decided_by_name":null,"decided_at":null,"expires_at":"2026-08-26T06:10:00.000Z","proposal":{"kind":"future_kind","value":true}}
+        }
+      ],
+      "queued_count":0
+    }
+    """#.utf8)
+
+    let thread = try JSONDecoder().decode(CompanionThread.self, from: data)
+    #expect(thread.entries[0].role == "future_role")
+    #expect(thread.entries[1].decision?.kind == .unknown)
+    #expect(thread.entries[1].decision?.status == .unknown)
+    #expect(thread.entries[1].decision?.proposal == nil)
+}
+
+@Test
+func submitsEveryCompanionDecisionActionThroughTheSharedRoute() async throws {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [DecisionMockURLProtocol.self]
+    DecisionMockURLProtocol.expectedActions = [
+        ["action": "allow"],
+        ["action": "deny"],
+        ["action": "answer", "answer": "Ship the stable release"],
+    ]
+    DecisionMockURLProtocol.handler = { request in
+        #expect(request.httpMethod == "POST")
+        #expect(request.url?.absoluteString.contains(
+            "/v1/companions/companion~one/decisions/request%2Fone"
+        ) == true)
+        #expect(request.value(forHTTPHeaderField: "Cookie") == "better-auth.session_token=session")
+        #expect(request.value(forHTTPHeaderField: "x-companion-org") == "org-1")
+        let body = try requestBody(request)
+        let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: String])
+        #expect(json == DecisionMockURLProtocol.expectedActions.removeFirst())
+        let response = try #require(HTTPURLResponse(
+            url: request.url!, statusCode: 202, httpVersion: nil, headerFields: nil
+        ))
+        let data = Data(#"{"thread":{"companion_id":"5b7d655e-36bb-4fbe-9acd-e56103759911","viewer_id":"owner-1","read_only":false,"can_send":true,"entries":[],"queued_count":0}}"#.utf8)
+        return (response, data)
+    }
+    defer {
+        DecisionMockURLProtocol.handler = nil
+        DecisionMockURLProtocol.expectedActions = []
+    }
+
+    let client = APIClient(
+        baseURL: URL(string: "http://127.0.0.1:3001")!,
+        session: URLSession(configuration: configuration)
+    )
+    await client.setAuthority(Session(
+        cookie: "better-auth.session_token=session",
+        orgID: "org-1",
+        needsOnboarding: false,
+        user: .init(id: "owner-1", email: "stan@example.com", name: "Stan")
+    ))
+
+    for action in [
+        CompanionDecisionAction.allow,
+        .deny,
+        .answer("Ship the stable release"),
+    ] {
+        let thread = try await client.decideCompanionDecision(
+            companionID: "companion~one",
+            requestID: "request/one",
+            action: action
+        )
+        #expect(thread.canSend)
+    }
+    #expect(DecisionMockURLProtocol.expectedActions.isEmpty)
+}
+
+@Test
+func decisionResponseInvalidatesAnOlderThreadPoll() throws {
+    func thread(status: String) throws -> CompanionThread {
+        try JSONDecoder().decode(CompanionThread.self, from: Data(#"""
+        {
+          "companion_id":"5b7d655e-36bb-4fbe-9acd-e56103759911",
+          "viewer_id":"owner-1",
+          "read_only":false,
+          "can_send":true,
+          "entries":[{
+            "event_id":"decision:question","ordinal":1,"role":"decision","content":"Which release?",
+            "author_id":null,"author_name":null,"queued":false,"created_at":"2026-08-26T06:00:00.000Z",
+            "decision":{"request_id":"question-1","kind":"question","name":"ask_user","title":"Which release?","detail":null,"status":"\#(status)","answer":null,"decided_by_id":null,"decided_by_name":null,"decided_at":null,"expires_at":"2026-08-26T06:10:00.000Z","proposal":null}
+          }],
+          "queued_count":0
+        }
+        """#.utf8))
+    }
+
+    var projection = CompanionThreadProjection(thread: try thread(status: "pending"))
+    let oldPoll = projection.beginRefresh()
+    projection.replaceAfterMutation(with: try thread(status: "allowed"))
+
+    #expect(!projection.accept(try thread(status: "pending"), refresh: oldPoll))
+    #expect(projection.thread?.entries.first?.decision?.status == .allowed)
+}
+
+@Test
+func decisionSubmissionGateRejectsDoubleTapAndAllowsRetry() async {
+    let gate = CompanionDecisionSubmissionGate()
+    let firstQuestion = await gate.acquire(requestID: "question-1")
+    let duplicateQuestion = await gate.acquire(requestID: "question-1")
+    #expect(firstQuestion)
+    #expect(!duplicateQuestion)
+
+    await gate.release(requestID: "question-1")
+    let retryQuestion = await gate.acquire(requestID: "question-1")
+    #expect(retryQuestion)
+    await gate.release(requestID: "question-1")
+}
+
+@Test
+func decisionSubmissionGateSerializesDistinctThreadSnapshots() async throws {
+    let gate = CompanionDecisionSubmissionGate()
+    let secondAcquisition = AsyncBooleanProbe()
+    #expect(await gate.acquire(requestID: "question-1"))
+
+    let secondRequest = Task {
+        let acquired = await gate.acquire(requestID: "shell-2")
+        await secondAcquisition.mark()
+        return acquired
+    }
+    try await Task.sleep(for: .milliseconds(20))
+    #expect(!(await secondAcquisition.read()))
+
+    await gate.release(requestID: "question-1")
+    #expect(await secondRequest.value)
+    #expect(await secondAcquisition.read())
+    await gate.release(requestID: "shell-2")
 }
 
 @Test

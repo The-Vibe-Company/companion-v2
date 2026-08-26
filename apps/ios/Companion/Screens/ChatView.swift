@@ -1,23 +1,44 @@
 import SwiftUI
 import CompanionKit
 
+@MainActor
+struct ChatServices {
+    let thread: (String) async throws -> CompanionThread
+    let listCompanions: () async throws -> [CompanionSummary]
+    let decide: (String, String, CompanionDecisionAction) async throws -> CompanionThread
+    let listSkills: () async throws -> [CompanionSkillReference]
+    let listPlugins: () async throws -> [CompanionPluginAccount]
+    let listProviders: () async throws -> CompanionProvidersResponse
+}
+
 struct ChatView: View {
     @Environment(SessionStore.self) private var sessionStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let companion: CompanionSummary
     let onSettings: () -> Void
+    let onPlugins: () -> Void
+    private let services: ChatServices?
     @State private var currentCompanion: CompanionSummary
-    @State private var thread: CompanionThread?
+    @State private var threadProjection = CompanionThreadProjection()
     @State private var draft = ""
     @State private var loading = true
     @State private var sending = false
     @State private var error: String?
     @State private var pendingMessages: [PendingMessage] = []
     @State private var markdownByEventID: [String: CachedMarkdownDocument] = [:]
-    @State private var reloadGeneration = 0
+    @State private var decisionSubmissionGate = CompanionDecisionSubmissionGate()
+    @State private var decisionCatalog = CompanionDecisionCatalog.empty
+    @State private var decisionCatalogLoaded = false
 
-    init(companion: CompanionSummary, onSettings: @escaping () -> Void) {
+    init(
+        companion: CompanionSummary,
+        onPlugins: @escaping () -> Void = {},
+        services: ChatServices? = nil,
+        onSettings: @escaping () -> Void
+    ) {
         self.companion = companion
+        self.onPlugins = onPlugins
+        self.services = services
         self.onSettings = onSettings
         _currentCompanion = State(initialValue: companion)
     }
@@ -43,13 +64,33 @@ struct ChatView: View {
                                 if startsNewDay(entry, after: index > 0 ? entries[index - 1] : nil) {
                                     dayMarker(for: transcriptDate(entry.createdAt) ?? .now)
                                 }
-                                MessageEntryView(
-                                    entry: entry,
-                                    own: entry.role == "user" && entry.authorID == thread?.viewerID,
-                                    companion: currentCompanion,
-                                    accent: visualTheme.accent,
-                                    markdown: markdownByEventID[entry.eventID]?.document
-                                )
+                                Group {
+                                    if let decision = entry.decision {
+                                        CompanionDecisionCard(
+                                            decision: decision,
+                                            companionName: currentCompanion.name,
+                                            canAct: thread?.canSend == true,
+                                            catalog: decisionCatalog,
+                                            accent: visualTheme.accent,
+                                            accentForeground: visualTheme.accentForeground,
+                                            onDecide: { action in
+                                                try await decide(
+                                                    requestID: decision.requestID,
+                                                    action: action
+                                                )
+                                            },
+                                            onOpenPlugins: onPlugins
+                                        )
+                                    } else {
+                                        MessageEntryView(
+                                            entry: entry,
+                                            own: entry.role == "user" && entry.authorID == thread?.viewerID,
+                                            companion: currentCompanion,
+                                            accent: visualTheme.accent,
+                                            markdown: markdownByEventID[entry.eventID]?.document
+                                        )
+                                    }
+                                }
                                 .id(entry.id)
                             }
 
@@ -98,6 +139,10 @@ struct ChatView: View {
                 try? await Task.sleep(for: .seconds(4))
                 if !Task.isCancelled { await reload(silently: true) }
             }
+        }
+        .task(id: decisionCatalogTaskID) {
+            guard decisionCatalogTaskID != nil else { return }
+            await loadDecisionCatalog()
         }
         .onChange(of: companion) { currentCompanion = companion }
     }
@@ -273,30 +318,40 @@ struct ChatView: View {
     }
 
     private func reload(silently: Bool = false) async {
-        reloadGeneration += 1
-        let generation = reloadGeneration
+        let generation = threadProjection.beginRefresh()
         if !silently { loading = true }
         do {
-            let next = try await sessionStore.thread(companionID: companion.id)
+            let next: CompanionThread
+            if let services {
+                next = try await services.thread(companion.id)
+            } else {
+                next = try await sessionStore.thread(companionID: companion.id)
+            }
             let renderedMarkdown = await renderedMarkdown(for: next.entries)
-            guard generation == reloadGeneration else { return }
+            guard threadProjection.accepts(refresh: generation) else { return }
             markdownByEventID = renderedMarkdown
-            thread = next
+            threadProjection.accept(next, refresh: generation)
             let persistedEventIDs = Set(next.entries.map(\.eventID))
             pendingMessages.removeAll { pending in
                 persistedEventIDs.contains("msg:\(pending.id.uuidString.lowercased())")
             }
             error = nil
         } catch {
-            guard generation == reloadGeneration else { return }
+            guard threadProjection.accepts(refresh: generation) else { return }
             self.error = "The conversation could not be refreshed."
         }
 
-        if let refreshed = try? await sessionStore.listCompanions().first(where: { $0.id == companion.id }) {
-            guard generation == reloadGeneration else { return }
+        let refreshed: CompanionSummary?
+        if let services {
+            refreshed = try? await services.listCompanions().first(where: { $0.id == companion.id })
+        } else {
+            refreshed = try? await sessionStore.listCompanions().first(where: { $0.id == companion.id })
+        }
+        if let refreshed {
+            guard threadProjection.accepts(refresh: generation) else { return }
             currentCompanion = refreshed
         }
-        if generation == reloadGeneration { loading = false }
+        if threadProjection.accepts(refresh: generation) { loading = false }
     }
 
     private func renderedMarkdown(
@@ -313,6 +368,17 @@ struct ChatView: View {
 
     private var entries: [TranscriptEntry] {
         thread?.entries ?? []
+    }
+
+    private var thread: CompanionThread? {
+        threadProjection.thread
+    }
+
+    private var decisionCatalogTaskID: String? {
+        entries.contains { entry in
+            guard let decision = entry.decision else { return false }
+            return decision.kind == .config
+        } ? companion.id : nil
     }
 
     private var pendingStartsNewDay: Bool {
@@ -386,6 +452,78 @@ struct ChatView: View {
                 pendingMessages[current].failed = true
             }
         }
+    }
+
+    private func decide(
+        requestID: String,
+        action: CompanionDecisionAction
+    ) async throws {
+        guard await decisionSubmissionGate.acquire(requestID: requestID) else { return }
+        threadProjection.invalidateRefreshes()
+
+        do {
+            let next: CompanionThread
+            if let services {
+                next = try await services.decide(companion.id, requestID, action)
+            } else {
+                next = try await sessionStore.decideCompanionDecision(
+                    companionID: companion.id,
+                    requestID: requestID,
+                    action: action
+                )
+            }
+
+            threadProjection.replaceAfterMutation(with: next)
+            let renderedMarkdown = await renderedMarkdown(for: next.entries)
+            markdownByEventID = renderedMarkdown
+            await decisionSubmissionGate.release(requestID: requestID)
+        } catch {
+            threadProjection.invalidateRefreshes()
+            await reload(silently: true)
+            await decisionSubmissionGate.release(requestID: requestID)
+            throw error
+        }
+    }
+
+    private func loadDecisionCatalog() async {
+        guard !decisionCatalogLoaded else { return }
+        decisionCatalogLoaded = true
+
+        async let skillsResult = loadDecisionSkills()
+        async let pluginsResult = loadDecisionPlugins()
+        async let providersResult = loadDecisionProviders()
+        let (skills, plugins, providers) = await (skillsResult, pluginsResult, providersResult)
+        guard !Task.isCancelled else { return }
+
+        decisionCatalog = CompanionDecisionCatalog(
+            skills: Dictionary(uniqueKeysWithValues: skills.map { ($0.id, $0.slug) }),
+            plugins: Dictionary(uniqueKeysWithValues: plugins.map {
+                ($0.id, "\($0.provider) · \($0.label)")
+            }),
+            models: providers.reduce(into: [String: String]()) { result, provider in
+                for model in provider.models { result[model.id] = model.name }
+            }
+        )
+    }
+
+    private func loadDecisionSkills() async -> [CompanionSkillReference] {
+        if let services { return (try? await services.listSkills()) ?? [] }
+        return (try? await sessionStore.listAccessibleCompanionSkills()) ?? []
+    }
+
+    private func loadDecisionPlugins() async -> [CompanionPluginAccount] {
+        if let services { return (try? await services.listPlugins()) ?? [] }
+        return (try? await sessionStore.listCompanionPlugins()) ?? []
+    }
+
+    private func loadDecisionProviders() async -> [CompanionProviderDefinition] {
+        let response: CompanionProvidersResponse?
+        if let services {
+            response = try? await services.listProviders()
+        } else {
+            response = try? await sessionStore.listCompanionProviders()
+        }
+        return response?.catalog ?? []
     }
 }
 

@@ -40,6 +40,131 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    func testDecisionDemoAnswersAndApprovesRequests() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-decision-demo"]
+        app.launchEnvironment["COMPANION_DECISION_DEMO_ACCESS"] = "owner"
+        app.launch()
+
+        let answerField = decisionAnswerField(in: app)
+        let answer = app.buttons["decision.answer.question-1"]
+        let deny = app.buttons["decision.deny.question-1"]
+        XCTAssertTrue(answerField.waitForExistence(timeout: 5))
+        XCTAssertTrue(answer.exists)
+        XCTAssertEqual(answer.label, "Answer request")
+        XCTAssertTrue(deny.exists)
+        XCTAssertFalse(answer.isEnabled)
+
+        answerField.tap()
+        answerField.typeText("Ship the stable release")
+        XCTAssertTrue(answer.isEnabled)
+        answer.doubleTap()
+        XCTAssertTrue(app.staticTexts["Submitted 1 request: question-1: answer"].waitForExistence(timeout: 2))
+
+        let routineCard = app.descendants(matching: .any)["decision.card.routine-1"]
+        for _ in 0..<4 where !routineCard.exists { app.swipeUp() }
+        XCTAssertTrue(routineCard.waitForExistence(timeout: 2))
+        let approveRoutine = app.buttons["decision.approve.routine-1"]
+        XCTAssertTrue(approveRoutine.waitForExistence(timeout: 2))
+        approveRoutine.tap()
+        XCTAssertTrue(app.staticTexts["Submitted 2 request: routine-1: allow"].waitForExistence(timeout: 2))
+    }
+
+    @MainActor
+    func testDecisionDemoKeepsViewerReadOnly() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-decision-demo"]
+        app.launchEnvironment["COMPANION_DECISION_DEMO_ACCESS"] = "viewer"
+        app.launch()
+
+        XCTAssertTrue(app.descendants(matching: .any)["decision.card.question-1"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["decision.answer.question-1"].exists)
+        XCTAssertFalse(app.buttons["decision.deny.question-1"].exists)
+        XCTAssertTrue(app.staticTexts["Waiting for an Owner or Editor"].exists)
+    }
+
+    @MainActor
+    func testDecisionDemoSupportsAccessibilityDynamicType() throws {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-companion-decision-demo",
+            "-UIPreferredContentSizeCategoryName",
+            "UICTContentSizeCategoryAccessibilityExtraExtraExtraLarge",
+        ]
+        app.launchEnvironment["COMPANION_DECISION_DEMO_ACCESS"] = "editor"
+        app.launch()
+
+        XCTAssertTrue(app.descendants(matching: .any)["decision.card.question-1"].waitForExistence(timeout: 5))
+        let answer = app.buttons["decision.answer.question-1"]
+        for _ in 0..<3 where !answer.exists { app.swipeUp() }
+        XCTAssertTrue(answer.exists)
+        XCTAssertTrue(app.staticTexts["Waiting"].exists)
+    }
+
+    @MainActor
+    func testDecisionDemoRendersEveryDecisionKindAndSettledState() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-decision-demo"]
+        app.launchEnvironment["COMPANION_DECISION_DEMO_ACCESS"] = "editor"
+        app.launch()
+
+        for requestID in ["question-1", "config-1", "routine-1", "trigger-1", "shell-1", "file-1"] {
+            let card = app.descendants(matching: .any)["decision.card.\(requestID)"]
+            for _ in 0..<6 where !card.exists { app.swipeUp() }
+            XCTAssertTrue(card.waitForExistence(timeout: 2), "Missing \(requestID)")
+        }
+        XCTAssertTrue(app.staticTexts["Timed out, denied"].exists)
+    }
+
+    @MainActor
+    func testDecisionDemoOpensPluginsForAConnectionRequest() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-decision-demo"]
+        app.launchEnvironment["COMPANION_DECISION_DEMO_ACCESS"] = "owner"
+        app.launch()
+
+        let openPlugins = app.buttons["decision.open-plugins.config-connect-1"]
+        for _ in 0..<5 where !openPlugins.exists { app.swipeUp() }
+        XCTAssertTrue(openPlugins.waitForExistence(timeout: 2))
+        openPlugins.tap()
+        XCTAssertTrue(app.staticTexts["Opened Plugins"].waitForExistence(timeout: 2))
+    }
+
+    @MainActor
+    func testDecisionDemoRecoversAfterAnError() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-decision-demo"]
+        app.launchEnvironment["COMPANION_DECISION_DEMO_ACCESS"] = "owner"
+        app.launchEnvironment["COMPANION_DECISION_DEMO_FAIL_ONCE"] = "question-1"
+        app.launch()
+
+        let answerField = decisionAnswerField(in: app)
+        let answer = app.buttons["decision.answer.question-1"]
+        XCTAssertTrue(answerField.waitForExistence(timeout: 5))
+        answerField.tap()
+        answerField.typeText("Retry this answer")
+        answer.tap()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["decision.error.question-1"]
+                .waitForExistence(timeout: 2)
+        )
+        XCTAssertTrue(answer.isEnabled)
+        answer.tap()
+        XCTAssertTrue(app.staticTexts["Submitted 1 request: question-1: answer"].waitForExistence(timeout: 2))
+    }
+
+    @MainActor
+    private func decisionAnswerField(in app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any).matching(
+            NSPredicate(
+                format: "identifier == %@ OR label == %@",
+                "decision.answer-field.question-1",
+                "Answer"
+            )
+        ).firstMatch
+    }
+
+    @MainActor
     func testLiquidGlassDemoRendersCompanionMarkdownSafely() throws {
         let app = XCUIApplication()
         app.launchArguments = ["-glass-chat-demo"]

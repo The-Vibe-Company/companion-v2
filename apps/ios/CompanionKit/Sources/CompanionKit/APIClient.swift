@@ -352,6 +352,10 @@ public actor APIClient {
         try await decode(PluginListEnvelope.self, path: "/v1/companion-plugins").accounts
     }
 
+    public func listAccessibleCompanionSkills() async throws -> [CompanionSkillReference] {
+        try await decode([CompanionSkillReference].self, path: "/v1/skills?lib=accessible")
+    }
+
     public func saveCompanionPlugin(
         _ input: SaveCompanionPluginInput
     ) async throws -> CompanionPluginAccount {
@@ -395,6 +399,22 @@ public actor APIClient {
     public func thread(companionID: String) async throws -> CompanionThread {
         let id = companionID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? companionID
         return try await decode(ThreadEnvelope.self, path: "/v1/companions/\(id)/thread").thread
+    }
+
+    public func decideCompanionDecision(
+        companionID: String,
+        requestID: String,
+        action: CompanionDecisionAction
+    ) async throws -> CompanionThread {
+        let companion = Self.encodedPathComponent(companionID)
+        let request = Self.encodedPathComponent(requestID)
+        let body = try encoder.encode(action)
+        return try await decode(
+            ThreadEnvelope.self,
+            path: "/v1/companions/\(companion)/decisions/\(request)",
+            method: "POST",
+            body: body
+        ).thread
     }
 
     public func sendMessage(companionID: String, content: String, clientMessageID: UUID) async throws {
@@ -581,5 +601,10 @@ public actor APIClient {
         response.allHeaderFields.first { key, _ in
             (key as? String)?.caseInsensitiveCompare(name) == .orderedSame
         }.map { String(describing: $0.value) }
+    }
+
+    private static func encodedPathComponent(_ value: String) -> String {
+        let unreserved = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        return value.addingPercentEncoding(withAllowedCharacters: unreserved) ?? value
     }
 }

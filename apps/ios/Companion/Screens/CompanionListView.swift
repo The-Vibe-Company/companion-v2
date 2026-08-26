@@ -298,7 +298,9 @@ struct CompanionListView: View {
         if let companion = companions.first(where: { $0.id == route.companionID }) {
             switch route {
             case .chat(let companionID):
-                ChatView(companion: companion) {
+                ChatView(companion: companion, onPlugins: {
+                    showingPlugins = true
+                }) {
                     path.append(.settings(companionID))
                 }
                 .onAppear { notifications.activeCompanionID = companionID }

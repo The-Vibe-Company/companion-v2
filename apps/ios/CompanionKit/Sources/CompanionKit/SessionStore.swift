@@ -324,6 +324,17 @@ public final class SessionStore {
         }
     }
 
+    public func listAccessibleCompanionSkills() async throws -> [CompanionSkillReference] {
+        do {
+            let skills = try await client.listAccessibleCompanionSkills()
+            await persistRollingAuthority()
+            return skills
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
     public func saveCompanionPlugin(
         _ input: SaveCompanionPluginInput
     ) async throws -> CompanionPluginAccount {
@@ -365,6 +376,25 @@ public final class SessionStore {
     public func thread(companionID: String) async throws -> CompanionThread {
         do {
             let thread = try await client.thread(companionID: companionID)
+            await persistRollingAuthority()
+            return thread
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func decideCompanionDecision(
+        companionID: String,
+        requestID: String,
+        action: CompanionDecisionAction
+    ) async throws -> CompanionThread {
+        do {
+            let thread = try await client.decideCompanionDecision(
+                companionID: companionID,
+                requestID: requestID,
+                action: action
+            )
             await persistRollingAuthority()
             return thread
         } catch let error as APIError where error.status == 401 {

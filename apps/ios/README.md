@@ -16,7 +16,10 @@ file-system-synchronized groups, so adding a Swift file does not require a proje
 The native roster can create Companions, open their essential settings from chat or a long-press
 menu, and request Owner-only durable deletion. Essential settings cover the Companion icon, name,
 instructions, provider, and model; Editor access is editable and Viewer access is read-only. The
-roster also manages model providers and MCP plugins. Provider
+native thread renders every durable decision request. Owner and Editor can answer `ask_user`,
+approve or deny configuration, routine, and trigger proposals, and handle historical shell/file
+requests without leaving iOS; Viewer remains read-only. The roster also manages model providers and
+MCP plugins. Provider
 connections support encrypted API keys plus the shared Claude authorization-code and Codex device
 flows. The live server catalog includes Claude, Codex, Kimi, Moonshot, z.ai, OpenAI API, and Google
 Gemini; the app renders that catalog rather than maintaining a divergent mobile allowlist. Members
@@ -56,10 +59,14 @@ Release builds ignore launch arguments and environment variables and always use
 `https://api.thecompanion.sh`.
 
 The Debug-only `-glass-chat-demo`, `-glass-management-demo`, `-glass-management-demo-plugins`,
-`-companion-icon-demo`, `-companion-settings-demo`, and `-companion-roster-demo` launch arguments
+`-companion-icon-demo`, `-companion-decision-demo`, `-companion-settings-demo`, and
+`-companion-roster-demo` launch arguments
 open deterministic showcases without requiring a server or account. Add `-companion-reduce-motion`
 alongside `-companion-icon-demo` to force the gallery's Reduce Motion path. The settings demo accepts
 `COMPANION_SETTINGS_DEMO_ACCESS=owner|editor|viewer` for deterministic role and deletion UI tests.
+The decision demo accepts `COMPANION_DECISION_DEMO_ACCESS=owner|editor|viewer` for the matching
+decision controls. Set `COMPANION_DECISION_DEMO_FAIL_ONCE=<request-id>` to exercise a failed
+submission followed by an enabled retry.
 The roster demo accepts the equivalent `COMPANION_ROSTER_DEMO_ACCESS` value and simulates a lost
 first deletion response followed by a same-key `202` retry. These arguments are excluded from Release
 behavior.

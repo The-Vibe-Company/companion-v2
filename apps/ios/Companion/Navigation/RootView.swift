@@ -16,7 +16,9 @@ struct RootView: View {
     var body: some View {
         Group {
 #if DEBUG
-            if ProcessInfo.processInfo.arguments.contains("-companion-icon-demo") {
+            if ProcessInfo.processInfo.arguments.contains("-companion-decision-demo") {
+                CompanionDecisionDemoView()
+            } else if ProcessInfo.processInfo.arguments.contains("-companion-icon-demo") {
                 CompanionIconCatalogDemoView(
                     forceReduceMotion: ProcessInfo.processInfo.arguments.contains("-companion-reduce-motion")
                 )
@@ -41,7 +43,8 @@ struct RootView: View {
         .task {
 #if DEBUG
             let arguments = ProcessInfo.processInfo.arguments
-            guard !arguments.contains("-companion-icon-demo"),
+            guard !arguments.contains("-companion-decision-demo"),
+                  !arguments.contains("-companion-icon-demo"),
                   !arguments.contains("-glass-chat-demo"),
                   !arguments.contains("-companion-settings-demo"),
                   !arguments.contains("-companion-roster-demo"),

@@ -497,6 +497,12 @@ public struct CompanionPluginAccount: Codable, Identifiable, Hashable, Sendable 
     }
 }
 
+/// The minimal Skills Hub projection needed to name a resource in a Companion decision card.
+public struct CompanionSkillReference: Codable, Identifiable, Hashable, Sendable {
+    public let id: String
+    public let slug: String
+}
+
 public struct CreateCompanionInput: Encodable, Equatable, Sendable {
     public let name: String
     public let persona: String?
@@ -620,6 +626,271 @@ public struct SaveCompanionPluginInput: Encodable, Equatable, Sendable {
     }
 }
 
+public enum CompanionDecisionKind: String, Codable, Equatable, Sendable {
+    case shell
+    case file
+    case question
+    case config
+    case routine
+    case trigger
+    case unknown
+
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = Self(rawValue: value) ?? .unknown
+    }
+}
+
+public enum CompanionDecisionStatus: String, Codable, Equatable, Sendable {
+    case pending
+    case allowed
+    case denied
+    case answered
+    case expired
+    case unknown
+
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = Self(rawValue: value) ?? .unknown
+    }
+}
+
+public struct CompanionConfigProposal: Codable, Equatable, Sendable {
+    public struct PluginConnection: Codable, Equatable, Sendable {
+        public let serverName: String
+        public let reason: String?
+
+        enum CodingKeys: String, CodingKey {
+            case serverName = "server_name"
+            case reason
+        }
+    }
+
+    public let addSkillIDs: [String]
+    public let removeSkillIDs: [String]
+    public let attachPluginIDs: [String]
+    public let detachPluginIDs: [String]
+    public let modelID: String?
+    public let persona: String?
+    public let includesPersona: Bool
+    public let connectPlugin: PluginConnection?
+
+    enum CodingKeys: String, CodingKey {
+        case kind
+        case addSkillIDs = "add_skill_ids"
+        case removeSkillIDs = "remove_skill_ids"
+        case attachPluginIDs = "attach_plugin_ids"
+        case detachPluginIDs = "detach_plugin_ids"
+        case modelID = "model_id"
+        case persona
+        case connectPlugin = "connect_plugin"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        addSkillIDs = try container.decodeIfPresent([String].self, forKey: .addSkillIDs) ?? []
+        removeSkillIDs = try container.decodeIfPresent([String].self, forKey: .removeSkillIDs) ?? []
+        attachPluginIDs = try container.decodeIfPresent([String].self, forKey: .attachPluginIDs) ?? []
+        detachPluginIDs = try container.decodeIfPresent([String].self, forKey: .detachPluginIDs) ?? []
+        modelID = try container.decodeIfPresent(String.self, forKey: .modelID)
+        includesPersona = container.contains(.persona)
+        persona = try container.decodeIfPresent(String.self, forKey: .persona)
+        connectPlugin = try container.decodeIfPresent(PluginConnection.self, forKey: .connectPlugin)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode("config", forKey: .kind)
+        if !addSkillIDs.isEmpty { try container.encode(addSkillIDs, forKey: .addSkillIDs) }
+        if !removeSkillIDs.isEmpty { try container.encode(removeSkillIDs, forKey: .removeSkillIDs) }
+        if !attachPluginIDs.isEmpty { try container.encode(attachPluginIDs, forKey: .attachPluginIDs) }
+        if !detachPluginIDs.isEmpty { try container.encode(detachPluginIDs, forKey: .detachPluginIDs) }
+        try container.encodeIfPresent(modelID, forKey: .modelID)
+        if includesPersona {
+            if let persona {
+                try container.encode(persona, forKey: .persona)
+            } else {
+                try container.encodeNil(forKey: .persona)
+            }
+        }
+        try container.encodeIfPresent(connectPlugin, forKey: .connectPlugin)
+    }
+}
+
+public struct CompanionRoutineProposal: Codable, Equatable, Sendable {
+    public let name: String
+    public let prompt: String
+    public let cron: String
+    public let timezone: String
+
+    enum CodingKeys: String, CodingKey {
+        case kind
+        case name
+        case prompt
+        case cron
+        case timezone
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        prompt = try container.decode(String.self, forKey: .prompt)
+        cron = try container.decode(String.self, forKey: .cron)
+        timezone = try container.decode(String.self, forKey: .timezone)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode("routine", forKey: .kind)
+        try container.encode(name, forKey: .name)
+        try container.encode(prompt, forKey: .prompt)
+        try container.encode(cron, forKey: .cron)
+        try container.encode(timezone, forKey: .timezone)
+    }
+}
+
+public struct CompanionTriggerProposal: Codable, Equatable, Sendable {
+    public struct Target: Codable, Equatable, Sendable {
+        public let repo: String?
+        public let events: [String]?
+    }
+
+    public let name: String
+    public let prompt: String
+    public let provider: String
+    public let target: Target?
+
+    enum CodingKeys: String, CodingKey {
+        case kind
+        case name
+        case prompt
+        case provider
+        case target
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        prompt = try container.decode(String.self, forKey: .prompt)
+        provider = try container.decode(String.self, forKey: .provider)
+        target = try container.decodeIfPresent(Target.self, forKey: .target)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode("trigger", forKey: .kind)
+        try container.encode(name, forKey: .name)
+        try container.encode(prompt, forKey: .prompt)
+        try container.encode(provider, forKey: .provider)
+        try container.encodeIfPresent(target, forKey: .target)
+    }
+}
+
+public enum CompanionDecisionProposal: Codable, Equatable, Sendable {
+    case config(CompanionConfigProposal)
+    case routine(CompanionRoutineProposal)
+    case trigger(CompanionTriggerProposal)
+
+    private enum CodingKeys: String, CodingKey {
+        case kind
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        switch try container.decode(String.self, forKey: .kind) {
+        case "config": self = .config(try CompanionConfigProposal(from: decoder))
+        case "routine": self = .routine(try CompanionRoutineProposal(from: decoder))
+        case "trigger": self = .trigger(try CompanionTriggerProposal(from: decoder))
+        default:
+            throw DecodingError.dataCorruptedError(
+                forKey: .kind,
+                in: container,
+                debugDescription: "Unsupported Companion decision proposal"
+            )
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        switch self {
+        case .config(let proposal): try proposal.encode(to: encoder)
+        case .routine(let proposal): try proposal.encode(to: encoder)
+        case .trigger(let proposal): try proposal.encode(to: encoder)
+        }
+    }
+}
+
+public struct CompanionDecision: Codable, Equatable, Sendable {
+    public let requestID: String
+    public let kind: CompanionDecisionKind
+    public let name: String
+    public let title: String
+    public let detail: String?
+    public let status: CompanionDecisionStatus
+    public let answer: String?
+    public let decidedByID: String?
+    public let decidedByName: String?
+    public let decidedAt: String?
+    public let expiresAt: String
+    public let proposal: CompanionDecisionProposal?
+
+    enum CodingKeys: String, CodingKey {
+        case requestID = "request_id"
+        case kind
+        case name
+        case title
+        case detail
+        case status
+        case answer
+        case decidedByID = "decided_by_id"
+        case decidedByName = "decided_by_name"
+        case decidedAt = "decided_at"
+        case expiresAt = "expires_at"
+        case proposal
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        requestID = try container.decode(String.self, forKey: .requestID)
+        kind = try container.decode(CompanionDecisionKind.self, forKey: .kind)
+        name = try container.decode(String.self, forKey: .name)
+        title = try container.decode(String.self, forKey: .title)
+        detail = try container.decodeIfPresent(String.self, forKey: .detail)
+        status = try container.decode(CompanionDecisionStatus.self, forKey: .status)
+        answer = try container.decodeIfPresent(String.self, forKey: .answer)
+        decidedByID = try container.decodeIfPresent(String.self, forKey: .decidedByID)
+        decidedByName = try container.decodeIfPresent(String.self, forKey: .decidedByName)
+        decidedAt = try container.decodeIfPresent(String.self, forKey: .decidedAt)
+        expiresAt = try container.decode(String.self, forKey: .expiresAt)
+        proposal = kind == .unknown
+            ? nil
+            : try container.decodeIfPresent(CompanionDecisionProposal.self, forKey: .proposal)
+    }
+}
+
+public enum CompanionDecisionAction: Encodable, Equatable, Sendable {
+    case allow
+    case deny
+    case answer(String)
+
+    private enum CodingKeys: String, CodingKey {
+        case action
+        case answer
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .allow:
+            try container.encode("allow", forKey: .action)
+        case .deny:
+            try container.encode("deny", forKey: .action)
+        case .answer(let answer):
+            try container.encode("answer", forKey: .action)
+            try container.encode(answer, forKey: .answer)
+        }
+    }
+}
+
 public struct TranscriptEntry: Codable, Identifiable, Equatable, Sendable {
     public let eventID: String
     public let ordinal: Int
@@ -627,6 +898,7 @@ public struct TranscriptEntry: Codable, Identifiable, Equatable, Sendable {
     public let content: String
     public let authorID: String?
     public let authorName: String?
+    public let decision: CompanionDecision?
     public let queued: Bool
     public let createdAt: String
 
@@ -639,6 +911,7 @@ public struct TranscriptEntry: Codable, Identifiable, Equatable, Sendable {
         case content
         case authorID = "author_id"
         case authorName = "author_name"
+        case decision
         case queued
         case createdAt = "created_at"
     }
