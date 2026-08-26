@@ -997,7 +997,7 @@ export const companionTurns = pgTable(
     queueSequenceCheck: check("companion_turns_queue_sequence_check", sql`${t.queueSequence} >= 1`),
     messageEventCheck: check("companion_turns_message_event_check", sql`${t.messageEventId} = 'msg:' || ${t.clientMessageId}::text`),
     actorCheck: check("companion_turns_actor_check", sql`char_length(${t.actorId}) between 1 and 200 and ${t.actorId} !~ E'[\\n\\r]'`),
-    deadlineCheck: check("companion_turns_deadline_check", sql`(${t.coldStartDeadlineAt} is null or ${t.coldStartDeadlineAt} >= ${t.createdAt}) and ((${t.status} in ('queued','cancelled') and ${t.inactivityDeadlineAt} is null and ${t.absoluteDeadlineAt} is null) or (${t.status} <> 'queued' and ${t.absoluteDeadlineAt} is not null and (${t.inactivityDeadlineAt} is null or ${t.absoluteDeadlineAt} >= ${t.inactivityDeadlineAt})))`),
+    deadlineCheck: check("companion_turns_deadline_check", sql`(${t.coldStartDeadlineAt} is null or ${t.coldStartDeadlineAt} >= ${t.createdAt}) and (${t.status} <> 'needs_input' or ${t.inactivityDeadlineAt} is null) and ((${t.status} in ('queued','cancelled') and ${t.inactivityDeadlineAt} is null and ${t.absoluteDeadlineAt} is null) or (${t.status} <> 'queued' and ${t.absoluteDeadlineAt} is not null and (${t.inactivityDeadlineAt} is null or ${t.absoluteDeadlineAt} >= ${t.inactivityDeadlineAt})))`),
     terminalCheck: check("companion_turns_terminal_check", sql`(${t.status} in ('succeeded','failed','interrupted','cancelled')) = (${t.settledAt} is not null)`),
     errorCheck: check("companion_turns_error_check", sql`((${t.lastErrorCode} is null) = (${t.lastErrorMessage} is null)) and ((${t.lastErrorCode} is null) = (${t.lastErrorAction} is null)) and (${t.lastErrorCode} is null or ${t.lastErrorCode} ~ '^[a-z][a-z0-9_]{0,63}$') and (${t.lastErrorMessage} is null or (char_length(${t.lastErrorMessage}) <= 500 and ${t.lastErrorMessage} !~ E'[\\n\\r]')) and (${t.status} not in ('failed','interrupted') or ${t.lastErrorCode} is not null) and (${t.status} not in ('succeeded','cancelled') or ${t.lastErrorCode} is null)`),
     messageEvent: index("companion_turns_message_event_idx").on(t.companionId, t.messageEventId),
@@ -1546,7 +1546,7 @@ export interface CompanionStoredDecision {
   name: string;
   title: string;
   detail: string | null;
-  status: "pending" | "allowed" | "denied" | "answered" | "expired";
+  status: "pending" | "allowed" | "denied" | "answered" | "expired" | "cancelled";
   answer: string | null;
   decided_by_id: string | null;
   decided_by_name: string | null;

@@ -19,7 +19,7 @@ export interface CompanionBudgetsBase {
   /**
    * A turn with no correlated Pi activity for this long is stalled. SQL twin:
    * `interval '10 minutes'`. The stall clock pauses on `needs_input` (the claim is released and the
-   * deadline re-armed on resume), so the decision timeout may approach — but never exceed — it.
+   * deadline is cleared, then re-armed on resume), so human wait time does not spend this budget.
    */
   inactivityStallMs: number;
   /**
@@ -43,7 +43,11 @@ export interface CompanionBudgetsBase {
   toolRunTimeoutMs: number;
   /** Ceiling for one shell/subagent Pi tool run. Known to equal the stall today — see exceedances. */
   execToolRunTimeoutMs: number;
-  /** How long ask_user/propose_* wait for a human answer before failing closed. */
+  /**
+   * How long ask_user/propose_* wait for a human answer before returning control to Pi without an
+   * approval. A newer member message also ends the wait early. The inactivity clock is paused in
+   * needs_input so the decision delivery can resume Pi cleanly instead of racing a stall.
+   */
   decisionTimeoutMs: number;
   /** One Box provider HTTP call (maintenance client, runtime adapters, lifecycle calls). */
   boxRequestTimeoutMs: number;
@@ -70,7 +74,7 @@ export const COMPANION_BUDGETS_BASE = {
   sweepIntervalMs: 2_000,
   toolRunTimeoutMs: 90_000,
   execToolRunTimeoutMs: 600_000,
-  decisionTimeoutMs: 5 * 60 * 1_000,
+  decisionTimeoutMs: 10 * 60 * 1_000,
   boxRequestTimeoutMs: 30_000,
   operationDeadlineMs: 10 * 60 * 1_000,
   layoutInstallBudgetMs: 300_000,
@@ -156,7 +160,7 @@ export function sqlIntervalToMs(literal: string): number {
 export const COMPANION_SQL_BUDGET_CONTRACT: Readonly<Record<string, readonly string[]>> = {
   // turnAbsoluteDeadlineMs.
   companion_runtime_claim_work_without_material_guard: ["2 hours"],
-  // decisionTimeoutMs floor for needs_input re-arm + inactivityStallMs.
+  // Accepted activity timestamp skew allowance + inactivityStallMs.
   companion_runtime_checkpoint: ["5 minutes", "10 minutes"],
   // Event retention window + inactivityStallMs re-arm.
   companion_runtime_project_event_batch: ["24 hours", "10 minutes"],

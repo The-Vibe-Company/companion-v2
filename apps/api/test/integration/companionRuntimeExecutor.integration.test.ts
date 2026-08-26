@@ -2276,6 +2276,203 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     }
   });
 
+  it("returns a pending decision to Pi and defers Start when a member sends a follow-up", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    let companionId = "";
+    try {
+      const [created] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ companionId: string }>>`
+          select companion_id::text as "companionId"
+          from public.companion_api_create_companion(
+            ${ids.orgA}::uuid, 'Busy warm follow-up fixture', null,
+            ${providerId}, 'fixture-model',
+            '[]'::jsonb, false, '[]'::jsonb
+          )
+        `,
+      });
+      companionId = created?.companionId ?? "";
+
+      await sql`
+        update companion_runtime_instances
+        set box_id = 'bx_busywarm', box_state = 'ready', pi_state = 'idle',
+          pi_invocation_id = 'pi-busy-warm', disk_layout_version = 14,
+          applied_settings_revision = desired_settings_revision,
+          applied_skills_revision = 1, applied_client_surface = 'web',
+          last_observed_at = now()
+        where companion_id = ${companionId}::uuid
+      `;
+      await sql`
+        update companion_runtime_instances
+        set material_client_surface = 'web', material_pi_invocation_id = 'pi-busy-warm',
+          material_expires_at = now() + interval '6 hours'
+        where companion_id = ${companionId}::uuid
+      `;
+
+      const firstMessageId = randomUUID();
+      await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx: Tx) => tx`
+          select * from public.companion_api_enqueue_turn(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${firstMessageId}::uuid,
+            'Keep Pi busy', 'web', '[]'::jsonb
+          )
+        `,
+      });
+      const firstClaim = await claimWork();
+      expect(firstClaim).toMatchObject({ workKind: "attempt", companionId });
+      const decisionId = randomUUID();
+      const requestKey = `superseded-${randomUUID()}`;
+      const expiresAt = new Date(Date.now() + 10 * 60_000).toISOString();
+      const decision = {
+        request_id: requestKey,
+        kind: "question",
+        name: "ask_user",
+        title: "Should the old turn continue?",
+        detail: "A newer member message should return control to Pi.",
+        status: "pending",
+        answer: null,
+        decided_by_id: null,
+        decided_by_name: null,
+        decided_at: null,
+        expires_at: expiresAt,
+      };
+      await sql`
+        update companion_runtime_instances
+        set pi_state = 'running', last_observed_at = now()
+        where companion_id = ${companionId}::uuid
+      `;
+      await sql`
+        update companion_turn_attempts
+        set status = 'needs_input', checkpoint = 'needs_input', updated_at = now()
+        where id = ${firstClaim.workId}::uuid
+      `;
+      await sql`
+        update companion_turns
+        set status = 'needs_input', state_changed_at = now(), updated_at = now()
+        where companion_id = ${companionId}::uuid and status = 'starting'
+      `;
+      const followUpMessageId = randomUUID();
+      const [followUp] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx: Tx) => tx<Array<{
+          turn: IntegrationJsonObject;
+          operation: IntegrationJsonObject | null;
+        }>>`
+          select turn, operation from public.companion_api_enqueue_turn(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${followUpMessageId}::uuid,
+            'Wait behind the active turn', 'web', '[]'::jsonb
+          )
+        `,
+      });
+      expect(followUp?.operation).toBeNull();
+      expect(followUp?.turn).toMatchObject({ status: "queued" });
+      const followUpTurnId = stringValue(followUp?.turn.id);
+
+      // Reproduce the projection/send race in the harder commit order: the member turn is already
+      // durable before the still-running attempt projects its decision. The deferred delivery
+      // reconciliation must close it after the transcript insert, without treating the message as
+      // an answer or waiting for the ten-minute expiry.
+      await sql.begin(async (tx) => {
+        await tx`
+          insert into companion_decision_deliveries(
+            id, org_id, companion_id, turn_id, attempt_id,
+            request_key, request_kind, expires_at
+          )
+          select ${decisionId}::uuid, ${ids.orgA}::uuid, ${companionId}::uuid,
+            attempt.turn_id, attempt.id, ${requestKey}, 'question', ${expiresAt}
+          from companion_turn_attempts attempt
+          where attempt.id = ${firstClaim.workId}::uuid
+        `;
+        await tx`
+          with next_entry as (
+            update companion_threads
+            set next_ordinal = next_ordinal + 1, updated_at = now()
+            where companion_id = ${companionId}::uuid
+            returning next_ordinal - 1 as ordinal
+          )
+          insert into companion_transcript_entries(
+            org_id, companion_id, event_id, ordinal, role, content, decision
+          )
+          select ${ids.orgA}::uuid, ${companionId}::uuid, ${`decision:${requestKey}`},
+            next_entry.ordinal, 'decision', ${decision.title}, ${tx.json(decision)}
+          from next_entry
+        `;
+      });
+
+      const [durable] = await sql<Array<{
+        startOperations: number;
+        coldStartDeadlineAt: Date | null;
+        decisionStatus: string;
+        transcriptStatus: string;
+      }>>`
+        select
+          (select count(*)::int from companion_operations operation
+           where operation.companion_id = ${companionId}::uuid
+             and operation.source_turn_id = ${followUpTurnId}::uuid
+             and operation.kind = 'start') as "startOperations",
+          turn_row.cold_start_deadline_at as "coldStartDeadlineAt",
+          delivery.decision_status::text as "decisionStatus",
+          transcript.decision ->> 'status' as "transcriptStatus"
+        from companion_turns turn_row
+        join companion_decision_deliveries delivery
+          on delivery.id = ${decisionId}::uuid
+        join companion_transcript_entries transcript
+          on transcript.companion_id = turn_row.companion_id
+         and transcript.event_id = ${`decision:${requestKey}`}
+        where turn_row.id = ${followUpTurnId}::uuid
+      `;
+      expect(durable).toEqual({
+        startOperations: 0,
+        coldStartDeadlineAt: null,
+        decisionStatus: "cancelled",
+        transcriptStatus: "cancelled",
+      });
+      await release(firstClaim);
+      const decisionClaim = await claimWork();
+      expect(decisionClaim).toMatchObject({
+        companionId,
+        workKind: "decision",
+        workId: decisionId,
+      });
+      const authorization = await asRuntime((tx) => tx<Array<{
+        authorized: boolean;
+        denialCode: string | null;
+      }>>`
+        select authorized, denial_code as "denialCode"
+        from public.companion_runtime_renew_and_authorize(
+          ${decisionClaim.orgId}::uuid, ${decisionClaim.companionId}::uuid,
+          ${decisionClaim.claimToken}::uuid, ${decisionClaim.claimEpoch}::bigint,
+          ${decisionClaim.gateEpoch}::bigint, ${executorId}, 'decision',
+          ${decisionClaim.workId}::uuid, 30
+        )
+      `);
+      expect(authorization).toEqual([{ authorized: true, denialCode: null }]);
+      const response = await asRuntime((tx) => tx<Array<{
+        kind: string;
+        payload: IntegrationJsonObject;
+      }>>`
+        select decision_request_kind::text as kind, decision_response_payload as payload
+        from public.companion_runtime_get_material(
+          ${decisionClaim.orgId}::uuid, ${decisionClaim.companionId}::uuid,
+          ${decisionClaim.claimToken}::uuid, ${decisionClaim.claimEpoch}::bigint,
+          ${decisionClaim.gateEpoch}::bigint, ${executorId}, 'decision',
+          ${decisionClaim.workId}::uuid, 30
+        )
+      `);
+      expect(response).toEqual([{
+        kind: "question",
+        payload: { type: "extension_ui_response", id: requestKey, cancelled: true },
+      }]);
+      await release(decisionClaim);
+    } finally {
+      if (companionId) await removeCompanion(companionId);
+    }
+  });
+
   it("quarantines old material claimers while the broker-aware executor can claim the work", async () => {
     if (!sql) throw new Error("runtime executor database is not initialized");
     let companionId = "";
@@ -5043,16 +5240,24 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         cursor: string;
         sequence: string;
         status: string;
+        turnStatus: string;
+        inactivityDeadlineAt: Date | null;
         unknownCount: number;
         malformedCount: number;
       }>>`
-        select event_cursor::text as cursor, checkpoint_sequence::text as sequence,
-          status::text as status, unknown_event_count as "unknownCount",
-          malformed_event_count as "malformedCount"
-        from companion_turn_attempts where id = ${fixture.attemptId}::uuid
+        select attempt.event_cursor::text as cursor,
+          attempt.checkpoint_sequence::text as sequence,
+          attempt.status::text as status, attempt.unknown_event_count as "unknownCount",
+          attempt.malformed_event_count as "malformedCount",
+          turn_row.status::text as "turnStatus",
+          turn_row.inactivity_deadline_at as "inactivityDeadlineAt"
+        from companion_turn_attempts attempt
+        join companion_turns turn_row on turn_row.id = attempt.turn_id
+        where attempt.id = ${fixture.attemptId}::uuid
       `;
       expect(attempt).toEqual({
-        cursor: "5", sequence: "1", status: "needs_input", unknownCount: 2, malformedCount: 1,
+        cursor: "5", sequence: "1", status: "needs_input", turnStatus: "needs_input",
+        inactivityDeadlineAt: null, unknownCount: 2, malformedCount: 1,
       });
       const [delivery] = await sql<Array<{ id: string; kind: string }>>`
         select id::text as id, request_kind::text as kind

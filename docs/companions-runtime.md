@@ -485,7 +485,12 @@ back.
 
 Pi's `ask_user` is projected as durable `needs_input`. Owner/Editor answers are stored before runtime
 delivery; Viewer can read but not answer. A runtime failure after persistence resumes delivery under
-the same attempt and decision identity.
+the same attempt and decision identity. The inactivity deadline is cleared while the turn is
+`needs_input`. After ten minutes without an answer, runtime delivers cancellation and Pi chooses
+whether to stop, explain a safe fallback, or continue without the missing approval. A newer member
+message performs the same fail-closed cancellation immediately, then waits as its own queued turn.
+Neither path can approve a confirmation or proposal. Delivery re-arms inactivity; the attempt's
+existing two-hour absolute deadline remains the outer bound.
 
 A `companion:config:<op>` confirmation with a strict JSON `{summary, proposal}` body projects as
 `request_kind = config_proposal`. The payload cannot name `hub_access`, `can_write_skills`, `name`,
@@ -522,7 +527,7 @@ creates a trigger itself, and a proposed trigger never fires in the turn that pr
 
 A running attempt has two bounds:
 
-- inactivity stall after ten minutes without correlated activity;
+- inactivity stall after ten minutes without correlated activity, paused while `needs_input`;
 - absolute deadline two hours after attempt start, regardless of activity.
 
 The two-second sweep settles either deadline no later than one additional sweep. Settlement is

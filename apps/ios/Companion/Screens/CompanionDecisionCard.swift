@@ -125,6 +125,10 @@ struct CompanionDecisionCard: View {
             Text("Timed out, denied")
                 .font(.caption)
                 .foregroundStyle(Color.companionMuted)
+        } else if decision.status == .cancelled {
+            Text("Closed without approval")
+                .font(.caption)
+                .foregroundStyle(Color.companionMuted)
         }
     }
 
@@ -359,6 +363,7 @@ struct CompanionDecisionCard: View {
         case .denied: "Denied"
         case .answered: "Answered"
         case .expired: "Timed out"
+        case .cancelled: "Closed"
         case .unknown: "Unknown"
         }
     }
@@ -368,6 +373,7 @@ struct CompanionDecisionCard: View {
         case .pending: "clock"
         case .allowed, .answered: "checkmark"
         case .denied, .expired: "exclamationmark.triangle"
+        case .cancelled: "xmark"
         case .unknown: "questionmark"
         }
     }
@@ -377,7 +383,7 @@ struct CompanionDecisionCard: View {
         case .pending: Color.companionWarning
         case .allowed, .answered: Color.companionSuccess
         case .denied, .expired: Color.companionDanger
-        case .unknown: Color.companionMuted
+        case .cancelled, .unknown: Color.companionMuted
         }
     }
 

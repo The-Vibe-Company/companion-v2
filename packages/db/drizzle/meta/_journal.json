@@ -904,6 +904,13 @@
       "when": 1790874400000,
       "tag": "0128_companion_retry_absent_box",
       "breakpoints": true
+    },
+    {
+      "idx": 129,
+      "version": "7",
+      "when": 1790960800000,
+      "tag": "0129_companion_decision_waits",
+      "breakpoints": true
     }
   ]
 }

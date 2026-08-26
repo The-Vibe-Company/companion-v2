@@ -233,7 +233,7 @@ function run() {
       method: "input",
       title: "companion:question:ask_user",
       placeholder: "Continue the simulated task?",
-      timeout: 300_000,
+      timeout: 600_000,
     });
     pendingUiRequest = { requestId, toolCallId, toolName: "ask_user" };
   }
@@ -261,7 +261,7 @@ function run() {
         summary: "Add the search skill",
         proposal,
       }),
-      timeout: 300_000,
+      timeout: 600_000,
     });
     pendingUiRequest = { requestId, toolCallId, toolName: "propose_config" };
   }
@@ -292,7 +292,7 @@ function run() {
         summary: "Schedule Standup each weekday at 9am",
         proposal,
       }),
-      timeout: 300_000,
+      timeout: 600_000,
     });
     pendingUiRequest = { requestId, toolCallId, toolName: "propose_routine" };
   }
@@ -323,7 +323,7 @@ function run() {
         summary: "Summarize failed CI runs when GitHub calls the webhook",
         proposal,
       }),
-      timeout: 300_000,
+      timeout: 600_000,
     });
     pendingUiRequest = { requestId, toolCallId, toolName: "propose_trigger" };
   }

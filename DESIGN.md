@@ -400,8 +400,11 @@ Viewer may only read its durable result.
 The durable turn state, not browser inference, owns waiting UI. `queued`, `starting`, and
 `dispatching` may show quiet operational copy but never the typing indicator. Only a Pi-acknowledged
 `running` attempt says “Companion is replying…”; `needs_input` and every terminal state stop it. A
-small queue count explains why later accepted messages have not started. Ten minutes without
-correlated activity, or the two-hour absolute ceiling, always becomes a visible terminal outcome.
+small queue count explains why later accepted messages have not started. A blocking human decision
+pauses the inactivity clock and returns control to Pi after ten minutes without treating silence as
+approval. A newer member message ends the wait sooner so Pi can finish safely before that ordinary
+queued turn runs. Outside `needs_input`, ten minutes without correlated activity always becomes a
+visible terminal outcome; the two-hour absolute ceiling remains authoritative everywhere.
 
 An `interrupted` card explains that delivery became ambiguous and that previous external effects may
 have succeeded. Owner/Editor gets **Retry** and **Cancel**: Retry creates a new attempt on the same

@@ -1020,6 +1020,60 @@ describe("Runtime v2 real-process control plane", () => {
       && delivery.body.length > 0
       && delivery.body.length <= 180)).toBe(true);
 
+    // Exercise takeover while the decision is still pending. Any later member message now closes
+    // this wait fail-closed, so notification fixtures must not be interleaved before the answer.
+    const [decision] = await databaseSql!<Array<{ requestKey: string }>>`
+      select request_key as "requestKey" from companion_decision_deliveries
+      where turn_id = ${decisionAccepted.turn.id}::uuid and decision_status = 'pending'
+      order by created_at limit 1
+    `;
+    if (!decision) throw new Error("ask_user did not project a durable decision");
+    const beforeTakeover = await simulatorState();
+    const beforeBroker = boxById(beforeTakeover, box.id)?.daemon;
+    if (!beforeBroker) throw new Error("decision turn lost its broker state");
+    const [attemptsBefore] = await databaseSql!<Array<{ count: number; dispatchCount: number }>>`
+      select count(*)::int as count, max(dispatch_count)::int as "dispatchCount"
+      from companion_turn_attempts
+      where turn_id = ${decisionAccepted.turn.id}::uuid
+    `;
+    expect(attemptsBefore?.count).toBe(1);
+    expect(attemptsBefore?.dispatchCount).toBe(1);
+
+    const takeoverStartedAt = Date.now();
+    await stopProcess(runtimeProcess, "SIGKILL");
+    runtimeProcess = startRuntime(randomUUID());
+    await waitForHttp(`${runtimeBase}/healthz`, runtimeProcess);
+    await apiJson(
+      `/v1/companions/${companionId}/decisions/${encodeURIComponent(decision.requestKey)}`,
+      {
+        method: "POST",
+        body: JSON.stringify({ action: "answer", answer: "Continue." }),
+      },
+      202,
+    );
+    await waitForTurn(decisionAccepted.turn.id, "succeeded", 45_000);
+    expect(Date.now() - takeoverStartedAt).toBeLessThan(45_000);
+    const [attemptsAfter] = await databaseSql!<Array<{ count: number; dispatchCount: number }>>`
+      select count(*)::int as count, max(dispatch_count)::int as "dispatchCount"
+      from companion_turn_attempts
+      where turn_id = ${decisionAccepted.turn.id}::uuid
+    `;
+    expect(attemptsAfter?.count).toBe(1);
+    expect(attemptsAfter?.dispatchCount).toBe(1);
+    const afterTakeover = await simulatorState();
+    const afterTakeoverBroker = boxById(afterTakeover, box.id)?.daemon;
+    expect(afterTakeoverBroker).toMatchObject({
+      invocationId: beforeBroker.invocationId,
+      activeAttemptId: null,
+    });
+    expect(afterTakeoverBroker?.tailCursor).toBeGreaterThan(beforeBroker.tailCursor);
+    expect(afterTakeoverBroker?.acknowledgedCursor).toBe(afterTakeoverBroker?.tailCursor);
+
+    await boxControl(`/boxes/${box.id}/scenario`, {
+      method: "PUT",
+      body: JSON.stringify({ scenario: "normal" }),
+    });
+
     const cancelled = await apiJson<{ turn: { id: string; status: string } }>(
       `/v1/companions/${companionId}/messages`,
       {
@@ -1219,57 +1273,6 @@ describe("Runtime v2 real-process control plane", () => {
       await notificationWorkerB.end({ timeout: 1 });
       await notificationApi.end({ timeout: 1 });
     }
-    const [decision] = await databaseSql!<Array<{ requestKey: string }>>`
-      select request_key as "requestKey" from companion_decision_deliveries
-      where turn_id = ${decisionAccepted.turn.id}::uuid and decision_status = 'pending'
-      order by created_at limit 1
-    `;
-    if (!decision) throw new Error("ask_user did not project a durable decision");
-    const beforeTakeover = await simulatorState();
-    const beforeBroker = boxById(beforeTakeover, box.id)?.daemon;
-    if (!beforeBroker) throw new Error("decision turn lost its broker state");
-    const [attemptsBefore] = await databaseSql!<Array<{ count: number; dispatchCount: number }>>`
-      select count(*)::int as count, max(dispatch_count)::int as "dispatchCount"
-      from companion_turn_attempts
-      where turn_id = ${decisionAccepted.turn.id}::uuid
-    `;
-    expect(attemptsBefore?.count).toBe(1);
-    expect(attemptsBefore?.dispatchCount).toBe(1);
-
-    const takeoverStartedAt = Date.now();
-    await stopProcess(runtimeProcess, "SIGKILL");
-    runtimeProcess = startRuntime(randomUUID());
-    await waitForHttp(`${runtimeBase}/healthz`, runtimeProcess);
-    await apiJson(
-      `/v1/companions/${companionId}/decisions/${encodeURIComponent(decision.requestKey)}`,
-      {
-        method: "POST",
-        body: JSON.stringify({ action: "answer", answer: "Continue." }),
-      },
-      202,
-    );
-    await waitForTurn(decisionAccepted.turn.id, "succeeded", 45_000);
-    expect(Date.now() - takeoverStartedAt).toBeLessThan(45_000);
-    const [attemptsAfter] = await databaseSql!<Array<{ count: number; dispatchCount: number }>>`
-      select count(*)::int as count, max(dispatch_count)::int as "dispatchCount"
-      from companion_turn_attempts
-      where turn_id = ${decisionAccepted.turn.id}::uuid
-    `;
-    expect(attemptsAfter?.count).toBe(1);
-    expect(attemptsAfter?.dispatchCount).toBe(1);
-    const afterTakeover = await simulatorState();
-    const afterTakeoverBroker = boxById(afterTakeover, box.id)?.daemon;
-    expect(afterTakeoverBroker).toMatchObject({
-      invocationId: beforeBroker.invocationId,
-      activeAttemptId: null,
-    });
-    expect(afterTakeoverBroker?.tailCursor).toBeGreaterThan(beforeBroker.tailCursor);
-    expect(afterTakeoverBroker?.acknowledgedCursor).toBe(afterTakeoverBroker?.tailCursor);
-
-    await boxControl(`/boxes/${box.id}/scenario`, {
-      method: "PUT",
-      body: JSON.stringify({ scenario: "normal" }),
-    });
     const concurrent = await Promise.all([
       apiJson<{ turn: { id: string; queue_sequence: number } }>(
         `/v1/companions/${companionId}/messages`,

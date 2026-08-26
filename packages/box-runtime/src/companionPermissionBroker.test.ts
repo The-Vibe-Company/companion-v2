@@ -21,6 +21,9 @@ describe("Companion Pi interaction extension", () => {
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain('name: "ask_user"');
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("ctx.ui.input(");
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("companion:question:");
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain(
+      "const DECISION_TIMEOUT_MS = 600000",
+    );
   });
 
   it("allows image reads and keeps a kind-aware abort timer around every execution tool", () => {
@@ -89,7 +92,7 @@ describe("Companion Pi interaction extension", () => {
     );
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE)
       .toContain("TRIGGER_PROVIDERS.includes(provider)");
-    // The trigger card is a five-minute interactive decision, exempt from the execution timer.
+    // The trigger card is a ten-minute interactive decision, exempt from the execution timer.
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain(
       '"propose_routine", "propose_trigger", "request_plugin_connection"',
     );

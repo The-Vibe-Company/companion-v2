@@ -5,6 +5,7 @@ import type { ToolCallMessagePartComponent } from "@assistant-ui/react";
 import type {
   CompanionConfigProposal,
   CompanionDecisionKind,
+  CompanionDecisionStatus,
   CompanionRoutineProposal,
   CompanionTriggerProposal,
 } from "@companion/contracts";
@@ -42,23 +43,23 @@ import type { CompanionDecisionArgs } from "./transcriptMessages";
  * operator. Resource names come from data this surface already loaded, never from the Pi payload.
  */
 
-const DECISION_ICONS: Record<CompanionDecisionKind, LucideIcon> = {
+const DECISION_ICONS = {
   shell: TerminalIcon,
   file: FilePenLineIcon,
   question: MessageSquareIcon,
   config: Settings2Icon,
   routine: CalendarClockIcon,
   trigger: WebhookIcon,
-};
+} satisfies Record<CompanionDecisionKind, LucideIcon>;
 
-const DECISION_KIND_LABELS: Record<CompanionDecisionKind, string> = {
+const DECISION_KIND_LABELS = {
   shell: "run a command",
   file: "edit a file",
   question: "asks",
   config: "these settings",
   routine: "this routine",
   trigger: "this trigger",
-};
+} satisfies Record<CompanionDecisionKind, string>;
 
 const DECISION_STATUS_LABELS = {
   pending: "waiting",
@@ -66,7 +67,8 @@ const DECISION_STATUS_LABELS = {
   denied: "denied",
   answered: "answered",
   expired: "timed out",
-} as const;
+  cancelled: "closed without approval",
+} satisfies Record<CompanionDecisionStatus, string>;
 
 const UNKNOWN_RESOURCE = "a resource owned by another member";
 
@@ -302,6 +304,9 @@ export const DecisionToolCard: ToolCallMessagePartComponent<CompanionDecisionArg
       )}
       {decision.status === "expired" && !decision.decided_by_name && (
         <p className="text-muted-foreground mt-1.5 text-xs">Timed out, denied</p>
+      )}
+      {decision.status === "cancelled" && !decision.decided_by_name && (
+        <p className="text-muted-foreground mt-1.5 text-xs">Closed without approval</p>
       )}
       {error && (
         <p className="text-destructive mt-1.5 text-xs" role="alert">{error}</p>

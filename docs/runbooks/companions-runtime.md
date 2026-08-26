@@ -229,6 +229,15 @@ write/ACK outcome is ambiguous, warn that earlier external effects may have succ
 Retry/Cancel only. Retry creates a new attempt and recycles Pi; it does not restart the Box. Never
 manually mark an ambiguous attempt queued.
 
+While a turn is waiting in `needs_input`, its inactivity deadline is intentionally cleared. An
+`ask_user` or `propose_*` decision returns control to Pi after ten minutes; a newer member message
+cancels the wait sooner, without becoming an implicit approval, and remains queued for its own turn.
+That queued follow-up must have neither a Start operation nor a cold-start deadline until it reaches
+the head of the queue. If an older deployment shows
+`turn_stalled` for the pending decision followed by `cold_start_deadline_exceeded` for a never-
+attempted message on an idle warm Box, deploy migration 0129 before retrying; do not restart or
+replace that healthy Box.
+
 ### MCP OAuth refresh failed
 
 `mcp_oauth_refresh_failed` with action `retry` means the loopback gateway could no longer obtain a
