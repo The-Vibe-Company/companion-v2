@@ -87,21 +87,7 @@ describe("COMPANION_PI_BROKER_SOURCE", () => {
     broker.stderr.on("data", (chunk: Buffer) => {
       startupStderr += chunk.toString("utf8");
     });
-    // A Unix socket path appears at bind(), but connections are only accepted once the broker
-    // reaches listen(). Waiting for the path alone left a window where the first command raced the
-    // broker and came back ECONNREFUSED, so readiness is proven by a real round trip instead.
-    await waitFor(async () => {
-      if (!existsSync(socketPath)) return false;
-      try {
-        await sendCompanionPiBrokerCommand({
-          socketPath,
-          command: { id: "control-source-ready", type: "broker_state" },
-        });
-        return true;
-      } catch {
-        return false;
-      }
-    }).catch((error) => {
+    await waitFor(() => existsSync(socketPath)).catch((error) => {
       throw new Error(`${error instanceof Error ? error.message : "startup failed"}: ${startupStderr}`);
     });
 
