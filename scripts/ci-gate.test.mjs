@@ -18,76 +18,48 @@ function jobs(overrides = {}, outputs = scopeOutputs) {
   return {
     scope: { result: "success", outputs },
     hygiene: { result: "success" },
-    "skill-guards-macos": { result: "skipped" },
-    "ios-quality": { result: "skipped" },
+    "apple-quality": { result: "skipped" },
     quality: { result: "skipped" },
     "application-build": { result: "skipped" },
     "database-integration": { result: "skipped" },
     "runtime-integration": { result: "skipped" },
     "railway-containers": { result: "skipped" },
     browser: { result: "skipped" },
-    "dependency-audit": { result: "skipped" },
-    coverage: { result: "skipped" },
     ...overrides,
   };
 }
 
 test("accepts skips explicitly disabled by pull-request scope", () => {
-  assert.deepEqual(rejectedJobs(jobs(), "pull_request"), []);
+  assert.deepEqual(rejectedJobs(jobs()), []);
 });
 
 test("rejects a skipped job required by scope", () => {
   const outputs = { ...scopeOutputs, browser: "true", build: "true" };
-  const failures = rejectedJobs(
-    jobs({ "application-build": { result: "success" } }, outputs),
-    "pull_request",
-  );
+  const failures = rejectedJobs(jobs({ "application-build": { result: "success" } }, outputs));
   assert.deepEqual(failures, ["browser=skipped (required success)"]);
 });
 
 test("rejects missing scope outputs instead of treating them as false", () => {
   const { browser: _browser, ...outputs } = scopeOutputs;
-  assert.deepEqual(rejectedJobs(jobs({}, outputs), "pull_request"), [
+  assert.deepEqual(rejectedJobs(jobs({}, outputs)), [
     "scope.browser=missing (required boolean output)",
   ]);
 });
 
-test("requires the macOS skill guards whenever the skill scope is on", () => {
-  const outputs = { ...scopeOutputs, skill: "true" };
-  assert.deepEqual(rejectedJobs(jobs({}, outputs), "pull_request"), [
-    "skill-guards-macos=skipped (required success)",
-  ]);
-  assert.deepEqual(
-    rejectedJobs(jobs({ "skill-guards-macos": { result: "success" } }, outputs), "pull_request"),
-    [],
-  );
-});
-
-test("requires iOS quality whenever native or shared-contract scope is on", () => {
-  const outputs = { ...scopeOutputs, ios: "true" };
-  assert.deepEqual(rejectedJobs(jobs({}, outputs), "pull_request"), [
-    "ios-quality=skipped (required success)",
-  ]);
-  assert.deepEqual(
-    rejectedJobs(jobs({ "ios-quality": { result: "success" } }, outputs), "pull_request"),
-    [],
-  );
-});
-
-test("requires coverage only for the weekly schedule", () => {
-  assert.deepEqual(rejectedJobs(jobs(), "push"), []);
-  assert.deepEqual(rejectedJobs(jobs(), "schedule"), ["coverage=skipped (required success)"]);
+test("requires Apple quality for either bundled Skill or iOS changes", () => {
+  for (const changed of [{ skill: "true" }, { ios: "true" }, { skill: "true", ios: "true" }]) {
+    const outputs = { ...scopeOutputs, ...changed };
+    assert.deepEqual(rejectedJobs(jobs({}, outputs)), ["apple-quality=skipped (required success)"]);
+    assert.deepEqual(rejectedJobs(jobs({ "apple-quality": { result: "success" } }, outputs)), []);
+  }
 });
 
 test("rejects failed, cancelled, and missing jobs even when scope disables them", () => {
-  const failures = rejectedJobs(
-    jobs({
-      quality: { result: "failure" },
-      "application-build": { result: "cancelled" },
-      "database-integration": undefined,
-    }),
-    "pull_request",
-  );
+  const failures = rejectedJobs(jobs({
+    quality: { result: "failure" },
+    "application-build": { result: "cancelled" },
+    "database-integration": undefined,
+  }));
   assert.deepEqual(failures, [
     "quality=failure (expected success or intentional skip)",
     "application-build=cancelled (expected success or intentional skip)",

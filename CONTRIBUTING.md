@@ -23,6 +23,15 @@ DATABASE_URL=postgres://companion:companion@127.0.0.1:5432/companion pnpm test:i
 
 Frontend changes require `pnpm browser:smoke` and a manual browser check as described in `CLAUDE.md`.
 
+## GitHub automation
+
+- `CI` validates pull requests, `main` pushes, and merge-queue commits. Its risk classifier skips
+  expensive jobs when a change cannot affect them.
+- `Diagnostic: iOS Live E2E` is a manual real-provider diagnostic against an isolated local stack.
+- `Release: iOS TestFlight` uploads an iOS build only after the exact `main` commit passes `CI`.
+- `Publish: Pi Bundle` publishes the content-addressed runtime bundle manually or after its build
+  inputs change on `main`.
+
 ## Pull requests
 
 - Keep a pull request focused on one outcome.

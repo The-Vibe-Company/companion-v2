@@ -143,6 +143,8 @@ and runtime database URL only to `apps/runtime` without changing the published w
 - Changes under `packages/companion-skill/skill/` require a version bump, top changelog entry, and
   `pnpm --filter @companion/companion-skill update:integrity`.
 - Run `pnpm verify:change`; exit 2 means printed follow-up gates are still required.
+- Before adding a GitHub Actions workflow, CI job, required check, or trigger, obtain explicit
+  approval from the repository owner.
 - Architecture/data/auth/API/runtime changes must keep `docs/design.md`,
   `docs/companions-runtime.md`, and the bundled Companion skill aligned. A new Companion capability
   also updates `composedInstructions()` so Pi is told it exists.

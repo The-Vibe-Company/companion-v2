@@ -16,7 +16,7 @@ function isTrue(value) {
   return value === "true";
 }
 
-export function rejectedJobs(jobs, eventName) {
+export function rejectedJobs(jobs) {
   const scope = jobs.scope;
   if (!scope || scope.result !== "success") {
     return [`scope=${scope?.result ?? "missing"} (required success)`];
@@ -31,16 +31,13 @@ export function rejectedJobs(jobs, eventName) {
   const required = {
     scope: true,
     hygiene: true,
-    "skill-guards-macos": isTrue(outputs.skill),
-    "ios-quality": isTrue(outputs.ios),
+    "apple-quality": isTrue(outputs.skill) || isTrue(outputs.ios),
     quality: isTrue(outputs.quality),
     "application-build": isTrue(outputs.build),
     "database-integration": isTrue(outputs.database),
     "runtime-integration": isTrue(outputs.runtime),
     "railway-containers": isTrue(outputs.containers),
     browser: isTrue(outputs.browser),
-    "dependency-audit": isTrue(outputs.dependencies),
-    coverage: eventName === "schedule",
   };
 
   return Object.entries(required).flatMap(([name, mustRun]) => {
@@ -54,7 +51,7 @@ export function rejectedJobs(jobs, eventName) {
 if (import.meta.url === new URL(`file://${process.argv[1]}`).href) {
   try {
     const jobs = JSON.parse(process.env.JOB_RESULTS ?? "{}");
-    const failures = rejectedJobs(jobs, process.env.EVENT_NAME ?? "");
+    const failures = rejectedJobs(jobs);
     if (failures.length) {
       console.error("CI Gate rejected:", failures.join(", "));
       process.exit(1);

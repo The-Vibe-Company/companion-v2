@@ -29,7 +29,7 @@ surchargées par un argument de lancement. L’API de production reste épinglé
 avec l’équipe Apple puis exporte avec `destination=upload`. L’export envoie le build à App Store
 Connect mais ne le soumet jamais à la revue App Store.
 
-`.github/workflows/ios-testflight.yml` exécute cette commande sur `macos-26`, après avoir vérifié
+Le workflow `Release: iOS TestFlight` exécute cette commande sur `macos-26`, après avoir vérifié
 que le SDK iPhoneOS 26 est actif :
 
 - automatiquement lorsque le workflow `CI` du commit exact termine avec succès sur `main` et que
@@ -79,7 +79,7 @@ xcodebuildmcp simulator build \
   --extra-args CODE_SIGNING_ALLOWED=NO
 ```
 
-Le workflow `iOS E2E` exécute ce smoke test manuellement ou chaque lundi depuis `main`. Son
+Le diagnostic manuel `Diagnostic: iOS Live E2E` exécute ce smoke test à la demande depuis `main`. Son
 environnement GitHub `ios-e2e` fournit `COMPANION_IOS_E2E_API_URL`,
 `COMPANION_IOS_E2E_EMAIL` et `COMPANION_IOS_E2E_PASSWORD`; les clés Box et Z.ai restent des secrets
 du dépôt. Le job démarre une stack et une base éphémères, seed le compte local, connecte Z.ai, crée

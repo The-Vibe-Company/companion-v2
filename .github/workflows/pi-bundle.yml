@@ -1,4 +1,4 @@
-name: Pi Bundle
+name: "Publish: Pi Bundle"
 
 # Build and publish the self-hosted Pi bundle: the content-addressed tarball that replaces the
 # npm-at-boot install (packages/box-runtime/src/piBundle.ts). The build must run on the Box's Node
