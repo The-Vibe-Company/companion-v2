@@ -8,6 +8,8 @@ struct ChatServices {
     let thread: (String) async throws -> CompanionThread
     let listCompanions: () async throws -> [CompanionSummary]
     let decide: (String, String, CompanionDecisionAction) async throws -> CompanionThread
+    let retryTurn: (String, String, UUID) async throws -> CompanionOperationSummary
+    let cancelTurn: (String, String) async throws -> CompanionThread
     let listSkills: () async throws -> [CompanionSkillReference]
     let listPlugins: () async throws -> [CompanionPluginAccount]
     let listProviders: () async throws -> CompanionProvidersResponse
@@ -68,7 +70,8 @@ struct ChatView: View {
                                 .padding(.top, 80)
                         } else if let error, thread == nil {
                             unavailableState(error)
-                        } else if thread?.entries.isEmpty != false && pendingMessages.isEmpty {
+                        } else if entries.isEmpty && pendingMessages.isEmpty
+                                    && thread?.interruptedTurn == nil {
                             emptyState
                         } else {
                             ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
@@ -105,6 +108,20 @@ struct ChatView: View {
                                 .id(entry.id)
                             }
 
+                            if let interruptedTurn = thread?.interruptedTurn {
+                                CompanionInterruptedTurnNotice(
+                                    turn: interruptedTurn,
+                                    queuedCount: thread?.queuedCount ?? 0,
+                                    canAct: thread?.canSend == true,
+                                    latestOperation: currentCompanion.runtime.latestOperation,
+                                    accent: visualTheme.accent,
+                                    accentForeground: visualTheme.accentForeground,
+                                    onRetry: retryInterruptedTurn,
+                                    onCancel: cancelInterruptedTurn
+                                )
+                                .id("interrupted-\(interruptedTurn.id)")
+                            }
+
                             if !pendingMessages.isEmpty, pendingStartsNewDay {
                                 dayMarker(for: .now)
                             }
@@ -130,7 +147,7 @@ struct ChatView: View {
                 .scrollDismissesKeyboard(.interactively)
                 .scrollIndicators(.hidden)
                 .safeAreaInset(edge: .bottom) { composer }
-                .onChange(of: (thread?.entries.count ?? 0) + pendingMessages.count) {
+                .onChange(of: scrollContentCount) {
                     if reduceMotion {
                         proxy.scrollTo("bottom", anchor: .bottom)
                     } else {
@@ -492,6 +509,10 @@ struct ChatView: View {
         return !Calendar.autoupdatingCurrent.isDateInToday(date)
     }
 
+    private var scrollContentCount: Int {
+        entries.count + pendingMessages.count + (thread?.interruptedTurn == nil ? 0 : 1)
+    }
+
     private func startsNewDay(_ entry: TranscriptEntry, after previous: TranscriptEntry?) -> Bool {
         guard let previous else { return true }
         guard let date = transcriptDate(entry.createdAt),
@@ -613,6 +634,51 @@ struct ChatView: View {
             await decisionSubmissionGate.release(requestID: requestID)
             throw error
         }
+    }
+
+    private func retryInterruptedTurn(
+        turnID: String,
+        retryID: UUID
+    ) async throws -> CompanionOperationSummary {
+        threadProjection.invalidateRefreshes()
+        let operation: CompanionOperationSummary
+        if let services {
+            operation = try await services.retryTurn(companion.id, turnID, retryID)
+        } else {
+            operation = try await sessionStore.retryCompanionTurn(
+                companionID: companion.id,
+                turnID: turnID,
+                retryID: retryID
+            )
+        }
+        await reload(silently: true)
+        return operation
+    }
+
+    private func cancelInterruptedTurn(turnID: String) async throws {
+        threadProjection.invalidateRefreshes()
+        let next: CompanionThread
+        if let services {
+            next = try await services.cancelTurn(companion.id, turnID)
+        } else {
+            next = try await sessionStore.cancelCompanionTurn(
+                companionID: companion.id,
+                turnID: turnID
+            )
+        }
+        threadProjection.replaceAfterMutation(with: next)
+        markdownByEventID = await renderedMarkdown(for: next.entries)
+        await refreshCompanionProjection()
+    }
+
+    private func refreshCompanionProjection() async {
+        let refreshed: CompanionSummary?
+        if let services {
+            refreshed = try? await services.listCompanions().first(where: { $0.id == companion.id })
+        } else {
+            refreshed = try? await sessionStore.listCompanions().first(where: { $0.id == companion.id })
+        }
+        if let refreshed { currentCompanion = refreshed }
     }
 
     private func loadDecisionCatalog() async {

@@ -88,6 +88,27 @@ private final class DecisionMockURLProtocol: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
+private final class TurnActionMockURLProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        do {
+            let handler = try #require(Self.handler)
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
 private final class AttachmentMockURLProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
 
@@ -903,6 +924,127 @@ func submitsEveryCompanionDecisionActionThroughTheSharedRoute() async throws {
         #expect(thread.canSend)
     }
     #expect(DecisionMockURLProtocol.expectedActions.isEmpty)
+}
+
+@Test
+func decodesInterruptedTurnAndItsSafeRecoveryAction() throws {
+    let data = Data(#"""
+    {
+      "companion_id":"5b7d655e-36bb-4fbe-9acd-e56103759911",
+      "viewer_id":"owner-1",
+      "read_only":false,
+      "can_send":true,
+      "entries":[],
+      "queued_count":2,
+      "interrupted_turn":{
+        "id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "companion_id":"5b7d655e-36bb-4fbe-9acd-e56103759911",
+        "client_message_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "status":"interrupted",
+        "queue_sequence":20,
+        "latest_attempt":null,
+        "replying":false,
+        "error":{"code":"cold_start_deadline_exceeded","message":"The Companion did not start before its deadline.","action":"retry"},
+        "state_changed_at":"2026-08-26T05:59:33.505Z",
+        "settled_at":"2026-08-26T05:59:33.505Z",
+        "created_at":"2026-08-26T05:55:12.466Z",
+        "updated_at":"2026-08-26T05:59:33.505Z"
+      }
+    }
+    """#.utf8)
+
+    let thread = try JSONDecoder().decode(CompanionThread.self, from: data)
+    #expect(thread.queuedCount == 2)
+    #expect(thread.interruptedTurn?.status == .interrupted)
+    #expect(thread.interruptedTurn?.error?.action == "retry")
+    #expect(thread.interruptedTurn?.latestAttempt == nil)
+}
+
+@Test
+func retriesAndCancelsInterruptedTurnsThroughSharedRoutes() async throws {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [TurnActionMockURLProtocol.self]
+    let retryID = UUID(uuidString: "dddddddd-dddd-4ddd-8ddd-dddddddddddd")!
+    var requestCount = 0
+    TurnActionMockURLProtocol.handler = { request in
+        requestCount += 1
+        #expect(request.httpMethod == "POST")
+        #expect(request.value(forHTTPHeaderField: "Cookie") == "better-auth.session_token=session")
+        #expect(request.value(forHTTPHeaderField: "x-companion-org") == "org-1")
+        let response = try #require(HTTPURLResponse(
+            url: request.url!, statusCode: 202, httpVersion: nil, headerFields: nil
+        ))
+
+        if requestCount == 1 {
+            #expect(request.url?.absoluteString.contains(
+                "/v1/companions/companion%2Fone/turns/turn%2Fone/retry"
+            ) == true)
+            let body = try #require(
+                JSONSerialization.jsonObject(with: requestBody(request)) as? [String: String]
+            )
+            #expect(body == ["retry_id": retryID.uuidString.lowercased()])
+            return (response, Data(#"""
+            {"operation":{
+              "id":"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+              "source_turn_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              "kind":"start",
+              "status":"pending",
+              "error":null
+            }}
+            """#.utf8))
+        }
+
+        #expect(request.url?.absoluteString.contains(
+            "/v1/companions/companion%2Fone/turns/turn%2Fone/cancel"
+        ) == true)
+        #expect(String(decoding: try requestBody(request), as: UTF8.self) == "{}")
+        return (response, Data(#"""
+        {
+          "turn":{
+            "id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "companion_id":"5b7d655e-36bb-4fbe-9acd-e56103759911",
+            "client_message_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "status":"cancelled","queue_sequence":20,"latest_attempt":null,"replying":false,
+            "error":null,"state_changed_at":"2026-08-26T06:00:00.000Z",
+            "settled_at":"2026-08-26T06:00:00.000Z","created_at":"2026-08-26T05:55:12.466Z",
+            "updated_at":"2026-08-26T06:00:00.000Z"
+          },
+          "thread":{
+            "companion_id":"5b7d655e-36bb-4fbe-9acd-e56103759911",
+            "viewer_id":"owner-1","read_only":false,"can_send":true,"entries":[],
+            "queued_count":2,"interrupted_turn":null
+          }
+        }
+        """#.utf8))
+    }
+    defer { TurnActionMockURLProtocol.handler = nil }
+
+    let client = APIClient(
+        baseURL: URL(string: "http://127.0.0.1:3001")!,
+        session: URLSession(configuration: configuration)
+    )
+    await client.setAuthority(Session(
+        cookie: "better-auth.session_token=session",
+        orgID: "org-1",
+        needsOnboarding: false,
+        user: .init(id: "owner-1", email: "stan@example.com", name: "Stan")
+    ))
+
+    let operation = try await client.retryCompanionTurn(
+        companionID: "companion/one",
+        turnID: "turn/one",
+        retryID: retryID
+    )
+    #expect(operation.status == .pending)
+    #expect(operation.sourceTurnID == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+
+    let thread = try await client.cancelCompanionTurn(
+        companionID: "companion/one",
+        turnID: "turn/one"
+    )
+    #expect(thread.interruptedTurn == nil)
+    #expect(thread.queuedCount == 2)
+    #expect(requestCount == 2)
 }
 
 @Test

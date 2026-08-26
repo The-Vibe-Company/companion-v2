@@ -200,9 +200,18 @@ public struct CompanionRuntimeSafeError: Codable, Hashable, Sendable {
 
 public struct CompanionOperationSummary: Codable, Identifiable, Hashable, Sendable {
     public let id: String
+    public let sourceTurnID: String?
     public let kind: CompanionOperationKind
     public let status: CompanionOperationStatus
     public let error: CompanionRuntimeSafeError?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case sourceTurnID = "source_turn_id"
+        case kind
+        case status
+        case error
+    }
 
     public var isActive: Bool {
         status == .pending || status == .running
@@ -1170,6 +1179,113 @@ public struct TranscriptEntry: Codable, Identifiable, Equatable, Sendable {
     }
 }
 
+public enum CompanionTurnStatus: String, Codable, Equatable, Sendable {
+    case queued
+    case starting
+    case dispatching
+    case running
+    case needsInput = "needs_input"
+    case succeeded
+    case failed
+    case interrupted
+    case cancelled
+    case unknown
+
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = Self(rawValue: value) ?? .unknown
+    }
+}
+
+public enum CompanionTurnAttemptStatus: String, Codable, Equatable, Sendable {
+    case starting
+    case dispatching
+    case running
+    case needsInput = "needs_input"
+    case succeeded
+    case failed
+    case interrupted
+    case cancelled
+    case unknown
+
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = Self(rawValue: value) ?? .unknown
+    }
+}
+
+public enum CompanionTurnDispatchState: String, Codable, Equatable, Sendable {
+    case pending
+    case writeIntent = "write_intent"
+    case accepted
+    case rejected
+    case ambiguous
+    case unknown
+
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = Self(rawValue: value) ?? .unknown
+    }
+}
+
+public struct CompanionTurnAttempt: Codable, Equatable, Sendable {
+    public let id: String
+    public let turnID: String
+    public let attemptNumber: Int
+    public let retryID: String?
+    public let status: CompanionTurnAttemptStatus
+    public let dispatchState: CompanionTurnDispatchState
+    public let piInvocationID: String?
+    public let dispatchAcceptedAt: String?
+    public let error: CompanionRuntimeSafeError?
+    public let startedAt: String
+    public let settledAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case turnID = "turn_id"
+        case attemptNumber = "attempt_number"
+        case retryID = "retry_id"
+        case status
+        case dispatchState = "dispatch_state"
+        case piInvocationID = "pi_invocation_id"
+        case dispatchAcceptedAt = "dispatch_accepted_at"
+        case error
+        case startedAt = "started_at"
+        case settledAt = "settled_at"
+    }
+}
+
+public struct CompanionTurn: Codable, Identifiable, Equatable, Sendable {
+    public let id: String
+    public let companionID: String
+    public let clientMessageID: String
+    public let status: CompanionTurnStatus
+    public let queueSequence: Int
+    public let latestAttempt: CompanionTurnAttempt?
+    public let replying: Bool
+    public let error: CompanionRuntimeSafeError?
+    public let stateChangedAt: String
+    public let settledAt: String?
+    public let createdAt: String
+    public let updatedAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case companionID = "companion_id"
+        case clientMessageID = "client_message_id"
+        case status
+        case queueSequence = "queue_sequence"
+        case latestAttempt = "latest_attempt"
+        case replying
+        case error
+        case stateChangedAt = "state_changed_at"
+        case settledAt = "settled_at"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+}
+
 public struct CompanionThread: Codable, Equatable, Sendable {
     public let companionID: String
     public let viewerID: String
@@ -1177,6 +1293,7 @@ public struct CompanionThread: Codable, Equatable, Sendable {
     public let canSend: Bool
     public let entries: [TranscriptEntry]
     public let queuedCount: Int
+    public let interruptedTurn: CompanionTurn?
 
     enum CodingKeys: String, CodingKey {
         case companionID = "companion_id"
@@ -1185,5 +1302,6 @@ public struct CompanionThread: Codable, Equatable, Sendable {
         case canSend = "can_send"
         case entries
         case queuedCount = "queued_count"
+        case interruptedTurn = "interrupted_turn"
     }
 }
