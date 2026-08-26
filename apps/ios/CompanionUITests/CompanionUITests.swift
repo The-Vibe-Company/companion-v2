@@ -571,7 +571,7 @@ final class CompanionUITests: XCTestCase {
         app.launch()
 
         let loadEarlier = app.buttons["chat.load-earlier"]
-        for _ in 0..<5 where !loadEarlier.exists {
+        for _ in 0..<12 where !loadEarlier.isHittable {
             app.swipeDown()
         }
         XCTAssertTrue(loadEarlier.waitForExistence(timeout: 5))
@@ -622,7 +622,9 @@ final class CompanionUITests: XCTestCase {
         app.launch()
 
         let entries = [
-            app.buttons["tool-run.open-details.long-118"],
+            app.buttons.matching(
+                NSPredicate(format: "label CONTAINS %@", "run_layout_checks")
+            ).firstMatch,
             app.descendants(matching: .any)["chat.entry.long-119"],
             app.descendants(matching: .any)["chat.entry.long-120"],
         ]
@@ -653,9 +655,15 @@ final class CompanionUITests: XCTestCase {
         app.launchEnvironment["COMPANION_TRANSCRIPT_DEMO_SHORT"] = "1"
         app.launch()
 
-        let queue = app.buttons["chat.queue.toggle"]
-        let composer = app.descendants(matching: .any)["chat.composer-controls"]
-        let thinking = app.descendants(matching: .any)["chat.thinking-status"]
+        let queue = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "2 queued")
+        ).firstMatch
+        let composer = app.buttons.matching(
+            NSPredicate(format: "identifier == %@", "chat.composer-controls")
+        ).firstMatch
+        let thinking = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier == %@", "chat.thinking-status")
+        ).firstMatch
         XCTAssertTrue(queue.waitForExistence(timeout: 5))
         XCTAssertTrue(composer.exists)
         XCTAssertLessThanOrEqual(queue.frame.maxY, composer.frame.minY)
@@ -758,7 +766,9 @@ final class CompanionUITests: XCTestCase {
         nativeWideTable.swipeLeft()
         XCTAssertLessThan(trailingCell.frame.minX, trailingCellInitialX)
 
-        let longTable = app.descendants(matching: .any)["markdown-table-demo.long-content"]
+        let longTable = app.otherElements.matching(
+            NSPredicate(format: "identifier == %@", "markdown-table-demo.long-content")
+        ).firstMatch
         for _ in 0..<4 where !longTable.isHittable { app.swipeUp() }
         let longDetailCell = longTable.descendants(matching: .any)["markdown.table.cell.1.1"]
         XCTAssertTrue(longDetailCell.exists)
@@ -819,7 +829,9 @@ final class CompanionUITests: XCTestCase {
         XCTAssertEqual(headerLeft.frame.minX, firstLeft.frame.minX, accuracy: 1)
         XCTAssertEqual(headerRight.frame.maxX, firstRight.frame.maxX, accuracy: 1)
 
-        let longTable = app.descendants(matching: .any)["markdown-table-demo.long-content"]
+        let longTable = app.otherElements.matching(
+            NSPredicate(format: "identifier == %@", "markdown-table-demo.long-content")
+        ).firstMatch
         for _ in 0..<5 where !app.frame.intersects(longTable.frame) { app.swipeUp() }
         XCTAssertTrue(app.frame.intersects(longTable.frame))
         XCTAssertGreaterThanOrEqual(longTable.frame.minX, app.frame.minX - 1)
