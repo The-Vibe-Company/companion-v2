@@ -64,6 +64,11 @@ public actor APIClient {
         let operation: CompanionOperationSummary
     }
 
+    private struct TurnThreadEnvelope: Decodable {
+        let turn: CompanionTurn
+        let thread: CompanionThread
+    }
+
     private struct ProviderConnectionEnvelope: Decodable {
         let connection: CompanionProviderConnection
     }
@@ -475,6 +480,36 @@ public actor APIClient {
             path: "/v1/companions/\(companion)/decisions/\(request)",
             method: "POST",
             body: body
+        ).thread
+    }
+
+    public func retryCompanionTurn(
+        companionID: String,
+        turnID: String,
+        retryID: UUID
+    ) async throws -> CompanionOperationSummary {
+        let companion = Self.encodedPathComponent(companionID)
+        let turn = Self.encodedPathComponent(turnID)
+        let body = try encoder.encode(["retry_id": retryID.uuidString.lowercased()])
+        return try await decode(
+            OperationEnvelope.self,
+            path: "/v1/companions/\(companion)/turns/\(turn)/retry",
+            method: "POST",
+            body: body
+        ).operation
+    }
+
+    public func cancelCompanionTurn(
+        companionID: String,
+        turnID: String
+    ) async throws -> CompanionThread {
+        let companion = Self.encodedPathComponent(companionID)
+        let turn = Self.encodedPathComponent(turnID)
+        return try await decode(
+            TurnThreadEnvelope.self,
+            path: "/v1/companions/\(companion)/turns/\(turn)/cancel",
+            method: "POST",
+            body: Data("{}".utf8)
         ).thread
     }
 
