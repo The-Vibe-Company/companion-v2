@@ -1,4 +1,4 @@
-import CoreGraphics
+@preconcurrency import CoreGraphics
 import Foundation
 import ImageIO
 import UniformTypeIdentifiers
@@ -449,7 +449,7 @@ private extension CompanionNotificationAvatar {
 
         context.setAllowsAntialiasing(true)
         context.setShouldAntialias(true)
-        context.setInterpolationQuality(.high)
+        context.interpolationQuality = .high
         context.clear(CGRect(x: 0, y: 0, width: CGFloat(size), height: CGFloat(size)))
 
         // Canvas and SVG coordinates have their origin at the top-left. Bitmap contexts use the
