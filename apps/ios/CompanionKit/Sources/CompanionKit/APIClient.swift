@@ -76,6 +76,14 @@ public actor APIClient {
         let account: CompanionPluginAccount
     }
 
+    private struct RoutineListEnvelope: Decodable {
+        let routines: [CompanionRoutine]
+    }
+
+    private struct TriggerListEnvelope: Decodable {
+        let triggers: [CompanionTrigger]
+    }
+
     private struct SocialSignInResponse: Decodable {
         let url: URL
         let redirect: Bool
@@ -209,6 +217,40 @@ public actor APIClient {
 
     public func listCompanions() async throws -> [CompanionSummary] {
         try await decode(CompanionListEnvelope.self, path: "/v1/companions").companions
+    }
+
+    public func connectedResources(
+        companionID: String,
+        selectedSkillIDs: [String]
+    ) async throws -> CompanionConnectedResources {
+        let id = companionID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? companionID
+        async let availableSkills = decode(
+            [CompanionSkillSummary].self,
+            path: "/v1/skills?lib=accessible"
+        )
+        async let routineEnvelope = decode(
+            RoutineListEnvelope.self,
+            path: "/v1/companions/\(id)/routines"
+        )
+        async let triggerEnvelope = decode(
+            TriggerListEnvelope.self,
+            path: "/v1/companions/\(id)/triggers"
+        )
+        let (skillRows, routineResult, triggerResult) = try await (
+            availableSkills,
+            routineEnvelope,
+            triggerEnvelope
+        )
+
+        var skillsByID: [String: CompanionSkillSummary] = [:]
+        for skill in skillRows { skillsByID[skill.id] = skill }
+        let skills = selectedSkillIDs.compactMap { skillsByID[$0] }
+        return CompanionConnectedResources(
+            skills: skills,
+            hiddenSkillCount: selectedSkillIDs.count - skills.count,
+            routines: routineResult.routines,
+            triggers: triggerResult.triggers
+        )
     }
 
     public func registerNotificationDevice(

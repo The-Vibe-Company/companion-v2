@@ -87,6 +87,27 @@ private final class AttachmentMockURLProtocol: URLProtocol, @unchecked Sendable 
     override func stopLoading() {}
 }
 
+private final class ConnectedResourcesMockURLProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        do {
+            let handler = try #require(Self.handler)
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
 private final class UploadProgressRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var values: [Double] = []
@@ -123,6 +144,54 @@ private func requestBody(_ request: URLRequest) throws -> Data {
 @Test
 func usesTheSharedAPIContract() {
     #expect(CompanionKit.apiRootPath == "/v1")
+}
+
+@Test
+func classifiesAssistantMarkdownLinksWithTheSharedPolicy() throws {
+    struct LinkCase {
+        let source: String
+        let expected: CompanionLinkRoute
+    }
+
+    let cases = [
+        LinkCase(source: "https://example.com/docs", expected: .system),
+        LinkCase(source: "HTTP://EXAMPLE.COM/docs", expected: .system),
+        LinkCase(source: "mailto:ops@example.com", expected: .system),
+        LinkCase(source: "ConDuCtOr://workspace?id=workspace-1", expected: .conductor),
+        LinkCase(source: "javascript:alert(1)", expected: .blocked),
+        LinkCase(source: "custom://workspace?id=workspace-1", expected: .blocked),
+        LinkCase(source: "workspace?id=workspace-1", expected: .blocked),
+    ]
+
+    for linkCase in cases {
+        let url = try #require(CompanionLinkPolicy.parse(linkCase.source))
+        #expect(CompanionLinkPolicy.route(for: url) == linkCase.expected)
+        #expect(CompanionLinkPolicy.route(for: linkCase.source) == linkCase.expected)
+    }
+
+    #expect(CompanionLinkPolicy.route(for: "not a valid URL") == .blocked)
+}
+
+@Test
+func keepsTheLinkSchemeAllowlistCaseInsensitiveAndFailClosed() throws {
+    let cases: [(scheme: String?, allowed: Bool)] = [
+        ("http", true),
+        ("HTTPS", true),
+        ("MailTo", true),
+        ("CONDUCTOR", true),
+        ("javascript", false),
+        ("tel", false),
+        ("unknown", false),
+        (nil, false),
+        ("", false),
+    ]
+
+    for linkCase in cases {
+        #expect(CompanionLinkPolicy.isAllowedScheme(linkCase.scheme) == linkCase.allowed)
+    }
+
+    let conductorURL = try #require(CompanionLinkPolicy.parse("CONDUCTOR://workspace?id=workspace-1"))
+    #expect(CompanionLinkPolicy.isConductor(conductorURL))
 }
 
 @Test
@@ -294,6 +363,117 @@ func companionAccessKeepsEditorsEditableAndViewersReadOnly() throws {
     #expect(companion.access == .viewer)
     #expect(!companion.access.canEditCompanionSettings)
     #expect(!companion.access.canDeleteCompanion)
+}
+
+@Test
+func loadsConnectedResourcesFromTheSharedFirstPartyRoutes() async throws {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [ConnectedResourcesMockURLProtocol.self]
+    ConnectedResourcesMockURLProtocol.handler = { request in
+        let requestURL = try #require(request.url)
+        #expect(request.httpMethod == "GET")
+        #expect(request.value(forHTTPHeaderField: "x-companion-org") == "org-1")
+        let data: Data
+        switch requestURL.path {
+        case "/v1/skills":
+            let components = try #require(URLComponents(url: requestURL, resolvingAgainstBaseURL: false))
+            #expect(components.queryItems == [URLQueryItem(name: "lib", value: "accessible")])
+            data = Data(#"""
+            [
+              {"id":"11111111-1111-4111-8111-111111111111","slug":"incident-summary","description":"Summarizes incidents.","display":{"name":"Incident Summary"}},
+              {"id":"99999999-9999-4999-8999-999999999999","slug":"not-selected","description":"Not connected."}
+            ]
+            """#.utf8)
+        case "/v1/companions/companion-1/routines":
+            data = Data(#"""
+            {"routines":[{
+              "id":"33333333-3333-4333-8333-333333333333",
+              "name":"Weekday brief",
+              "cron":"0 9 * * 1-5",
+              "timezone":"America/New_York",
+              "enabled":true,
+              "next_fire_at":"2026-08-27T13:00:00.000Z",
+              "last_error_message":null
+            }]}
+            """#.utf8)
+        case "/v1/companions/companion-1/triggers":
+            data = Data(#"""
+            {"triggers":[{
+              "id":"44444444-4444-4444-8444-444444444444",
+              "name":"Pull request opened",
+              "provider":"github",
+              "registration_status":"registered",
+              "enabled":false,
+              "last_error_message":null
+            }]}
+            """#.utf8)
+        default:
+            Issue.record("Unexpected connected-resources route: \(requestURL.absoluteString)")
+            data = Data()
+        }
+        let response = try #require(HTTPURLResponse(
+            url: requestURL,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: ["Cache-Control": "private, no-store"]
+        ))
+        return (response, data)
+    }
+    defer { ConnectedResourcesMockURLProtocol.handler = nil }
+
+    let client = APIClient(
+        baseURL: URL(string: "http://127.0.0.1:3001")!,
+        session: URLSession(configuration: configuration)
+    )
+    await client.setAuthority(Session(
+        cookie: "better-auth.session_token=session",
+        orgID: "org-1",
+        needsOnboarding: false,
+        user: .init(id: "user-1", email: "stan@example.com", name: "Stan")
+    ))
+
+    let resources = try await client.connectedResources(
+        companionID: "companion-1",
+        selectedSkillIDs: [
+            "11111111-1111-4111-8111-111111111111",
+            "22222222-2222-4222-8222-222222222222",
+        ]
+    )
+
+    #expect(resources.skills.map(\.slug) == ["incident-summary"])
+    #expect(resources.skills.map(\.displayName) == ["Incident Summary"])
+    #expect(resources.hiddenSkillCount == 1)
+    #expect(resources.routines.first?.scheduleDescription == "Weekdays at 09:00")
+    #expect(resources.routines.first?.status == .active)
+    #expect(resources.triggers.first?.providerName == "GitHub")
+    #expect(resources.triggers.first?.registrationDescription == "Webhook registered")
+    #expect(resources.triggers.first?.status == .disabled)
+}
+
+@Test
+func humanizesCommonRoutineSchedules() throws {
+    let examples = [
+        ("*/15 * * * *", "Every 15 minutes"),
+        ("0 * * * *", "Every hour"),
+        ("30 14 * * *", "Every day at 14:30"),
+        ("0 9 * * 1-5", "Weekdays at 09:00"),
+        ("0 8 1 * *", "Custom schedule"),
+    ]
+    for (cron, expected) in examples {
+        let data = Data(#"""
+        {
+          "id":"33333333-3333-4333-8333-333333333333",
+          "name":"Schedule",
+          "cron":"\#(cron)",
+          "timezone":"UTC",
+          "enabled":true,
+          "next_fire_at":null,
+          "last_error_message":null
+        }
+        """#.utf8)
+        let routine = try JSONDecoder().decode(CompanionRoutine.self, from: data)
+        #expect(routine.scheduleDescription == expected)
+    }
 }
 
 @Test

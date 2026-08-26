@@ -5,6 +5,7 @@ import CompanionKit
 struct CompanionListServices {
     let listCompanions: () async throws -> [CompanionSummary]
     let deleteCompanion: (String, UUID) async throws -> CompanionOperationSummary
+    let connectedResources: (CompanionSummary) async throws -> CompanionConnectedResources
 }
 
 struct CompanionListView: View {
@@ -157,6 +158,9 @@ struct CompanionListView: View {
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("companion.row.\(companion.id)")
                     .contextMenu {
+                        Button("Connected resources", systemImage: "link") {
+                            path.append(.resources(companion.id))
+                        }
                         Button("Settings", systemImage: "gearshape") {
                             path.append(.settings(companion.id))
                         }
@@ -178,6 +182,9 @@ struct CompanionListView: View {
                     }
                     .accessibilityAction(named: "Settings") {
                         path.append(.settings(companion.id))
+                    }
+                    .accessibilityAction(named: "Connected resources") {
+                        path.append(.resources(companion.id))
                     }
                 }
             }
@@ -298,9 +305,11 @@ struct CompanionListView: View {
         if let companion = companions.first(where: { $0.id == route.companionID }) {
             switch route {
             case .chat(let companionID):
-                ChatView(companion: companion) {
-                    path.append(.settings(companionID))
-                }
+                ChatView(
+                    companion: companion,
+                    onResources: { path.append(.resources(companionID)) },
+                    onSettings: { path.append(.settings(companionID)) }
+                )
                 .onAppear { notifications.activeCompanionID = companionID }
                 .onDisappear {
                     if notifications.activeCompanionID == companionID {
@@ -314,6 +323,15 @@ struct CompanionListView: View {
                     onDeletionAccepted: deletionAccepted,
                     onDeletionAmbiguous: { companionID, requestID in
                         deleteRequestIDs[companionID] = requestID
+                    }
+                )
+            case .resources:
+                CompanionConnectedResourcesView(
+                    companion: companion,
+                    services: services.map { services in
+                        CompanionConnectedResourcesServices(
+                            load: { try await services.connectedResources(companion) }
+                        )
                     }
                 )
             }
@@ -416,7 +434,8 @@ struct CompanionRosterDemoView: View {
                 },
                 deleteCompanion: { companionID, requestID in
                     try demoState.delete(companionID: companionID, requestID: requestID)
-                }
+                },
+                connectedResources: { _ in CompanionConnectedResourcesDemoFixtures.resources }
             )
         )
     }
@@ -459,6 +478,7 @@ private enum CompanionRosterDemoFixtures {
           "name":"Luna",
           "persona":"Keep releases calm",
           "model_id":"claude-sonnet",
+          "selected_skill_ids":["11111111-1111-4111-8111-111111111111","22222222-2222-4222-8222-222222222222"],
           "icon":{"shape":6,"mouth":1,"accessory":6,"color":2},
           "access":"\#(access.rawValue)",
           "hidden":false,
@@ -488,11 +508,12 @@ private enum CompanionRosterDemoFixtures {
 
 private enum CompanionRoute: Hashable {
     case chat(String)
+    case resources(String)
     case settings(String)
 
     var companionID: String {
         switch self {
-        case .chat(let id), .settings(let id): return id
+        case .chat(let id), .resources(let id), .settings(let id): return id
         }
     }
 }

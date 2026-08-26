@@ -7,6 +7,7 @@ struct ChatView: View {
     @Environment(SessionStore.self) private var sessionStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let companion: CompanionSummary
+    let onResources: () -> Void
     let onSettings: () -> Void
     @State private var currentCompanion: CompanionSummary
     @State private var thread: CompanionThread?
@@ -24,8 +25,13 @@ struct ChatView: View {
     @State private var markdownByEventID: [String: CachedMarkdownDocument] = [:]
     @State private var reloadGeneration = 0
 
-    init(companion: CompanionSummary, onSettings: @escaping () -> Void) {
+    init(
+        companion: CompanionSummary,
+        onResources: @escaping () -> Void = {},
+        onSettings: @escaping () -> Void
+    ) {
         self.companion = companion
+        self.onResources = onResources
         self.onSettings = onSettings
         _currentCompanion = State(initialValue: companion)
     }
@@ -156,6 +162,15 @@ struct ChatView: View {
                 compact: true,
                 replyingColor: visualTheme.accent
             )
+        }
+
+        ToolbarItem(placement: .topBarTrailing) {
+            Button(action: onResources) {
+                Image(systemName: "link")
+                    .frame(width: 44, height: 44)
+            }
+            .accessibilityLabel("Connected resources for \(currentCompanion.name)")
+            .accessibilityIdentifier("chat.resources")
         }
 
         ToolbarItem(placement: .topBarTrailing) {

@@ -214,6 +214,7 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
     public let name: String
     public let persona: String?
     public let modelID: String?
+    public let selectedSkillIDs: [String]
     public let icon: Icon?
     public let access: CompanionAccess
     public let hidden: Bool
@@ -280,6 +281,7 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
         case name
         case persona
         case modelID = "model_id"
+        case selectedSkillIDs = "selected_skill_ids"
         case icon
         case access
         case hidden
@@ -294,6 +296,7 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
         name = try container.decode(String.self, forKey: .name)
         persona = try container.decodeIfPresent(String.self, forKey: .persona)
         modelID = try container.decodeIfPresent(String.self, forKey: .modelID)
+        selectedSkillIDs = try container.decodeIfPresent([String].self, forKey: .selectedSkillIDs) ?? []
         icon = try container.decodeIfPresent(Icon.self, forKey: .icon)
         access = try container.decodeIfPresent(CompanionAccess.self, forKey: .access) ?? .viewer
         hidden = try container.decodeIfPresent(Bool.self, forKey: .hidden) ?? false
@@ -313,6 +316,7 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
             name: name,
             persona: persona,
             modelID: modelID,
+            selectedSkillIDs: selectedSkillIDs,
             icon: icon,
             access: access,
             hidden: hidden,
@@ -327,6 +331,7 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
         name: String,
         persona: String?,
         modelID: String?,
+        selectedSkillIDs: [String],
         icon: Icon?,
         access: CompanionAccess,
         hidden: Bool,
@@ -338,12 +343,179 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
         self.name = name
         self.persona = persona
         self.modelID = modelID
+        self.selectedSkillIDs = selectedSkillIDs
         self.icon = icon
         self.access = access
         self.hidden = hidden
         self.unread = unread
         self.lastMessage = lastMessage
         self.runtime = runtime
+    }
+}
+
+public enum CompanionConnectedResourceStatus: String, Equatable, Sendable {
+    case active
+    case disabled
+    case error
+
+    public var label: String {
+        switch self {
+        case .active: "Active"
+        case .disabled: "Disabled"
+        case .error: "Error"
+        }
+    }
+}
+
+public struct CompanionSkillSummary: Codable, Identifiable, Equatable, Sendable {
+    public struct Display: Codable, Equatable, Sendable {
+        public let name: String?
+    }
+
+    public let id: String
+    public let slug: String
+    public let description: String
+    public let display: Display?
+
+    public var displayName: String {
+        guard let name = display?.name?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !name.isEmpty else {
+            return slug
+        }
+        return name
+    }
+}
+
+public struct CompanionRoutine: Codable, Identifiable, Equatable, Sendable {
+    public let id: String
+    public let name: String
+    public let cron: String
+    public let timezone: String
+    public let enabled: Bool
+    public let nextFireAt: String?
+    public let lastErrorMessage: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case cron
+        case timezone
+        case enabled
+        case nextFireAt = "next_fire_at"
+        case lastErrorMessage = "last_error_message"
+    }
+
+    public var status: CompanionConnectedResourceStatus {
+        if !enabled { return .disabled }
+        return lastErrorMessage == nil ? .active : .error
+    }
+
+    /// A concise, truthful label for common five-field schedules. The literal cron remains visible
+    /// beside this label, so an unfamiliar expression is never guessed at or hidden.
+    public var scheduleDescription: String {
+        let fields = cron.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        guard fields.count == 5 else { return "Custom schedule" }
+        let minute = fields[0]
+        let hour = fields[1]
+        let dayOfMonth = fields[2]
+        let month = fields[3]
+        let dayOfWeek = fields[4]
+
+        guard dayOfMonth == "*", month == "*" else { return "Custom schedule" }
+        if hour == "*", dayOfWeek == "*" {
+            if minute == "0" { return "Every hour" }
+            if minute.hasPrefix("*/"), let interval = Int(minute.dropFirst(2)), interval > 0 {
+                return "Every \(interval) minutes"
+            }
+        }
+
+        guard let hourValue = Int(hour), (0...23).contains(hourValue),
+              let minuteValue = Int(minute), (0...59).contains(minuteValue) else {
+            return "Custom schedule"
+        }
+        let time = String(format: "%02d:%02d", hourValue, minuteValue)
+        switch dayOfWeek {
+        case "*": return "Every day at \(time)"
+        case "1-5": return "Weekdays at \(time)"
+        case "0,6", "6,0": return "Weekends at \(time)"
+        default:
+            let names = ["0": "Sunday", "1": "Monday", "2": "Tuesday", "3": "Wednesday",
+                         "4": "Thursday", "5": "Friday", "6": "Saturday", "7": "Sunday"]
+            if let name = names[dayOfWeek] { return "Every \(name) at \(time)" }
+            return "Custom schedule"
+        }
+    }
+}
+
+public struct CompanionTrigger: Codable, Identifiable, Equatable, Sendable {
+    public enum RegistrationStatus: String, Codable, Equatable, Sendable {
+        case manual
+        case registered
+        case failed
+        case unknown
+
+        public init(from decoder: Decoder) throws {
+            let value = try decoder.singleValueContainer().decode(String.self)
+            self = Self(rawValue: value) ?? .unknown
+        }
+    }
+
+    public let id: String
+    public let name: String
+    public let provider: String
+    public let registrationStatus: RegistrationStatus
+    public let enabled: Bool
+    public let lastErrorMessage: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case provider
+        case registrationStatus = "registration_status"
+        case enabled
+        case lastErrorMessage = "last_error_message"
+    }
+
+    public var status: CompanionConnectedResourceStatus {
+        if !enabled { return .disabled }
+        return lastErrorMessage == nil ? .active : .error
+    }
+
+    public var providerName: String {
+        switch provider {
+        case "github": "GitHub"
+        case "linear": "Linear"
+        case "custom": "Custom"
+        default: provider
+        }
+    }
+
+    public var registrationDescription: String {
+        switch registrationStatus {
+        case .manual: "Webhook managed manually"
+        case .registered: "Webhook registered"
+        case .failed: "Registration failed"
+        case .unknown: "Registration unknown"
+        }
+    }
+}
+
+public struct CompanionConnectedResources: Equatable, Sendable {
+    public let skills: [CompanionSkillSummary]
+    public let hiddenSkillCount: Int
+    public let routines: [CompanionRoutine]
+    public let triggers: [CompanionTrigger]
+
+    public init(
+        skills: [CompanionSkillSummary],
+        hiddenSkillCount: Int,
+        routines: [CompanionRoutine],
+        triggers: [CompanionTrigger]
+    ) {
+        self.skills = skills
+        self.hiddenSkillCount = hiddenSkillCount
+        self.routines = routines
+        self.triggers = triggers
     }
 }
 
