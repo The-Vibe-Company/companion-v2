@@ -78,13 +78,13 @@ struct RootView: View {
         .preferredColorScheme(preferredColorScheme)
     }
 
-    private var preferredColorScheme: ColorScheme {
+    private var preferredColorScheme: ColorScheme? {
 #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("-markdown-table-dark-demo") {
             return .dark
         }
 #endif
-        return .light
+        return nil
     }
 
     private var activeNotificationSessionID: String? {

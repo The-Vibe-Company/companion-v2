@@ -219,6 +219,53 @@ public final class SessionStore {
         }
     }
 
+    public func updateCompanionPluginSelection(
+        companionID: String,
+        selectedMCPAccountIDs: [String]
+    ) async throws -> CompanionSummary {
+        do {
+            let companion = try await client.updateCompanionPluginSelection(
+                companionID: companionID,
+                selectedMCPAccountIDs: selectedMCPAccountIDs
+            )
+            await persistRollingAuthority()
+            return companion
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func companionRuntime(companionID: String) async throws -> CompanionSummary {
+        do {
+            let companion = try await client.companionRuntime(companionID: companionID)
+            await persistRollingAuthority()
+            return companion
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func restartCompanion(
+        companionID: String,
+        target: CompanionRuntimeRestartTarget,
+        requestID: UUID
+    ) async throws -> CompanionOperationSummary {
+        do {
+            let operation = try await client.restartCompanion(
+                companionID: companionID,
+                target: target,
+                requestID: requestID
+            )
+            await persistRollingAuthority()
+            return operation
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
     public func deleteCompanion(
         companionID: String,
         requestID: UUID
