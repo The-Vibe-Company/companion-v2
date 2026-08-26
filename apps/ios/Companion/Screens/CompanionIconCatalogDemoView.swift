@@ -7,6 +7,7 @@ struct CompanionIconCatalogDemoView: View {
     var forceReduceMotion = false
 
     @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    @State private var selectedIcon = CompanionSummary.Icon(shape: 1, mouth: 1, accessory: 1, color: 2)
 
     private var reduceMotion: Bool {
         forceReduceMotion || systemReduceMotion
@@ -32,18 +33,10 @@ struct CompanionIconCatalogDemoView: View {
                     .accessibilityValue(reduceMotion ? "On" : "Off")
                     .accessibilityIdentifier("demo.icon.reduce-motion")
 
-                    catalogSection("Shapes", count: 8, identifier: "shape") { index in
-                        CompanionSummary.Icon(shape: index, mouth: 1, accessory: 0, color: 7)
-                    }
-                    catalogSection("Mouths", count: 5, identifier: "mouth") { index in
-                        CompanionSummary.Icon(shape: 1, mouth: index, accessory: 0, color: 4)
-                    }
-                    catalogSection("Accessories", count: 7, identifier: "accessory") { index in
-                        CompanionSummary.Icon(shape: 1, mouth: 1, accessory: index, color: 5)
-                    }
-                    catalogSection("Colors", count: 11, identifier: "color") { index in
-                        CompanionSummary.Icon(shape: 1, mouth: 1, accessory: 0, color: index)
-                    }
+                    CompanionIconGallery(
+                        selection: $selectedIcon,
+                        accessibilityIdentifierPrefix: "demo.icon"
+                    )
 
                     VStack(alignment: .leading, spacing: 12) {
                         Text("States")
@@ -71,48 +64,7 @@ struct CompanionIconCatalogDemoView: View {
             .navigationTitle("Companion icon catalog")
             .navigationBarTitleDisplayMode(.inline)
         }
-    }
-
-    private func catalogSection(
-        _ title: String,
-        count: Int,
-        identifier: String,
-        icon: @escaping (Int) -> CompanionSummary.Icon
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title)
-                .font(.headline)
-            Grid(horizontalSpacing: 12, verticalSpacing: 14) {
-                ForEach(0..<((count + 3) / 4), id: \.self) { row in
-                    GridRow {
-                        ForEach(0..<4, id: \.self) { column in
-                            let index = row * 4 + column
-                            if index < count {
-                                VStack(spacing: 6) {
-                                    CompanionAvatar(
-                                        name: "\(title) \(index + 1)",
-                                        icon: icon(index),
-                                        size: 64,
-                                        state: .still,
-                                        reduceMotionOverride: reduceMotionOverride
-                                    )
-                                    Text("\(index + 1)")
-                                        .font(.caption.monospacedDigit())
-                                        .foregroundStyle(Color.companionMuted)
-                                }
-                                .accessibilityElement(children: .combine)
-                                .accessibilityIdentifier("demo.icon.\(identifier).\(index)")
-                            } else {
-                                Color.clear
-                                    .frame(width: 64, height: 84)
-                                    .accessibilityHidden(true)
-                            }
-                        }
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
+        .environment(\.accessibilityReduceMotion, reduceMotion)
     }
 
     private func stateSample(

@@ -15,7 +15,6 @@ struct CompanionSettingsServices {
 
 struct CompanionSettingsView: View {
     @Environment(SessionStore.self) private var sessionStore
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     let companion: CompanionSummary
     let onSaved: (CompanionSummary) -> Void
@@ -25,9 +24,6 @@ struct CompanionSettingsView: View {
     private let services: CompanionSettingsServices?
 
     @State private var currentCompanion: CompanionSummary
-    @State private var name: String
-    @State private var instructions: String
-    @State private var icon: CompanionSummary.Icon
     @State private var providers: CompanionProvidersResponse?
     @State private var providerID: String
     @State private var modelID: String
@@ -55,9 +51,6 @@ struct CompanionSettingsView: View {
         self.onDeletionFailed = onDeletionFailed
         self.services = services
         _currentCompanion = State(initialValue: companion)
-        _name = State(initialValue: companion.name)
-        _instructions = State(initialValue: companion.persona ?? "")
-        _icon = State(initialValue: companion.icon ?? .init(shape: 1, mouth: 1, accessory: 1, color: 2))
         _providerID = State(initialValue: companion.runtime.providerIDs.first ?? "")
         _modelID = State(initialValue: companion.modelID ?? "")
     }
@@ -112,8 +105,6 @@ struct CompanionSettingsView: View {
         }
         .task(id: companion.id) { await loadProviders() }
         .onChange(of: providerID) { selectDefaultModel() }
-        .onChange(of: name) { enforceNameLimit() }
-        .onChange(of: instructions) { enforceInstructionsLimit() }
         .onChange(of: companion) { _, updated in syncServerProjection(updated) }
     }
 
@@ -158,49 +149,46 @@ struct CompanionSettingsView: View {
 
     private var identitySection: some View {
         Section {
-            VStack(spacing: 14) {
-                CompanionAvatar(name: displayName, icon: icon, size: 82)
-                    .accessibilityLabel("Preview for \(displayName)")
+            HStack(spacing: 14) {
+                CompanionAvatar(
+                    name: currentCompanion.name,
+                    icon: currentCompanion.icon,
+                    size: 66,
+                    state: .still
+                )
+                .accessibilityHidden(true)
 
-                if canEdit {
-                    Button("Surprise me", systemImage: "dice.fill") { randomizeIcon() }
-                        .buttonStyle(.glass)
-                        .accessibilityIdentifier("companion.settings.randomize-icon")
-
-                    Grid(horizontalSpacing: 8, verticalSpacing: 8) {
-                        GridRow {
-                            iconControl("Shape", symbol: "square.on.circle", part: .shape)
-                            iconControl("Face", symbol: "face.smiling", part: .mouth)
-                        }
-                        GridRow {
-                            iconControl("Style", symbol: "wand.and.stars", part: .accessory)
-                            iconControl("Color", symbol: "paintpalette.fill", part: .color)
-                        }
-                    }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(currentCompanion.name)
+                        .font(.headline)
+                        .accessibilityIdentifier("companion.settings.identity.name")
+                    Text(currentCompanion.persona ?? "No instructions")
+                        .font(.subheadline)
+                        .foregroundStyle(Color.companionMuted)
+                        .lineLimit(3)
                 }
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 6)
 
-            LabeledContent("Name") {
-                TextField("Companion name", text: $name)
-                    .multilineTextAlignment(.trailing)
-                    .textInputAutocapitalization(.words)
-                    .autocorrectionDisabled()
-                    .disabled(!canEdit || busy)
-                    .accessibilityIdentifier("companion.settings.name")
+                Spacer(minLength: 0)
             }
+            .frame(minHeight: 70)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(currentCompanion.name). \(currentCompanion.persona ?? "No instructions")")
+            .accessibilityIdentifier("companion.settings.identity.summary")
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Instructions")
-                    .font(.subheadline.weight(.semibold))
-                TextField("What this Companion is for", text: $instructions, axis: .vertical)
-                    .lineLimit(3...6)
-                    .disabled(!canEdit || busy)
-                    .accessibilityIdentifier("companion.settings.instructions")
-                Text("Applied after active work settles and before the next turn starts.")
-                    .font(.caption)
-                    .foregroundStyle(Color.companionMuted)
+            if canEdit {
+                NavigationLink {
+                    CompanionIdentityEditorView(
+                        companion: currentCompanion,
+                        onSaved: identitySaved,
+                        updateCompanion: services?.updateCompanion
+                    )
+                } label: {
+                    Label("Edit", systemImage: "pencil")
+                        .frame(minHeight: 44)
+                }
+                .disabled(busy)
+                .accessibilityLabel("Edit identity")
+                .accessibilityIdentifier("companion.settings.identity.edit")
             }
         } header: {
             Text("Identity")
@@ -281,24 +269,6 @@ struct CompanionSettingsView: View {
         }
     }
 
-    private enum IconPart {
-        case shape
-        case mouth
-        case accessory
-        case color
-    }
-
-    private func iconControl(_ title: String, symbol: String, part: IconPart) -> some View {
-        Button {
-            cycle(part)
-        } label: {
-            Label(title, systemImage: symbol)
-                .frame(maxWidth: .infinity, minHeight: 44)
-        }
-        .buttonStyle(.glass)
-        .accessibilityHint("Cycles to the next \(title.lowercased())")
-    }
-
     private var canEdit: Bool {
         currentCompanion.access.canEditCompanionSettings
     }
@@ -323,29 +293,15 @@ struct CompanionSettingsView: View {
         connectedProviders.first(where: { $0.id == providerID })
     }
 
-    private var displayName: String {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? currentCompanion.name : trimmed
-    }
-
     private var changed: Bool {
-        name.trimmingCharacters(in: .whitespacesAndNewlines) != currentCompanion.name
-            || normalizedInstructions != currentCompanion.persona
-            || icon != currentCompanion.icon
-            || providerID != currentCompanion.runtime.providerIDs.first
+        providerID != currentCompanion.runtime.providerIDs.first
             || modelID != currentCompanion.modelID
-    }
-
-    private var normalizedInstructions: String? {
-        let value = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
-        return value.isEmpty ? nil : value
     }
 
     private var canSave: Bool {
         canEdit
             && !busy
             && changed
-            && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && selectedProvider?.models.contains(where: { $0.id == modelID }) == true
     }
 
@@ -400,11 +356,11 @@ struct CompanionSettingsView: View {
         error = nil
         success = nil
         let input = UpdateCompanionInput(
-            name: name.trimmingCharacters(in: .whitespacesAndNewlines),
-            persona: normalizedInstructions,
+            name: currentCompanion.name,
+            persona: currentCompanion.persona,
             providerID: providerID,
             modelID: modelID,
-            icon: icon
+            icon: currentCompanion.icon ?? .init(shape: 1, mouth: 1, accessory: 1, color: 2)
         )
         do {
             let response: CompanionSummary
@@ -418,9 +374,6 @@ struct CompanionSettingsView: View {
             }
             let updated = response.preservingListProjection(from: currentCompanion)
             currentCompanion = updated
-            name = updated.name
-            instructions = updated.persona ?? ""
-            icon = updated.icon ?? icon
             providerID = updated.runtime.providerIDs.first ?? providerID
             modelID = updated.modelID ?? modelID
             success = "Settings saved."
@@ -468,14 +421,6 @@ struct CompanionSettingsView: View {
         deleting = false
     }
 
-    private func enforceNameLimit() {
-        if name.count > 120 { name = String(name.prefix(120)) }
-    }
-
-    private func enforceInstructionsLimit() {
-        if instructions.count > 280 { instructions = String(instructions.prefix(280)) }
-    }
-
     private func syncServerProjection(_ updated: CompanionSummary) {
         currentCompanion = updated.preservingListProjection(from: currentCompanion)
         if updated.deletionOperation != nil { deleteRequestID = nil }
@@ -486,39 +431,11 @@ struct CompanionSettingsView: View {
         onSaved(currentCompanion)
     }
 
-    private func randomizeIcon() {
-        updateIcon {
-            .init(
-                shape: .random(in: 0..<8),
-                mouth: .random(in: 0..<5),
-                accessory: .random(in: 0..<7),
-                color: .random(in: 0..<11)
-            )
-        }
-    }
-
-    private func cycle(_ part: IconPart) {
-        updateIcon {
-            switch part {
-            case .shape:
-                return .init(shape: (icon.shape + 1) % 8, mouth: icon.mouth, accessory: icon.accessory, color: icon.color)
-            case .mouth:
-                return .init(shape: icon.shape, mouth: (icon.mouth + 1) % 5, accessory: icon.accessory, color: icon.color)
-            case .accessory:
-                return .init(shape: icon.shape, mouth: icon.mouth, accessory: (icon.accessory + 1) % 7, color: icon.color)
-            case .color:
-                return .init(shape: icon.shape, mouth: icon.mouth, accessory: icon.accessory, color: (icon.color + 1) % 11)
-            }
-        }
-    }
-
-    private func updateIcon(_ mutation: () -> CompanionSummary.Icon) {
-        let next = mutation()
-        if reduceMotion {
-            icon = next
-        } else {
-            withAnimation(.easeOut(duration: 0.18)) { icon = next }
-        }
+    private func identitySaved(_ updated: CompanionSummary) {
+        currentCompanion = updated.preservingListProjection(from: currentCompanion)
+        success = "Identity saved."
+        error = nil
+        onSaved(currentCompanion)
     }
 }
 

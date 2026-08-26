@@ -1,10 +1,19 @@
 import SwiftUI
 import CompanionKit
 
+@MainActor
+struct CreateCompanionServices {
+    let listProviders: () async throws -> CompanionProvidersResponse
+    let listPlugins: () async throws -> [CompanionPluginAccount]
+    let createCompanion: (CreateCompanionInput) async throws -> CompanionSummary
+}
+
 struct CreateCompanionView: View {
     @Environment(SessionStore.self) private var sessionStore
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let onCreated: (CompanionSummary) -> Void
+    private let services: CreateCompanionServices?
 
     @State private var name = ""
     @State private var icon = CompanionSummary.Icon(shape: 6, mouth: 1, accessory: 6, color: 2)
@@ -18,6 +27,14 @@ struct CreateCompanionView: View {
     @State private var error: String?
     @State private var showingProviders = false
     @State private var showingPlugins = false
+
+    init(
+        services: CreateCompanionServices? = nil,
+        onCreated: @escaping (CompanionSummary) -> Void
+    ) {
+        self.services = services
+        self.onCreated = onCreated
+    }
 
     var body: some View {
         NavigationStack {
@@ -34,6 +51,7 @@ struct CreateCompanionView: View {
                         if let error { CompanionErrorNotice(message: error) }
 
                         identityCard
+                        iconCard
 
                         if loading && providers == nil {
                             ProgressView("Loading workspace…")
@@ -90,19 +108,44 @@ struct CreateCompanionView: View {
                                 .stroke(Color.companionBorder, lineWidth: 0.7)
                         }
                         .accessibilityLabel("Companion name")
+                }
+            }
+        }
+    }
 
-                    Button("Surprise me", systemImage: "dice.fill") { randomizeIcon() }
-                        .buttonStyle(.glass)
+    private var iconCard: some View {
+        CompanionManagementCard("Icon") {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: 12) {
+                    iconPickerDetail
+                    Spacer(minLength: 8)
+                    randomizeButton
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    iconPickerDetail
+                    randomizeButton
                 }
             }
 
-            HStack(spacing: 8) {
-                iconControl("Shape", symbol: "square.on.circle", part: .shape)
-                iconControl("Face", symbol: "face.smiling", part: .mouth)
-                iconControl("Style", symbol: "wand.and.stars", part: .accessory)
-                iconControl("Color", symbol: "paintpalette.fill", part: .color)
-            }
+            CompanionIconGallery(
+                selection: $icon,
+                accessibilityIdentifierPrefix: "companion.create.icon"
+            )
         }
+    }
+
+    private var iconPickerDetail: some View {
+        Text("Choose every part of your Companion's icon.")
+            .font(.subheadline)
+            .foregroundStyle(Color.companionMuted)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var randomizeButton: some View {
+        Button("Surprise me", systemImage: "dice.fill") { randomizeIcon() }
+            .buttonStyle(.glass)
+            .accessibilityIdentifier("companion.create.randomize-icon")
     }
 
     @ViewBuilder
@@ -217,33 +260,10 @@ struct CreateCompanionView: View {
         }
     }
 
-    private enum IconPart {
-        case shape
-        case mouth
-        case accessory
-        case color
-    }
-
     private struct PluginGroup {
         let provider: String
         let title: String
         let accounts: [CompanionPluginAccount]
-    }
-
-    private func iconControl(_ title: String, symbol: String, part: IconPart) -> some View {
-        Button {
-            cycle(part)
-        } label: {
-            VStack(spacing: 5) {
-                Image(systemName: symbol)
-                    .font(.subheadline.weight(.semibold))
-                Text(title)
-                    .font(.caption2.weight(.semibold))
-            }
-            .frame(maxWidth: .infinity, minHeight: 48)
-        }
-        .buttonStyle(.glass)
-        .accessibilityHint("Cycles to the next \(title.lowercased())")
     }
 
     private var displayName: String {
@@ -325,9 +345,7 @@ struct CreateCompanionView: View {
     private func loadWorkspace() async {
         loading = true
         do {
-            async let nextProviders = sessionStore.listCompanionProviders()
-            async let nextPlugins = sessionStore.listCompanionPlugins()
-            let (providerResponse, pluginResponse) = try await (nextProviders, nextPlugins)
+            let (providerResponse, pluginResponse) = try await loadWorkspaceResources()
             providers = providerResponse
             plugins = pluginResponse
             let validPluginIDs = Set(pluginResponse.map(\.id))
@@ -338,6 +356,21 @@ struct CreateCompanionView: View {
             self.error = companionDisplayMessage(error, fallback: "The workspace configuration could not be loaded.")
         }
         loading = false
+    }
+
+    private func loadWorkspaceResources() async throws -> (
+        CompanionProvidersResponse,
+        [CompanionPluginAccount]
+    ) {
+        if let services {
+            async let nextProviders = services.listProviders()
+            async let nextPlugins = services.listPlugins()
+            return try await (nextProviders, nextPlugins)
+        }
+
+        async let nextProviders = sessionStore.listCompanionProviders()
+        async let nextPlugins = sessionStore.listCompanionPlugins()
+        return try await (nextProviders, nextPlugins)
     }
 
     private func selectInitialProvider(from response: CompanionProvidersResponse) {
@@ -371,7 +404,12 @@ struct CreateCompanionView: View {
             icon: icon
         )
         do {
-            let companion = try await sessionStore.createCompanion(input)
+            let companion: CompanionSummary
+            if let services {
+                companion = try await services.createCompanion(input)
+            } else {
+                companion = try await sessionStore.createCompanion(input)
+            }
             onCreated(companion)
             dismiss()
         } catch {
@@ -381,28 +419,106 @@ struct CreateCompanionView: View {
     }
 
     private func randomizeIcon() {
-        withAnimation(.spring(duration: 0.35, bounce: 0.24)) {
-            icon = .init(
-                shape: .random(in: 0..<8),
-                mouth: .random(in: 0..<5),
-                accessory: .random(in: 0..<7),
-                color: .random(in: 0..<11)
-            )
-        }
-    }
-
-    private func cycle(_ part: IconPart) {
-        withAnimation(.spring(duration: 0.28, bounce: 0.2)) {
-            switch part {
-            case .shape:
-                icon = .init(shape: (icon.shape + 1) % 8, mouth: icon.mouth, accessory: icon.accessory, color: icon.color)
-            case .mouth:
-                icon = .init(shape: icon.shape, mouth: (icon.mouth + 1) % 5, accessory: icon.accessory, color: icon.color)
-            case .accessory:
-                icon = .init(shape: icon.shape, mouth: icon.mouth, accessory: (icon.accessory + 1) % 7, color: icon.color)
-            case .color:
-                icon = .init(shape: icon.shape, mouth: icon.mouth, accessory: icon.accessory, color: (icon.color + 1) % 11)
+        let updated = CompanionSummary.Icon(
+            shape: .random(in: 0..<8),
+            mouth: .random(in: 0..<5),
+            accessory: .random(in: 0..<7),
+            color: .random(in: 0..<11)
+        )
+        if reduceMotion {
+            icon = updated
+        } else {
+            withAnimation(.easeOut(duration: 0.18)) {
+                icon = updated
             }
         }
     }
 }
+
+#if DEBUG
+struct CreateCompanionDemoView: View {
+    @State private var createdCompanion: CompanionSummary?
+
+    var body: some View {
+        if let createdCompanion {
+            ContentUnavailableView(
+                "\(createdCompanion.name) created",
+                systemImage: "checkmark.circle",
+                description: Text("The deterministic creation fixture accepted the selected identity.")
+            )
+        } else {
+            CreateCompanionView(
+                services: CreateCompanionDemoFixtures.services,
+                onCreated: { createdCompanion = $0 }
+            )
+        }
+    }
+}
+
+@MainActor
+private enum CreateCompanionDemoFixtures {
+    static let services = CreateCompanionServices(
+        listProviders: { providers },
+        listPlugins: { [] },
+        createCompanion: { input in companion(input: input) }
+    )
+
+    private static var providers: CompanionProvidersResponse {
+        decode(#"""
+        {
+          "catalog":[{
+            "id":"anthropic",
+            "name":"Claude",
+            "auth_methods":["api_key"],
+            "description":"Claude models",
+            "models":[{"id":"claude-sonnet","name":"Sonnet","default":true}]
+          }],
+          "connections":[{
+            "provider_id":"anthropic",
+            "auth_method":"api_key",
+            "connected_by":"user-1",
+            "created_at":"2026-08-26T08:00:00.000Z",
+            "updated_at":"2026-08-26T08:00:00.000Z"
+          }],
+          "default_provider_id":"anthropic",
+          "can_manage":true
+        }
+        """#)
+    }
+
+    private static func companion(input: CreateCompanionInput) -> CompanionSummary {
+        let object: [String: Any] = [
+            "id": "c96ab360-00f3-4497-a51a-51442db8add1",
+            "name": input.name,
+            "persona": NSNull(),
+            "model_id": input.modelID,
+            "selected_skill_ids": [],
+            "selected_mcp_account_ids": input.selectedMCPAccountIDs,
+            "icon": [
+                "shape": input.icon.shape,
+                "mouth": input.icon.mouth,
+                "accessory": input.icon.accessory,
+                "color": input.icon.color,
+            ],
+            "access": "owner",
+            "hidden": false,
+            "unread": false,
+            "last_message": NSNull(),
+            "runtime": [
+                "state": "not_created",
+                "daemon_state": "stopped",
+                "replying": false,
+                "last_error": NSNull(),
+                "provider_ids": [input.providerID],
+                "latest_operation": NSNull(),
+            ],
+        ]
+        let data = try! JSONSerialization.data(withJSONObject: object)
+        return try! JSONDecoder().decode(CompanionSummary.self, from: data)
+    }
+
+    private static func decode<Value: Decodable>(_ json: String) -> Value {
+        try! JSONDecoder().decode(Value.self, from: Data(json.utf8))
+    }
+}
+#endif

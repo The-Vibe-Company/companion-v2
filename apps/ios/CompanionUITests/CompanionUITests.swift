@@ -790,8 +790,30 @@ final class CompanionUITests: XCTestCase {
         let app = launchCompanionSettings(access: "editor")
 
         XCTAssertTrue(app.buttons["companion.settings.save"].exists)
-        XCTAssertTrue(app.descendants(matching: .any)["companion.settings.name"].isEnabled)
+        XCTAssertFalse(app.descendants(matching: .any)["companion.settings.name"].exists)
         XCTAssertFalse(app.buttons["companion.settings.delete"].exists)
+
+        let editIdentity = app.descendants(matching: .any)["companion.settings.identity.edit"]
+        XCTAssertTrue(editIdentity.waitForExistence(timeout: 2))
+        editIdentity.tap()
+
+        XCTAssertTrue(app.navigationBars["Edit identity"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.descendants(matching: .any)["companion.identity.name"].isEnabled)
+        let selectedShape = app.descendants(matching: .any)["companion.identity.icon.shape.6"]
+        for _ in 0..<4 where !selectedShape.exists { app.swipeUp() }
+        XCTAssertTrue(selectedShape.waitForExistence(timeout: 2))
+        XCTAssertEqual(selectedShape.value as? String, "Selected")
+
+        let firstShape = app.descendants(matching: .any)["companion.identity.icon.shape.0"]
+        XCTAssertTrue(firstShape.exists)
+        firstShape.tap()
+        XCTAssertEqual(firstShape.value as? String, "Selected")
+        let identitySave = app.buttons["companion.identity.save"]
+        XCTAssertTrue(identitySave.isEnabled)
+        identitySave.tap()
+
+        XCTAssertTrue(app.navigationBars["Companion settings"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["Identity saved."].waitForExistence(timeout: 2))
 
         openConnectedResources(in: app)
         XCTAssertFalse(app.buttons["companion.resources.plugins.add"].exists)
@@ -806,7 +828,8 @@ final class CompanionUITests: XCTestCase {
         let app = launchCompanionSettings(access: "viewer")
 
         XCTAssertFalse(app.buttons["companion.settings.save"].exists)
-        XCTAssertFalse(app.descendants(matching: .any)["companion.settings.name"].isEnabled)
+        XCTAssertTrue(app.descendants(matching: .any)["companion.settings.identity.summary"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["companion.settings.identity.edit"].exists)
         XCTAssertFalse(app.buttons["companion.settings.delete"].exists)
         XCTAssertTrue(app.staticTexts["You have read-only access to this Companion."].exists)
     }
@@ -1078,37 +1101,26 @@ final class CompanionUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Companion icon catalog"].waitForExistence(timeout: 5))
         try captureScreenshot(named: "catalog-top.png")
 
-        for shape in 0..<8 {
-            let element = app.descendants(matching: .any)["demo.icon.shape.\(shape)"]
-            XCTAssertTrue(element.exists)
-            XCTAssertTrue(element.label.contains("Companion"), "Shape \(shape) should have a Companion VoiceOver label")
-        }
-        for mouth in 0..<5 {
-            let element = app.descendants(matching: .any)["demo.icon.mouth.\(mouth)"]
-            XCTAssertTrue(element.exists)
-            XCTAssertTrue(element.label.contains("Companion"), "Mouth \(mouth) should have a Companion VoiceOver label")
-        }
-        for accessory in 0..<7 {
-            let element = app.descendants(matching: .any)["demo.icon.accessory.\(accessory)"]
-            XCTAssertTrue(element.exists)
-            XCTAssertTrue(element.label.contains("Companion"), "Accessory \(accessory) should have a Companion VoiceOver label")
-        }
+        assertIconOptions(in: app, prefix: "demo.icon.shape", count: 8)
+        assertIconOptions(in: app, prefix: "demo.icon.mouth", count: 5)
+        assertIconOptions(in: app, prefix: "demo.icon.accessory", count: 7)
+        assertIconOptions(in: app, prefix: "demo.icon.color", count: 11)
 
-        app.swipeUp()
-        app.swipeUp()
-        for color in 0..<11 {
-            let element = app.descendants(matching: .any)["demo.icon.color.\(color)"]
-            XCTAssertTrue(element.exists)
-            XCTAssertTrue(element.label.contains("Companion"), "Color \(color) should have a Companion VoiceOver label")
-        }
+        let colorChoice = app.descendants(matching: .any)["demo.icon.color.10"]
+        XCTAssertTrue(colorChoice.exists)
+        colorChoice.tap()
+        XCTAssertEqual(colorChoice.value as? String, "Selected")
+
         for (identifier, label) in [("idle", "Idle"), ("thinking", "Thinking"), ("still", "Still")] {
             let element = app.descendants(matching: .any)["demo.icon.state.\(identifier)"]
+            for _ in 0..<4 where !element.exists { app.swipeUp() }
             XCTAssertTrue(element.exists)
             XCTAssertTrue(element.label.contains(label))
             XCTAssertTrue(element.label.contains("Companion"), "\(label) should have a Companion VoiceOver label")
         }
         for size in [30, 52, 86] {
             let element = app.descendants(matching: .any)["demo.icon.size.\(size)"]
+            for _ in 0..<4 where !element.exists { app.swipeUp() }
             XCTAssertTrue(element.exists)
             XCTAssertTrue(element.label.contains("Companion"), "Size \(size) should have a Companion VoiceOver label")
         }
@@ -1127,6 +1139,28 @@ final class CompanionUITests: XCTestCase {
         XCTAssertEqual(reduceMotionIndicator.label, "Reduce Motion")
         XCTAssertEqual(reduceMotionIndicator.value as? String, "On")
         try captureScreenshot(named: "catalog-reduce-motion.png")
+    }
+
+    @MainActor
+    func testCreateCompanionUsesTheSharedVisualIconSelector() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-create-demo"]
+        app.launch()
+
+        XCTAssertTrue(app.navigationBars["New Companion"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["companion.create.icon.shape.grid"].waitForExistence(timeout: 2))
+
+        let initialShape = app.descendants(matching: .any)["companion.create.icon.shape.6"]
+        XCTAssertTrue(initialShape.exists)
+        XCTAssertEqual(initialShape.value as? String, "Selected")
+
+        let nextShape = app.descendants(matching: .any)["companion.create.icon.shape.0"]
+        nextShape.tap()
+        XCTAssertEqual(nextShape.value as? String, "Selected")
+        assertIconOptions(in: app, prefix: "companion.create.icon.shape", count: 8)
+        assertIconOptions(in: app, prefix: "companion.create.icon.mouth", count: 5)
+        assertIconOptions(in: app, prefix: "companion.create.icon.accessory", count: 7)
+        assertIconOptions(in: app, prefix: "companion.create.icon.color", count: 11)
     }
 
     @MainActor
@@ -1173,6 +1207,24 @@ final class CompanionUITests: XCTestCase {
         XCTAssertTrue(creationAvatar.label.contains("Nova"))
         XCTAssertTrue(creationAvatar.label.contains("Companion"))
         try captureScreenshot(named: "creation-thinking.png")
+    }
+
+    @MainActor
+    private func assertIconOptions(
+        in app: XCUIApplication,
+        prefix: String,
+        count: Int
+    ) {
+        for index in 0..<count {
+            let element = app.descendants(matching: .any)["\(prefix).\(index)"]
+            for _ in 0..<5 where !element.exists { app.swipeUp() }
+            XCTAssertTrue(element.exists, "Missing icon option \(prefix).\(index)")
+            XCTAssertTrue(
+                element.label.contains("Companion"),
+                "Icon option \(prefix).\(index) should have a Companion VoiceOver label"
+            )
+            XCTAssertTrue(["Selected", "Not selected"].contains(element.value as? String ?? ""))
+        }
     }
 
     @MainActor
