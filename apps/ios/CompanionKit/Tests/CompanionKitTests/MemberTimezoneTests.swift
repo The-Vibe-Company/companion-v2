@@ -185,6 +185,7 @@ func apiClientUsesProfileRoutineAndTriggerRoutes() async throws {
             target: CompanionTriggerTarget(repo: "acme/project", events: ["pull_request"])
         )
     )
+    #expect(createdTrigger.prompt == "Summarize the pull request.")
     #expect(createdTrigger.provider == "github")
     #expect(createdTrigger.target?.repo == "acme/project")
 }

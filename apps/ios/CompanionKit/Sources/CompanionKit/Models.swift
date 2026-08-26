@@ -643,6 +643,7 @@ public struct CompanionTrigger: Codable, Identifiable, Equatable, Sendable {
     public let id: String
     public let companionID: String?
     public let name: String
+    public let prompt: String
     public let provider: String
     public let target: CompanionTriggerTarget?
     public let registrationStatus: RegistrationStatus
@@ -656,6 +657,7 @@ public struct CompanionTrigger: Codable, Identifiable, Equatable, Sendable {
         case id
         case companionID = "companion_id"
         case name
+        case prompt
         case provider
         case target
         case registrationStatus = "registration_status"
@@ -669,6 +671,7 @@ public struct CompanionTrigger: Codable, Identifiable, Equatable, Sendable {
     public init(
         id: String,
         name: String,
+        prompt: String = "",
         provider: String,
         registrationStatus: RegistrationStatus,
         enabled: Bool,
@@ -682,6 +685,7 @@ public struct CompanionTrigger: Codable, Identifiable, Equatable, Sendable {
         self.id = id
         self.companionID = companionID
         self.name = name
+        self.prompt = prompt
         self.provider = provider
         self.target = target
         self.registrationStatus = registrationStatus
