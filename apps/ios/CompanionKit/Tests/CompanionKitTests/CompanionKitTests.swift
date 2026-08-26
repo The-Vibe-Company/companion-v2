@@ -935,6 +935,88 @@ func decodesViewerAndAuthorIdentityForSharedThreads() throws {
     #expect(thread.entries.first?.authorID == "editor-2")
     #expect(thread.entries.first?.authorName == "Morgan")
     #expect(thread.entries.first?.attachments == [])
+    #expect(thread.activeTurn == nil)
+}
+
+@Test
+func decodesAssistantReasoningAndPreservesLegacyTranscriptEntries() throws {
+    func decodeEntry(reasoningJSON: String?) throws -> TranscriptEntry {
+        let reasoningField = reasoningJSON.map { "\"reasoning\":\($0),\n      " } ?? ""
+        let data = Data("""
+        {
+          "event_id":"msg:reasoning-1",
+          "ordinal":1,
+          "role":"assistant",
+          "content":"The answer is ready.",
+          \(reasoningField)"queued":false,
+          "created_at":"2026-08-24T11:00:00.000Z"
+        }
+        """.utf8)
+        return try JSONDecoder().decode(TranscriptEntry.self, from: data)
+    }
+
+    let present = try decodeEntry(reasoningJSON: "\"Reviewing the transcript contract.\"")
+    let missing = try decodeEntry(reasoningJSON: nil)
+    let null = try decodeEntry(reasoningJSON: "null")
+
+    #expect(present.reasoning == "Reviewing the transcript contract.")
+    #expect(missing.reasoning == nil)
+    #expect(null.reasoning == nil)
+}
+
+@Test
+func decodesActiveTurnAndTranscriptTurnIdentity() throws {
+    let data = Data(#"""
+    {
+      "companion_id":"5b7d655e-36bb-4fbe-9acd-e56103759911",
+      "viewer_id":"owner-1",
+      "read_only":false,
+      "can_send":true,
+      "entries":[{
+        "event_id":"msg:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "ordinal":1,
+        "role":"user",
+        "content":"Please continue",
+        "turn_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "queued":false,
+        "created_at":"2026-08-26T06:00:00.000Z"
+      }],
+      "active_turn":{
+        "id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "companion_id":"5b7d655e-36bb-4fbe-9acd-e56103759911",
+        "client_message_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "status":"running",
+        "queue_sequence":20,
+        "latest_attempt":{
+          "id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+          "turn_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "attempt_number":1,
+          "retry_id":null,
+          "status":"running",
+          "dispatch_state":"accepted",
+          "pi_invocation_id":"pi-invocation-1",
+          "dispatch_accepted_at":"2026-08-26T06:00:01.000Z",
+          "error":null,
+          "started_at":"2026-08-26T06:00:00.000Z",
+          "settled_at":null
+        },
+        "replying":true,
+        "error":null,
+        "state_changed_at":"2026-08-26T06:00:00.000Z",
+        "settled_at":null,
+        "created_at":"2026-08-26T06:00:00.000Z",
+        "updated_at":"2026-08-26T06:00:00.000Z"
+      },
+      "queued_count":0,
+      "interrupted_turn":null
+    }
+    """#.utf8)
+
+    let thread = try JSONDecoder().decode(CompanionThread.self, from: data)
+    #expect(thread.activeTurn?.id == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    #expect(thread.activeTurn?.replying == true)
+    #expect(thread.activeTurn?.latestAttempt?.id == "cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+    #expect(thread.entries.first?.turnID == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 }
 
 @Test

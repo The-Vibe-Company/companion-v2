@@ -81,7 +81,7 @@ xcodebuildmcp swift-package test --package-path apps/ios/CompanionKit
 Release builds ignore launch arguments and environment variables and always use
 `https://api.thecompanion.sh`.
 
-The Debug-only `-glass-chat-demo`, `-companion-queued-demo`, `-markdown-table-demo`,
+The Debug-only `-glass-chat-demo`, `-glass-chat-thinking-demo`, `-companion-queued-demo`, `-markdown-table-demo`,
 `-glass-management-demo`, `-glass-management-demo-plugins`,
 `-companion-icon-demo`, `-companion-create-demo`, `-companion-decision-demo`, `-companion-interruption-demo`,
 `-companion-transcript-window-demo`, `-companion-resources-demo`,
@@ -107,6 +107,8 @@ removal, restoration after a lost first deletion response, and a same-key `202` 
 arguments are excluded from Release behavior.
 The resources demo accepts `COMPANION_RESOURCES_DEMO_EMPTY=skills|routines|triggers` to show one
 section's deterministic empty state.
+Combine `-glass-chat-demo -glass-chat-thinking-demo` to keep the composer-adjacent thinking status
+visible and connect its tap target to the demo reply's collapsed reasoning disclosure.
 Combine `-companion-roster-demo -companion-notification-demo` to inject a version-1 response payload
 and verify deferred navigation to Luna's chat without contacting APNs.
 
