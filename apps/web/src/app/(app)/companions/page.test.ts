@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-module-mocking, anti-slop/require-safety-comment-for-type-assertion -- Existing route tests predate the incremental anti-slop gate; this change only extends their established fixture and response assertions. */
+
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -153,16 +155,29 @@ describe("Companions page access gate", () => {
       if (path === "/v1/companions") return { companions: [] };
       if (path === "/v1/companion-plugins") return { accounts: [] };
       if (path === "/v1/skills?lib=mine") {
-        return [{ id: "personal-1", slug: "my-private-skill" }];
+        return [{
+          id: "personal-1",
+          slug: "my-private-skill",
+          description: "Keeps personal research organized.",
+          scope: "personal",
+        }];
       }
       if (path === "/v1/skills?lib=org") {
-        return [{ id: "org-skill-1", slug: "shared-skill" }];
+        return [{
+          id: "org-skill-1",
+          slug: "shared-skill",
+          description: "Applies the workspace release checklist.",
+          scope: "org",
+        }];
       }
       return [];
     });
 
     const element = await CompanionsPage({ searchParams: Promise.resolve({}) }) as {
-      props: { initialProviders: unknown; skills: Array<{ id: string; slug: string }> };
+      props: {
+        initialProviders: unknown;
+        skills: Array<{ id: string; slug: string; description: string; scope: "personal" | "org" }>;
+      };
     };
     const requestedPaths = apiMocks.serverApiFetch.mock.calls.map(([path]) => path);
 
@@ -177,8 +192,18 @@ describe("Companions page access gate", () => {
     expect(requestedPaths).toContain("/v1/skills?lib=org");
     expect(element.props.initialProviders).toBeNull();
     expect(element.props.skills).toEqual([
-      { id: "personal-1", slug: "my-private-skill" },
-      { id: "org-skill-1", slug: "shared-skill" },
+      {
+        id: "personal-1",
+        slug: "my-private-skill",
+        description: "Keeps personal research organized.",
+        scope: "personal",
+      },
+      {
+        id: "org-skill-1",
+        slug: "shared-skill",
+        description: "Applies the workspace release checklist.",
+        scope: "org",
+      },
     ]);
   });
 

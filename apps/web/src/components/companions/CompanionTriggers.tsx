@@ -10,6 +10,7 @@ import {
   updateCompanionTrigger,
 } from "@/lib/companions";
 import { Dialog } from "../org/primitives";
+import { Badge } from "../cds";
 import { Icon } from "../Icon";
 import { PluginMark } from "./PluginMark";
 
@@ -238,24 +239,38 @@ export function CompanionTriggers({
         )}
       </div>
       {triggers.length === 0 ? (
-        <p className="chat-context__empty">No triggers yet.</p>
+        <p className="chat-context__empty">
+          No triggers connected. Webhook prompts will appear here.
+        </p>
       ) : (
-        <ul className="chat-context__routines">
+        <ul className="chat-context__resources">
           {triggers.map((trigger) => (
-            <li key={trigger.id} className="chat-context__routine">
+            <li key={trigger.id} className="chat-context__resource">
               <div className="chat-context__routine-main">
-                <span
-                  className="chat-context__routine-name"
-                  style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
-                >
-                  {trigger.provider !== "custom" && (
-                    <PluginMark provider={trigger.provider} variant="glyph" />
-                  )}
-                  {trigger.name}
+                <span className="chat-context__resource-head">
+                  <span className="chat-context__routine-name chat-context__trigger-name">
+                    {trigger.provider !== "custom" && (
+                      <PluginMark provider={trigger.provider} variant="glyph" />
+                    )}
+                    {trigger.name}
+                  </span>
+                  <Badge
+                    tone={!trigger.enabled ? "neutral" : trigger.last_error_message ? "danger" : "ok"}
+                    dot
+                  >
+                    {!trigger.enabled ? "Disabled" : trigger.last_error_message ? "Error" : "Active"}
+                  </Badge>
                 </span>
-                {/* The provider is a machine value and a UI label only; it names the mark, never an
-                    authentication scheme. */}
-                <span className="chat-context__caption mono">{trigger.provider}</span>
+                <span className="chat-context__resource-meta">
+                  <span>{PROVIDER_LABELS[trigger.provider]}</span>
+                  <span>
+                    {trigger.registration_status === "registered"
+                      ? "Webhook registered"
+                      : trigger.registration_status === "failed"
+                        ? "Registration failed"
+                        : "Webhook managed manually"}
+                  </span>
+                </span>
                 {trigger.last_fired_at && (
                   <span className="chat-context__caption">
                     Last fired {new Date(trigger.last_fired_at).toLocaleString()}
@@ -275,7 +290,7 @@ export function CompanionTriggers({
                     disabled={busyId === trigger.id}
                     onClick={() => void toggle(trigger)}
                   >
-                    {trigger.enabled ? "On" : "Off"}
+                    {trigger.enabled ? "Turn off" : "Turn on"}
                   </button>
                   <button
                     type="button"

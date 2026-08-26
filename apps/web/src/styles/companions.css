@@ -1937,19 +1937,87 @@ button.chat-box:focus-visible {
   color: var(--color-faint);
 }
 
-.chat-context__routines {
+.chat-context__resources {
   margin: 0;
   padding: 0;
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  border-top: 1px solid var(--color-line);
 }
 
-.chat-context__routine {
+.chat-context__resource {
+  min-width: 0;
+  padding: 10px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-bottom: 1px solid var(--color-line);
+}
+
+.chat-context__resource-link {
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 4px;
+  color: inherit;
+  text-decoration: none;
+}
+
+.chat-context__resource-link:hover .chat-context__resource-name {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.chat-context__resource-link:focus-visible {
+  outline: 2px solid var(--color-accent-ring);
+  outline-offset: 3px;
+  border-radius: var(--radius-sm);
+}
+
+.chat-context__resource-head {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* The shared healthy green carries the dot and tint. At this compact text size its foreground is
+   below the AA floor, so the written status stays at full content contrast. */
+.chat-context__resource-head .cds-badge--ok {
+  color: var(--color-fg);
+}
+
+.chat-context__resource-name,
+.chat-context__routine-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.chat-context__resource-description,
+.chat-context__resource-meta {
+  color: var(--color-muted);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+}
+
+.chat-context__resource-description {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.chat-context__resource-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+}
+
+.chat-context__resource--quiet {
+  color: var(--color-faint);
+  font-size: var(--text-xs);
 }
 
 .chat-context__routine-main {
@@ -1966,7 +2034,14 @@ button.chat-box:focus-visible {
 
 .chat-context__routine-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
+}
+
+.chat-context__trigger-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .chat-context__routine-error {
@@ -2078,41 +2153,6 @@ button.chat-box:focus-visible {
   margin: 0;
   color: var(--color-muted);
   font-size: var(--text-xs);
-}
-
-.chat-context__chips {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-/* A skill is named by its literal slug, with the accent dot saying it is staged rather than merely
-   available. */
-.chat-context__chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 9px;
-  border: 1px solid var(--color-line);
-  border-radius: var(--radius-full);
-  background: var(--color-surface-raised);
-  color: var(--color-fg);
-  font-size: var(--text-xs);
-}
-
-.chat-context__chip i {
-  width: 6px;
-  height: 6px;
-  border-radius: var(--radius-full);
-  background: var(--color-accent-edge);
-}
-
-.chat-context__chip--quiet {
-  color: var(--color-faint);
-  font-family: var(--font-ui);
 }
 
 /* The scrim behind the panel when it comes over the conversation. It only exists in overlay mode:
@@ -2380,5 +2420,23 @@ button.chat-box:focus-visible {
 
   .chat-head .cds-btn {
     min-height: 44px;
+  }
+
+  .chat-context__close,
+  .chat-context__add {
+    width: 44px;
+    height: 44px;
+  }
+
+  .chat-context__resource-link,
+  .chat-context__routine-actions .chat-context__link,
+  .chat-context__titlerow > .chat-context__link {
+    min-height: 44px;
+  }
+
+  .chat-context__routine-actions .chat-context__link,
+  .chat-context__titlerow > .chat-context__link {
+    display: inline-flex;
+    align-items: center;
   }
 }

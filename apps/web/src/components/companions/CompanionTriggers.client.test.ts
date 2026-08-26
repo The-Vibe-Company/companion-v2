@@ -129,7 +129,7 @@ describe("Companion triggers panel", () => {
     document.body.innerHTML = "";
   });
 
-  it("lists each trigger with its provider as a literal machine value", async () => {
+  it("lists each trigger with a readable provider and explicit status", async () => {
     const container = await mount({
       triggers: [
         trigger(),
@@ -144,9 +144,9 @@ describe("Companion triggers panel", () => {
     });
 
     expect(container.textContent).toContain("CI failed");
-    expect(container.textContent).toContain("github");
+    expect(container.textContent).toContain("GitHub");
     expect(container.textContent).toContain("Ticket opened");
-    expect(container.textContent).toContain("linear");
+    expect(container.textContent).toContain("Linear");
     expect(container.textContent).toContain("This trigger was disabled after repeated failures.");
   });
 
@@ -156,7 +156,7 @@ describe("Companion triggers panel", () => {
     const onChange = vi.fn();
     const container = await mount({ triggers: [trigger()], onChange });
 
-    const toggle = requireNamedButton(container, "On");
+    const toggle = requireNamedButton(container, "Turn off");
     await act(async () => {
       toggle.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     });
@@ -276,7 +276,8 @@ describe("Companion triggers panel", () => {
     expect(container.textContent).toContain("CI failed");
     expect(buttonNamed(container, "Copy URL")).toBeUndefined();
     expect(buttonNamed(container, "Rotate secret")).toBeUndefined();
-    expect(buttonNamed(container, "On")).toBeUndefined();
+    expect(buttonNamed(container, "Turn on")).toBeUndefined();
+    expect(buttonNamed(container, "Turn off")).toBeUndefined();
     expect(buttonNamed(container, "Delete")).toBeUndefined();
     expect(container.querySelector("[aria-label='Add a trigger']")).toBeNull();
   });
@@ -286,7 +287,7 @@ describe("Companion triggers panel", () => {
 
     expect(buttonNamed(container, "Copy URL")).toBeUndefined();
     expect(buttonNamed(container, "Rotate secret")).toBeUndefined();
-    expect(buttonNamed(container, "On")).toBeDefined();
+    expect(buttonNamed(container, "Turn off")).toBeDefined();
     expect(buttonNamed(container, "Delete")).toBeDefined();
   });
 });

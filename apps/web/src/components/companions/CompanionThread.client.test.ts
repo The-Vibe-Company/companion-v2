@@ -903,8 +903,8 @@ describe("CompanionThread context panel", () => {
 
     expect(headings).toEqual(["Screen", "Skills", "Routines", "Triggers"]);
     expect(panel(container)?.textContent).not.toContain("coming soon");
-    expect(panel(container)?.textContent).toContain("No routines yet.");
-    expect(panel(container)?.textContent).toContain("No triggers yet.");
+    expect(panel(container)?.textContent).toContain("No routines connected.");
+    expect(panel(container)?.textContent).toContain("No triggers connected.");
   });
 
   it("shows a runner the live desktop beside the conversation once the Box is running", async () => {
@@ -1027,6 +1027,7 @@ describe("CompanionThread context panel", () => {
     });
 
     expect(contextToggle(closed)?.getAttribute("aria-pressed")).toBe("false");
+    expect(contextToggle(closed)?.getAttribute("aria-label")).toBe("Show Companion details");
     expect(panel(closed)).toBeNull();
 
     await act(async () => {
@@ -1038,6 +1039,7 @@ describe("CompanionThread context panel", () => {
     const open = await mount(async () => true, { context: { open: true } });
 
     expect(contextToggle(open)?.getAttribute("aria-pressed")).toBe("true");
+    expect(contextToggle(open)?.getAttribute("aria-label")).toBe("Hide Companion details");
   });
 
   it("takes the conversation out of reach while the panel is over it", async () => {
