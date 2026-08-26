@@ -10,9 +10,15 @@ let package = Package(
     ],
     products: [
         .library(name: "CompanionKit", targets: ["CompanionKit"]),
+        .library(name: "CompanionNotificationAvatar", targets: ["CompanionNotificationAvatar"]),
     ],
     targets: [
         .target(name: "CompanionKit"),
+        .target(name: "CompanionNotificationAvatar"),
         .testTarget(name: "CompanionKitTests", dependencies: ["CompanionKit"]),
+        .testTarget(
+            name: "CompanionNotificationAvatarTests",
+            dependencies: ["CompanionNotificationAvatar"]
+        ),
     ]
 )

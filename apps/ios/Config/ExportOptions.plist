@@ -16,6 +16,8 @@
 	<dict>
 		<key>dev.companion.mobile</key>
 		<string>Companion Native App Store 2026-08-24</string>
+		<key>dev.companion.mobile.notifyextension</key>
+		<string>Companion Notification Service App Store 2026-08-26</string>
 	</dict>
 	<key>teamID</key>
 	<string>K28B69CWQ7</string>

@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-shape-in-symbol-names -- Companion icons use "shape" as the geometric catalog field in the shared wire contract. */
+
 import { sql } from "drizzle-orm";
 
 import type {
@@ -54,6 +56,13 @@ export interface CompanionNotificationDeliveryClaim {
   bundleId: "dev.companion.mobile.dev" | "dev.companion.mobile";
   orgId: string;
   companionId: string;
+  companionName: string;
+  icon: {
+    shape: number;
+    mouth: number;
+    accessory: number;
+    color: number;
+  };
   event: CompanionNotificationEvent;
   eventKey: string;
   title: string;
@@ -69,7 +78,7 @@ export async function claimCompanionNotificationDeliveries(input: {
   database: NotificationDatabase;
 }): Promise<CompanionNotificationDeliveryClaim[]> {
   const result = await input.database.execute(sql`
-    select * from public.companion_claim_notification_deliveries(
+    select * from public.companion_claim_notification_deliveries_v2(
       ${input.workerId},
       ${input.limit ?? 50},
       ${input.leaseSeconds ?? 60}
@@ -84,14 +93,25 @@ export async function claimCompanionNotificationDeliveries(input: {
     bundleId: "dev.companion.mobile.dev" | "dev.companion.mobile";
     orgId: string;
     companionId: string;
+    companionName: string;
+    iconShape: number;
+    iconMouth: number;
+    iconAccessory: number;
+    iconColor: number;
     event: CompanionNotificationEvent;
     eventKey: string;
     title: string;
     body: string;
     expiresAt: Date | string;
     attemptCount: number;
-  }>(result).map((row) => ({
+  }>(result).map(({ iconShape, iconMouth, iconAccessory, iconColor, ...row }) => ({
     ...row,
+    icon: {
+      shape: iconShape,
+      mouth: iconMouth,
+      accessory: iconAccessory,
+      color: iconColor,
+    },
     expiresAt: row.expiresAt instanceof Date ? row.expiresAt : new Date(row.expiresAt),
   }));
 }
