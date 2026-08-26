@@ -9,6 +9,7 @@ import {
   updateCompanionRoutine,
 } from "@/lib/companions";
 import { Dialog } from "../org/primitives";
+import { Badge } from "../cds";
 import { Icon } from "../Icon";
 
 function nextFires(cron: string, timezone: string, count = 3): string[] {
@@ -204,15 +205,26 @@ export function CompanionRoutines({
         )}
       </div>
       {routines.length === 0 ? (
-        <p className="chat-context__empty">No routines yet.</p>
+        <p className="chat-context__empty">
+          No routines connected. Scheduled prompts will appear here.
+        </p>
       ) : (
-        <ul className="chat-context__routines">
+        <ul className="chat-context__resources">
           {routines.map((routine) => (
-            <li key={routine.id} className="chat-context__routine">
+            <li key={routine.id} className="chat-context__resource">
               <div className="chat-context__routine-main">
-                <span className="chat-context__routine-name">{routine.name}</span>
-                <span className="chat-context__caption mono">
-                  {routine.cron} · {routine.timezone}
+                <span className="chat-context__resource-head">
+                  <span className="chat-context__routine-name">{routine.name}</span>
+                  <Badge
+                    tone={!routine.enabled ? "neutral" : routine.last_error_message ? "danger" : "ok"}
+                    dot
+                  >
+                    {!routine.enabled ? "Disabled" : routine.last_error_message ? "Error" : "Active"}
+                  </Badge>
+                </span>
+                <span className="chat-context__resource-meta">
+                  <span className="mono">{routine.cron}</span>
+                  <span>{routine.timezone}</span>
                 </span>
                 {routine.enabled && routine.next_fire_at && (
                   <span className="chat-context__caption">
@@ -233,7 +245,7 @@ export function CompanionRoutines({
                     disabled={busyId === routine.id}
                     onClick={() => void toggle(routine)}
                   >
-                    {routine.enabled ? "On" : "Off"}
+                    {routine.enabled ? "Turn off" : "Turn on"}
                   </button>
                   <button
                     type="button"

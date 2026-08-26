@@ -408,7 +408,8 @@ export function CompanionThread({
             type="button"
             className={"iconbtn chat-context-toggle"
               + (context.open ? " chat-context-toggle--on" : "")}
-            aria-label={context.open ? "Hide the context panel" : "Show the context panel"}
+            aria-label={context.open ? "Hide Companion details" : "Show Companion details"}
+            title="Companion details"
             aria-pressed={context.open}
             onClick={context.onToggle}
           >
@@ -461,7 +462,7 @@ export function CompanionThread({
           <button
             type="button"
             className="chat-context-scrim"
-            aria-label="Hide the context panel"
+            aria-label="Hide Companion details"
             onClick={context.onToggle}
           />
         )}

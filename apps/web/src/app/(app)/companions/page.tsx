@@ -14,6 +14,11 @@ import { initialsOf } from "@/lib/settingsViewModel";
 
 export const dynamic = "force-dynamic";
 
+/** A route address is one value; repeated query keys are ignored instead of guessed at. */
+function singleSearchParam(value: string | string[] | undefined): string | null {
+  return Array.isArray(value) ? null : value ?? null;
+}
+
 export default async function CompanionsPage({
   searchParams,
 }: {
@@ -22,11 +27,8 @@ export default async function CompanionsPage({
   if (!companionsEnabled()) notFound();
 
   const resolvedSearchParams = await searchParams;
-  const openedCompanion = resolvedSearchParams.companion;
-  const initialCompanionId = typeof openedCompanion === "string" ? openedCompanion : null;
-  const settingsCompanion = resolvedSearchParams.settings;
-  const initialSettingsCompanionId =
-    typeof settingsCompanion === "string" ? settingsCompanion : null;
+  const initialCompanionId = singleSearchParam(resolvedSearchParams.companion);
+  const initialSettingsCompanionId = singleSearchParam(resolvedSearchParams.settings);
   const initialPluginsOpen = resolvedSearchParams.view === "plugins";
 
   const authState = await loadServerAuth<{
@@ -54,8 +56,8 @@ export default async function CompanionsPage({
     plugins,
   ] =
     await Promise.all([
-      // Only ids and slugs are needed by the optional context panel. Keep the public library
-      // queries separate, then union them without loading the hidden Skills trees or labels.
+      // The context panel names and describes attached Skills. Keep the public library queries
+      // separate, then union them without loading the hidden Skills trees or labels.
       serverApiFetch<SkillListRow[]>("/v1/skills?lib=mine", { headers }).catch(() => []),
       serverApiFetch<SkillListRow[]>("/v1/skills?lib=org", { headers }).catch(() => []),
       serverApiFetch<{ companions: Companion[] }>("/v1/companions", { headers }).catch(() => null),
@@ -82,10 +84,15 @@ export default async function CompanionsPage({
     avatarUrl: authState.user.avatarUrl ?? null,
   };
 
-  // What the context panel can name a Companion's attached skills by. An id not in here belongs to
-  // somebody else's personal library, and the panel counts it rather than guessing at a name.
+  // What the context panel can show for a Companion's attached Skills. An id not in here belongs to
+  // somebody else's personal library, and the panel counts it rather than guessing at its details.
   const visibleSkills = [...new Map(
-    [...mineRows, ...orgRows].map((skill) => [skill.id, { id: skill.id, slug: skill.slug }]),
+    [...mineRows, ...orgRows].map((skill) => [skill.id, {
+      id: skill.id,
+      slug: skill.slug,
+      description: skill.description,
+      scope: skill.scope,
+    }]),
   ).values()];
   return (
     <CompanionsApp

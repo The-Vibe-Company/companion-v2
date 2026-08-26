@@ -170,6 +170,23 @@ describe("Companions mobile viewport", () => {
     expect(desktop).toContain("min-height: 44px;");
   });
 
+  it("makes Companion details a full-width, touch-safe phone view", () => {
+    const phonePanel = declarationsFor(".chat-context", PHONE)[0];
+    expect(phonePanel).toContain("width: 100%;");
+    expect(phonePanel).toContain("border-left: 0;");
+
+    for (const selector of [".chat-context__close", ".chat-context__add"]) {
+      const control = declarationsFor(selector, COARSE_POINTER)[0];
+      expect(control).toContain("width: 44px;");
+      expect(control).toContain("height: 44px;");
+    }
+    expect(declarationsFor(".chat-context__resource-link", COARSE_POINTER)[0])
+      .toContain("min-height: 44px;");
+    expect(declarationsFor(".chat-context__routine-actions")[0]).toContain("flex-wrap: wrap;");
+    expect(declarationsFor(".chat-context__resource-head .cds-badge--ok")[0])
+      .toContain("color: var(--color-fg);");
+  });
+
   it("sizes every dialog against its scrim instead of the viewport width", () => {
     // `100vw` counts the scrollbar and the overscroll gutter, so a dialog came out wider than what is
     // on screen and the page could be dragged sideways behind it.
