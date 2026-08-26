@@ -34,19 +34,19 @@ public struct CompanionThreadProjection: Equatable, Sendable {
     }
 }
 
-/// Serializes durable decision writes for one Companion while still deduplicating by Pi request id.
-/// Each endpoint response contains the whole thread, so distinct requests must not overlap and let
-/// an older snapshot replace a newer accepted decision. Finishing a failed write releases the id so
-/// the same card can retry.
-public actor CompanionDecisionSubmissionGate {
-    private var activeRequestIDs: Set<String> = []
+/// Serializes durable writes whose response replaces the whole thread while still deduplicating the
+/// caller's stable mutation id. Distinct decision and turn-cancellation requests must not overlap
+/// and let an older snapshot replace a newer accepted mutation. A failed write releases its id so
+/// the same action can retry.
+public actor CompanionThreadMutationGate {
+    private var activeMutationIDs: Set<String> = []
     private var writeInProgress = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
     public init() {}
 
-    public func acquire(requestID: String) async -> Bool {
-        guard activeRequestIDs.insert(requestID).inserted else { return false }
+    public func acquire(mutationID: String) async -> Bool {
+        guard activeMutationIDs.insert(mutationID).inserted else { return false }
 
         if writeInProgress {
             await withCheckedContinuation { continuation in
@@ -59,8 +59,8 @@ public actor CompanionDecisionSubmissionGate {
         return true
     }
 
-    public func release(requestID: String) {
-        guard activeRequestIDs.remove(requestID) != nil else { return }
+    public func release(mutationID: String) {
+        guard activeMutationIDs.remove(mutationID) != nil else { return }
 
         if waiters.isEmpty {
             writeInProgress = false

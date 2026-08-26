@@ -1140,11 +1140,11 @@ public struct TranscriptEntry: Codable, Identifiable, Equatable, Sendable {
     public let role: String
     public let content: String
     public let reasoning: String?
-    public let turnID: String?
     public let authorID: String?
     public let authorName: String?
     public let decision: CompanionDecision?
     public let tool: CompanionToolRun?
+    public let turnID: String?
     public let queued: Bool
     public let attachments: [CompanionAttachment]
     public let createdAt: String
@@ -1157,11 +1157,11 @@ public struct TranscriptEntry: Codable, Identifiable, Equatable, Sendable {
         case role
         case content
         case reasoning
-        case turnID = "turn_id"
         case authorID = "author_id"
         case authorName = "author_name"
         case decision
         case tool
+        case turnID = "turn_id"
         case queued
         case attachments
         case createdAt = "created_at"
@@ -1174,11 +1174,11 @@ public struct TranscriptEntry: Codable, Identifiable, Equatable, Sendable {
         role = try container.decode(String.self, forKey: .role)
         content = try container.decode(String.self, forKey: .content)
         reasoning = try container.decodeIfPresent(String.self, forKey: .reasoning)
-        turnID = try container.decodeIfPresent(String.self, forKey: .turnID)
         authorID = try container.decodeIfPresent(String.self, forKey: .authorID)
         authorName = try container.decodeIfPresent(String.self, forKey: .authorName)
         decision = try container.decodeIfPresent(CompanionDecision.self, forKey: .decision)
         tool = try container.decodeIfPresent(CompanionToolRun.self, forKey: .tool)
+        turnID = try container.decodeIfPresent(String.self, forKey: .turnID)
         queued = try container.decodeIfPresent(Bool.self, forKey: .queued) ?? false
         attachments = try container.decodeIfPresent([CompanionAttachment].self, forKey: .attachments) ?? []
         createdAt = try container.decode(String.self, forKey: .createdAt)

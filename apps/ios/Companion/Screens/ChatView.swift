@@ -39,7 +39,7 @@ struct ChatView: View {
     @State private var pendingMessages: [PendingMessage] = []
     @State private var markdownByEventID: [String: CachedMarkdownDocument] = [:]
     @State private var expandedReasoningEventIDs: Set<String> = []
-    @State private var decisionSubmissionGate = CompanionDecisionSubmissionGate()
+    @State private var threadMutationGate = CompanionThreadMutationGate()
     @State private var decisionCatalog = CompanionDecisionCatalog.empty
     @State private var decisionCatalogLoaded = false
     @FocusState private var composerFocused: Bool
@@ -74,8 +74,11 @@ struct ChatView: View {
                                     && thread?.interruptedTurn == nil {
                             emptyState
                         } else {
-                            ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
-                                if startsNewDay(entry, after: index > 0 ? entries[index - 1] : nil) {
+                            ForEach(Array(renderedEntries.enumerated()), id: \.element.id) { index, entry in
+                                if startsNewDay(
+                                    entry,
+                                    after: index > 0 ? renderedEntries[index - 1] : nil
+                                ) {
                                     dayMarker(for: transcriptDate(entry.createdAt) ?? .now)
                                 }
                                 Group {
@@ -119,7 +122,7 @@ struct ChatView: View {
                                     accent: visualTheme.accent,
                                     accentForeground: visualTheme.accentForeground,
                                     onRetry: retryInterruptedTurn,
-                                    onCancel: cancelInterruptedTurn
+                                    onCancel: cancelTurn
                                 )
                                 .id("interrupted-\(interruptedTurn.id)")
                             }
@@ -149,7 +152,7 @@ struct ChatView: View {
                 .scrollDismissesKeyboard(.interactively)
                 .scrollIndicators(.hidden)
                 .safeAreaInset(edge: .bottom) {
-                    composer(onThinkingTap: { revealLiveReasoning(using: proxy) })
+                    bottomControls(onThinkingTap: { revealLiveReasoning(using: proxy) })
                 }
                 .onChange(of: scrollContentCount) {
                     if reduceMotion {
@@ -286,6 +289,23 @@ struct ChatView: View {
         .padding(28)
         .companionGlass(radius: 28)
         .padding(.top, 56)
+    }
+
+    @ViewBuilder
+    private func bottomControls(onThinkingTap: @escaping () -> Void) -> some View {
+        VStack(spacing: 8) {
+            if !queuedEntries.isEmpty {
+                CompanionQueuedMessagesView(
+                    entries: queuedEntries,
+                    canManage: thread?.canSend == true,
+                    accent: visualTheme.accent,
+                    onRemove: cancelTurn
+                )
+                .padding(.horizontal, 12)
+            }
+
+            composer(onThinkingTap: onThinkingTap)
+        }
     }
 
     @ViewBuilder
@@ -558,6 +578,14 @@ struct ChatView: View {
         thread?.entries ?? []
     }
 
+    private var renderedEntries: [TranscriptEntry] {
+        entries.filter { !$0.queued }
+    }
+
+    private var queuedEntries: [TranscriptEntry] {
+        entries.filter(\.queued)
+    }
+
     private func refreshSelectedToolDetail(from entries: [TranscriptEntry]) {
         guard let selectedToolDetail else { return }
         guard let entry = entries.first(where: { $0.eventID == selectedToolDetail.id }),
@@ -589,12 +617,13 @@ struct ChatView: View {
     }
 
     private var pendingStartsNewDay: Bool {
-        guard let last = entries.last, let date = transcriptDate(last.createdAt) else { return true }
+        guard let last = renderedEntries.last,
+              let date = transcriptDate(last.createdAt) else { return true }
         return !Calendar.autoupdatingCurrent.isDateInToday(date)
     }
 
     private var scrollContentCount: Int {
-        entries.count + pendingMessages.count + (thread?.interruptedTurn == nil ? 0 : 1)
+        renderedEntries.count + pendingMessages.count + (thread?.interruptedTurn == nil ? 0 : 1)
     }
 
     private func startsNewDay(_ entry: TranscriptEntry, after previous: TranscriptEntry?) -> Bool {
@@ -693,7 +722,8 @@ struct ChatView: View {
         requestID: String,
         action: CompanionDecisionAction
     ) async throws {
-        guard await decisionSubmissionGate.acquire(requestID: requestID) else { return }
+        let mutationID = "decision:\(requestID)"
+        guard await threadMutationGate.acquire(mutationID: mutationID) else { return }
         threadProjection.invalidateRefreshes()
 
         do {
@@ -711,11 +741,11 @@ struct ChatView: View {
             threadProjection.replaceAfterMutation(with: next)
             let renderedMarkdown = await renderedMarkdown(for: next.entries)
             markdownByEventID = renderedMarkdown
-            await decisionSubmissionGate.release(requestID: requestID)
+            await threadMutationGate.release(mutationID: mutationID)
         } catch {
             threadProjection.invalidateRefreshes()
             await reload(silently: true)
-            await decisionSubmissionGate.release(requestID: requestID)
+            await threadMutationGate.release(mutationID: mutationID)
             throw error
         }
     }
@@ -739,20 +769,29 @@ struct ChatView: View {
         return operation
     }
 
-    private func cancelInterruptedTurn(turnID: String) async throws {
+    private func cancelTurn(turnID: String) async throws {
+        let mutationID = "cancel:\(turnID)"
+        guard await threadMutationGate.acquire(mutationID: mutationID) else { return }
         threadProjection.invalidateRefreshes()
-        let next: CompanionThread
-        if let services {
-            next = try await services.cancelTurn(companion.id, turnID)
-        } else {
-            next = try await sessionStore.cancelCompanionTurn(
-                companionID: companion.id,
-                turnID: turnID
-            )
+        do {
+            let next: CompanionThread
+            if let services {
+                next = try await services.cancelTurn(companion.id, turnID)
+            } else {
+                next = try await sessionStore.cancelCompanionTurn(
+                    companionID: companion.id,
+                    turnID: turnID
+                )
+            }
+            threadProjection.replaceAfterMutation(with: next)
+            markdownByEventID = await renderedMarkdown(for: next.entries)
+            await refreshCompanionProjection()
+            await threadMutationGate.release(mutationID: mutationID)
+        } catch {
+            await reload(silently: true)
+            await threadMutationGate.release(mutationID: mutationID)
+            throw error
         }
-        threadProjection.replaceAfterMutation(with: next)
-        markdownByEventID = await renderedMarkdown(for: next.entries)
-        await refreshCompanionProjection()
     }
 
     private func refreshCompanionProjection() async {
