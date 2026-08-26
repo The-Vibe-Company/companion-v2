@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-shape-in-symbol-names -- Companion icons use "shape" as the geometric catalog field in the shared wire contract. */
+
 import { generateKeyPairSync, verify } from "node:crypto";
 import { createServer } from "node:http2";
 import type { AddressInfo } from "node:net";
@@ -33,6 +35,8 @@ const claim: CompanionNotificationDeliveryClaim = {
   bundleId: "dev.companion.mobile.dev",
   orgId: "44444444-4444-4444-8444-444444444444",
   companionId: "55555555-5555-4555-8555-555555555555",
+  companionName: "Luna",
+  icon: { shape: 6, mouth: 4, accessory: 3, color: 8 },
   event: "reply",
   eventKey: "turn:66666666-6666-4666-8666-666666666666:succeeded",
   title: "Luna replied",
@@ -81,15 +85,31 @@ describe("APNs delivery", () => {
         alert: { title: "Luna replied", body: "The release is ready." },
         sound: "default",
         "thread-id": claim.companionId,
+        "mutable-content": 1,
       },
       version: 1,
       org_id: claim.orgId,
       companion_id: claim.companionId,
       event: "reply",
+      companion_name: "Luna",
+      companion_icon: { shape: 6, mouth: 4, accessory: 3, color: 8 },
     });
     expect("badge" in payload.aps).toBe(false);
     expect(apnsCollapseId(claim.eventKey)).toHaveLength(64);
   });
+
+  it.each(["input_required", "failed", "interrupted"] as const)(
+    "keeps %s alerts plain and omits avatar application data",
+    (event) => {
+      const payload = apnsPayload({
+        ...claim,
+        event,
+      });
+      expect(payload.aps["mutable-content"]).toBeUndefined();
+      expect(payload.companion_name).toBeUndefined();
+      expect(payload.companion_icon).toBeUndefined();
+    },
+  );
 
   it("builds a plain-text alert from a Markdown reply", () => {
     const payload = apnsPayload({

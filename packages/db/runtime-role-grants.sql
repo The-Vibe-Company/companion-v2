@@ -709,6 +709,13 @@ BEGIN
         'public.companion_notification_terminal_turn()'::regprocedure,
         'public.companion_notification_pending_decision()'::regprocedure
       ];
+      IF pg_catalog.to_regprocedure(
+        'public.companion_claim_notification_deliveries_v2(text,integer,integer)'
+      ) IS NOT NULL THEN
+        worker_functions := worker_functions || ARRAY[
+          'public.companion_claim_notification_deliveries_v2(text,integer,integer)'::regprocedure
+        ];
+      END IF;
     END IF;
     -- 0110 adds webhook-fired Companion triggers. They are API-only: the webhook fires
     -- synchronously in the API request through the Owner-impersonating enqueue, so the worker

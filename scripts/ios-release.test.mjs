@@ -88,6 +88,7 @@ function runRelease(t, { failOn = "", prepare } = {}) {
       ASC_KEY_P8: PRIVATE_KEY_FIXTURE,
       BUILD_NUMBER,
       IOS_PROVISIONING_PROFILE_SPECIFIER: "Fixture App Store Profile",
+      IOS_NOTIFICATION_EXTENSION_PROVISIONING_PROFILE_SPECIFIER: "Fixture Extension Profile",
       PATH: `${binDir}:${process.env.PATH ?? ""}`,
       RELEASE_OUTPUT_DIR: outputDir,
       STUB_XCODEBUILD_FAIL_ON: failOn,
@@ -108,7 +109,10 @@ test("the native release executes archive then App Store export with an ephemera
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(calls.map(([command]) => command), ["archive", "-exportArchive"]);
   assert.ok(calls[0].includes(`CURRENT_PROJECT_VERSION=${BUILD_NUMBER}`));
-  assert.ok(calls[0].includes("PROVISIONING_PROFILE_SPECIFIER=Fixture App Store Profile"));
+  assert.ok(calls[0].includes("IOS_PROVISIONING_PROFILE_SPECIFIER=Fixture App Store Profile"));
+  assert.ok(calls[0].includes(
+    "IOS_NOTIFICATION_EXTENSION_PROVISIONING_PROFILE_SPECIFIER=Fixture Extension Profile",
+  ));
   assert.ok(calls[1].includes(resolve(ROOT, "apps/ios/Config/ExportOptions.plist")));
   assert.equal(readFileSync(join(outputDir, "archive.log"), "utf8"), "stub archive success\n");
   assert.equal(readFileSync(join(outputDir, "export.log"), "utf8"), "stub -exportArchive success\n");
@@ -198,6 +202,10 @@ test("the TestFlight workflow releases only a CI-approved main commit", () => {
   assert.match(workflow, /IOS_DISTRIBUTION_P12: \$\{\{ secrets\.IOS_DISTRIBUTION_P12 \}\}/);
   assert.match(workflow, /IOS_DISTRIBUTION_P12_PASSWORD: \$\{\{ secrets\.IOS_DISTRIBUTION_P12_PASSWORD \}\}/);
   assert.match(workflow, /IOS_PROVISIONING_PROFILE: \$\{\{ secrets\.IOS_PROVISIONING_PROFILE \}\}/);
+  assert.match(
+    workflow,
+    /IOS_NOTIFICATION_EXTENSION_PROVISIONING_PROFILE: \$\{\{ secrets\.IOS_NOTIFICATION_EXTENSION_PROVISIONING_PROFILE \}\}/,
+  );
   assert.match(workflow, /security import/);
   assert.doesNotMatch(workflow, /security import[^\n]* -A(?: |$)/);
   assert.match(workflow, /security import[^\n]*-T \/usr\/bin\/codesign -T \/usr\/bin\/security/);
@@ -215,6 +223,11 @@ test("App Store export pins the distribution profile for the production bundle",
   assert.match(exportOptions, /<key>signingCertificate<\/key>\s*<string>Apple Distribution<\/string>/);
   assert.match(exportOptions, /<key>dev\.companion\.mobile<\/key>/);
   assert.match(exportOptions, /<string>Companion Native App Store 2026-08-24<\/string>/);
+  assert.match(exportOptions, /<key>dev\.companion\.mobile\.notifyextension<\/key>/);
+  assert.match(
+    exportOptions,
+    /<string>Companion Notification Service App Store 2026-08-26<\/string>/,
+  );
 });
 
 test("the iPad declaration includes every multitasking orientation required by App Store Connect", () => {

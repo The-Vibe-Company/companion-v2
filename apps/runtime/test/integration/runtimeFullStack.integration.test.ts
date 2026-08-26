@@ -1,4 +1,4 @@
-/* oxlint-disable anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/require-safety-comment-for-type-assertion -- Existing simulator fixture decoding predates the incremental anti-slop gate. */
+/* oxlint-disable anti-slop/no-runtime-typeof, anti-slop/no-shape-in-symbol-names, anti-slop/no-unknown-parameters, anti-slop/require-safety-comment-for-type-assertion -- Existing simulator fixture decoding predates the incremental anti-slop gate; Companion icon shapes are geometric catalog fields. */
 
 /**
  * Product promise:
@@ -1155,13 +1155,33 @@ describe("Runtime v2 real-process control plane", () => {
       expect(boundedFanout).toEqual({ count: 2, maxBody: 180 });
 
       const [claimsA, claimsB] = await Promise.all([
-        notificationWorkerA<Array<{ deliveryId: string; claimToken: string; eventKey: string }>>`
-          select "deliveryId"::text, "claimToken"::text, "eventKey"
-          from public.companion_claim_notification_deliveries('notification-worker-a', 3, 60)
+        notificationWorkerA<Array<{
+          deliveryId: string;
+          claimToken: string;
+          eventKey: string;
+          companionName: string;
+          iconShape: number;
+          iconMouth: number;
+          iconAccessory: number;
+          iconColor: number;
+        }>>`
+          select "deliveryId"::text, "claimToken"::text, "eventKey", "companionName",
+            "iconShape", "iconMouth", "iconAccessory", "iconColor"
+          from public.companion_claim_notification_deliveries_v2('notification-worker-a', 3, 60)
         `,
-        notificationWorkerB<Array<{ deliveryId: string; claimToken: string; eventKey: string }>>`
-          select "deliveryId"::text, "claimToken"::text, "eventKey"
-          from public.companion_claim_notification_deliveries('notification-worker-b', 3, 60)
+        notificationWorkerB<Array<{
+          deliveryId: string;
+          claimToken: string;
+          eventKey: string;
+          companionName: string;
+          iconShape: number;
+          iconMouth: number;
+          iconAccessory: number;
+          iconColor: number;
+        }>>`
+          select "deliveryId"::text, "claimToken"::text, "eventKey", "companionName",
+            "iconShape", "iconMouth", "iconAccessory", "iconColor"
+          from public.companion_claim_notification_deliveries_v2('notification-worker-b', 3, 60)
         `,
       ]);
       expect(claimsA.length).toBeGreaterThan(0);
@@ -1172,6 +1192,12 @@ describe("Runtime v2 real-process control plane", () => {
         .not.toContain(revokedEventKey);
       expect([...claimsA, ...claimsB].map((claim) => claim.eventKey))
         .not.toContain(expiredEventKey);
+      expect([...claimsA, ...claimsB].every((claim) =>
+        claim.companionName === "Runtime full stack"
+        && claim.iconShape === 1
+        && claim.iconMouth === 1
+        && claim.iconAccessory === 1
+        && claim.iconColor === 2)).toBe(true);
 
       const fencedClaim = claimsA[0]!;
       const [wrongFence] = await notificationWorkerA<Array<{ completed: boolean }>>`
