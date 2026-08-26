@@ -143,6 +143,9 @@ and runtime database URL only to `apps/runtime` without changing the published w
 - Changes under `packages/companion-skill/skill/` require a version bump, top changelog entry, and
   `pnpm --filter @companion/companion-skill update:integrity`.
 - Run `pnpm verify:change`; exit 2 means printed follow-up gates are still required.
+- Never install or invoke `xcodebuildmcp` in CI, and never use it as an automated app test
+  runner. Apple CI must use the native `swift test`, `xcodebuild`, and `xcrun simctl` commands;
+  reserve XcodeBuildMCP for local interactive agent work.
 - Before adding a GitHub Actions workflow, CI job, required check, or trigger, obtain explicit
   approval from the repository owner.
 - Architecture/data/auth/API/runtime changes must keep `docs/design.md`,

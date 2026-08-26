@@ -45,7 +45,6 @@ jobs:
       - name: Install native dependencies
         run: |
           brew install postgresql@17
-          npm install --global xcodebuildmcp@2.7.0
           pnpm install --frozen-lockfile
 
       - name: Start the isolated Companion stack
@@ -72,7 +71,7 @@ jobs:
         run: node scripts/ios-e2e-fixture.mjs prepare
 
       - name: Exercise login, roster, send, Box, Pi, and z.ai reply
-        run: xcodebuildmcp swift-package test --package-path apps/ios/CompanionKit
+        run: swift test --package-path apps/ios/CompanionKit
 
       - name: Remove the E2E Companion and its Box
         if: always() && steps.stack.outputs.pid != ''

@@ -40,6 +40,7 @@ struct ChatView: View {
     @State private var decisionSubmissionGate = CompanionDecisionSubmissionGate()
     @State private var decisionCatalog = CompanionDecisionCatalog.empty
     @State private var decisionCatalogLoaded = false
+    @FocusState private var composerFocused: Bool
 
     init(
         companion: CompanionSummary,
@@ -173,13 +174,6 @@ struct ChatView: View {
             await loadDecisionCatalog()
         }
         .onChange(of: companion) { currentCompanion = companion }
-        .photosPicker(
-            isPresented: $showPhotoPicker,
-            selection: $photoPickerItems,
-            maxSelectionCount: max(1, remainingAttachmentCapacity),
-            matching: .images,
-            preferredItemEncoding: .compatible
-        )
         .onChange(of: photoPickerItems) { _, items in
             guard !items.isEmpty else { return }
             loadSelectedPhotos(items)
@@ -337,12 +331,12 @@ struct ChatView: View {
                     HStack(alignment: .bottom, spacing: 10) {
                         Menu {
                             Button {
-                                showPhotoPicker = true
+                                presentPhotoLibrary()
                             } label: {
                                 Label("Photo library", systemImage: "photo.on.rectangle")
                             }
                             Button {
-                                showDocumentPicker = true
+                                presentDocumentPicker()
                             } label: {
                                 Label("Choose file", systemImage: "document")
                             }
@@ -366,9 +360,17 @@ struct ChatView: View {
                                 : "Attach a photo or file"
                         )
                         .accessibilityIdentifier("chat.attach")
+                        .photosPicker(
+                            isPresented: $showPhotoPicker,
+                            selection: $photoPickerItems,
+                            maxSelectionCount: max(1, remainingAttachmentCapacity),
+                            matching: .images,
+                            preferredItemEncoding: .compatible
+                        )
 
                         TextField("Message \(currentCompanion.name)", text: $draft, axis: .vertical)
                             .lineLimit(1...5)
+                            .focused($composerFocused)
                             .padding(.horizontal, 16)
                             .padding(.vertical, 13)
                             .companionGlass(radius: 23, interactive: true)
@@ -725,6 +727,23 @@ struct ChatView: View {
     private func removeAttachment(_ id: UUID) {
         draftAttachments.removeAll { $0.id == id }
         attachmentError = nil
+    }
+
+    private func presentPhotoLibrary() {
+        composerFocused = false
+        Task { @MainActor in
+            // UIKit must finish dismissing the menu and keyboard before another presenter starts.
+            try? await Task.sleep(for: .milliseconds(250))
+            showPhotoPicker = true
+        }
+    }
+
+    private func presentDocumentPicker() {
+        composerFocused = false
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(250))
+            showDocumentPicker = true
+        }
     }
 
     private func loadSelectedPhotos(_ items: [PhotosPickerItem]) {
