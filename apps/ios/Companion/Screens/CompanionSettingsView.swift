@@ -492,7 +492,10 @@ struct CompanionSettingsDemoView: View {
                     description: Text("The Companion will remain visible until its Box is permanently deleted.")
                 )
             } else {
-                ChatView(companion: companion) {
+                ChatView(
+                    companion: companion,
+                    services: CompanionSettingsDemoFixtures.chatServices(access: access)
+                ) {
                     showingSettings = true
                 }
                 .navigationDestination(isPresented: $showingSettings) {
@@ -535,6 +538,31 @@ private enum CompanionSettingsDemoFixtures {
             listProviders: { providers },
             updateCompanion: { _, input in updatedCompanion(input: input, access: access) },
             deleteCompanion: { _, _ in deleteOperation }
+        )
+    }
+
+    static func chatServices(access: CompanionAccess) -> ChatServices {
+        let currentCompanion = companion(access: access)
+        let currentThread: CompanionThread = decode(#"""
+        {
+          "companion_id":"c96ab360-00f3-4497-a51a-51442db8add1",
+          "viewer_id":"user-1",
+          "read_only":\#(access == .viewer ? "true" : "false"),
+          "can_send":\#(access == .viewer ? "false" : "true"),
+          "entries":[],
+          "queued_count":0,
+          "interrupted_turn":null
+        }
+        """#)
+        return ChatServices(
+            thread: { _ in currentThread },
+            listCompanions: { [currentCompanion] },
+            decide: { _, _, _ in currentThread },
+            retryTurn: { _, _, _ in deleteOperation },
+            cancelTurn: { _, _ in currentThread },
+            listSkills: { [] },
+            listPlugins: { [] },
+            listProviders: { providers }
         )
     }
 

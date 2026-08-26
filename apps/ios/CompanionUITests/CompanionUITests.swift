@@ -40,6 +40,31 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    func testChatPhotoLibraryOpensOnFirstSelectionWithKeyboardVisible() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-settings-demo"]
+        app.launchEnvironment["COMPANION_SETTINGS_DEMO_ACCESS"] = "owner"
+        app.launch()
+
+        let composer = app.descendants(matching: .any)["chat.composer"]
+        let attach = app.buttons["chat.attach"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        XCTAssertTrue(attach.exists)
+
+        composer.tap()
+        composer.typeText("Draft")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 2))
+
+        attach.tap()
+        let photoLibrary = app.buttons["Photo library"]
+        XCTAssertTrue(photoLibrary.waitForExistence(timeout: 2))
+        photoLibrary.tap()
+
+        XCTAssertTrue(app.buttons["Cancel"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.keyboards.firstMatch.exists)
+    }
+
+    @MainActor
     func testDecisionDemoAnswersAndApprovesRequests() throws {
         let app = XCUIApplication()
         app.launchArguments = ["-companion-decision-demo"]

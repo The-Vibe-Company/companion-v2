@@ -217,6 +217,12 @@ jobs:
           --derived-data-path "$RUNNER_TEMP/companion-derived-data"
           --extra-args CODE_SIGNING_ALLOWED=NO
 
+      - name: Test photo picker focus handoff
+        if: needs.scope.outputs.ios == 'true'
+        run: >-
+          xcodebuildmcp simulator test
+          --json '{"workspacePath":"apps/ios/Companion.xcworkspace","scheme":"Companion","configuration":"Debug","simulatorId":"${{ steps.simulator.outputs.id }}","derivedDataPath":"${{ runner.temp }}/companion-derived-data","progress":true,"extraArgs":["CODE_SIGNING_ALLOWED=NO","-only-testing:CompanionUITests/CompanionUITests/testChatPhotoLibraryOpensOnFirstSelectionWithKeyboardVisible"]}'
+
   quality:
     name: Quality Node 22
     runs-on: ubuntu-latest
