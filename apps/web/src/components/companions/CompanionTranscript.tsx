@@ -835,6 +835,8 @@ function ComposerImageChip({
           <img src={src} alt={file.name} className="h-full w-full object-cover" />
         ) : null}
       </div>
+      {/* Keeps the filename in the DOM for screen readers and text-content assertions. */}
+      <span className="sr-only">{file.name}</span>
       <button
         type="button"
         onClick={() => {
