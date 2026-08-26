@@ -891,6 +891,67 @@ public enum CompanionDecisionAction: Encodable, Equatable, Sendable {
     }
 }
 
+public enum CompanionToolRunKind: String, Codable, Hashable, Sendable {
+    case shell
+    case file
+    case browse
+    case computer
+    case subagent
+    case tool
+
+    /// The server keeps the catalog open for rolling deploys. A newer runtime may write a kind
+    /// this client does not know yet; keep the transcript readable with the generic tool family.
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = Self(rawValue: value) ?? .tool
+    }
+}
+
+public enum CompanionToolRunStatus: String, Codable, Hashable, Sendable {
+    case running
+    case ok
+    case error
+    case timeout
+}
+
+public struct CompanionToolRun: Codable, Equatable, Hashable, Sendable {
+    public let callID: String?
+    public let kind: CompanionToolRunKind
+    public let name: String
+    public let title: String
+    public let status: CompanionToolRunStatus
+    public let detail: String?
+    public let screenshot: String?
+
+    public init(
+        callID: String?,
+        kind: CompanionToolRunKind,
+        name: String,
+        title: String,
+        status: CompanionToolRunStatus,
+        detail: String?,
+        screenshot: String?
+    ) {
+        self.callID = callID
+        self.kind = kind
+        self.name = name
+        self.title = title
+        self.status = status
+        self.detail = detail
+        self.screenshot = screenshot
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case callID = "call_id"
+        case kind
+        case name
+        case title
+        case status
+        case detail
+        case screenshot
+    }
+}
+
 public struct TranscriptEntry: Codable, Identifiable, Equatable, Sendable {
     public let eventID: String
     public let ordinal: Int
@@ -899,6 +960,7 @@ public struct TranscriptEntry: Codable, Identifiable, Equatable, Sendable {
     public let authorID: String?
     public let authorName: String?
     public let decision: CompanionDecision?
+    public let tool: CompanionToolRun?
     public let queued: Bool
     public let createdAt: String
 
@@ -912,6 +974,7 @@ public struct TranscriptEntry: Codable, Identifiable, Equatable, Sendable {
         case authorID = "author_id"
         case authorName = "author_name"
         case decision
+        case tool
         case queued
         case createdAt = "created_at"
     }

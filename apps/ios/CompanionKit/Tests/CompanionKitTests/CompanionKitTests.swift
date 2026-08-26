@@ -604,6 +604,108 @@ func decisionSubmissionGateSerializesDistinctThreadSnapshots() async throws {
 }
 
 @Test
+func decodesStructuredToolRunsIncludingOptionalPayloads() throws {
+    let data = Data(#"""
+    [
+      {
+        "call_id":"call-shell-1",
+        "kind":"shell",
+        "name":"run_command",
+        "title":"pnpm test --filter CompanionKit",
+        "status":"running",
+        "detail":"$ pnpm test --filter CompanionKit",
+        "screenshot":"data:image/png;base64,AA=="
+      },
+      {
+        "call_id":null,
+        "kind":"future_runtime_kind",
+        "name":"future_tool",
+        "title":"A newer runtime tool",
+        "status":"ok",
+        "detail":null,
+        "screenshot":null
+      }
+    ]
+    """#.utf8)
+
+    let runs = try JSONDecoder().decode([CompanionToolRun].self, from: data)
+    let shell = try #require(runs.first)
+    let future = try #require(runs.last)
+
+    #expect(shell.callID == "call-shell-1")
+    #expect(shell.kind == .shell)
+    #expect(shell.name == "run_command")
+    #expect(shell.title == "pnpm test --filter CompanionKit")
+    #expect(shell.status == .running)
+    #expect(shell.detail == "$ pnpm test --filter CompanionKit")
+    #expect(shell.screenshot == "data:image/png;base64,AA==")
+    #expect(future.callID == nil)
+    #expect(future.kind == .tool)
+    #expect(future.name == "future_tool")
+    #expect(future.title == "A newer runtime tool")
+    #expect(future.status == .ok)
+    #expect(future.detail == nil)
+    #expect(future.screenshot == nil)
+}
+
+@Test
+func decodesEveryStructuredToolRunStatus() throws {
+    let statuses = ["running", "ok", "error", "timeout"]
+    for rawStatus in statuses {
+        let data = Data(#"""
+        {
+          "call_id":"call-status",
+          "kind":"tool",
+          "name":"status_tool",
+          "title":"Status fixture",
+          "status":"\#(rawStatus)",
+          "detail":null,
+          "screenshot":null
+        }
+        """#.utf8)
+        let run = try JSONDecoder().decode(CompanionToolRun.self, from: data)
+        #expect(run.status.rawValue == rawStatus)
+    }
+}
+
+@Test
+func unknownToolKindKeepsTheContainingThreadReadable() throws {
+    let data = Data(#"""
+    {
+      "companion_id":"5b7d655e-36bb-4fbe-9acd-e56103759911",
+      "viewer_id":"viewer-1",
+      "read_only":true,
+      "can_send":false,
+      "entries":[{
+        "event_id":"tool:future-1",
+        "ordinal":2,
+        "role":"tool",
+        "content":"",
+        "author_id":null,
+        "author_name":null,
+        "tool":{
+          "call_id":"future-call",
+          "kind":"runtime_added_kind",
+          "name":"future_tool",
+          "title":"Future tool output",
+          "status":"timeout",
+          "detail":"The runtime added this family after the client shipped.",
+          "screenshot":null
+        },
+        "queued":false,
+        "created_at":"2026-08-24T11:00:00.000Z"
+      }],
+      "queued_count":0
+    }
+    """#.utf8)
+
+    let thread = try JSONDecoder().decode(CompanionThread.self, from: data)
+    #expect(thread.entries.first?.role == "tool")
+    #expect(thread.entries.first?.tool?.kind == .tool)
+    #expect(thread.entries.first?.tool?.status == .timeout)
+}
+
+@Test
 func extractsOnlyTheSessionCookieFromAuthHeaders() throws {
     let response = try #require(HTTPURLResponse(
         url: URL(string: "http://127.0.0.1:3001/v1/auth/login")!,

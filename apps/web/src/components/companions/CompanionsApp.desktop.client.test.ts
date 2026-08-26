@@ -697,7 +697,12 @@ describe("CompanionsApp context panel", () => {
         currentOrg: org,
         viewer: { id: "user-1", name: "Ada", email: "ada@example.test", initials: "A", avatarUrl: null },
         navigation,
-        skills: [{ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", slug: "incident-summary" }],
+        skills: [{
+          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          slug: "incident-summary",
+          description: "Summarizes the important facts from an incident.",
+          scope: "org",
+        }],
         initialCompanions: [staged],
         initialProviders: providers,
         initialPlugins: [],
@@ -707,6 +712,6 @@ describe("CompanionsApp context panel", () => {
 
     expect(container.textContent).toContain("incident-summary");
     // An id in somebody's personal library is counted rather than given a name it cannot prove.
-    expect(container.textContent).toContain("1 not visible to you");
+    expect(container.textContent).toContain("1 selected Skill is not visible to you");
   });
 });

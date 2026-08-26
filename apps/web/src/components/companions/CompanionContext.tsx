@@ -1,13 +1,22 @@
 "use client";
 
-import type { Companion, CompanionDesktop, CompanionRoutine, CompanionTrigger } from "@companion/contracts";
+import type {
+  Companion,
+  CompanionDesktop,
+  CompanionRoutine,
+  CompanionTrigger,
+  SkillListRow,
+} from "@companion/contracts";
+import Link from "next/link";
+import { Badge } from "../cds";
 import { Icon } from "../Icon";
+import { skillsRouteHref } from "../skills/route";
 import { companionStatus } from "./status";
 import { CompanionRoutines } from "./CompanionRoutines";
 import { CompanionTriggers } from "./CompanionTriggers";
 
 /** One library skill this Companion may stage on its Box, named the way the Skills list names it. */
-export type CompanionContextSkill = { id: string; slug: string };
+export type CompanionContextSkill = Pick<SkillListRow, "id" | "slug" | "description" | "scope">;
 
 /**
  * What this Companion has beside its conversation: its screen and the skills it may stage on its
@@ -67,13 +76,13 @@ export function CompanionContext({
   const unnamed = companion.selected_skill_ids.length - named.length;
 
   return (
-    <aside className="chat-context" aria-label={`${companion.name} context`}>
+    <aside className="chat-context" aria-label={`${companion.name} details`}>
       <header className="chat-context__head">
-        <h2>Context</h2>
+        <h2>Companion details</h2>
         <button
           type="button"
           className="iconbtn chat-context__close"
-          aria-label="Hide the context panel"
+          aria-label="Hide Companion details"
           onClick={onClose}
         >
           <Icon name="x" size={15} />
@@ -170,21 +179,37 @@ export function CompanionContext({
             )}
           </div>
           {companion.selected_skill_ids.length === 0 ? (
-            <p className="chat-context__empty">No library skills are attached.</p>
+            <p className="chat-context__empty">
+              No Skills attached. Add Skills in settings to give this Companion specialized instructions.
+            </p>
           ) : (
             <>
-              <ul className="chat-context__chips">
+              <ul className="chat-context__resources">
                 {named.map((skill) => (
-                  <li key={skill.id} className="chat-context__chip mono">
-                    <i aria-hidden="true" />
-                    {skill.slug}
+                  <li key={skill.id} className="chat-context__resource">
+                    <Link
+                      className="chat-context__resource-link"
+                      href={skillsRouteHref({
+                        lib: skill.scope === "org" ? "org" : "mine",
+                        kind: "all",
+                        skill: skill.slug,
+                      })}
+                    >
+                      <span className="chat-context__resource-head">
+                        <span className="chat-context__resource-name mono">{skill.slug}</span>
+                        <Badge tone="ok" dot>Enabled</Badge>
+                      </span>
+                      <span className="chat-context__resource-description">
+                        {skill.description || "No description provided."}
+                      </span>
+                    </Link>
                   </li>
                 ))}
                 {unnamed > 0 && (
                   // Ids this reader cannot see belong to somebody's personal library; the count is
                   // honest about them rather than inventing a name for a skill they cannot read.
-                  <li className="chat-context__chip chat-context__chip--quiet">
-                    {unnamed} not visible to you
+                  <li className="chat-context__resource chat-context__resource--quiet">
+                    {unnamed} selected {unnamed === 1 ? "Skill is" : "Skills are"} not visible to you.
                   </li>
                 )}
               </ul>
