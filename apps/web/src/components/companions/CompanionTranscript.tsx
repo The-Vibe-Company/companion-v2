@@ -21,7 +21,7 @@ import {
   type AppendMessage,
   type AssistantRuntime,
 } from "@assistant-ui/react";
-import { ArrowUpIcon, PaperclipIcon, SquareIcon, XIcon } from "lucide-react";
+import { ArrowUpIcon, PaperclipIcon, PlusIcon, SquareIcon, XIcon } from "lucide-react";
 import type {
   Companion,
   CompanionThread as Thread,
@@ -1021,7 +1021,7 @@ function Footer() {
               : "Attach files"}
             className="text-muted-foreground hover:text-foreground hover:bg-muted disabled:hover:bg-transparent pointer-coarse:size-11 grid size-8 shrink-0 place-items-center self-end rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <PaperclipIcon className="size-4" />
+            <PlusIcon className="size-5" />
           </button>
           <ComposerPrimitive.Input
             className="text-foreground max-h-42 min-h-8 flex-1 resize-none overscroll-contain bg-transparent py-1 outline-none"
