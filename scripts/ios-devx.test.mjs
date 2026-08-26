@@ -173,6 +173,7 @@ test("CI tests iOS without secrets and keeps the live provider diagnostic manual
   assert.doesNotMatch(ci, /xcodebuildmcp/i);
   assert.match(ci, /swift test --package-path apps\/ios\/CompanionKit/);
   assert.match(ci, /xcodebuild test/);
+  assert.match(ci, /testTranscriptWindowDemoLoadsEarlierMessages/);
   assert.match(ci, /testTranscriptWindowDemoKeepsLatestEntriesOrderedAndSeparated/);
   assert.match(ci, /testTranscriptWindowDemoBottomControlsNeverCoverChatContent/);
   assert.match(ci, /testMarkdownTableDemoKeepsRowsAndColumnsSeparated/);
