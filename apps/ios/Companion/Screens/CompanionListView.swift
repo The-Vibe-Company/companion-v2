@@ -11,10 +11,11 @@ struct CompanionListServices {
 struct CompanionListView: View {
     @Environment(SessionStore.self) private var sessionStore
     @Environment(NotificationCoordinator.self) private var notifications
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let session: Session
     private let services: CompanionListServices?
     @State private var path: [CompanionRoute] = []
-    @State private var companions: [CompanionSummary] = []
+    @State private var rosterState = CompanionRosterState()
     @State private var query = ""
     @State private var loading = true
     @State private var error: String?
@@ -25,7 +26,6 @@ struct CompanionListView: View {
     @State private var companionToDelete: CompanionSummary?
     @State private var deleteRequestIDs: [String: UUID] = [:]
     @State private var deletingCompanionIDs: Set<String> = []
-    @State private var acceptedDeletions: [String: CompanionOperationSummary] = [:]
     @State private var rosterNotice: String?
     @State private var rosterActionError: String?
 
@@ -84,7 +84,7 @@ struct CompanionListView: View {
             }
             .sheet(isPresented: $showingCreateCompanion) {
                 CreateCompanionView { companion in
-                    companions.insert(companion, at: 0)
+                    rosterState.prepend(companion)
                     Task { await reload(silently: true) }
                 }
                 .tint(Color.companionAccent)
@@ -126,6 +126,10 @@ struct CompanionListView: View {
             }
             .tint(Color.companionInk)
         }
+    }
+
+    private var companions: [CompanionSummary] {
+        rosterState.companions
     }
 
     private var roster: some View {
@@ -261,7 +265,7 @@ struct CompanionListView: View {
                 next = try await sessionStore.listCompanions()
             }
             guard generation == reloadGeneration else { return }
-            companions = next
+            rosterState.reconcile(with: next)
             let nextIDs = Set(next.map(\.id))
             let reconciledDeletionIDs = Set(next.compactMap { companion in
                 companion.deletionOperation == nil ? nil : companion.id
@@ -269,7 +273,6 @@ struct CompanionListView: View {
             deleteRequestIDs = deleteRequestIDs.filter { companionID, _ in
                 nextIDs.contains(companionID) && !reconciledDeletionIDs.contains(companionID)
             }
-            acceptedDeletions = acceptedDeletions.filter { nextIDs.contains($0.key) }
             if let missingRoute = path.last?.companionID, !nextIDs.contains(missingRoute) {
                 path.removeAll()
             }
@@ -321,10 +324,9 @@ struct CompanionListView: View {
                 CompanionSettingsView(
                     companion: companion,
                     onSaved: replace,
+                    onDeletionStarted: beginOptimisticDeletion,
                     onDeletionAccepted: deletionAccepted,
-                    onDeletionAmbiguous: { companionID, requestID in
-                        deleteRequestIDs[companionID] = requestID
-                    }
+                    onDeletionFailed: deletionFailed
                 )
             case .resources:
                 CompanionConnectedResourcesView(
@@ -346,12 +348,11 @@ struct CompanionListView: View {
     }
 
     private func replace(_ updated: CompanionSummary) {
-        guard let index = companions.firstIndex(where: { $0.id == updated.id }) else { return }
-        companions[index] = updated.preservingListProjection(from: companions[index])
+        rosterState.replace(updated)
     }
 
     private func effectiveDeletion(for companion: CompanionSummary) -> CompanionOperationSummary? {
-        companion.deletionOperation ?? acceptedDeletions[companion.id]
+        companion.deletionOperation
     }
 
     private func hasActiveWork(_ companion: CompanionSummary) -> Bool {
@@ -381,6 +382,7 @@ struct CompanionListView: View {
         rosterNotice = nil
         let requestID = deleteRequestIDs[companion.id] ?? UUID()
         deleteRequestIDs[companion.id] = requestID
+        beginOptimisticDeletion(companion, requestID)
         do {
             let operation: CompanionOperationSummary
             if let services {
@@ -394,24 +396,105 @@ struct CompanionListView: View {
             deleteRequestIDs[companion.id] = nil
             deletionAccepted(companion.id, operation)
         } catch {
-            if let apiError = error as? APIError, apiError.status == 0 {
-                rosterActionError = "The deletion response was not received. Retry Delete safely reuses the same request."
-            } else {
-                rosterActionError = companionDisplayMessage(
-                    error,
-                    fallback: "This Companion could not be deleted."
-                )
-            }
+            deletionFailed(companion, requestID, error)
         }
         companionToDelete = nil
     }
 
-    private func deletionAccepted(_ companionID: String, _ operation: CompanionOperationSummary) {
-        acceptedDeletions[companionID] = operation
+    private func beginOptimisticDeletion(_ companion: CompanionSummary, _ requestID: UUID) {
+        deleteRequestIDs[companion.id] = requestID
+        deletingCompanionIDs.insert(companion.id)
+        companionToDelete = nil
         rosterActionError = nil
-        rosterNotice = "Deletion requested. The Companion will remain visible until its Box is permanently deleted."
+        rosterNotice = nil
         path.removeAll()
-        Task { await reload(silently: true) }
+        if notifications.activeCompanionID == companion.id {
+            notifications.activeCompanionID = nil
+        }
+        if notifications.pendingDestination?.companionID == companion.id {
+            notifications.discardPendingDestination()
+        }
+        if reduceMotion {
+            rosterState.removeOptimistically(companionID: companion.id)
+        } else {
+            withAnimation(.easeOut(duration: 0.18)) {
+                rosterState.removeOptimistically(companionID: companion.id)
+            }
+        }
+        AccessibilityNotification.Announcement("\(companion.name) removed.").post()
+    }
+
+    private func deletionAccepted(_ companionID: String, _ operation: CompanionOperationSummary) {
+        deletingCompanionIDs.remove(companionID)
+        deleteRequestIDs[companionID] = nil
+        let restored = reconcileDeletionResponse(companionID: companionID, operation: operation)
+        guard operation.isActive else {
+            let name = restored?.name
+                ?? companions.first(where: { $0.id == companionID })?.name
+                ?? "Companion"
+            let message = operation.error?.message ?? "\(name) could not be deleted."
+            rosterActionError = restored == nil ? message : "\(message) \(name) was restored."
+            rosterNotice = nil
+            announceRestoration(restored)
+            return
+        }
+        rosterActionError = nil
+        rosterNotice = "Deletion requested."
+    }
+
+    private func deletionFailed(_ companion: CompanionSummary, _ requestID: UUID, _ cause: Error) {
+        deletingCompanionIDs.remove(companion.id)
+        let restored = restoreOptimisticDeletion(companionID: companion.id)
+        guard restored != nil || rosterState.contains(companionID: companion.id) else {
+            deleteRequestIDs[companion.id] = nil
+            rosterActionError = nil
+            rosterNotice = "Deletion completed."
+            return
+        }
+        deleteRequestIDs[companion.id] = requestID
+        if let apiError = cause as? APIError, apiError.status == 0 {
+            rosterActionError = restored == nil
+                ? "Deletion could not be confirmed. Retrying reuses the same request."
+                : "Deletion could not be confirmed. \(companion.name) was restored. Retrying reuses the same request."
+        } else {
+            let message = companionDisplayMessage(
+                cause,
+                fallback: "This Companion could not be deleted."
+            )
+            rosterActionError = restored == nil ? message : "\(message) \(companion.name) was restored."
+        }
+        rosterNotice = nil
+        announceRestoration(restored)
+    }
+
+    private func restoreOptimisticDeletion(companionID: String) -> CompanionSummary? {
+        if reduceMotion {
+            return rosterState.restoreDeletion(companionID: companionID)
+        }
+        var restored: CompanionSummary?
+        withAnimation(.easeOut(duration: 0.18)) {
+            restored = rosterState.restoreDeletion(companionID: companionID)
+        }
+        return restored
+    }
+
+    private func reconcileDeletionResponse(
+        companionID: String,
+        operation: CompanionOperationSummary
+    ) -> CompanionSummary? {
+        if reduceMotion {
+            return rosterState.reconcileDeletionResponse(companionID: companionID, operation: operation)
+        }
+        var restored: CompanionSummary?
+        withAnimation(.easeOut(duration: 0.18)) {
+            restored = rosterState.reconcileDeletionResponse(companionID: companionID, operation: operation)
+        }
+        return restored
+    }
+
+    private func announceRestoration(_ companion: CompanionSummary?) {
+        guard let companion else { return }
+        AccessibilityNotification.Announcement("\(companion.name) could not be deleted and was restored.").post()
     }
 }
 

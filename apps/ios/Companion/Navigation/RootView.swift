@@ -18,6 +18,8 @@ struct RootView: View {
 #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("-companion-queued-demo") {
                 CompanionQueuedMessagesDemoView()
+            } else if ProcessInfo.processInfo.arguments.contains("-markdown-table-demo") {
+                MarkdownTableDemoView()
             } else if ProcessInfo.processInfo.arguments.contains("-companion-interruption-demo") {
                 CompanionInterruptedTurnDemoView()
             } else if ProcessInfo.processInfo.arguments.contains("-companion-decision-demo") {
@@ -50,6 +52,7 @@ struct RootView: View {
 #if DEBUG
             let arguments = ProcessInfo.processInfo.arguments
             guard !arguments.contains("-companion-queued-demo"),
+                  !arguments.contains("-markdown-table-demo"),
                   !arguments.contains("-companion-interruption-demo"),
                   !arguments.contains("-companion-decision-demo"),
                   !arguments.contains("-companion-icon-demo"),
@@ -72,7 +75,16 @@ struct RootView: View {
         }
         .animation(.easeOut(duration: 0.24), value: sessionStore.phase)
         .tint(.companionAccent)
-        .preferredColorScheme(.light)
+        .preferredColorScheme(preferredColorScheme)
+    }
+
+    private var preferredColorScheme: ColorScheme {
+#if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-markdown-table-dark-demo") {
+            return .dark
+        }
+#endif
+        return .light
     }
 
     private var activeNotificationSessionID: String? {

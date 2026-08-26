@@ -40,6 +40,31 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    func testChatPhotoLibraryOpensOnFirstSelectionWithKeyboardVisible() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-settings-demo"]
+        app.launchEnvironment["COMPANION_SETTINGS_DEMO_ACCESS"] = "owner"
+        app.launch()
+
+        let composer = app.descendants(matching: .any)["chat.composer"]
+        let attach = app.buttons["chat.attach"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        XCTAssertTrue(attach.exists)
+
+        composer.tap()
+        composer.typeText("Draft")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 2))
+
+        attach.tap()
+        let photoLibrary = app.buttons["Photo library"]
+        XCTAssertTrue(photoLibrary.waitForExistence(timeout: 2))
+        photoLibrary.tap()
+
+        XCTAssertTrue(app.buttons["Cancel"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.keyboards.firstMatch.exists)
+    }
+
+    @MainActor
     func testDecisionDemoAnswersAndApprovesRequests() throws {
         let app = XCUIApplication()
         app.launchArguments = ["-companion-decision-demo"]
@@ -477,6 +502,104 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    func testMarkdownTableDemoCoversNativeTableLayouts() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-markdown-table-demo"]
+        app.launch()
+
+        XCTAssertTrue(app.navigationBars["Markdown tables"].waitForExistence(timeout: 5))
+
+        for fixture in ["simple", "wide", "long-content", "alignment", "single-row"] {
+            let table = app.descendants(matching: .any)["markdown-table-demo.\(fixture)"]
+            XCTAssertTrue(table.exists, "Missing deterministic \(fixture) table fixture")
+        }
+
+        let simpleTable = app.descendants(matching: .any)["markdown-table-demo.simple"]
+        XCTAssertTrue(simpleTable.staticTexts["Simple two-column table"].exists)
+        let healthyCell = simpleTable.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "Status, Healthy")
+        ).firstMatch
+        XCTAssertTrue(healthyCell.exists)
+        let simpleValueCell = simpleTable.descendants(matching: .any)[
+            "markdown.table.cell.1.1"
+        ]
+        XCTAssertTrue(simpleValueCell.exists)
+        let simpleCellHeight = simpleValueCell.frame.height
+
+        let wideTable = app.descendants(matching: .any)["markdown-table-demo.wide"]
+        let nativeWideTable = wideTable.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "markdown.table.")
+        ).firstMatch
+        XCTAssertTrue(nativeWideTable.exists)
+        XCTAssertLessThanOrEqual(nativeWideTable.frame.maxX, app.frame.maxX + 1)
+        XCTAssertGreaterThanOrEqual(nativeWideTable.frame.minX, app.frame.minX - 1)
+        let trailingCell = wideTable.descendants(matching: .any)["markdown.table.cell.1.5"]
+        XCTAssertTrue(trailingCell.exists)
+        let trailingCellInitialX = trailingCell.frame.minX
+        nativeWideTable.swipeLeft()
+        XCTAssertLessThan(trailingCell.frame.minX, trailingCellInitialX)
+
+        let longTable = app.descendants(matching: .any)["markdown-table-demo.long-content"]
+        for _ in 0..<4 where !longTable.isHittable { app.swipeUp() }
+        let longDetailCell = longTable.descendants(matching: .any)["markdown.table.cell.1.1"]
+        XCTAssertTrue(longDetailCell.exists)
+        XCTAssertGreaterThan(longDetailCell.frame.height, simpleCellHeight)
+
+        let alignmentTable = app.descendants(matching: .any)["markdown-table-demo.alignment"]
+        for _ in 0..<4 where !alignmentTable.isHittable { app.swipeUp() }
+        let centerCell = alignmentTable.descendants(matching: .any)[
+            "markdown.table.cell.1.1"
+        ]
+        let rightCell = alignmentTable.descendants(matching: .any)[
+            "markdown.table.cell.1.2"
+        ]
+        XCTAssertEqual(centerCell.value as? String, "Center aligned")
+        XCTAssertEqual(rightCell.value as? String, "Right aligned")
+        XCTAssertTrue(alignmentTable.links["Beta"].exists)
+        try captureScreenshot(named: "markdown-tables.png")
+    }
+
+    @MainActor
+    func testMarkdownTableDemoSupportsAccessibilityTextInLandscape() throws {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-markdown-table-demo",
+            "-UIPreferredContentSizeCategoryName",
+            "UICTContentSizeCategoryAccessibilityExtraExtraExtraLarge",
+        ]
+        app.launch()
+        defer {
+            XCUIDevice.shared.orientation = .portrait
+            app.terminate()
+        }
+
+        XCUIDevice.shared.orientation = .landscapeLeft
+
+        let wideTable = app.descendants(matching: .any)["markdown-table-demo.wide"]
+        XCTAssertTrue(wideTable.waitForExistence(timeout: 5))
+        XCTAssertLessThanOrEqual(wideTable.frame.maxX, app.frame.maxX + 1)
+        XCTAssertGreaterThanOrEqual(wideTable.frame.minX, app.frame.minX - 1)
+        try captureScreenshot(named: "markdown-tables-accessibility-landscape.png")
+    }
+
+    @MainActor
+    func testMarkdownTableDemoSupportsDarkAppearance() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-markdown-table-demo", "-markdown-table-dark-demo"]
+        app.launch()
+
+        let simpleTable = app.descendants(matching: .any)["markdown-table-demo.simple"]
+        XCTAssertTrue(simpleTable.waitForExistence(timeout: 5))
+        let healthyCell = simpleTable.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "Status, Healthy")
+        ).firstMatch
+        XCTAssertTrue(healthyCell.exists)
+        let gallery = app.descendants(matching: .any)["markdown-table-demo.gallery"]
+        XCTAssertEqual(gallery.value as? String, "Dark appearance")
+        try captureScreenshot(named: "markdown-tables-dark.png")
+    }
+
+    @MainActor
     func testCompanionMarkdownCacheInvalidatesChangedEventContent() throws {
         let app = XCUIApplication()
         app.launchArguments = ["-glass-chat-demo", "-markdown-cache-ui-test"]
@@ -673,7 +796,7 @@ final class CompanionUITests: XCTestCase {
         delete.tap()
         confirmRosterDeletion(in: app)
 
-        let ambiguousMessage = "The deletion response was not received. Retry Delete safely reuses the same request."
+        let ambiguousMessage = "Deletion could not be confirmed. Luna was restored. Retrying reuses the same request."
         let ambiguousNotice = app.descendants(matching: .any)["Error. \(ambiguousMessage)"]
         XCTAssertTrue(ambiguousNotice.waitForExistence(timeout: 5))
 
@@ -683,9 +806,7 @@ final class CompanionUITests: XCTestCase {
         retry.tap()
         confirmRosterDeletion(in: app)
 
-        let acceptedMessage = "Deletion requested. The Companion will remain visible until its Box is permanently deleted."
-        let acceptedNotice = app.descendants(matching: .any)[acceptedMessage]
-        XCTAssertTrue(acceptedNotice.waitForExistence(timeout: 5))
+        XCTAssertTrue(row.waitForNonExistence(timeout: 5))
     }
 
     @MainActor
