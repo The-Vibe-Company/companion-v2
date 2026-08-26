@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -211,4 +211,10 @@ test("lockfile, workflow, and CI gate changes force the full pipeline", () => {
 test("non-pull-request events force every scope", () => {
   const result = classifyFiles([], { forceFull: true });
   for (const [key, value] of Object.entries(result)) assert.equal(value, true, `${key} should be true`);
+});
+
+test("code pull requests run the same full Node quality suite as main", () => {
+  const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+  assert.match(workflow, /- name: Run full quality checks\n\s+run: pnpm ci:quality --output-logs=errors-only/);
+  assert.doesNotMatch(workflow, /Run affected quality checks|turbo run lint typecheck test --affected/);
 });

@@ -280,12 +280,7 @@ jobs:
           ANTI_SLOP_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
         run: pnpm lint:anti-slop -- --base "$ANTI_SLOP_BASE_SHA"
 
-      - name: Run affected quality checks
-        if: github.event_name == 'pull_request' && needs.scope.outputs.full != 'true'
-        run: pnpm exec turbo run lint typecheck test --affected --continue=dependencies-successful --output-logs=errors-only
-
       - name: Run full quality checks
-        if: github.event_name != 'pull_request' || needs.scope.outputs.full == 'true'
         run: pnpm ci:quality --output-logs=errors-only
 
   application-build:

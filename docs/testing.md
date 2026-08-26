@@ -203,6 +203,10 @@ contents; deletions and agent-tooling directories are ignored. The default compa
 therefore requires resolving all anti-slop findings in that file rather than only findings on the
 changed lines.
 
+Every pull request with non-documentation changes runs the full Node lint, typecheck, and test
+suite. `main` must not be the first place an unrelated workspace failure can surface; affected-only
+quality selection is reserved for local iteration, not the required GitHub gate.
+
 `verify:change` exit code 2 means its selected checks passed but the printed database, browser,
 container, or dependency gates remain mandatory. Report exact commands and outcomes; static
 inspection is not a passing test.

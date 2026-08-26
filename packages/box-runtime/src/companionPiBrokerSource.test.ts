@@ -15,6 +15,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
+import { z } from "zod";
 
 import { sendCompanionPiBrokerCommand } from "./companionPiBrokerCore";
 import {
@@ -23,12 +24,33 @@ import {
 } from "./companionPiBroker";
 
 const processes: ChildProcessWithoutNullStreams[] = [];
+const processExits = new WeakMap<ChildProcessWithoutNullStreams, Promise<ProcessExit>>();
 const directories: string[] = [];
 const execFileAsync = promisify(execFile);
+const brokerStateSchema = z.object({
+  invocationId: z.string(),
+  activeAttemptId: z.string().nullable(),
+  tailCursor: z.number(),
+  counters: z.object({
+    malformedLines: z.number(),
+    oversizedLines: z.number(),
+    unknownEvents: z.number(),
+  }),
+});
+const stringArraySchema = z.array(z.string());
+const journalKindSchema = z.object({ kind: z.string() });
 
 afterEach(async () => {
   await Promise.all(processes.splice(0).map(stopBrokerProcess));
-  for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
+  for (const directory of directories.splice(0)) {
+    rmSync(directory, {
+      recursive: true,
+      force: true,
+      // Linux can transiently report ENOTEMPTY while child-process pipe teardown finishes.
+      maxRetries: 5,
+      retryDelay: 25,
+    });
+  }
 });
 
 describe("COMPANION_PI_BROKER_SOURCE", () => {
@@ -67,7 +89,7 @@ describe("COMPANION_PI_BROKER_SOURCE", () => {
     writeFileSync(piPath, fakePiSource(), { mode: 0o700 });
     chmodSync(piPath, 0o700);
 
-    const broker = spawn(process.execPath, [brokerPath], {
+    const broker = trackBrokerProcess(spawn(process.execPath, [brokerPath], {
       env: {
         ...process.env,
         COMPANION_PI_ROOT: runtimeRoot,
@@ -81,8 +103,7 @@ describe("COMPANION_PI_BROKER_SOURCE", () => {
         FAKE_PI_ARGV_PATH: piArgvPath,
       },
       stdio: ["pipe", "pipe", "pipe"],
-    });
-    processes.push(broker);
+    }));
     let startupStderr = "";
     broker.stderr.on("data", (chunk: Buffer) => {
       startupStderr += chunk.toString("utf8");
@@ -95,7 +116,7 @@ describe("COMPANION_PI_BROKER_SOURCE", () => {
     // already has one on disk in --session-dir, silently discarding its conversation on every
     // broker (re)start. Assert the exact argv the broker spawns Pi with so a future regeneration of
     // the bundled broker source cannot lose this flag unnoticed.
-    expect(await waitForJsonFile<string[]>(piArgvPath)).toEqual([
+    expect(await waitForStringArrayJsonFile(piArgvPath)).toEqual([
       "--mode", "rpc", "--session-dir", join(runtimeRoot, "sessions"), "--continue", "--no-skills",
     ]);
 
@@ -116,15 +137,14 @@ describe("COMPANION_PI_BROKER_SOURCE", () => {
       data: { attemptId: "attempt-source-1", piAcknowledged: true },
     });
 
-    let brokerState: Record<string, unknown> = {};
+    let brokerState: z.infer<typeof brokerStateSchema> | null = null;
     await waitFor(async () => {
       const response = await sendCompanionPiBrokerCommand({
         socketPath,
         command: { id: "control-source-state", type: "broker_state" },
       });
-      brokerState = response.data as Record<string, unknown>;
-      return brokerState.activeAttemptId === null
-        && Number(brokerState.tailCursor) >= 3;
+      brokerState = brokerStateSchema.parse(response.data);
+      return brokerState.activeAttemptId === null && brokerState.tailCursor >= 3;
     });
     expect(brokerState).toMatchObject({
       invocationId: "invocation-source-1",
@@ -165,8 +185,8 @@ describe("COMPANION_PI_BROKER_SOURCE", () => {
     const brokerExit = await waitForExit(broker);
     expect(brokerExit).toMatchObject({ code: 1, signal: null });
     expect(existsSync(socketPath)).toBe(false);
-    const journalRecords = readJournalRecords(join(runtimeRoot, "events"));
-    expect(journalRecords.some((record) => record.kind === "pi_process_exit")).toBe(false);
+    const journalKinds = readJournalKinds(join(runtimeRoot, "events"));
+    expect(journalKinds).not.toContain("pi_process_exit");
     expect(JSON.parse(readFileSync(join(runtimeRoot, "events", "counters.json"), "utf8")))
       .toMatchObject({ unboundEvents: 1 });
   }, 10_000);
@@ -183,7 +203,7 @@ describe("COMPANION_PI_BROKER_SOURCE", () => {
     writeFileSync(brokerPath, COMPANION_PI_BROKER_SOURCE, { mode: 0o700 });
     writeFileSync(piPath, fakePiSource(), { mode: 0o700 });
 
-    const broker = spawn(process.execPath, [brokerPath], {
+    const broker = trackBrokerProcess(spawn(process.execPath, [brokerPath], {
       env: {
         ...process.env,
         COMPANION_PI_ROOT: runtimeRoot,
@@ -195,8 +215,7 @@ describe("COMPANION_PI_BROKER_SOURCE", () => {
         FAKE_PI_ARGV_PATH: join(home, "pi.argv.json"),
       },
       stdio: ["pipe", "pipe", "pipe"],
-    });
-    processes.push(broker);
+    }));
     let stderr = "";
     broker.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString("utf8");
@@ -217,7 +236,7 @@ describe("COMPANION_PI_BROKER_SOURCE", () => {
     writeFileSync(brokerPath, COMPANION_PI_BROKER_SOURCE, { mode: 0o700 });
     writeFileSync(piPath, "#!/usr/bin/env node\nprocess.exit(23);\n", { mode: 0o700 });
 
-    const broker = spawn(process.execPath, [brokerPath], {
+    const broker = trackBrokerProcess(spawn(process.execPath, [brokerPath], {
       env: {
         ...process.env,
         COMPANION_PI_ROOT: runtimeRoot,
@@ -227,8 +246,7 @@ describe("COMPANION_PI_BROKER_SOURCE", () => {
         COMPANION_PI_RPC_TIMEOUT_MS: "10000",
       },
       stdio: ["pipe", "pipe", "pipe"],
-    });
-    processes.push(broker);
+    }));
     let stderr = "";
     broker.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString("utf8");
@@ -259,7 +277,7 @@ describe("Pi broker --append-system-prompt", () => {
     writeFileSync(brokerPath, COMPANION_PI_BROKER_SOURCE, { mode: 0o700 });
     writeFileSync(piPath, fakePiSource(), { mode: 0o700 });
     chmodSync(piPath, 0o700);
-    const broker = spawn(process.execPath, [brokerPath], {
+    trackBrokerProcess(spawn(process.execPath, [brokerPath], {
       env: {
         ...process.env,
         COMPANION_PI_ROOT: runtimeRoot,
@@ -271,9 +289,8 @@ describe("Pi broker --append-system-prompt", () => {
         FAKE_PI_ARGV_PATH: piArgvPath,
       },
       stdio: ["pipe", "pipe", "pipe"],
-    });
-    processes.push(broker);
-    return waitForJsonFile<string[]>(piArgvPath);
+    }));
+    return waitForStringArrayJsonFile(piArgvPath);
   }
 
   it("passes a present instructions file as --append-system-prompt", async () => {
@@ -289,6 +306,67 @@ describe("Pi broker --append-system-prompt", () => {
 
   it("omits --append-system-prompt when instructions.txt is whitespace-only", async () => {
     expect(await spawnedPiArgv("   \n")).not.toContain("--append-system-prompt");
+  });
+});
+
+describe("Pi broker subprocess teardown", () => {
+  it("waits for inherited stdio to close after a broker process exits", async () => {
+    const broker = trackBrokerProcess(spawn(process.execPath, [
+      "-e",
+      `const { spawn } = require("node:child_process");
+const grandchild = spawn(process.execPath, ["-e", "setTimeout(() => {}, 150)"], {
+  stdio: ["ignore", "inherit", "inherit"],
+});
+grandchild.unref();`,
+    ], {
+      stdio: ["pipe", "pipe", "pipe"],
+    }));
+    await new Promise<void>((resolve) => broker.once("exit", () => resolve()));
+
+    expect(broker.exitCode).toBe(0);
+    expect(broker.stdout.closed).toBe(false);
+    await stopBrokerProcess(broker);
+    expect(broker.stdout.closed).toBe(true);
+  });
+
+  it("bounds cleanup when a descendant keeps inherited stdio open", async () => {
+    const home = temporaryDirectory("pi-broker-close-timeout-");
+    const grandchildPidPath = join(home, "grandchild.pid");
+    const broker = trackBrokerProcess(spawn(process.execPath, [
+      "-e",
+      `const { spawn } = require("node:child_process");
+const { writeFileSync } = require("node:fs");
+const grandchild = spawn(process.execPath, ["-e", "setTimeout(() => {}, 10000)"], {
+  stdio: ["ignore", "inherit", "inherit"],
+});
+writeFileSync(process.argv[1], String(grandchild.pid));
+grandchild.unref();`,
+      grandchildPidPath,
+    ], {
+      stdio: ["pipe", "pipe", "pipe"],
+    }));
+    await waitFor(() => existsSync(grandchildPidPath));
+    const grandchildPid = z.coerce.number().int().positive()
+      .parse(readFileSync(grandchildPidPath, "utf8"));
+    await new Promise<void>((resolve) => broker.once("exit", () => resolve()));
+    expect(broker.stdout.closed).toBe(false);
+
+    const teardown = stopBrokerProcess(broker, 25);
+    try {
+      const outcome = await Promise.race([
+        teardown.then(() => "closed" as const),
+        new Promise<"deadline">((resolve) => setTimeout(() => resolve("deadline"), 500)),
+      ]);
+      expect(outcome).toBe("closed");
+      expect(broker.stdout.destroyed).toBe(true);
+    } finally {
+      try {
+        process.kill(grandchildPid, "SIGKILL");
+      } catch {
+        // The fixture may have already exited after closing its inherited streams.
+      }
+      await teardown;
+    }
   });
 });
 
@@ -362,43 +440,59 @@ async function waitFor(check: () => boolean | Promise<boolean>, timeoutMs = 5_00
   throw new Error("condition did not become true before timeout");
 }
 
-async function waitForJsonFile<T>(path: string, timeoutMs = 5_000): Promise<T> {
-  let parsed: T | undefined;
+async function waitForStringArrayJsonFile(path: string, timeoutMs = 5_000): Promise<string[]> {
+  let parsed: string[] | undefined;
   await waitFor(() => {
     if (!existsSync(path)) return false;
     try {
-      parsed = JSON.parse(readFileSync(path, "utf8")) as T;
+      parsed = stringArraySchema.parse(JSON.parse(readFileSync(path, "utf8")));
       return true;
     } catch {
       // writeFileSync creates the path before the bytes land; wait until JSON is complete.
       return false;
     }
   }, timeoutMs);
-  return parsed as T;
+  if (!parsed) throw new Error("JSON file did not contain a string array");
+  return parsed;
 }
 
-function waitForExit(child: ChildProcessWithoutNullStreams): Promise<{
+interface ProcessExit {
   code: number | null;
   signal: NodeJS.Signals | null;
-}> {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
-  }
-  return new Promise((resolve) => {
-    child.once("close", (code, signal) => resolve({ code, signal }));
-  });
 }
 
-async function stopBrokerProcess(child: ChildProcessWithoutNullStreams): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return;
+function trackBrokerProcess(child: ChildProcessWithoutNullStreams): ChildProcessWithoutNullStreams {
+  const exit = new Promise<ProcessExit>((resolve) => {
+    child.once("close", (code, signal) => resolve({ code, signal }));
+  });
+  processExits.set(child, exit);
+  processes.push(child);
+  return child;
+}
+
+function waitForExit(child: ChildProcessWithoutNullStreams): Promise<ProcessExit> {
+  const exit = processExits.get(child);
+  if (!exit) throw new Error("broker process was not tracked before waiting for exit");
+  return exit;
+}
+
+async function stopBrokerProcess(
+  child: ChildProcessWithoutNullStreams,
+  closeTimeoutMs = 3_000,
+): Promise<void> {
   // Let the broker's SIGTERM handler terminate and await its Pi child before removing the shared
   // temp directory. SIGKILL bypasses that handler and lets Pi race rmSync with late file writes.
-  child.kill("SIGTERM");
+  if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
   try {
-    await waitForExitWithin(child, 3_000);
+    await waitForExitWithin(child, closeTimeoutMs);
   } catch {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-    await waitForExit(child);
+    // An exited process cannot be killed again, and an orphan descendant may keep its inherited
+    // pipe open indefinitely. Close our pipe ends and keep even the fallback wait bounded.
+    child.stdin.destroy();
+    child.stdout.destroy();
+    child.stderr.destroy();
+    await waitForExitWithin(child, closeTimeoutMs).catch(() => undefined);
   }
 }
 
@@ -419,7 +513,7 @@ async function waitForExitWithin(
   }
 }
 
-function readJournalRecords(directory: string): Array<Record<string, unknown>> {
+function readJournalKinds(directory: string): string[] {
   return readdirSync(directory)
     .filter((name) => name.endsWith(".ndjson"))
     .sort()
@@ -427,5 +521,5 @@ function readJournalRecords(directory: string): Array<Record<string, unknown>> {
       .trim()
       .split("\n")
       .filter(Boolean)
-      .map((line) => JSON.parse(line) as Record<string, unknown>));
+      .map((line) => journalKindSchema.parse(JSON.parse(line)).kind));
 }
