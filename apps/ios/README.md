@@ -14,8 +14,11 @@ belong in the zero-dependency `CompanionKit` Swift package. The committed Xcode 
 file-system-synchronized groups, so adding a Swift file does not require a project-file edit.
 
 The native roster can create Companions, open their essential settings from chat or a long-press
-menu, and request Owner-only durable deletion. Essential settings cover the Companion icon, name,
-instructions, provider, and model; Editor access is editable and Viewer access is read-only. The
+menu, and request Owner-only durable deletion. A confirmed deletion removes the Companion from the
+local roster immediately while the durable request runs; request failure restores the row, and a
+later roster poll may honestly reintroduce a Companion the control plane still returns. Essential
+settings cover the Companion icon, name, instructions, provider, and model; Editor access is
+editable and Viewer access is read-only. The
 native thread renders every durable decision request. Owner and Editor can answer `ask_user`,
 approve or deny configuration, routine, and trigger proposals, and handle historical shell/file
 requests without leaving iOS. An interrupted turn is equally explicit: Owner and Editor can retry
@@ -72,9 +75,9 @@ submission followed by an enabled retry.
 The interruption demo accepts `COMPANION_INTERRUPTION_DEMO_ACCESS=owner|editor|viewer`; set
 `COMPANION_INTERRUPTION_DEMO_FAIL_RETRY_ONCE=1` to verify that an uncertain submission keeps the
 same safe retry action available.
-The roster demo accepts the equivalent `COMPANION_ROSTER_DEMO_ACCESS` value and simulates a lost
-first deletion response followed by a same-key `202` retry. These arguments are excluded from Release
-behavior.
+The roster demo accepts the equivalent `COMPANION_ROSTER_DEMO_ACCESS` value and simulates immediate
+removal, restoration after a lost first deletion response, and a same-key `202` retry. These
+arguments are excluded from Release behavior.
 The resources demo accepts `COMPANION_RESOURCES_DEMO_EMPTY=skills|routines|triggers` to show one
 section's deterministic empty state.
 Combine `-companion-roster-demo -companion-notification-demo` to inject a version-1 response payload
