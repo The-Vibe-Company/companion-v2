@@ -458,9 +458,9 @@ struct CreateCompanionDemoView: View {
 @MainActor
 private enum CreateCompanionDemoFixtures {
     static let services = CreateCompanionServices(
-        listProviders: { providers },
+        listProviders: { await providers },
         listPlugins: { [] },
-        createCompanion: { input in companion(input: input) }
+        createCompanion: { input in await companion(input: input) }
     )
 
     private static var providers: CompanionProvidersResponse {
