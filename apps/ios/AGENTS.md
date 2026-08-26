@@ -4,8 +4,10 @@ This directory is the iOS-only SwiftUI client. Use Swift 6, target iOS 26 or lat
 free of third-party dependencies. Shared models, API, authentication, secure session, and polling
 logic belong in `CompanionKit`; the app target owns SwiftUI presentation and platform integration.
 
-- Use `xcodebuildmcp` for discovery, builds, simulator launches, tests, screenshots, and UI
-  inspection. Check command help and session defaults before the first build action.
+- Use `xcodebuildmcp` only for local interactive discovery, builds, simulator launches,
+  screenshots, and UI inspection. Never install or invoke it in CI, and never use it as an
+  automated app test runner. Apple CI uses native `swift test`, `xcodebuild`, and `xcrun simctl`.
+  Check command help and session defaults before the first local build action.
 - For non-trivial native work, use the repo-local `ios-product-dev` owner skill, route SwiftUI
   mechanics through `swiftui-expert-dev`, visual direction through `design-frontend-dev`, and all
   Apple build or simulator work through `xcodebuildmcp-cli`. The same packages are mirrored for

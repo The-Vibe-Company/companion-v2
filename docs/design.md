@@ -118,7 +118,10 @@ membership and Companion access while claiming, leases each delivery, and sends 
 HTTP/2 with an Apple ES256 provider token. Deliveries expire after 24 hours. Success deletes the
 row, revoked tokens disable the installation, and transient Apple responses clear the lease with
 bounded backoff. The payload contains only a bounded expurgated preview and the versioned
-organization/Companion/event navigation tuple.
+organization/Companion/event navigation tuple. Reply claims additionally project the current
+cosmetic icon indexes and Companion name through a versioned worker-only function. The APNs reply
+sets `mutable-content`; the native extension renders that closed catalog locally for the system
+communication avatar, with no control-plane avatar endpoint or network fetch.
 
 One `(companion_id, client_message_id)` produces exactly one turn. The transaction that stores the
 user message also stores that turn. A duplicate POST resolves to the same row. A retry names a new

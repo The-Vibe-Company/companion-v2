@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -103,6 +103,22 @@ test("the project is synchronized, shared, and backed by CompanionKit", () => {
   assert.match(read("apps/ios/README.md"), /same\s+`\/v1` API/);
 });
 
+test("reply notifications embed the locally rendered avatar service extension", () => {
+  const project = read("apps/ios/Companion.xcodeproj/project.pbxproj");
+  const appInfo = read("apps/ios/Companion/Support/Info.plist");
+  const extensionInfo = read("apps/ios/CompanionNotificationService/Info.plist");
+  const entitlements = read("apps/ios/Config/Companion.entitlements");
+
+  assert.match(project, /CompanionNotificationService\.appex in Embed App Extensions/);
+  assert.match(project, /productName = CompanionNotificationAvatar/);
+  assert.match(project, /PRODUCT_BUNDLE_IDENTIFIER = dev\.companion\.mobile\.dev\.notifyextension/);
+  assert.match(project, /PRODUCT_BUNDLE_IDENTIFIER = dev\.companion\.mobile\.notifyextension/);
+  assert.match(extensionInfo, /com\.apple\.usernotifications\.service/);
+  assert.match(extensionInfo, /\$\(PRODUCT_MODULE_NAME\)\.NotificationService/);
+  assert.match(appInfo, /<string>INSendMessageIntent<\/string>/);
+  assert.match(entitlements, /com\.apple\.developer\.usernotifications\.communication/);
+});
+
 test("the Expo client and its repository-local skills are gone", () => {
   assert.equal(existsSync(resolve(ROOT, "apps/mobile")), false);
   assert.equal(existsSync(resolve(ROOT, "skills-lock.json")), false);
@@ -154,14 +170,19 @@ test("CI builds iOS without secrets and keeps the live provider diagnostic manua
   assert.match(ci, /^  apple-quality:$/m);
   assert.match(ci, /^    runs-on: macos-26$/m);
   assert.match(ci, /if: needs\.scope\.outputs\.skill == 'true' \|\| needs\.scope\.outputs\.ios == 'true'/);
-  assert.match(ci, /xcodebuildmcp swift-package test --package-path apps\/ios\/CompanionKit/);
-  assert.match(ci, /xcodebuildmcp simulator build/);
+  assert.doesNotMatch(ci, /xcodebuildmcp/i);
+  assert.match(ci, /swift test --package-path apps\/ios\/CompanionKit/);
+  assert.match(ci, /xcodebuild build/);
+  assert.match(ci, /xcodebuild test/);
+  assert.match(ci, /xcrun simctl list devices available --json/);
   assert.match(ci, /node scripts\/select-ios-simulator\.mjs/);
   assert.doesNotMatch(ci, /^  skill-guards-macos:$/m);
   assert.doesNotMatch(ci, /^  ios-quality:$/m);
   assert.doesNotMatch(ci, /^  schedule:$/m);
   assert.doesNotMatch(ci, /^  workflow_dispatch:$/m);
   assert.match(e2e, /^name: "Diagnostic: iOS Live E2E"$/m);
+  assert.doesNotMatch(e2e, /xcodebuildmcp/i);
+  assert.match(e2e, /swift test --package-path apps\/ios\/CompanionKit/);
   assert.match(e2e, /^  workflow_dispatch:$/m);
   assert.doesNotMatch(e2e, /^  schedule:$/m);
   assert.doesNotMatch(e2e, /^  pull_request:/m);
@@ -170,6 +191,19 @@ test("CI builds iOS without secrets and keeps the live provider diagnostic manua
   assert.match(e2e, /COMPANION_BOX_API_KEY: \$\{\{ secrets\.COMPANION_BOX_E2E_API_KEY \}\}/);
   assert.match(e2e, /node scripts\/ios-e2e-fixture\.mjs prepare/);
   assert.match(e2e, /node scripts\/ios-e2e-fixture\.mjs cleanup/);
+});
+
+test("GitHub Actions never installs or invokes XcodeBuildMCP", () => {
+  const workflows = readdirSync(resolve(ROOT, ".github/workflows"))
+    .filter((file) => file.endsWith(".yml") || file.endsWith(".yaml"));
+
+  for (const workflow of workflows) {
+    assert.doesNotMatch(
+      read(`.github/workflows/${workflow}`),
+      /xcodebuildmcp/i,
+      `${workflow} must use native Apple command-line tools`,
+    );
+  }
 });
 
 test("dependency auditing stays inside Quality and Pi publishing remains narrowly scoped", () => {
@@ -196,19 +230,27 @@ test("dependency auditing stays inside Quality and Pi publishing remains narrowl
 
 test("the CI simulator selector ignores other Apple platforms and chooses the latest iOS", () => {
   const selected = selectLatestIOSSimulator({
-    data: {
-      simulators: [
-        { simulatorId: "vision", runtime: "visionOS 26.0", isAvailable: true },
-        { simulatorId: "ios-older", runtime: "iOS 25.4", isAvailable: true },
-        { simulatorId: "ios-unavailable", runtime: "iOS 27.0", isAvailable: false },
-        { simulatorId: "ios-latest", runtime: "iOS 26.5", isAvailable: true },
+    devices: {
+      "com.apple.CoreSimulator.SimRuntime.visionOS-26-0": [
+        { udid: "vision", isAvailable: true },
+      ],
+      "com.apple.CoreSimulator.SimRuntime.iOS-25-4": [
+        { udid: "ios-older", isAvailable: true },
+      ],
+      "com.apple.CoreSimulator.SimRuntime.iOS-27-0": [
+        { udid: "ios-unavailable", isAvailable: false },
+      ],
+      "com.apple.CoreSimulator.SimRuntime.iOS-26-5": [
+        { udid: "ios-latest", isAvailable: true },
       ],
     },
   });
 
   assert.equal(selected.simulatorId, "ios-latest");
   assert.throws(
-    () => selectLatestIOSSimulator({ data: { simulators: [{ simulatorId: "vision", runtime: "visionOS 26.0" }] } }),
+    () => selectLatestIOSSimulator({
+      devices: { "com.apple.CoreSimulator.SimRuntime.visionOS-26-0": [{ udid: "vision" }] },
+    }),
     /No available iOS simulator/,
   );
 });

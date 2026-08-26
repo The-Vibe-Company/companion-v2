@@ -44,11 +44,14 @@ export interface CompanionApnsPayload {
     alert: { title: string; body: string };
     sound: "default";
     "thread-id": string;
+    "mutable-content"?: 1;
   };
   version: 1;
   org_id: string;
   companion_id: string;
   event: CompanionNotificationDeliveryClaim["event"];
+  companion_name?: string;
+  companion_icon?: CompanionNotificationDeliveryClaim["icon"];
 }
 
 function base64url(value: string | Buffer): string {
@@ -110,7 +113,8 @@ export function apnsCollapseId(eventKey: string): string {
 }
 
 export function apnsPayload(claim: CompanionNotificationDeliveryClaim): CompanionApnsPayload {
-  return {
+  const includesAvatar = claim.event === "reply";
+  const payload: CompanionApnsPayload = {
     aps: {
       alert: { title: claim.title, body: plainTextNotificationBody(claim.body) },
       sound: "default",
@@ -121,6 +125,12 @@ export function apnsPayload(claim: CompanionNotificationDeliveryClaim): Companio
     companion_id: claim.companionId,
     event: claim.event,
   };
+  if (includesAvatar) {
+    payload.aps["mutable-content"] = 1;
+    payload.companion_name = claim.companionName;
+    payload.companion_icon = claim.icon;
+  }
+  return payload;
 }
 
 export class Http2ApnsSender implements ApnsSender {

@@ -262,6 +262,7 @@ describe("Skills Hub runtime-role grants", () => {
     );
     for (const signature of [
       "companion_claim_notification_deliveries(text,integer,integer)",
+      "companion_claim_notification_deliveries_v2(text,integer,integer)",
       "companion_validate_notification_delivery(uuid,uuid)",
       "companion_complete_notification_delivery(uuid,uuid)",
       "companion_defer_notification_delivery(uuid,uuid,integer)",

@@ -14,8 +14,11 @@ belong in the zero-dependency `CompanionKit` Swift package. The committed Xcode 
 file-system-synchronized groups, so adding a Swift file does not require a project-file edit.
 
 The native roster can create Companions, open their essential settings from chat or a long-press
-menu, and request Owner-only durable deletion. Essential settings cover the Companion icon, name,
-instructions, provider, and model; Editor access is editable and Viewer access is read-only.
+menu, and request Owner-only durable deletion. A confirmed deletion removes the Companion from the
+local roster immediately while the durable request runs; request failure restores the row, and a
+later roster poll may honestly reintroduce a Companion the control plane still returns. Essential
+settings cover the Companion icon, name, instructions, provider, and model; Editor access is
+editable and Viewer access is read-only.
 Connected resources now lives inside those settings as one child management page. It retains the
 native Skills, routines, and triggers status views, lists the member's attached MCP plugin accounts
 by provider and label, and lets the Companion Owner attach or detach already-connected accounts.
@@ -46,6 +49,12 @@ Push Notifications are requested immediately after the first active session. Deb
 production APNs. A tap waits for session and roster restoration, verifies the workspace and current
 access, then opens the existing chat. Foreground alerts include banner, Notification Center list,
 and sound unless that chat is already open. The app deliberately uses no numeric badge.
+Reply pushes also carry the Companion's four cosmetic icon indexes and `mutable-content: 1`. The
+embedded Notification Service Extension renders the closed blob catalog into a PNG locally, then
+uses it as the sender image for Apple's communication-notification treatment. No avatar endpoint,
+credential, or network request is involved. If intent enrichment cannot finish, the extension
+returns the same title/body with the PNG as a standard attachment; if the extension itself times
+out, iOS displays the original plain alert. Decision and failure alerts remain plain notifications.
 
 Long-term native work is guided by the repo-local `ios-product-dev`, `swiftui-expert-dev`,
 `design-frontend-dev`, and `xcodebuildmcp-cli` skills. Their iOS-specific packages are mirrored
@@ -71,7 +80,7 @@ xcodebuildmcp swift-package test --package-path apps/ios/CompanionKit
 Release builds ignore launch arguments and environment variables and always use
 `https://api.thecompanion.sh`.
 
-The Debug-only `-glass-chat-demo`, `-glass-management-demo`, `-glass-management-demo-plugins`,
+The Debug-only `-glass-chat-demo`, `-markdown-table-demo`, `-glass-management-demo`, `-glass-management-demo-plugins`,
 `-companion-icon-demo`, `-companion-decision-demo`, `-companion-interruption-demo`, `-companion-resources-demo`,
 `-companion-settings-demo`, and
 `-companion-roster-demo` launch arguments
@@ -81,12 +90,14 @@ alongside `-companion-icon-demo` to force the gallery's Reduce Motion path. The 
 The decision demo accepts `COMPANION_DECISION_DEMO_ACCESS=owner|editor|viewer` for the matching
 decision controls. Set `COMPANION_DECISION_DEMO_FAIL_ONCE=<request-id>` to exercise a failed
 submission followed by an enabled retry.
+Add `-markdown-table-dark-demo` alongside `-markdown-table-demo` to exercise the table gallery with
+the adaptive Companion color tokens in dark appearance.
 The interruption demo accepts `COMPANION_INTERRUPTION_DEMO_ACCESS=owner|editor|viewer`; set
 `COMPANION_INTERRUPTION_DEMO_FAIL_RETRY_ONCE=1` to verify that an uncertain submission keeps the
 same safe retry action available.
-The roster demo accepts the equivalent `COMPANION_ROSTER_DEMO_ACCESS` value and simulates a lost
-first deletion response followed by a same-key `202` retry. These arguments are excluded from Release
-behavior.
+The roster demo accepts the equivalent `COMPANION_ROSTER_DEMO_ACCESS` value and simulates immediate
+removal, restoration after a lost first deletion response, and a same-key `202` retry. These
+arguments are excluded from Release behavior.
 The resources demo accepts `COMPANION_RESOURCES_DEMO_EMPTY=skills|routines|triggers` to show one
 section's deterministic empty state.
 Combine `-companion-roster-demo -companion-notification-demo` to inject a version-1 response payload
@@ -100,16 +111,22 @@ macOS 26 runner, verifies the complete approved push range, and checks the iPhon
 signing. It has no arbitrary-ref manual dispatch; an existing delivery can be retried from its
 GitHub Actions run. The workflow uses the protected `ios-testflight` environment and the
 `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8`,
-`IOS_DISTRIBUTION_P12`, `IOS_DISTRIBUTION_P12_PASSWORD`, and `IOS_PROVISIONING_PROFILE` secrets. The
-signing certificate and profile are installed only in a temporary CI keychain and removed after the
-job.
+`IOS_DISTRIBUTION_P12`, `IOS_DISTRIBUTION_P12_PASSWORD`, `IOS_PROVISIONING_PROFILE`, and
+`IOS_NOTIFICATION_EXTENSION_PROVISIONING_PROFILE` secrets. The signing certificate and profiles
+are installed only for the release job and removed afterward.
 
-Before distributing a push-enabled build, enable Push Notifications on both App IDs and replace the
-`IOS_PROVISIONING_PROFILE` secret with a regenerated profile containing the `aps-environment`
-entitlement. Deploy migration 0124 before that build, and configure the worker-only
-`COMPANION_APNS_KEY_ID`, `COMPANION_APNS_TEAM_ID`, and base64-encoded
-`COMPANION_APNS_PRIVATE_KEY_BASE64`. Validate background, terminated, foreground, decision, failure,
-and tap routing on a physical/TestFlight device with Apple's Push Notification Console. Removing all
+The archive embeds `CompanionNotificationService` with production bundle id
+`dev.companion.mobile.notifyextension` (Debug uses the containing app prefix
+`dev.companion.mobile.dev.notifyextension`). The app profile must include Push Notifications and
+Communication Notifications; the extension needs its own App Store distribution profile. The
+extension has no separate entitlement file and makes no network request.
+
+Before distributing a push-enabled build, enable Push Notifications and Communication Notifications
+on the app App ID, register the extension App ID, and replace both provisioning-profile secrets with
+matching regenerated profiles. Deploy migrations 0124 and 0131 before that build, and configure the
+worker-only `COMPANION_APNS_KEY_ID`, `COMPANION_APNS_TEAM_ID`, and base64-encoded
+`COMPANION_APNS_PRIVATE_KEY_BASE64`. Validate background, terminated, foreground, decision,
+failure, and tap routing on a physical/TestFlight device with Apple's Push Notification Console. Removing all
 three worker variables is the push rollback; turns and the iOS app continue to function.
 
 If the matching `main` CI fails, no TestFlight delivery is created. A later successful CI run for
@@ -124,6 +141,7 @@ ASC_KEY_ID="<key-id>" \
 ASC_ISSUER_ID="<issuer-id>" \
 ASC_KEY_PATH="/secure/path/AuthKey_<key-id>.p8" \
 IOS_PROVISIONING_PROFILE_SPECIFIER="Companion Native App Store 2026-08-24" \
+IOS_NOTIFICATION_EXTENSION_PROVISIONING_PROFILE_SPECIFIER="Companion Notification Service App Store 2026-08-26" \
 bash apps/ios/scripts/release.sh
 ```
 

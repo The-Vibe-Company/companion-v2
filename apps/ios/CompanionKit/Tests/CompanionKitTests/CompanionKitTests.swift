@@ -628,6 +628,106 @@ func settingsUpdatePreservesTheRosterMessageProjection() throws {
 }
 
 @Test
+func rosterRemovesACompanionOptimisticallyAndRestoresItsPositionAfterFailure() throws {
+    let luna = try rosterCompanion(id: "companion-1", name: "Luna")
+    let nova = try rosterCompanion(id: "companion-2", name: "Nova")
+    var roster = CompanionRosterState(companions: [luna, nova])
+
+    let removed = roster.removeOptimistically(companionID: luna.id)
+
+    #expect(removed == luna)
+    #expect(roster.companions.map(\.id) == [nova.id])
+
+    let restored = roster.restoreDeletion(companionID: luna.id)
+
+    #expect(restored == luna)
+    #expect(roster.companions.map(\.id) == [luna.id, nova.id])
+}
+
+@Test
+func rosterKeepsAnAcceptedDeletionRemovedUntilTheServerReconcilesIt() throws {
+    let luna = try rosterCompanion(id: "companion-1", name: "Luna")
+    let nova = try rosterCompanion(id: "companion-2", name: "Nova")
+    let operation = try rosterDeletionOperation(status: "pending")
+    var roster = CompanionRosterState(companions: [luna, nova])
+
+    roster.removeOptimistically(companionID: luna.id)
+    roster.reconcileDeletionResponse(companionID: luna.id, operation: operation)
+
+    #expect(roster.companions.map(\.id) == [nova.id])
+    #expect(roster.restoreDeletion(companionID: luna.id) == nil)
+
+    roster.reconcile(with: [luna, nova])
+
+    #expect(roster.companions.map(\.id) == [luna.id, nova.id])
+}
+
+@Test
+func rosterRestoresATerminalDeletionReplayForAFreshRetry() throws {
+    let luna = try rosterCompanion(id: "companion-1", name: "Luna")
+    let operation = try rosterDeletionOperation(status: "failed")
+    var roster = CompanionRosterState(companions: [luna])
+
+    roster.removeOptimistically(companionID: luna.id)
+    let restored = roster.reconcileDeletionResponse(companionID: luna.id, operation: operation)
+
+    #expect(restored == luna)
+    #expect(roster.companions == [luna])
+}
+
+@Test
+func rosterDoesNotDuplicateACompanionThatReappearsBeforeFailureRestoration() throws {
+    let luna = try rosterCompanion(id: "companion-1", name: "Luna")
+    var roster = CompanionRosterState(companions: [luna])
+
+    roster.removeOptimistically(companionID: luna.id)
+    roster.reconcile(with: [luna])
+
+    #expect(roster.restoreDeletion(companionID: luna.id) == nil)
+    #expect(roster.companions == [luna])
+}
+
+@Test
+func rosterDoesNotRestoreACompanionAfterTheServerOmitsIt() throws {
+    let luna = try rosterCompanion(id: "companion-1", name: "Luna")
+    let nova = try rosterCompanion(id: "companion-2", name: "Nova")
+    var roster = CompanionRosterState(companions: [luna, nova])
+
+    roster.removeOptimistically(companionID: luna.id)
+    roster.reconcile(with: [nova])
+
+    #expect(roster.restoreDeletion(companionID: luna.id) == nil)
+    #expect(roster.companions == [nova])
+}
+
+private func rosterCompanion(id: String, name: String) throws -> CompanionSummary {
+    try JSONDecoder().decode(CompanionSummary.self, from: Data(#"""
+    {
+      "id":"\#(id)",
+      "name":"\#(name)",
+      "persona":null,
+      "model_id":"claude-sonnet",
+      "access":"owner",
+      "hidden":false,
+      "unread":false,
+      "last_message":null,
+      "runtime":{"state":"running","replying":false,"last_error":null,"provider_ids":["anthropic"]}
+    }
+    """#.utf8))
+}
+
+private func rosterDeletionOperation(status: String) throws -> CompanionOperationSummary {
+    try JSONDecoder().decode(CompanionOperationSummary.self, from: Data(#"""
+    {
+      "id":"operation-1",
+      "kind":"delete",
+      "status":"\#(status)",
+      "error":null
+    }
+    """#.utf8))
+}
+
+@Test
 func resourceScreenReconcilesParentRuntimeWithoutHidingFreshWork() throws {
     let active = try JSONDecoder().decode(CompanionSummary.self, from: Data(#"""
     {
@@ -1413,6 +1513,27 @@ func decodesEveryStructuredToolRunStatus() throws {
         let run = try JSONDecoder().decode(CompanionToolRun.self, from: data)
         #expect(run.status.rawValue == rawStatus)
     }
+}
+
+@Test
+func preservesMaximumStructuredToolDetailAsLiteralText() throws {
+    let untrusted = String(repeating: "<script>alert('literal')</script> & output\n", count: 500)
+    let detail = String(untrusted.prefix(16_000))
+    let data = try JSONSerialization.data(withJSONObject: [
+        "call_id": "call-detail-16k",
+        "kind": "computer",
+        "name": "computer",
+        "title": "Inspect the complete operation payload",
+        "status": "ok",
+        "detail": detail,
+        "screenshot": "data:image/jpeg;base64,/9j/4AAQSkZJRg==",
+    ])
+
+    let run = try JSONDecoder().decode(CompanionToolRun.self, from: data)
+    #expect(run.detail == detail)
+    #expect(run.detail?.count == 16_000)
+    #expect(run.detail?.hasPrefix("<script>") == true)
+    #expect(run.screenshot == "data:image/jpeg;base64,/9j/4AAQSkZJRg==")
 }
 
 @Test
