@@ -1,5 +1,7 @@
-import SwiftUI
 import CompanionKit
+import PhotosUI
+import SwiftUI
+import UniformTypeIdentifiers
 
 struct ChatView: View {
     @Environment(SessionStore.self) private var sessionStore
@@ -9,6 +11,12 @@ struct ChatView: View {
     @State private var currentCompanion: CompanionSummary
     @State private var thread: CompanionThread?
     @State private var draft = ""
+    @State private var draftAttachments: [CompanionMessageAttachment] = []
+    @State private var attachmentError: String?
+    @State private var photoPickerItems: [PhotosPickerItem] = []
+    @State private var showPhotoPicker = false
+    @State private var showDocumentPicker = false
+    @State private var selectingAttachments = false
     @State private var loading = true
     @State private var sending = false
     @State private var error: String?
@@ -100,6 +108,23 @@ struct ChatView: View {
             }
         }
         .onChange(of: companion) { currentCompanion = companion }
+        .photosPicker(
+            isPresented: $showPhotoPicker,
+            selection: $photoPickerItems,
+            maxSelectionCount: max(1, remainingAttachmentCapacity),
+            matching: .images,
+            preferredItemEncoding: .compatible
+        )
+        .onChange(of: photoPickerItems) { _, items in
+            guard !items.isEmpty else { return }
+            loadSelectedPhotos(items)
+        }
+        .fileImporter(
+            isPresented: $showDocumentPicker,
+            allowedContentTypes: Self.allowedDocumentTypes,
+            allowsMultipleSelection: true,
+            onCompletion: importDocuments
+        )
     }
 
     @ToolbarContentBuilder
@@ -217,8 +242,57 @@ struct ChatView: View {
                     .padding(.vertical, 14)
                     .companionGlass(radius: 20)
             } else {
+                if !draftAttachments.isEmpty {
+                    ComposerAttachmentStrip(
+                        attachments: draftAttachments,
+                        onRemove: removeAttachment
+                    )
+                    .padding(.horizontal, 2)
+                }
+
+                if let attachmentError {
+                    Text(attachmentError)
+                        .font(.caption)
+                        .foregroundStyle(Color.companionDanger)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 4)
+                        .accessibilityLabel("Attachment error: \(attachmentError)")
+                }
+
                 GlassEffectContainer(spacing: 12) {
                     HStack(alignment: .bottom, spacing: 10) {
+                        Menu {
+                            Button {
+                                showPhotoPicker = true
+                            } label: {
+                                Label("Photo library", systemImage: "photo.on.rectangle")
+                            }
+                            Button {
+                                showDocumentPicker = true
+                            } label: {
+                                Label("Choose file", systemImage: "document")
+                            }
+                        } label: {
+                            Group {
+                                if selectingAttachments {
+                                    ProgressView().controlSize(.small)
+                                } else {
+                                    Image(systemName: "plus")
+                                }
+                            }
+                            .font(.system(size: 17, weight: .semibold))
+                            .frame(width: 46, height: 46)
+                        }
+                        .buttonStyle(.glass)
+                        .buttonBorderShape(.circle)
+                        .disabled(attachDisabled)
+                        .accessibilityLabel(
+                            remainingAttachmentCapacity == 0
+                                ? "Five files attached"
+                                : "Attach a photo or file"
+                        )
+                        .accessibilityIdentifier("chat.attach")
+
                         TextField("Message \(currentCompanion.name)", text: $draft, axis: .vertical)
                             .lineLimit(1...5)
                             .padding(.horizontal, 16)
@@ -246,6 +320,15 @@ struct ChatView: View {
                         .accessibilityIdentifier("chat.send")
                     }
                 }
+
+                if !draftAttachments.isEmpty,
+                   draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text("Add a message to send \(draftAttachments.count == 1 ? "this file" : "these files").")
+                        .font(.caption)
+                        .foregroundStyle(Color.companionMuted)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 4)
+                }
             }
         }
         .padding(.horizontal, 12)
@@ -254,7 +337,18 @@ struct ChatView: View {
     }
 
     private var sendDisabled: Bool {
-        sending || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || thread?.canSend == false
+        sending
+            || selectingAttachments
+            || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || thread?.canSend == false
+    }
+
+    private var attachDisabled: Bool {
+        sending || selectingAttachments || remainingAttachmentCapacity == 0 || thread?.canSend == false
+    }
+
+    private var remainingAttachmentCapacity: Int {
+        max(0, companionMessageAttachmentMaximumCount - draftAttachments.count)
     }
 
     private var visualTheme: CompanionVisualTheme {
@@ -344,9 +438,17 @@ struct ChatView: View {
     private func send() {
         let content = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !content.isEmpty, !sending else { return }
-        let message = PendingMessage(id: UUID(), content: content, failed: false)
+        let message = PendingMessage(
+            id: UUID(),
+            content: content,
+            attachments: draftAttachments,
+            failed: false,
+            uploadProgress: draftAttachments.isEmpty ? nil : 0
+        )
         pendingMessages.append(message)
         draft = ""
+        draftAttachments = []
+        attachmentError = nil
         sending = true
         error = nil
         Task {
@@ -372,12 +474,22 @@ struct ChatView: View {
         guard let index = pendingMessages.firstIndex(where: { $0.id == id }) else { return }
         let message = pendingMessages[index]
         pendingMessages[index].failed = false
+        if !message.attachments.isEmpty { pendingMessages[index].uploadProgress = 0 }
         error = nil
         do {
             try await sessionStore.sendMessage(
                 companionID: companion.id,
                 content: message.content,
-                clientMessageID: message.id
+                clientMessageID: message.id,
+                attachments: message.attachments,
+                uploadProgress: message.attachments.isEmpty ? nil : { progress in
+                    Task { @MainActor in
+                        guard let current = pendingMessages.firstIndex(where: { $0.id == id }) else {
+                            return
+                        }
+                        pendingMessages[current].uploadProgress = progress
+                    }
+                }
             )
             pendingMessages.removeAll { $0.id == id }
             await reload(silently: true)
@@ -386,6 +498,117 @@ struct ChatView: View {
                 pendingMessages[current].failed = true
             }
         }
+    }
+
+    private func removeAttachment(_ id: UUID) {
+        draftAttachments.removeAll { $0.id == id }
+        attachmentError = nil
+    }
+
+    private func loadSelectedPhotos(_ items: [PhotosPickerItem]) {
+        selectingAttachments = true
+        attachmentError = nil
+        Task {
+            var imported: [CompanionMessageAttachment] = []
+            var firstError: String?
+            for (offset, item) in items.prefix(remainingAttachmentCapacity).enumerated() {
+                do {
+                    guard let data = try await item.loadTransferable(type: Data.self) else {
+                        firstError = firstError ?? "That photo could not be loaded."
+                        continue
+                    }
+                    imported.append(try CompanionMessageAttachment(
+                        data: data,
+                        filename: "photo-\(draftAttachments.count + offset + 1)",
+                        declaredContentType: item.supportedContentTypes.first?.preferredMIMEType
+                    ))
+                } catch {
+                    firstError = firstError ?? attachmentImportMessage(error)
+                }
+            }
+            appendImportedAttachments(imported, firstError: firstError)
+            photoPickerItems = []
+            selectingAttachments = false
+        }
+    }
+
+    private func importDocuments(_ result: Result<[URL], Error>) {
+        guard case let .success(urls) = result else {
+            if case let .failure(error) = result,
+               (error as NSError).code != NSUserCancelledError {
+                attachmentError = "Files could not be opened."
+            }
+            return
+        }
+        selectingAttachments = true
+        attachmentError = nil
+        let capacity = remainingAttachmentCapacity
+        Task {
+            let imported = await Task.detached(priority: .userInitiated) {
+                Self.readDocuments(Array(urls.prefix(capacity)))
+            }.value
+            appendImportedAttachments(imported.attachments, firstError: imported.firstError)
+            if urls.count > capacity {
+                attachmentError = "You can attach up to five files."
+            }
+            selectingAttachments = false
+        }
+    }
+
+    private func appendImportedAttachments(
+        _ attachments: [CompanionMessageAttachment],
+        firstError: String?
+    ) {
+        let capacity = remainingAttachmentCapacity
+        draftAttachments.append(contentsOf: attachments.prefix(capacity))
+        if attachments.count > capacity {
+            attachmentError = "You can attach up to five files."
+        } else {
+            attachmentError = firstError
+        }
+    }
+
+    private func attachmentImportMessage(_ error: Error) -> String {
+        if let validation = error as? CompanionMessageAttachmentError {
+            return validation.localizedDescription
+        }
+        return "That file could not be opened."
+    }
+
+    private static let allowedDocumentTypes: [UTType] = [
+        .pdf,
+        .commaSeparatedText,
+        .plainText,
+        .json,
+        UTType(filenameExtension: "md") ?? .plainText,
+    ]
+
+    nonisolated private static func readDocuments(_ urls: [URL]) -> AttachmentImportResult {
+        var attachments: [CompanionMessageAttachment] = []
+        var firstError: String?
+        for url in urls {
+            let accessing = url.startAccessingSecurityScopedResource()
+            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+            do {
+                let values = try url.resourceValues(forKeys: [.fileSizeKey, .contentTypeKey])
+                if let size = values.fileSize, size > companionAttachmentMaximumBytes {
+                    throw CompanionMessageAttachmentError.tooLarge
+                }
+                let data = try Data(contentsOf: url, options: .mappedIfSafe)
+                attachments.append(try CompanionMessageAttachment(
+                    data: data,
+                    filename: url.lastPathComponent,
+                    declaredContentType: values.contentType?.preferredMIMEType
+                ))
+            } catch {
+                if let validation = error as? CompanionMessageAttachmentError {
+                    firstError = firstError ?? validation.localizedDescription
+                } else {
+                    firstError = firstError ?? "That file could not be opened."
+                }
+            }
+        }
+        return AttachmentImportResult(attachments: attachments, firstError: firstError)
     }
 }
 
@@ -402,9 +625,12 @@ struct ChatMessageBubble: View {
     var timestamp: String?
     var queued = false
     var companionName = "Companion"
+    var companionID: String?
     var icon: CompanionSummary.Icon?
     var accent = Color.companionAccent
     var markdown: MarkdownDocument?
+    var attachments: [CompanionAttachment] = []
+    var localAttachments: [CompanionMessageAttachment] = []
 
     @ViewBuilder
     var body: some View {
@@ -447,6 +673,17 @@ struct ChatMessageBubble: View {
                     .font(.body)
                     .foregroundStyle(Color.companionInk)
                     .textSelection(.enabled)
+            }
+
+            if !localAttachments.isEmpty {
+                LocalMessageAttachmentList(attachments: localAttachments)
+            }
+
+            if let companionID, !attachments.isEmpty {
+                TranscriptAttachmentList(
+                    companionID: companionID,
+                    attachments: attachments
+                )
             }
 
             if queued || timestamp != nil {
@@ -498,9 +735,11 @@ private struct MessageEntryView: View {
             timestamp: timeLabel,
             queued: entry.queued,
             companionName: companion.name,
+            companionID: companion.id,
             icon: companion.icon,
             accent: accent,
-            markdown: entry.role == "assistant" ? markdown : nil
+            markdown: entry.role == "assistant" ? markdown : nil,
+            attachments: entry.attachments
         )
     }
 
@@ -523,7 +762,9 @@ private func parseCompanionTimestamp(_ value: String) -> Date? {
 private struct PendingMessage: Identifiable, Equatable {
     let id: UUID
     let content: String
+    let attachments: [CompanionMessageAttachment]
     var failed: Bool
+    var uploadProgress: Double?
 }
 
 private struct PendingMessageView: View {
@@ -538,9 +779,18 @@ private struct PendingMessageView: View {
             ChatMessageBubble(
                 content: message.content,
                 kind: .mine,
-                timestamp: message.failed ? "Not delivered" : "Sending…",
-                accent: accent
+                timestamp: statusLabel,
+                accent: accent,
+                localAttachments: message.attachments
             )
+
+            if let progress = message.uploadProgress, !message.failed {
+                ProgressView(value: progress)
+                    .tint(accent)
+                    .frame(maxWidth: 220)
+                    .accessibilityLabel("Uploading attachments")
+                    .accessibilityValue(progress.formatted(.percent.precision(.fractionLength(0))))
+            }
 
             if message.failed {
                 VStack(alignment: .trailing, spacing: 6) {
@@ -561,4 +811,16 @@ private struct PendingMessageView: View {
             }
         }
     }
+
+    private var statusLabel: String {
+        if message.failed { return "Not delivered" }
+        guard let progress = message.uploadProgress else { return "Sending…" }
+        if progress >= 1 { return "Finishing upload…" }
+        return "Uploading \(progress.formatted(.percent.precision(.fractionLength(0))))"
+    }
+}
+
+private struct AttachmentImportResult: Sendable {
+    let attachments: [CompanionMessageAttachment]
+    let firstError: String?
 }

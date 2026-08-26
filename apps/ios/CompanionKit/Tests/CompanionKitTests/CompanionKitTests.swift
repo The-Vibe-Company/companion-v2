@@ -66,6 +66,44 @@ private final class NotificationMockURLProtocol: URLProtocol, @unchecked Sendabl
     override func stopLoading() {}
 }
 
+private final class AttachmentMockURLProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        do {
+            let handler = try #require(Self.handler)
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
+private final class UploadProgressRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [Double] = []
+
+    func append(_ value: Double) {
+        lock.lock()
+        values.append(value)
+        lock.unlock()
+    }
+
+    func snapshot() -> [Double] {
+        lock.lock()
+        defer { lock.unlock() }
+        return values
+    }
+}
+
 private func requestBody(_ request: URLRequest) throws -> Data {
     if let body = request.httpBody { return body }
     let stream = try #require(request.httpBodyStream)
@@ -317,6 +355,145 @@ func decodesViewerAndAuthorIdentityForSharedThreads() throws {
     #expect(thread.viewerID == "viewer-1")
     #expect(thread.entries.first?.authorID == "editor-2")
     #expect(thread.entries.first?.authorName == "Morgan")
+    #expect(thread.entries.first?.attachments == [])
+}
+
+@Test
+func decodesAttachmentMetadataWithoutAStorageURL() throws {
+    let entry = try JSONDecoder().decode(TranscriptEntry.self, from: Data(#"""
+    {
+      "event_id":"msg:17f8b827-8a06-4ef8-9352-58cc03c849a4",
+      "ordinal":1,
+      "role":"user",
+      "content":"Look at this",
+      "author_id":"editor-2",
+      "author_name":"Morgan",
+      "queued":false,
+      "attachments":[{
+        "id":"7c1f0b52-8a2e-4c3d-9f10-0b1c2d3e4f50",
+        "kind":"user_upload",
+        "content_type":"image/png",
+        "byte_size":2048,
+        "filename":"Q3_chart.PNG",
+        "position":0
+      }],
+      "created_at":"2026-08-24T11:00:00.000Z"
+    }
+    """#.utf8))
+    let attachment = try #require(entry.attachments.first)
+    #expect(attachment.kind == .userUpload)
+    #expect(attachment.contentType == .png)
+    #expect(attachment.byteSize == 2_048)
+    #expect(attachment.filename == "Q3_chart.PNG")
+}
+
+@Test
+func validatesAttachmentsFromBytesBeforeUpload() throws {
+    let png = try CompanionMessageAttachment(
+        id: try #require(UUID(uuidString: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")),
+        data: Data([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01]),
+        filename: "photo",
+        declaredContentType: "application/octet-stream"
+    )
+    #expect(png.contentType == .png)
+    #expect(png.filename == "photo.png")
+
+    #expect(throws: CompanionMessageAttachmentError.unsupportedType) {
+        try CompanionMessageAttachment(
+            data: Data("not a png".utf8),
+            filename: "fake.png",
+            declaredContentType: "image/png"
+        )
+    }
+    #expect(throws: CompanionMessageAttachmentError.unsupportedType) {
+        try CompanionMessageAttachment(
+            data: Data([0x61, 0x00, 0x62]),
+            filename: "bad.txt",
+            declaredContentType: "text/plain"
+        )
+    }
+    #expect(throws: CompanionMessageAttachmentError.tooLarge) {
+        try CompanionMessageAttachment(
+            data: Data(repeating: 0x61, count: companionAttachmentMaximumBytes + 1),
+            filename: "large.txt",
+            declaredContentType: "text/plain"
+        )
+    }
+    #expect(CompanionMessageAttachmentError.tooMany.localizedDescription == "You can attach up to five files.")
+}
+
+@Test
+func sendsAttachmentsAsRepeatedMultipartFilePartsAndReadsThemWithAuthority() async throws {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [AttachmentMockURLProtocol.self]
+    let messageID = try #require(UUID(uuidString: "17f8b827-8a06-4ef8-9352-58cc03c849a4"))
+    let pngBytes = Data([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01])
+    let files = [
+        try CompanionMessageAttachment(data: pngBytes, filename: "Q3 chart.PNG"),
+        try CompanionMessageAttachment(
+            data: Data("a,b\n1,2\n".utf8),
+            filename: "rows.csv",
+            declaredContentType: "text/csv"
+        ),
+    ]
+    let progress = UploadProgressRecorder()
+    AttachmentMockURLProtocol.handler = { request in
+        let requestURL = try #require(request.url)
+        #expect(request.value(forHTTPHeaderField: "Cookie") == "better-auth.session_token=session")
+        #expect(request.value(forHTTPHeaderField: "x-companion-org") == "org-1")
+        if request.httpMethod == "POST" {
+            #expect(requestURL.path == "/v1/companions/companion-1/messages")
+            let contentType = try #require(request.value(forHTTPHeaderField: "Content-Type"))
+            #expect(contentType.hasPrefix("multipart/form-data; boundary=CompanionBoundary-"))
+            let body = try requestBody(request)
+            let text = try #require(String(data: body, encoding: .isoLatin1))
+            #expect(text.contains("name=\"content\"\r\n\r\nLook at these"))
+            #expect(text.contains("name=\"client_message_id\"\r\n\r\n17f8b827-8a06-4ef8-9352-58cc03c849a4"))
+            #expect(text.components(separatedBy: "name=\"file\"").count - 1 == 2)
+            #expect(text.contains("filename=\"Q3 chart.PNG\""))
+            #expect(text.contains("Content-Type: image/png"))
+            #expect(text.contains("Content-Type: text/csv"))
+            let response = try #require(HTTPURLResponse(
+                url: requestURL, statusCode: 202, httpVersion: nil, headerFields: nil
+            ))
+            return (response, Data(#"{"turn":{"id":"turn-1"}}"#.utf8))
+        }
+        #expect(request.httpMethod == "GET")
+        #expect(requestURL.path == "/v1/companions/companion-1/attachments/attachment-1")
+        let response = try #require(HTTPURLResponse(
+            url: requestURL,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "image/png"]
+        ))
+        return (response, pngBytes)
+    }
+    defer { AttachmentMockURLProtocol.handler = nil }
+
+    let client = APIClient(
+        baseURL: URL(string: "http://127.0.0.1:3001")!,
+        session: URLSession(configuration: configuration)
+    )
+    await client.setAuthority(Session(
+        cookie: "better-auth.session_token=session",
+        orgID: "org-1",
+        needsOnboarding: false,
+        user: .init(id: "user-1", email: "stan@example.com", name: "Stan")
+    ))
+    try await client.sendMessage(
+        companionID: "companion-1",
+        content: "Look at these",
+        clientMessageID: messageID,
+        attachments: files,
+        uploadProgress: { progress.append($0) }
+    )
+    #expect(progress.snapshot().first == 0)
+    #expect(progress.snapshot().last == 1)
+    let downloaded = try await client.attachmentData(
+        companionID: "companion-1",
+        attachmentID: "attachment-1"
+    )
+    #expect(downloaded == pngBytes)
 }
 
 @Test
