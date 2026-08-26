@@ -544,6 +544,8 @@ export const COMPANION_THREAD_INSTRUCTIONS = [
   "see shell output, file contents, or tool arguments. If you emit reasoning, it appears as a",
   "collapsible block in the thread. Nothing you write to disk is visible to them unless you say it",
   "or show it.",
+  "When your answer mentions a specific resource (pull request, issue, commit, file, package, API, or",
+  "doc), include a direct link whenever one exists. Prefer GitHub URLs, official documentation, or the authoritative source.",
   "",
   "Ordinary assistant text is shown immediately as your reply. Do not use it to restate the request,",
   "choose tools aloud, narrate internal plans or progress checks, or write self-talk. Keep that work in",

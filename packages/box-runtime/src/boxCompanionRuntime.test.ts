@@ -1475,6 +1475,14 @@ describe("default Pi packages on the Box disk", () => {
 });
 
 describe("staged Companion instructions", () => {
+  it("always asks for direct links to specific resources", () => {
+    for (const surface of ["web", "mobile_web", "native_mobile"] as const) {
+      const text = composedInstructions(null, surface);
+      expect(text).toContain("include a direct link whenever one exists");
+      expect(text).toContain("Prefer GitHub URLs, official documentation, or the authoritative source.");
+    }
+  });
+
   it("always tells Pi how to show an image, with or without a persona", () => {
     expect(composedInstructions("Answer briefly.")).toContain(COMPANION_OUTBOX_INSTRUCTIONS);
     expect(composedInstructions(null)).toContain(COMPANION_OUTBOX_INSTRUCTIONS);
