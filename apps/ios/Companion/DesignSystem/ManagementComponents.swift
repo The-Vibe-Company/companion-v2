@@ -96,7 +96,7 @@ struct CompanionErrorNotice: View {
             .foregroundStyle(Color.companionDanger)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(14)
-            .background(Color.companionDanger.opacity(0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .companionMaterial(radius: 16)
             .accessibilityLabel("Error. \(message)")
     }
 }

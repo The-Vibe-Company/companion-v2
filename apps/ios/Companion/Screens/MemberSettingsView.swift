@@ -20,7 +20,7 @@ struct MemberSettingsView: View {
 
     var body: some View {
         NavigationStack {
-            CompanionBackdrop(style: .neutral) {
+            CompanionBackdrop {
                 Form {
                     if let error {
                         Section {

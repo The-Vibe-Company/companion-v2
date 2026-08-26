@@ -18,7 +18,7 @@ struct CompanionDecisionDemoView: View {
 
     var body: some View {
         NavigationStack {
-            CompanionBackdrop(style: .companion(.companionAccent)) {
+            CompanionBackdrop {
                 ScrollView {
                     LazyVStack(spacing: 16) {
                         if let notice {

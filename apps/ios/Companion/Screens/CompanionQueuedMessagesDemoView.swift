@@ -16,7 +16,7 @@ struct CompanionQueuedMessagesDemoView: View {
 
     var body: some View {
         NavigationStack {
-            CompanionBackdrop(style: .companion(.blue)) {
+            CompanionBackdrop {
                 ScrollView {
                     LazyVStack(spacing: 16) {
                         ChatMessageBubble(
@@ -28,8 +28,7 @@ struct CompanionQueuedMessagesDemoView: View {
                         ChatMessageBubble(
                             content: "Add the screenshots when this is ready.",
                             kind: .mine,
-                            timestamp: "11:03 AM",
-                            accent: .blue
+                            timestamp: "11:03 AM"
                         )
                     }
                     .padding(16)

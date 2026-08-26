@@ -20,7 +20,7 @@ struct CompanionInterruptedTurnDemoView: View {
 
     var body: some View {
         NavigationStack {
-            CompanionBackdrop(style: .neutral) {
+            CompanionBackdrop {
                 ScrollView {
                     if released {
                         ContentUnavailableView(
