@@ -38,16 +38,22 @@ struct GlassChatDemoView: View {
                                 .background(.thinMaterial, in: Capsule())
 
                             ForEach(messages) { message in
-                                ChatMessageBubble(
-                                    content: message.content,
-                                    kind: message.kind,
-                                    authorName: message.author,
-                                    timestamp: message.timestamp,
-                                    companionName: companionName,
-                                    icon: icon,
-                                    accent: visualTheme.accent,
-                                    markdown: markdownByEventID[message.eventID]?.document
-                                )
+                                Group {
+                                    if let tool = message.tool {
+                                        CompanionToolRunCard(tool: tool)
+                                    } else {
+                                        ChatMessageBubble(
+                                            content: message.content,
+                                            kind: message.kind,
+                                            authorName: message.author,
+                                            timestamp: message.timestamp,
+                                            companionName: companionName,
+                                            icon: icon,
+                                            accent: visualTheme.accent,
+                                            markdown: markdownByEventID[message.eventID]?.document
+                                        )
+                                    }
+                                }
                                 .accessibilityIdentifier(message.accessibilityIdentifier)
                                 .id(message.id)
                             }
@@ -155,7 +161,7 @@ struct GlassChatDemoView: View {
 
     private var markdownSources: [MarkdownDocumentSource] {
         messages.compactMap { message in
-            guard message.kind == .assistant else { return nil }
+            guard message.kind == .assistant, message.tool == nil else { return nil }
             return MarkdownDocumentSource(eventID: message.eventID, content: message.content)
         }
     }
@@ -339,6 +345,7 @@ private struct DemoMessage: Identifiable {
     let kind: ChatMessageBubble.Kind
     var author: String?
     var timestamp: String?
+    var tool: CompanionToolRun?
 
     var eventID: String { id.uuidString }
 
@@ -347,19 +354,22 @@ private struct DemoMessage: Identifiable {
     }
 
     var accessibilityIdentifier: String {
-        isMarkdownFixture ? "demo.markdown.reply" : "demo.message.\(id)"
+        if let tool { return "demo.tool-run.\(tool.kind.rawValue)" }
+        return isMarkdownFixture ? "demo.markdown.reply" : "demo.message.\(id)"
     }
 
     init(
         content: String,
         kind: ChatMessageBubble.Kind,
         author: String? = nil,
-        timestamp: String? = nil
+        timestamp: String? = nil,
+        tool: CompanionToolRun? = nil
     ) {
         self.content = content
         self.kind = kind
         self.author = author
         self.timestamp = timestamp
+        self.tool = tool
     }
 
     static let samples: [DemoMessage] = [
@@ -368,6 +378,67 @@ private struct DemoMessage: Identifiable {
             kind: .assistant,
             author: "Companion",
             timestamp: "09:41"
+        ),
+        .init(
+            content: "",
+            kind: .assistant,
+            author: "Companion",
+            timestamp: "09:41",
+            tool: .init(
+                callID: "demo-shell-1",
+                kind: .shell,
+                name: "shell",
+                title: "Shell command",
+                status: .ok,
+                detail: nil,
+                screenshot: nil
+            )
+        ),
+        .init(
+            content: "",
+            kind: .assistant,
+            author: "Companion",
+            timestamp: "09:41",
+            tool: .init(
+                callID: "demo-file-1",
+                kind: .file,
+                name: "file",
+                title: "File operation",
+                status: .error,
+                detail: nil,
+                screenshot: nil
+            )
+        ),
+        .init(
+            content: "",
+            kind: .assistant,
+            author: "Companion",
+            timestamp: "09:41",
+            tool: .init(
+                callID: "demo-subagent-1",
+                kind: .subagent,
+                name: "subagent",
+                title: "reviewer: inspect the native transcript",
+                status: .running,
+                detail: """
+                Reviewing the transcript model and native rendering.
+                Confirmed the shared API remains unchanged.
+                Checked the shell, file, browse, computer, and generic families.
+                Checked running, done, failed, and timed-out status language.
+                Verified that status is visible without relying on color.
+                Verified that the disclosure starts collapsed.
+                Verified that long progress wraps within the reading column.
+                Verified that detail stays literal, selectable, and monospace.
+                Verified that large text moves status below the summary.
+                Verified that Reduce Motion replaces the spinner with a static symbol.
+                Verified that Reduce Transparency uses an opaque system surface.
+                Verified that system colors adapt to the active appearance.
+                Checked that the touch target remains at least 44 points.
+                Checked that unknown future tool kinds use the generic family.
+                Finishing the native tool-operation review.
+                """,
+                screenshot: nil
+            )
         ),
         .init(
             content: "Je veux quelque chose de très premium, lisible et vraiment natif Apple.",
