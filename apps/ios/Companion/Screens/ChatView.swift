@@ -71,7 +71,7 @@ struct ChatView: View {
         let visibleEntries = entries
         let renderedEntries = visibleEntries.filter { !$0.queued }
         let queuedEntries = thread?.entries.filter(\.queued) ?? []
-        CompanionBackdrop(style: .companion(visualTheme.base)) {
+        CompanionBackdrop {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 16) {

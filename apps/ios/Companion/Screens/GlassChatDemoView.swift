@@ -27,7 +27,7 @@ struct GlassChatDemoView: View {
 
     var body: some View {
         NavigationStack {
-            CompanionBackdrop(style: .companion(visualTheme.base)) {
+            CompanionBackdrop {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(spacing: 16) {
@@ -282,7 +282,7 @@ private struct GlassRosterDemoView: View {
 
     var body: some View {
         NavigationStack {
-            CompanionBackdrop(style: .neutral) {
+            CompanionBackdrop {
                 ScrollView {
                     LazyVStack(spacing: 12) {
                         ForEach(companions) { companion in

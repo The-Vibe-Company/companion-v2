@@ -35,7 +35,7 @@ struct CompanionListView: View {
 
     var body: some View {
         NavigationStack(path: $path) {
-            CompanionBackdrop(style: .neutral) {
+            CompanionBackdrop {
                 Group {
                     if loading && companions.isEmpty {
                         loadingState

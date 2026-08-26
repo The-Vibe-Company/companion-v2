@@ -16,7 +16,7 @@ struct CompanionQueuedMessagesDemoView: View {
 
     var body: some View {
         NavigationStack {
-            CompanionBackdrop(style: .companion(.blue)) {
+            CompanionBackdrop {
                 ScrollView {
                     LazyVStack(spacing: 16) {
                         ChatMessageBubble(
