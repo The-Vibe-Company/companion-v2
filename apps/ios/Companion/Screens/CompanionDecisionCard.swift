@@ -388,7 +388,7 @@ struct CompanionDecisionCard: View {
     }
 
     private var borderColor: Color {
-        pending ? accent.opacity(0.62) : Color.companionDivider
+        Color.companionDivider
     }
 
     private func perform(_ action: CompanionDecisionAction) {

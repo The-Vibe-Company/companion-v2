@@ -56,7 +56,6 @@ struct GlassChatDemoView: View {
                                             timestamp: message.timestamp,
                                             companionName: companionName,
                                             icon: icon,
-                                            accent: visualTheme.accent,
                                             markdown: markdownByEventID[message.eventID]?.document
                                         )
                                     }
@@ -91,12 +90,12 @@ struct GlassChatDemoView: View {
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
-            .tint(visualTheme.accent)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button { showRoster = true } label: {
                         Image(systemName: "line.3.horizontal")
                     }
+                    .tint(visualTheme.accent)
                     .accessibilityLabel("Ouvrir les conversations")
                 }
 
@@ -142,6 +141,7 @@ struct GlassChatDemoView: View {
                     } label: {
                         Image(systemName: "ellipsis")
                     }
+                    .tint(visualTheme.accent)
                     .accessibilityLabel("Options de la conversation")
                 }
             }

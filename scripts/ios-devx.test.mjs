@@ -119,6 +119,38 @@ test("full-screen native backdrops stay neutral in every state", () => {
   );
 });
 
+test("chat content stays neutral while Companion accents remain on actions and identity", () => {
+  const chat = read("apps/ios/Companion/Screens/ChatView.swift");
+  const bubble = chat.slice(
+    chat.indexOf("struct ChatMessageBubble"),
+    chat.indexOf("private struct MessageEntryView"),
+  );
+  const decisionCard = read("apps/ios/Companion/Screens/CompanionDecisionCard.swift");
+  const glassChatDemo = read("apps/ios/Companion/Screens/GlassChatDemoView.swift");
+  const glassDemoBubbles = glassChatDemo.slice(
+    glassChatDemo.indexOf("ChatMessageBubble("),
+    glassChatDemo.indexOf(".accessibilityIdentifier(message.accessibilityIdentifier)"),
+  );
+  const queuedDemo = read("apps/ios/Companion/Screens/CompanionQueuedMessagesDemoView.swift");
+  const queuedDemoBubbles = queuedDemo.slice(
+    queuedDemo.indexOf("ChatMessageBubble("),
+    queuedDemo.indexOf(".padding(16)"),
+  );
+
+  assert.match(bubble, /\.companionGlass\(radius: 18\)/);
+  assert.match(bubble, /MarkdownMessageView\(document: markdown, accent: \.companionInk\)/);
+  assert.doesNotMatch(bubble, /var accent\b|accent\.opacity|visualTheme\.accent|tint:/);
+  assert.doesNotMatch(chat, /\.toolbar \{ headerToolbar \}\s*\.tint\(visualTheme\.accent\)/);
+  assert.match(chat, /\.buttonStyle\(\.glassProminent\)\s*\.buttonBorderShape\(\.circle\)\s*\.tint\(visualTheme\.accent\)/);
+  assert.doesNotMatch(decisionCard, /pending \? accent\.opacity/);
+  assert.doesNotMatch(glassDemoBubbles, /accent:|tint:/);
+  assert.doesNotMatch(queuedDemoBubbles, /accent:|tint:/);
+  assert.doesNotMatch(
+    glassChatDemo,
+    /\.navigationBarTitleDisplayMode\(\.inline\)\s*\.tint\(visualTheme\.accent\)/,
+  );
+});
+
 test("the project is synchronized, shared, and backed by CompanionKit", () => {
   const project = read("apps/ios/Companion.xcodeproj/project.pbxproj");
   const scheme = read("apps/ios/Companion.xcodeproj/xcshareddata/xcschemes/Companion.xcscheme");
