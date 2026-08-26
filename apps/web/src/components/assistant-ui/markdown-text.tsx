@@ -15,10 +15,45 @@ import { CheckIcon, CopyIcon } from "lucide-react";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { cn } from "@/lib/utils";
 
+/** React Markdown's existing safe protocols, plus the one app handoff this product supports. */
+const ALLOWED_MARKDOWN_PROTOCOLS = new Set([
+  "http:",
+  "https:",
+  "irc:",
+  "ircs:",
+  "mailto:",
+  "xmpp:",
+  "conductor:",
+]);
+
+/**
+ * Preserve relative links and React Markdown's safe protocols while allowing explicit app links.
+ * Parsing against a fixed base makes the scheme decision exact instead of relying on a prefix that
+ * whitespace, casing, or an encoded character could fool.
+ */
+function allowlistedMarkdownUrl(value: string): string {
+  try {
+    const url = new URL(value, "https://companion.invalid");
+    return ALLOWED_MARKDOWN_PROTOCOLS.has(url.protocol) ? value : "";
+  } catch {
+    return "";
+  }
+}
+
+function isConductorDeepLink(href: string | undefined): boolean {
+  if (!href) return false;
+  try {
+    return new URL(href, "https://companion.invalid").protocol === "conductor:";
+  } catch {
+    return false;
+  }
+}
+
 const MarkdownTextImpl = () => {
   return (
     <MarkdownTextPrimitive
       remarkPlugins={[remarkGfm]}
+      urlTransform={allowlistedMarkdownUrl}
       className="aui-md"
       components={defaultComponents}
       // The registry turns both of these on for a token-by-token stream: `smooth` reveals text with
@@ -65,11 +100,12 @@ const useCopyToClipboard = ({
   const [isCopied, setIsCopied] = useState<boolean>(false);
 
   const copyToClipboard = (value: string) => {
-    if (!value || typeof navigator === "undefined" || !navigator.clipboard) {
+    const clipboard = globalThis.navigator?.clipboard;
+    if (!value || !clipboard) {
       return;
     }
 
-    navigator.clipboard.writeText(value).then(
+    clipboard.writeText(value).then(
       () => {
         setIsCopied(true);
         setTimeout(() => setIsCopied(false), copiedDuration);
@@ -152,17 +188,24 @@ const defaultComponents = memoizeMarkdownComponents({
    * marked as untrusted. Blocking links outright would break the ordinary case — Pi citing a runbook
    * — so this is the reader's decision, made with the link visibly external.
    */
-  a: ({ className, ...props }) => (
-    <a
-      className={cn(
-        "aui-md-a text-primary hover:text-primary/80 underline underline-offset-2",
-        className,
-      )}
-      target="_blank"
-      rel="noopener noreferrer nofollow ugc"
-      {...props}
-    />
-  ),
+  a: ({ className, href, ...props }) => {
+    const opensApp = isConductorDeepLink(href);
+    return (
+      <a
+        className={cn(
+          "aui-md-a text-foreground decoration-primary hover:text-muted-foreground underline underline-offset-2",
+          opensApp && "aui-md-deep-link",
+          className,
+        )}
+        href={href}
+        // A native same-page navigation keeps the tap's user activation intact so mobile browsers
+        // can hand the custom scheme to Conductor. Web links retain their isolated new tab.
+        target={opensApp ? undefined : "_blank"}
+        rel="noopener noreferrer nofollow ugc"
+        {...props}
+      />
+    );
+  },
   blockquote: ({ className, ...props }) => (
     <blockquote
       className={cn(
