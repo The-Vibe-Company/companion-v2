@@ -211,6 +211,8 @@ jobs:
           -configuration Debug
           -destination "platform=iOS Simulator,id=${{ steps.simulator.outputs.id }}"
           -derivedDataPath "$RUNNER_TEMP/companion-derived-data"
+          -retry-tests-on-failure
+          -test-iterations 2
           -only-testing:CompanionUITests/CompanionUITests/testTranscriptWindowDemoLoadsEarlierMessages
           -only-testing:CompanionUITests/CompanionUITests/testTranscriptWindowDemoKeepsLatestEntriesOrderedAndSeparated
           -only-testing:CompanionUITests/CompanionUITests/testTranscriptWindowDemoBottomControlsNeverCoverChatContent

@@ -168,6 +168,8 @@ struct ChatView: View {
                     }
                     .scrollDismissesKeyboard(.interactively)
                     .scrollIndicators(.hidden)
+                    .defaultScrollAnchor(.bottom)
+                    .accessibilityIdentifier("chat.transcript")
                     .onScrollGeometryChange(for: CGFloat.self) { geometry in
                         max(0, geometry.contentSize.height - geometry.visibleRect.maxY)
                     } action: { _, bottomDistance in

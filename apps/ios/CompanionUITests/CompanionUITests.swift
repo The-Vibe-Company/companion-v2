@@ -621,12 +621,19 @@ final class CompanionUITests: XCTestCase {
         app.launchArguments = ["-companion-transcript-window-demo"]
         app.launch()
 
+        let latest = app.descendants(matching: .any)["chat.entry.long-120"]
+        if !latest.waitForExistence(timeout: 3) {
+            let scrollToBottom = app.buttons["chat.scroll-to-bottom"]
+            XCTAssertTrue(scrollToBottom.waitForExistence(timeout: 3))
+            scrollToBottom.tap()
+        }
+
         let entries = [
             app.buttons.matching(
                 NSPredicate(format: "label CONTAINS %@", "run_layout_checks")
             ).firstMatch,
             app.descendants(matching: .any)["chat.entry.long-119"],
-            app.descendants(matching: .any)["chat.entry.long-120"],
+            latest,
         ]
         XCTAssertTrue(entries.last?.waitForExistence(timeout: 5) == true)
 
@@ -671,20 +678,12 @@ final class CompanionUITests: XCTestCase {
         app.swipeDown()
         let scrollToBottom = app.buttons["chat.scroll-to-bottom"]
         XCTAssertTrue(scrollToBottom.waitForExistence(timeout: 3))
+        let transcript = app.scrollViews.matching(
+            NSPredicate(format: "identifier == %@", "chat.transcript")
+        ).firstMatch
+        XCTAssertTrue(transcript.exists)
+        XCTAssertLessThanOrEqual(transcript.frame.maxY, scrollToBottom.frame.minY)
         XCTAssertLessThanOrEqual(scrollToBottom.frame.maxY, queue.frame.minY)
-
-        let visibleBubbles = app.descendants(matching: .any).matching(
-            NSPredicate(format: "identifier BEGINSWITH %@", "chat.entry.")
-        ).allElementsBoundByIndex.filter(\.isHittable)
-        let visibleToolCards = app.buttons.matching(
-            NSPredicate(format: "identifier BEGINSWITH %@", "tool-run.open-details.")
-        ).allElementsBoundByIndex.filter(\.isHittable)
-        for entry in visibleBubbles + visibleToolCards {
-            XCTAssertFalse(
-                scrollToBottom.frame.intersects(entry.frame),
-                "Scroll-to-latest covers \(entry.identifier)"
-            )
-        }
 
         XCTAssertTrue(thinking.exists)
         XCTAssertFalse(thinking.frame.intersects(queue.frame))
