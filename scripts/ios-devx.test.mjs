@@ -147,22 +147,51 @@ test("the iOS launcher derives the API port from Conductor and uses XcodeBuildMC
   assert.doesNotMatch(launcher, /iPhone 17|\bxcodebuild\b|\bxcrun\b|\bsimctl\b/);
 });
 
-test("CI builds iOS without secrets and isolates the live provider workflow", () => {
+test("CI builds iOS without secrets and keeps the live provider diagnostic manual", () => {
   const ci = read(".github/workflows/ci.yml");
   const e2e = read(".github/workflows/ios-e2e.yml");
 
-  assert.match(ci, /^  ios-quality:$/m);
+  assert.match(ci, /^  apple-quality:$/m);
   assert.match(ci, /^    runs-on: macos-26$/m);
+  assert.match(ci, /if: needs\.scope\.outputs\.skill == 'true' \|\| needs\.scope\.outputs\.ios == 'true'/);
   assert.match(ci, /xcodebuildmcp swift-package test --package-path apps\/ios\/CompanionKit/);
   assert.match(ci, /xcodebuildmcp simulator build/);
   assert.match(ci, /node scripts\/select-ios-simulator\.mjs/);
+  assert.doesNotMatch(ci, /^  skill-guards-macos:$/m);
+  assert.doesNotMatch(ci, /^  ios-quality:$/m);
+  assert.doesNotMatch(ci, /^  schedule:$/m);
+  assert.doesNotMatch(ci, /^  workflow_dispatch:$/m);
+  assert.match(e2e, /^name: "Diagnostic: iOS Live E2E"$/m);
   assert.match(e2e, /^  workflow_dispatch:$/m);
-  assert.match(e2e, /^  schedule:$/m);
+  assert.doesNotMatch(e2e, /^  schedule:$/m);
   assert.doesNotMatch(e2e, /^  pull_request:/m);
+  assert.doesNotMatch(e2e, /^  push:/m);
   assert.match(e2e, /^    environment: ios-e2e$/m);
   assert.match(e2e, /COMPANION_BOX_API_KEY: \$\{\{ secrets\.COMPANION_BOX_E2E_API_KEY \}\}/);
   assert.match(e2e, /node scripts\/ios-e2e-fixture\.mjs prepare/);
   assert.match(e2e, /node scripts\/ios-e2e-fixture\.mjs cleanup/);
+});
+
+test("dependency auditing stays inside Quality and Pi publishing remains narrowly scoped", () => {
+  const ci = read(".github/workflows/ci.yml");
+  const quality = ci.slice(ci.indexOf("  quality:"), ci.indexOf("  application-build:"));
+  const pi = read(".github/workflows/pi-bundle.yml");
+
+  assert.match(quality, /if: needs\.scope\.outputs\.dependencies == 'true'/);
+  assert.match(quality, /audit --prod --audit-level=high/);
+  assert.doesNotMatch(ci, /^  dependency-audit:$/m);
+  assert.doesNotMatch(ci, /^  coverage:$/m);
+  assert.match(pi, /^name: "Publish: Pi Bundle"$/m);
+  assert.match(pi, /^  workflow_dispatch:$/m);
+  assert.match(pi, /^  push:$/m);
+  for (const path of [
+    "packages/box-runtime/src/piBundle.ts",
+    "scripts/build-pi-bundle.sh",
+    "scripts/upload-pi-bundle.mjs",
+    ".github/workflows/pi-bundle.yml",
+  ]) {
+    assert.match(pi, new RegExp(`      - "${path.replaceAll(".", "\\.")}"`));
+  }
 });
 
 test("the CI simulator selector ignores other Apple platforms and chooses the latest iOS", () => {

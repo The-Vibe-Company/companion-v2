@@ -1,9 +1,7 @@
-name: iOS E2E
+name: "Diagnostic: iOS Live E2E"
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "37 4 * * 1"
 
 permissions:
   contents: read

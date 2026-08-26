@@ -165,7 +165,7 @@ test("the TestFlight workflow releases only a CI-approved main commit", () => {
   const ciWorkflow = read(".github/workflows/ci.yml");
   const releaseScope = workflow.slice(workflow.indexOf("  release-scope:"), workflow.indexOf("  upload:"));
 
-  assert.match(workflow, /^name: iOS TestFlight$/m);
+  assert.match(workflow, /^name: "Release: iOS TestFlight"$/m);
   assert.match(workflow, /^  workflow_run:$/m);
   assert.match(workflow, /^    workflows:\n      - CI$/m);
   assert.match(workflow, /^    types:\n      - completed$/m);
