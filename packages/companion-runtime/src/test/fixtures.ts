@@ -259,6 +259,8 @@ export function attemptMaterial(overrides: Partial<RuntimeWorkMaterial> = {}): R
     attemptId: ATTEMPT_ID,
     messageEventId: MESSAGE_EVENT_ID,
     promptText: "Hello from a durable turn",
+    turnStartedAt: new Date("2026-08-26T13:00:00.000Z"),
+    memberTimezone: "UTC",
     decisionRequestKind: null,
     decisionResponsePayload: null,
     providerMaterial: [],

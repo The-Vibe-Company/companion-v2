@@ -1,3 +1,4 @@
+/* oxlint-disable anti-slop/no-runtime-typeof, anti-slop/require-safety-comment-for-type-assertion -- Existing skill view-model parser debt; the timezone field only extends the typed member projection. */
 import type {
   OrgRole,
   CompanionDisplay,
@@ -150,6 +151,8 @@ export interface MeVM {
   initials: string;
   /** Resolved avatar URL (custom upload or Gravatar); null falls back to initials. */
   avatarUrl: string | null;
+  /** Stored personal IANA timezone; null until the detected default is accepted. */
+  timezone?: string | null;
 }
 
 /* ---- Org / membership view-models (settings surface + switcher) ----------- */

@@ -1,5 +1,6 @@
 import SwiftUI
 import CompanionKit
+import UIKit
 
 @MainActor
 struct CompanionConnectedResourcesServices {
@@ -8,6 +9,44 @@ struct CompanionConnectedResourcesServices {
     let updatePluginSelection: ([String]) async throws -> CompanionSummary
     let loadCompanion: () async throws -> CompanionSummary
     let restart: (CompanionRuntimeRestartTarget, UUID) async throws -> CompanionOperationSummary
+    let createRoutine: ((CreateCompanionRoutineInput) async throws -> CompanionRoutine)?
+    let updateRoutine: ((String, UpdateCompanionRoutineInput) async throws -> CompanionRoutine)?
+    let deleteRoutine: ((String) async throws -> Void)?
+    let createTrigger: ((CreateCompanionTriggerInput) async throws -> CompanionTrigger)?
+    let updateTrigger: ((String, UpdateCompanionTriggerInput) async throws -> CompanionTrigger)?
+    let deleteTrigger: ((String) async throws -> Void)?
+    let rotateTriggerSecret: ((String) async throws -> CompanionTrigger)?
+    let saveMemberTimezone: ((String) async throws -> String)?
+
+    init(
+        load: @escaping () async throws -> CompanionConnectedResources,
+        listPlugins: @escaping () async throws -> [CompanionPluginAccount],
+        updatePluginSelection: @escaping ([String]) async throws -> CompanionSummary,
+        loadCompanion: @escaping () async throws -> CompanionSummary,
+        restart: @escaping (CompanionRuntimeRestartTarget, UUID) async throws -> CompanionOperationSummary,
+        createRoutine: ((CreateCompanionRoutineInput) async throws -> CompanionRoutine)? = nil,
+        updateRoutine: ((String, UpdateCompanionRoutineInput) async throws -> CompanionRoutine)? = nil,
+        deleteRoutine: ((String) async throws -> Void)? = nil,
+        createTrigger: ((CreateCompanionTriggerInput) async throws -> CompanionTrigger)? = nil,
+        updateTrigger: ((String, UpdateCompanionTriggerInput) async throws -> CompanionTrigger)? = nil,
+        deleteTrigger: ((String) async throws -> Void)? = nil,
+        rotateTriggerSecret: ((String) async throws -> CompanionTrigger)? = nil,
+        saveMemberTimezone: ((String) async throws -> String)? = nil
+    ) {
+        self.load = load
+        self.listPlugins = listPlugins
+        self.updatePluginSelection = updatePluginSelection
+        self.loadCompanion = loadCompanion
+        self.restart = restart
+        self.createRoutine = createRoutine
+        self.updateRoutine = updateRoutine
+        self.deleteRoutine = deleteRoutine
+        self.createTrigger = createTrigger
+        self.updateTrigger = updateTrigger
+        self.deleteTrigger = deleteTrigger
+        self.rotateTriggerSecret = rotateTriggerSecret
+        self.saveMemberTimezone = saveMemberTimezone
+    }
 }
 
 struct CompanionConnectedResourcesView: View {
@@ -30,6 +69,15 @@ struct CompanionConnectedResourcesView: View {
     @State private var restartingTarget: CompanionRuntimeRestartTarget?
     @State private var restartRequestIDs: [CompanionRuntimeRestartTarget: UUID] = [:]
     @State private var acceptedOperation: CompanionOperationSummary?
+    @State private var resourceActionError: String?
+    @State private var busyResourceID: String?
+    @State private var routineToDelete: CompanionRoutine?
+    @State private var triggerToDelete: CompanionTrigger?
+    @State private var editingRoutine: CompanionRoutine?
+    @State private var editingTrigger: CompanionTrigger?
+    @State private var showingNewRoutine = false
+    @State private var showingNewTrigger = false
+    @State private var confirmingRotateTriggerID: String?
 
     init(
         companion: CompanionSummary,
@@ -108,6 +156,86 @@ struct CompanionConnectedResourcesView: View {
             PluginManagementView()
                 .tint(visualTheme.accent)
         }
+        .confirmationDialog(
+            "Delete this routine?",
+            isPresented: Binding(
+                get: { routineToDelete != nil },
+                set: { if !$0 { routineToDelete = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: routineToDelete
+        ) { routine in
+            Button("Delete \(routine.name)", role: .destructive) {
+                Task { await deleteRoutine(routine) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("This removes the scheduled prompt from the Companion.")
+        }
+        .confirmationDialog(
+            "Delete this trigger?",
+            isPresented: Binding(
+                get: { triggerToDelete != nil },
+                set: { if !$0 { triggerToDelete = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: triggerToDelete
+        ) { trigger in
+            Button("Delete \(trigger.name)", role: .destructive) {
+                Task { await deleteTrigger(trigger) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("Existing webhook requests will stop being accepted.")
+        }
+        .sheet(isPresented: $showingNewRoutine) {
+            CompanionRoutineEditorView(
+                memberTimezone: effectiveMemberTimezone,
+                memberTimezoneWasUnset: sessionStore.memberTimezone == nil,
+                saveMemberTimezone: { try await saveMemberTimezone($0) },
+                create: { try await createRoutine($0) },
+                update: { id, input in try await updateRoutine(id: id, input: input) }
+            ) {
+                showingNewRoutine = false
+                Task { await load() }
+            }
+            .tint(visualTheme.accent)
+        }
+        .sheet(item: $editingRoutine) { routine in
+            CompanionRoutineEditorView(
+                initial: routine,
+                memberTimezone: effectiveMemberTimezone,
+                memberTimezoneWasUnset: false,
+                saveMemberTimezone: { try await saveMemberTimezone($0) },
+                create: { try await createRoutine($0) },
+                update: { id, input in try await updateRoutine(id: id, input: input) }
+            ) {
+                editingRoutine = nil
+                Task { await load() }
+            }
+            .tint(visualTheme.accent)
+        }
+        .sheet(isPresented: $showingNewTrigger) {
+            CompanionTriggerEditorView(
+                create: { try await createTrigger($0) },
+                update: { id, input in try await updateTrigger(id: id, input: input) }
+            ) {
+                showingNewTrigger = false
+                Task { await load() }
+            }
+            .tint(visualTheme.accent)
+        }
+        .sheet(item: $editingTrigger) { trigger in
+            CompanionTriggerEditorView(
+                initial: trigger,
+                create: { try await createTrigger($0) },
+                update: { id, input in try await updateTrigger(id: id, input: input) }
+            ) {
+                editingTrigger = nil
+                Task { await load() }
+            }
+            .tint(visualTheme.accent)
+        }
         .accessibilityIdentifier("companion.resources")
     }
 
@@ -120,6 +248,9 @@ struct CompanionConnectedResourcesView: View {
                 }
                 if let success {
                     CompanionSuccessNotice(message: success)
+                }
+                if let resourceActionError {
+                    CompanionErrorNotice(message: resourceActionError)
                 }
                 resourceSection(
                     title: "Skills",
@@ -247,6 +378,10 @@ struct CompanionConnectedResourcesView: View {
                     .font(.subheadline)
                     .foregroundStyle(Color.companionMuted)
                     .fixedSize(horizontal: false, vertical: true)
+                Text("Times shown in \(effectiveMemberTimezone).")
+                    .font(.caption)
+                    .foregroundStyle(Color.companionMuted)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .accessibilityElement(children: .combine)
@@ -264,6 +399,29 @@ struct CompanionConnectedResourcesView: View {
                     .font(.headline)
                     .foregroundStyle(Color.companionInk)
                 Spacer()
+                if canEditResources, title == "Routines" {
+                    Button {
+                        showingNewRoutine = true
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.body.weight(.semibold))
+                            .frame(width: 32, height: 32)
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Add a routine")
+                    .accessibilityIdentifier("companion.resources.routines.add")
+                } else if canEditResources, title == "Triggers" {
+                    Button {
+                        showingNewTrigger = true
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.body.weight(.semibold))
+                            .frame(width: 32, height: 32)
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Add a trigger")
+                    .accessibilityIdentifier("companion.resources.triggers.add")
+                }
                 Text("\(count)")
                     .font(.caption.monospacedDigit().weight(.semibold))
                     .foregroundStyle(Color.companionMuted)
@@ -378,6 +536,22 @@ struct CompanionConnectedResourcesView: View {
                 }
                 .foregroundStyle(Color.companionMuted)
                 .fixedSize(horizontal: false, vertical: true)
+                if let nextFire = MemberTimezone.formatInstant(
+                    routine.nextFireAt,
+                    in: effectiveMemberTimezone
+                ) {
+                    Text("Next \(nextFire) · \(effectiveMemberTimezone)")
+                        .font(.caption)
+                        .foregroundStyle(Color.companionMuted)
+                }
+                if let lastFire = MemberTimezone.formatInstant(
+                    routine.lastFiredAt,
+                    in: effectiveMemberTimezone
+                ) {
+                    Text("Last fired \(lastFire) · \(effectiveMemberTimezone)")
+                        .font(.caption)
+                        .foregroundStyle(Color.companionMuted)
+                }
                 if let message = routine.lastErrorMessage {
                     Text(message)
                         .font(.caption)
@@ -387,11 +561,37 @@ struct CompanionConnectedResourcesView: View {
             }
             Spacer(minLength: 8)
             statusBadge(routine.status)
+            if canEditResources {
+                if busyResourceID == routine.id {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityLabel("Updating routine \(routine.name)")
+                } else {
+                    Menu {
+                        Button(routine.enabled ? "Turn off" : "Turn on") {
+                            Task { await toggleRoutine(routine) }
+                        }
+                        Button("Edit", systemImage: "pencil") {
+                            editingRoutine = routine
+                        }
+                        Button("Delete", systemImage: "trash", role: .destructive) {
+                            routineToDelete = routine
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                            .font(.body.weight(.semibold))
+                            .frame(width: 32, height: 32)
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Actions for routine \(routine.name)")
+                    .accessibilityIdentifier("companion.resources.routine-actions.\(routine.id)")
+                }
+            }
         }
         .padding(16)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: canEditResources ? .contain : .combine)
         .accessibilityLabel(
-            "\(routine.name). \(routine.scheduleDescription). \(routine.timezone). \(routine.status.label)"
+            routineAccessibilityLabel(routine)
         )
         .accessibilityIdentifier("companion.resources.routine.\(routine.id)")
     }
@@ -412,6 +612,14 @@ struct CompanionConnectedResourcesView: View {
                             ? Color.companionDanger
                             : Color.companionMuted
                     )
+                if let lastFire = MemberTimezone.formatInstant(
+                    trigger.lastFiredAt,
+                    in: effectiveMemberTimezone
+                ) {
+                    Text("Last fired \(lastFire) · \(effectiveMemberTimezone)")
+                        .font(.caption)
+                        .foregroundStyle(Color.companionMuted)
+                }
                 if let message = trigger.lastErrorMessage {
                     Text(message)
                         .font(.caption)
@@ -421,11 +629,64 @@ struct CompanionConnectedResourcesView: View {
             }
             Spacer(minLength: 8)
             statusBadge(trigger.status)
+            if canEditResources, trigger.webhookURL != nil {
+                Button {
+                    copyWebhookURL(trigger)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                        .font(.body.weight(.semibold))
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Copy webhook URL for \(trigger.name)")
+                .accessibilityIdentifier("companion.resources.trigger-copy.\(trigger.id)")
+            }
+            if canEditResources {
+                if busyResourceID == trigger.id {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityLabel("Updating trigger \(trigger.name)")
+                } else {
+                    Menu {
+                        Button(trigger.enabled ? "Turn off" : "Turn on") {
+                            Task { await toggleTrigger(trigger) }
+                        }
+                        Button("Edit", systemImage: "pencil") {
+                            editingTrigger = trigger
+                        }
+                        if trigger.webhookURL != nil {
+                            Button("Copy webhook URL", systemImage: "doc.on.doc") {
+                                copyWebhookURL(trigger)
+                            }
+                            Button(
+                                confirmingRotateTriggerID == trigger.id ? "Confirm rotate secret" : "Rotate secret",
+                                systemImage: "arrow.triangle.2.circlepath"
+                            ) {
+                                if confirmingRotateTriggerID == trigger.id {
+                                    Task { await rotateTriggerSecret(trigger) }
+                                } else {
+                                    confirmingRotateTriggerID = trigger.id
+                                }
+                            }
+                        }
+                        Button("Delete", systemImage: "trash", role: .destructive) {
+                            triggerToDelete = trigger
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                            .font(.body.weight(.semibold))
+                            .frame(width: 32, height: 32)
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Actions for trigger \(trigger.name)")
+                    .accessibilityIdentifier("companion.resources.trigger-actions.\(trigger.id)")
+                }
+            }
         }
         .padding(16)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: canEditResources ? .contain : .combine)
         .accessibilityLabel(
-            "\(trigger.name). \(trigger.providerName). \(trigger.registrationDescription). \(trigger.status.label)"
+            triggerAccessibilityLabel(trigger)
         )
         .accessibilityIdentifier("companion.resources.trigger.\(trigger.id)")
     }
@@ -507,6 +768,27 @@ struct CompanionConnectedResourcesView: View {
         case .disabled: .companionMuted
         case .error: .companionDanger
         }
+    }
+
+    private func routineAccessibilityLabel(_ routine: CompanionRoutine) -> String {
+        var parts = [routine.name, routine.scheduleDescription, routine.timezone]
+        if let next = MemberTimezone.formatInstant(routine.nextFireAt, in: effectiveMemberTimezone) {
+            parts.append("Next \(next) in \(effectiveMemberTimezone)")
+        }
+        if let last = MemberTimezone.formatInstant(routine.lastFiredAt, in: effectiveMemberTimezone) {
+            parts.append("Last fired \(last) in \(effectiveMemberTimezone)")
+        }
+        parts.append(routine.status.label)
+        return parts.joined(separator: ". ")
+    }
+
+    private func triggerAccessibilityLabel(_ trigger: CompanionTrigger) -> String {
+        var parts = [trigger.name, trigger.providerName, trigger.registrationDescription]
+        if let last = MemberTimezone.formatInstant(trigger.lastFiredAt, in: effectiveMemberTimezone) {
+            parts.append("Last fired \(last) in \(effectiveMemberTimezone)")
+        }
+        parts.append(trigger.status.label)
+        return parts.joined(separator: ". ")
     }
 
     private func emptyRow(title: String, detail: String, identifier: String) -> some View {
@@ -705,6 +987,155 @@ struct CompanionConnectedResourcesView: View {
         case "conductor": "Conductor"
         default: provider.split(separator: "-").map { $0.capitalized }.joined(separator: " ")
         }
+    }
+
+    private var canEditResources: Bool {
+        currentCompanion.access.canEditCompanionSettings
+    }
+
+    private var effectiveMemberTimezone: String {
+        sessionStore.memberTimezone ?? MemberTimezone.deviceIdentifier
+    }
+
+    private func saveMemberTimezone(_ identifier: String) async throws -> String {
+        if let save = services?.saveMemberTimezone {
+            return try await save(identifier)
+        }
+        let profile = try await sessionStore.updateUserProfile(timezone: identifier)
+        return profile.timezone ?? identifier
+    }
+
+    private func createRoutine(_ input: CreateCompanionRoutineInput) async throws -> CompanionRoutine {
+        guard canEditResources else { throw APIError(status: 403, code: "forbidden", message: "You cannot edit this Companion.") }
+        if let create = services?.createRoutine { return try await create(input) }
+        return try await sessionStore.createCompanionRoutine(companionID: companion.id, input: input)
+    }
+
+    private func updateRoutine(
+        id: String,
+        input: UpdateCompanionRoutineInput
+    ) async throws -> CompanionRoutine {
+        guard canEditResources else { throw APIError(status: 403, code: "forbidden", message: "You cannot edit this Companion.") }
+        if let update = services?.updateRoutine { return try await update(id, input) }
+        return try await sessionStore.updateCompanionRoutine(
+            companionID: companion.id,
+            routineID: id,
+            input: input
+        )
+    }
+
+    private func deleteRoutine(_ routine: CompanionRoutine) async {
+        guard canEditResources, busyResourceID == nil else { return }
+        busyResourceID = routine.id
+        resourceActionError = nil
+        routineToDelete = nil
+        do {
+            if let delete = services?.deleteRoutine {
+                try await delete(routine.id)
+            } else {
+                try await sessionStore.deleteCompanionRoutine(companionID: companion.id, routineID: routine.id)
+            }
+            await load()
+        } catch {
+            resourceActionError = companionDisplayMessage(error, fallback: "The routine could not be deleted.")
+        }
+        busyResourceID = nil
+    }
+
+    private func toggleRoutine(_ routine: CompanionRoutine) async {
+        guard canEditResources, busyResourceID == nil else { return }
+        busyResourceID = routine.id
+        resourceActionError = nil
+        do {
+            _ = try await updateRoutine(
+                id: routine.id,
+                input: UpdateCompanionRoutineInput(enabled: !routine.enabled)
+            )
+            await load()
+        } catch {
+            resourceActionError = companionDisplayMessage(error, fallback: "The routine could not be updated.")
+        }
+        busyResourceID = nil
+    }
+
+    private func createTrigger(_ input: CreateCompanionTriggerInput) async throws -> CompanionTrigger {
+        guard canEditResources else { throw APIError(status: 403, code: "forbidden", message: "You cannot edit this Companion.") }
+        if let create = services?.createTrigger { return try await create(input) }
+        return try await sessionStore.createCompanionTrigger(companionID: companion.id, input: input)
+    }
+
+    private func updateTrigger(
+        id: String,
+        input: UpdateCompanionTriggerInput
+    ) async throws -> CompanionTrigger {
+        guard canEditResources else { throw APIError(status: 403, code: "forbidden", message: "You cannot edit this Companion.") }
+        if let update = services?.updateTrigger { return try await update(id, input) }
+        return try await sessionStore.updateCompanionTrigger(
+            companionID: companion.id,
+            triggerID: id,
+            input: input
+        )
+    }
+
+    private func deleteTrigger(_ trigger: CompanionTrigger) async {
+        guard canEditResources, busyResourceID == nil else { return }
+        busyResourceID = trigger.id
+        resourceActionError = nil
+        triggerToDelete = nil
+        do {
+            if let delete = services?.deleteTrigger {
+                try await delete(trigger.id)
+            } else {
+                try await sessionStore.deleteCompanionTrigger(companionID: companion.id, triggerID: trigger.id)
+            }
+            await load()
+        } catch {
+            resourceActionError = companionDisplayMessage(error, fallback: "The trigger could not be deleted.")
+        }
+        busyResourceID = nil
+    }
+
+    private func toggleTrigger(_ trigger: CompanionTrigger) async {
+        guard canEditResources, busyResourceID == nil else { return }
+        busyResourceID = trigger.id
+        resourceActionError = nil
+        do {
+            _ = try await updateTrigger(
+                id: trigger.id,
+                input: UpdateCompanionTriggerInput(enabled: !trigger.enabled)
+            )
+            await load()
+        } catch {
+            resourceActionError = companionDisplayMessage(error, fallback: "The trigger could not be updated.")
+        }
+        busyResourceID = nil
+    }
+
+    private func copyWebhookURL(_ trigger: CompanionTrigger) {
+        guard canEditResources, let webhookURL = trigger.webhookURL else { return }
+        UIPasteboard.general.string = webhookURL
+        resourceActionError = nil
+    }
+
+    private func rotateTriggerSecret(_ trigger: CompanionTrigger) async {
+        guard canEditResources, busyResourceID == nil else { return }
+        busyResourceID = trigger.id
+        resourceActionError = nil
+        confirmingRotateTriggerID = nil
+        do {
+            if let rotate = services?.rotateTriggerSecret {
+                _ = try await rotate(trigger.id)
+            } else {
+                _ = try await sessionStore.rotateCompanionTriggerSecret(
+                    companionID: companion.id,
+                    triggerID: trigger.id
+                )
+            }
+            await load()
+        } catch {
+            resourceActionError = companionDisplayMessage(error, fallback: "The webhook secret could not be rotated.")
+        }
+        busyResourceID = nil
     }
 
     private func load() async {

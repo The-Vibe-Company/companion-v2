@@ -36,6 +36,7 @@ export default async function SkillsPage({
     email: string;
     name: string;
     avatarUrl?: string | null;
+    timezone?: string | null;
     needsOnboarding?: boolean;
   }>();
   if (authState.status === "unauthenticated") redirect("/login");
@@ -80,6 +81,7 @@ export default async function SkillsPage({
     email: whoami.email,
     initials: (whoami.name?.[0] ?? whoami.email?.[0] ?? "?").toUpperCase(),
     avatarUrl: whoami.avatarUrl ?? null,
+    timezone: whoami.timezone ?? null,
   };
 
   return (

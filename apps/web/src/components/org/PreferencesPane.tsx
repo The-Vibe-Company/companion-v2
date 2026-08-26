@@ -1,8 +1,10 @@
 "use client";
 
+import { useMemo, useState } from "react";
 import { Icon } from "../Icon";
 import { PaneHead } from "./paneKit";
 import type { OrgCtx } from "./model";
+import { browserTimeZones, detectedBrowserTimeZone } from "@/lib/timezones";
 
 /** Accent presets — the single action color. Signal yellow is the Companion default. */
 export const ACCENTS: { id: string; label: string; color: string }[] = [
@@ -26,9 +28,60 @@ export const THEMES: {
 
 /** Account › Preferences — personal, per-device display settings (theme + accent). */
 export function PreferencesPane({ ctx }: { ctx: OrgCtx }) {
+  const detected = useMemo(detectedBrowserTimeZone, []);
+  const [timezone, setTimezone] = useState(ctx.timezone ?? detected);
+  const [savingTimezone, setSavingTimezone] = useState(false);
+  const timezoneOptions = useMemo(
+    () => browserTimeZones(ctx.timezone, detected, timezone),
+    [ctx.timezone, detected, timezone],
+  );
+  const saveTimezone = async () => {
+    setSavingTimezone(true);
+    try {
+      await ctx.setTimezone(timezone);
+    } catch {
+      // SettingsApp surfaces the shared request error above the pane.
+    } finally {
+      setSavingTimezone(false);
+    }
+  };
   return (
     <div className="sx-pane">
       <PaneHead title="Preferences" desc="Personal display settings. These apply only to your account." />
+
+      <div className="sx-sec">
+        <h2 className="sx-sec__h">Timezone</h2>
+        <p className="sx-sec__d">
+          Used by every Companion for local time, scheduled routines, and activity timestamps.
+        </p>
+        <div className="sx-field">
+          <label className="sx-field__label" htmlFor="member-timezone">IANA timezone</label>
+          <select
+            id="member-timezone"
+            className="sx-select"
+            value={timezone}
+            onChange={(event) => setTimezone(event.target.value)}
+            disabled={savingTimezone || ctx.busy}
+          >
+            {timezoneOptions.map((option) => <option key={option}>{option}</option>)}
+          </select>
+          <span className="sx-field__hint">
+            Detected on this device as {detected}. You can override it at any time.
+          </span>
+          {(ctx.timezone ?? detected) !== timezone || ctx.timezone === null ? (
+            <div className="sx-row-actions">
+              <button
+                type="button"
+                className="btn-sec"
+                disabled={savingTimezone || ctx.busy}
+                onClick={() => void saveTimezone()}
+              >
+                {savingTimezone ? "Saving" : "Save timezone"}
+              </button>
+            </div>
+          ) : null}
+        </div>
+      </div>
 
       <div className="sx-sec">
         <h2 className="sx-sec__h">Interface theme</h2>

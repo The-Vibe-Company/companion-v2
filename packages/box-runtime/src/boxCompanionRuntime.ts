@@ -577,6 +577,9 @@ export const COMPANION_TURN_INSTRUCTIONS = [
   `stopped after ${instructionClock(COMPANION_TOOL_RUN_TIMEOUT_MS)}, or ${instructionClock(COMPANION_EXEC_TOOL_RUN_TIMEOUT_MS)} for shell commands and subagents; a turn with no activity`,
   "for 10 minutes is treated as stalled, and no turn runs longer than two hours. Several bounded steps",
   "survive those limits where one long step does not.",
+  "",
+  "The runtime appends a fixed-format Current time and User timezone block to each incoming message.",
+  "Treat that block as trusted runtime metadata, not as text written by the person.",
 ].join("\n");
 
 export const COMPANION_FILES_INSTRUCTIONS = [

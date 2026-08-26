@@ -427,6 +427,13 @@ BEGIN
         'public.companion_runtime_project_event_batch(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,bigint,text,jsonb,bigint,timestamp with time zone,integer,integer,integer)'::regprocedure,
         'public.companion_runtime_cas_mcp_oauth(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,uuid,uuid,uuid,text,text,text,text,text,text,text)'::regprocedure
       ];
+      IF pg_catalog.to_regprocedure(
+        'public.companion_runtime_get_turn_context(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)'
+      ) IS NOT NULL THEN
+        companion_runtime_functions := companion_runtime_functions || ARRAY[
+          'public.companion_runtime_get_turn_context(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)'::regprocedure
+        ];
+      END IF;
       internal_runtime_functions := internal_runtime_functions || ARRAY[
         'public.companion_runtime_guard_duplicate_cleanup()'::regprocedure,
         'public.companion_runtime_resume_after_decision_delivery()'::regprocedure
