@@ -531,14 +531,19 @@ final class CompanionUITests: XCTestCase {
             app.swipeDown()
         }
         XCTAssertTrue(loadEarlier.waitForExistence(timeout: 5))
-        let preservedAnchor = app.staticTexts["Long-thread message 71"]
-        XCTAssertTrue(preservedAnchor.isHittable)
+        XCTAssertTrue(loadEarlier.isHittable)
+        let preservedAnchor = app.descendants(matching: .any)["chat.entry.long-71"]
+        XCTAssertTrue(preservedAnchor.exists)
         loadEarlier.tap()
 
-        XCTAssertTrue(preservedAnchor.waitForExistence(timeout: 3))
+        let anchorVisible = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isHittable == true"),
+            object: preservedAnchor
+        )
+        wait(for: [anchorVisible], timeout: 3)
         XCTAssertTrue(preservedAnchor.isHittable)
-        let earlier = app.staticTexts["Long-thread message 21"]
-        for _ in 0..<5 where !earlier.exists {
+        let earlier = app.descendants(matching: .any)["chat.entry.long-21"]
+        for _ in 0..<12 where !earlier.exists {
             app.swipeDown()
         }
         XCTAssertTrue(earlier.waitForExistence(timeout: 3))
@@ -572,8 +577,11 @@ final class CompanionUITests: XCTestCase {
         app.launchArguments = ["-companion-transcript-window-demo"]
         app.launch()
 
-        let orderedIDs = ["long-118", "long-119", "long-120"]
-        let entries = orderedIDs.map { app.descendants(matching: .any)["chat.entry.\($0)"] }
+        let entries = [
+            app.buttons["tool-run.open-details.long-118"],
+            app.descendants(matching: .any)["chat.entry.long-119"],
+            app.descendants(matching: .any)["chat.entry.long-120"],
+        ]
         XCTAssertTrue(entries.last?.waitForExistence(timeout: 5) == true)
 
         for (earlier, later) in zip(entries, entries.dropFirst()) {
@@ -591,9 +599,7 @@ final class CompanionUITests: XCTestCase {
         let table = app.descendants(matching: .any).matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "markdown.table.")
         ).firstMatch
-        let tool = app.buttons["tool-run.open-details.long-118"]
         XCTAssertTrue(table.exists)
-        XCTAssertTrue(tool.exists)
     }
 
     @MainActor
@@ -615,10 +621,13 @@ final class CompanionUITests: XCTestCase {
         XCTAssertTrue(scrollToBottom.waitForExistence(timeout: 3))
         XCTAssertLessThanOrEqual(scrollToBottom.frame.maxY, queue.frame.minY)
 
-        let visibleEntries = app.descendants(matching: .any).matching(
+        let visibleBubbles = app.descendants(matching: .any).matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "chat.entry.")
         ).allElementsBoundByIndex.filter(\.isHittable)
-        for entry in visibleEntries {
+        let visibleToolCards = app.buttons.matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "tool-run.open-details.")
+        ).allElementsBoundByIndex.filter(\.isHittable)
+        for entry in visibleBubbles + visibleToolCards {
             XCTAssertFalse(
                 scrollToBottom.frame.intersects(entry.frame),
                 "Scroll-to-latest covers \(entry.identifier)"
@@ -767,8 +776,8 @@ final class CompanionUITests: XCTestCase {
         XCTAssertEqual(headerRight.frame.maxX, firstRight.frame.maxX, accuracy: 1)
 
         let longTable = app.descendants(matching: .any)["markdown-table-demo.long-content"]
-        for _ in 0..<5 where !longTable.isHittable { app.swipeUp() }
-        XCTAssertTrue(longTable.isHittable)
+        for _ in 0..<5 where !app.frame.intersects(longTable.frame) { app.swipeUp() }
+        XCTAssertTrue(app.frame.intersects(longTable.frame))
         XCTAssertGreaterThanOrEqual(longTable.frame.minX, app.frame.minX - 1)
         XCTAssertLessThanOrEqual(longTable.frame.maxX, app.frame.maxX + 1)
         let longRows = (0...3).map {

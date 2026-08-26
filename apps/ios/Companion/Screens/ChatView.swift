@@ -127,7 +127,6 @@ struct ChatView: View {
                                         )
                                     }
                                 }
-                                .accessibilityIdentifier("chat.entry.\(entry.eventID)")
                                 .id(entry.id)
                             }
 
@@ -188,7 +187,6 @@ struct ChatView: View {
                         reduceMotion ? nil : .easeOut(duration: 0.18),
                         value: isNearBottom
                     )
-                    .accessibilityIdentifier("chat.bottom-controls")
                 }
                 .onScrollGeometryChange(for: CGFloat.self) { geometry in
                     max(0, geometry.contentSize.height - geometry.visibleRect.maxY)
@@ -1261,6 +1259,7 @@ private struct MessageEntryView: View {
                 markdown: entry.role == "assistant" ? markdown : nil,
                 attachments: entry.attachments
             )
+            .accessibilityIdentifier("chat.entry.\(entry.eventID)")
         }
     }
 
