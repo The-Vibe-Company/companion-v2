@@ -835,6 +835,31 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    func testOwnerCanDiscardAnIdentityDraft() throws {
+        let app = launchCompanionSettings(access: "owner")
+
+        let editIdentity = app.descendants(matching: .any)["companion.settings.identity.edit"]
+        editIdentity.tap()
+
+        let originalShape = app.descendants(matching: .any)["companion.identity.icon.shape.6"]
+        for _ in 0..<4 where !originalShape.exists { app.swipeUp() }
+        XCTAssertEqual(originalShape.value as? String, "Selected")
+
+        let draftShape = app.descendants(matching: .any)["companion.identity.icon.shape.0"]
+        draftShape.tap()
+        XCTAssertEqual(draftShape.value as? String, "Selected")
+
+        app.navigationBars["Edit identity"].buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(app.navigationBars["Companion settings"].waitForExistence(timeout: 2))
+        XCTAssertFalse(app.staticTexts["Identity saved."].exists)
+
+        editIdentity.tap()
+        let reopenedShape = app.descendants(matching: .any)["companion.identity.icon.shape.6"]
+        for _ in 0..<4 where !reopenedShape.exists { app.swipeUp() }
+        XCTAssertEqual(reopenedShape.value as? String, "Selected")
+    }
+
+    @MainActor
     func testSettingsOwnsConnectedResourcesWithNativeResourceDetails() throws {
         let app = launchCompanionRoster(access: "viewer")
         let row = app.descendants(matching: .any)["companion.row.c96ab360-00f3-4497-a51a-51442db8add1"]
