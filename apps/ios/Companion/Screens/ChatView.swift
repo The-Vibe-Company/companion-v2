@@ -286,8 +286,14 @@ struct ChatView: View {
                     value: isNearBottom
                 )
                 .onChange(of: scrollContentRevision) {
-                    guard let request = scrollCoordinator.takePendingRequest() else { return }
-                    performScroll(to: request, with: proxy)
+                    Task { @MainActor in
+                        // Let the accepted transcript window complete one layout turn before
+                        // resolving its lazy scroll targets. Requests raised by the same update
+                        // remain coalesced in the coordinator until this physical-scroll boundary.
+                        await Task.yield()
+                        guard let request = scrollCoordinator.takePendingRequest() else { return }
+                        performScroll(to: request, with: proxy)
+                    }
                 }
             }
         }
