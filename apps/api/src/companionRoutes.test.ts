@@ -46,9 +46,11 @@ const coreMocks = {
   enqueueCompanionOperationV2: vi.fn<typeof coreModule.enqueueCompanionOperationV2>(),
   enqueueCompanionTurnV2: vi.fn<typeof coreModule.enqueueCompanionTurnV2>(),
   getCompanionDecisionV2: vi.fn<typeof coreModule.getCompanionDecisionV2>(),
+  getCompanionRoutineRunV2: vi.fn<typeof coreModule.getCompanionRoutineRunV2>(),
   getCompanionV2: vi.fn<typeof coreModule.getCompanionV2>(),
   listCompanionsV2: vi.fn<typeof coreModule.listCompanionsV2>(),
   listCompanionRoutinesV2: vi.fn<typeof coreModule.listCompanionRoutinesV2>(),
+  listCompanionRoutineRunsV2: vi.fn<typeof coreModule.listCompanionRoutineRunsV2>(),
   createCompanionRoutineV2: vi.fn<typeof coreModule.createCompanionRoutineV2>(),
   updateCompanionRoutineV2: vi.fn<typeof coreModule.updateCompanionRoutineV2>(),
   deleteCompanionRoutineV2: vi.fn<typeof coreModule.deleteCompanionRoutineV2>(),
@@ -328,6 +330,7 @@ describe("Companions Runtime v2 API", () => {
     coreMocks.answerCompanionConfigDecisionV2.mockResolvedValue(undefined);
     coreMocks.answerCompanionRoutineDecisionV2.mockResolvedValue(undefined);
     coreMocks.listCompanionRoutinesV2.mockResolvedValue([]);
+    coreMocks.listCompanionRoutineRunsV2.mockResolvedValue({ runs: [], next_cursor: null });
     coreMocks.answerCompanionTriggerDecisionV2.mockResolvedValue(undefined);
     coreMocks.listCompanionTriggersV2.mockResolvedValue([]);
     coreMocks.getCompanionDecisionV2.mockResolvedValue({
@@ -1224,6 +1227,71 @@ describe("Companions Runtime v2 API", () => {
     );
     expect(created.status).toBe(201);
     await expect(created.json()).resolves.toEqual({ routine });
+  });
+
+  it("lists routine runs and reads one private routine transcript", async () => {
+    const routineId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const runId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const summary = {
+      run_id: runId,
+      companion_id: COMPANION_ID,
+      routine: { id: routineId, name: "Standup" },
+      status: "succeeded" as const,
+      outcome: "surfaced" as const,
+      surface_mode: "notify" as const,
+      main_entry_event_id: "routine-return:notice",
+      relay_turn_id: null,
+      created_at: NOW,
+      started_at: NOW,
+      settled_at: NOW,
+      error: null,
+    };
+    const detail = {
+      ...summary,
+      internal_entries: [{
+        event_id: "routine:work:1",
+        ordinal: 0,
+        role: "assistant" as const,
+        content: "Checked the deployment.",
+        reasoning: null,
+        tool: null,
+        decision: null,
+        created_at: NOW,
+      }],
+    };
+    coreMocks.listCompanionRoutineRunsV2.mockResolvedValue({
+      runs: [summary],
+      next_cursor: null,
+    });
+    coreMocks.getCompanionRoutineRunV2.mockResolvedValue(detail);
+    const app = appWithRoutes();
+
+    const listed = await app.request(
+      `/v1/companions/${COMPANION_ID}/routines/${routineId}/runs?limit=20`,
+    );
+    expect(listed.status).toBe(200);
+    expect(listed.headers.get("cache-control")).toBe("private, no-store");
+    await expect(listed.json()).resolves.toEqual({ runs: [summary], next_cursor: null });
+    expect(coreMocks.listCompanionRoutineRunsV2).toHaveBeenCalledWith(expect.objectContaining({
+      companionId: COMPANION_ID,
+      routineId,
+      limit: 20,
+    }));
+
+    const read = await app.request(
+      `/v1/companions/${COMPANION_ID}/routine-runs/${runId}`,
+    );
+    expect(read.status).toBe(200);
+    expect(read.headers.get("cache-control")).toBe("private, no-store");
+    await expect(read.json()).resolves.toEqual({ run: detail });
+  });
+
+  it("rejects an unbounded routine-run history request before the database", async () => {
+    const response = await appWithRoutes().request(
+      `/v1/companions/${COMPANION_ID}/routines/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/runs?limit=101`,
+    );
+    expect(response.status).toBe(400);
+    expect(coreMocks.listCompanionRoutineRunsV2).not.toHaveBeenCalled();
   });
 
   it("applies trigger proposals through the dedicated answer path", async () => {

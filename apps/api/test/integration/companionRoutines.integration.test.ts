@@ -10,6 +10,8 @@ import {
   fireCompanionRoutine,
   failCompanionRoutineFire,
   listCompanionRoutinesV2,
+  listCompanionRoutineRunsV2,
+  getCompanionRoutineRunV2,
   listCompanionsV2,
   readCompanionThreadV2,
   routineFireMessageId,
@@ -224,7 +226,7 @@ describe("Companion routines over the real database", () => {
     expect(entry).toMatchObject({
       role: "user",
       content: "Write the Daily standup summary.",
-      routine: { id: created.id, name: "Daily standup" },
+      routine: { id: created.id, name: "Daily standup", run_id: entry?.turn_id },
     });
 
     // The conversation list is read by everyone who can see the Companion, and the fire is recorded
@@ -286,6 +288,246 @@ describe("Companion routines over the real database", () => {
       consecutive_failures: 1,
       enabled: true,
     });
+  });
+
+  it("keeps private run history tenant-scoped and references one notify payload in the main thread", async () => {
+    const created = await asActor(fixture.owner, (database) => createCompanionRoutineV2({
+      orgId: fixture.orgA,
+      companionId,
+      ...draft("Deployment check"),
+      database,
+    }));
+    await integrationDb
+      .update(schema.companionRoutines)
+      .set({ nextFireAt: new Date() })
+      .where(eq(schema.companionRoutines.id, created.id));
+    const [claim] = await claimDueCompanionRoutines({
+      workerId: "integration-routine-history-worker",
+      database: integrationDb,
+    });
+    expect(claim?.routineId).toBe(created.id);
+    await fireCompanionRoutine({
+      workerId: "integration-routine-history-worker",
+      orgId: fixture.orgA,
+      routineId: created.id,
+      clientMessageId: routineFireMessageId({
+        routineId: created.id,
+        scheduledFor: claim!.scheduledFor,
+      }),
+      scheduledFor: claim!.scheduledFor,
+      nextFireAt: new Date(Date.now() + 60 * 60 * 1000),
+      database: integrationDb,
+    });
+
+    const [run] = await integrationDb
+      .select({ id: schema.companionTurns.id })
+      .from(schema.companionTurns)
+      .where(eq(schema.companionTurns.routineSnapshotId, created.id));
+    expect(run).toBeDefined();
+    const marker = await integrationDb.query.companionTranscriptEntries.findFirst({
+      where: eq(schema.companionTranscriptEntries.turnId, run!.id),
+    });
+    expect(marker).toMatchObject({ routineName: "Deployment check" });
+
+    await integrationDb.insert(schema.companionRoutineRunEntries).values({
+      orgId: fixture.orgA,
+      companionId,
+      runId: run!.id,
+      eventId: "routine:work:1",
+      ordinal: 0,
+      role: "assistant",
+      content: "Inspected the deployment before returning.",
+    });
+    const mainEntryEventId = `routine-return:${run!.id}`;
+    await integrationDb.insert(schema.companionTranscriptEntries).values({
+      orgId: fixture.orgA,
+      companionId,
+      eventId: mainEntryEventId,
+      ordinal: (marker?.ordinal ?? 0) + 1,
+      role: "assistant",
+      content: "The deployment is healthy.",
+    });
+    await integrationDb.insert(schema.companionRoutineReturns).values({
+      orgId: fixture.orgA,
+      companionId,
+      runId: run!.id,
+      mode: "notify",
+      mainEntryEventId,
+    });
+    await expect(integrationDb.insert(schema.companionRoutineReturns).values({
+      orgId: fixture.orgA,
+      companionId,
+      runId: run!.id,
+      mode: "notify",
+      mainEntryEventId,
+    })).rejects.toMatchObject({ cause: { code: "23505" } });
+
+    await integrationDb
+      .update(schema.companionTurns)
+      .set({
+        lastErrorCode: "provider_unavailable",
+        lastErrorMessage: "Reconnect the routine provider credential.",
+        lastErrorAction: "reconnect_provider",
+      })
+      .where(eq(schema.companionTurns.id, run!.id));
+    const ownerDetail = await asActor(fixture.owner, (database) => getCompanionRoutineRunV2({
+      orgId: fixture.orgA,
+      companionId,
+      runId: run!.id,
+      database,
+    }));
+    expect(ownerDetail.error).toEqual({
+      code: "provider_unavailable",
+      message: "Reconnect the routine provider credential.",
+      action: "reconnect_provider",
+    });
+
+    await asActor(fixture.owner, (database) => setCompanionWorkspaceShareV2({
+      actor: fixture.owner,
+      orgId: fixture.orgA,
+      companionId,
+      role: "viewer",
+      database,
+    }));
+    const viewerHistory = await asActor(fixture.developer, (database) =>
+      listCompanionRoutineRunsV2({
+        orgId: fixture.orgA,
+        companionId,
+        routineId: created.id,
+        database,
+      }));
+    expect(viewerHistory).toMatchObject({ next_cursor: null });
+    expect(viewerHistory.runs).toHaveLength(1);
+    expect(viewerHistory.runs[0]).toMatchObject({
+      run_id: run!.id,
+      outcome: "surfaced",
+      surface_mode: "notify",
+      main_entry_event_id: mainEntryEventId,
+      relay_turn_id: null,
+    });
+    const detail = await asActor(fixture.developer, (database) => getCompanionRoutineRunV2({
+      orgId: fixture.orgA,
+      companionId,
+      runId: run!.id,
+      database,
+    }));
+    expect(detail.internal_entries).toEqual([expect.objectContaining({
+      event_id: "routine:work:1",
+      content: "Inspected the deployment before returning.",
+    })]);
+    expect(detail.error).toEqual({
+      code: "runtime_unavailable",
+      message: "Companion runtime needs attention.",
+      action: "none",
+    });
+    expect(JSON.stringify(detail)).not.toContain("The deployment is healthy.");
+
+    await expect(withTenantContext(
+      { orgId: fixture.orgB, userId: fixture.outsider.id },
+      (database) => getCompanionRoutineRunV2({
+        orgId: fixture.orgB,
+        companionId,
+        runId: run!.id,
+        database,
+      }),
+    )).rejects.toThrow();
+
+    await asActor(fixture.owner, (database) => deleteCompanionRoutineV2({
+      orgId: fixture.orgA,
+      companionId,
+      routineId: created.id,
+      database,
+    }));
+    await expect(asActor(fixture.developer, (database) => listCompanionRoutineRunsV2({
+      orgId: fixture.orgA,
+      companionId,
+      routineId: created.id,
+      database,
+    }))).resolves.toMatchObject({ runs: [expect.objectContaining({ run_id: run!.id })] });
+  });
+
+  it("projects an additive-rollout main-session reply as a virtual notify result", async () => {
+    const created = await asActor(fixture.owner, (database) => createCompanionRoutineV2({
+      orgId: fixture.orgA,
+      companionId,
+      ...draft("Legacy compatibility"),
+      database,
+    }));
+    await integrationDb
+      .update(schema.companionRoutines)
+      .set({ nextFireAt: new Date() })
+      .where(eq(schema.companionRoutines.id, created.id));
+    const [claim] = await claimDueCompanionRoutines({
+      workerId: "integration-routine-legacy-worker",
+      database: integrationDb,
+    });
+    await fireCompanionRoutine({
+      workerId: "integration-routine-legacy-worker",
+      orgId: fixture.orgA,
+      routineId: created.id,
+      clientMessageId: routineFireMessageId({
+        routineId: created.id,
+        scheduledFor: claim!.scheduledFor,
+      }),
+      scheduledFor: claim!.scheduledFor,
+      nextFireAt: new Date(Date.now() + 60 * 60 * 1000),
+      database: integrationDb,
+    });
+
+    const [run] = await integrationDb
+      .select({ id: schema.companionTurns.id })
+      .from(schema.companionTurns)
+      .where(eq(schema.companionTurns.routineSnapshotId, created.id));
+    const marker = await integrationDb.query.companionTranscriptEntries.findFirst({
+      where: eq(schema.companionTranscriptEntries.turnId, run!.id),
+    });
+    const legacyReplyEventId = `v2:legacy:${run!.id}:assistant`;
+    await integrationDb.insert(schema.companionTranscriptEntries).values({
+      orgId: fixture.orgA,
+      companionId,
+      turnId: run!.id,
+      eventId: legacyReplyEventId,
+      ordinal: (marker?.ordinal ?? 0) + 1,
+      role: "assistant",
+      content: "This reply was produced by the pre-cutover main Pi session.",
+    });
+    await integrationDb
+      .update(schema.companionTurns)
+      .set({
+        status: "succeeded",
+        inactivityDeadlineAt: null,
+        absoluteDeadlineAt: new Date(Date.now() + 2 * 60 * 60 * 1000),
+        settledAt: new Date(),
+      })
+      .where(eq(schema.companionTurns.id, run!.id));
+
+    const history = await asActor(fixture.owner, (database) => listCompanionRoutineRunsV2({
+      orgId: fixture.orgA,
+      companionId,
+      routineId: created.id,
+      database,
+    }));
+    expect(history.runs).toEqual([expect.objectContaining({
+      run_id: run!.id,
+      status: "succeeded",
+      outcome: "surfaced",
+      surface_mode: "notify",
+      main_entry_event_id: legacyReplyEventId,
+      relay_turn_id: null,
+    })]);
+    const detail = await asActor(fixture.owner, (database) => getCompanionRoutineRunV2({
+      orgId: fixture.orgA,
+      companionId,
+      runId: run!.id,
+      database,
+    }));
+    expect(detail.internal_entries).toEqual([expect.objectContaining({
+      event_id: marker!.eventId,
+      role: "user",
+    })]);
+    expect(JSON.stringify(detail.internal_entries)).not.toContain(
+      "This reply was produced by the pre-cutover main Pi session.",
+    );
   });
 
   it("keeps a claimed instant comparable after the worker's JavaScript round trip", async () => {

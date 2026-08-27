@@ -1,11 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
+import { z } from "zod";
 
-import type { CompanionRoutine } from "@companion/contracts";
+import type {
+  CompanionRoutine,
+  CompanionRoutineRunDetail,
+  CompanionRoutineRunList,
+} from "@companion/contracts";
 import {
   COMPANION_ROUTINE_MIN_INTERVAL_MS,
   companionRoutineDraftSchema,
   companionRoutineProposalSchema,
+  companionRoutineRunDetailSchema,
+  companionRoutineRunSummarySchema,
   companionRoutineSchema,
 } from "@companion/contracts";
 import type { Db } from "@companion/db";
@@ -16,17 +23,24 @@ import {
   validateRoutineSchedule,
 } from "./companionRoutines";
 
-function rows<T>(result: unknown): T[] {
-  return Array.from(result as Iterable<T>);
+function rows<T>(result: Iterable<T>): T[] {
+  return Array.from(result);
 }
 
-function hasDatabaseErrorCode(error: unknown, expected: string): boolean {
-  const seen = new Set<unknown>();
-  let current = error;
-  while (current && typeof current === "object" && !seen.has(current)) {
+const databaseErrorSchema = z.object({
+  code: z.string().optional(),
+  cause: z.instanceof(Error).optional(),
+}).passthrough();
+
+function hasDatabaseErrorCode(error: Error, expected: string): boolean {
+  const seen = new Set<Error>();
+  let current: Error | undefined = error;
+  while (current !== undefined && !seen.has(current)) {
     seen.add(current);
-    if ("code" in current && current.code === expected) return true;
-    current = "cause" in current ? current.cause : null;
+    const parsed = databaseErrorSchema.safeParse(current);
+    if (!parsed.success) return false;
+    if (parsed.data.code === expected) return true;
+    current = parsed.data.cause;
   }
   return false;
 }
@@ -35,6 +49,13 @@ export class CompanionRoutineNotFoundError extends Error {
   constructor() {
     super("companion routine not found");
     this.name = "CompanionRoutineNotFoundError";
+  }
+}
+
+export class CompanionRoutineRunNotFoundError extends Error {
+  constructor() {
+    super("companion routine run not found");
+    this.name = "CompanionRoutineRunNotFoundError";
   }
 }
 
@@ -52,10 +73,6 @@ export class CompanionRoutineInvalidError extends Error {
     this.name = "CompanionRoutineInvalidError";
     this.code = code;
   }
-}
-
-function parseRoutine(value: unknown): CompanionRoutine {
-  return companionRoutineSchema.parse(value);
 }
 
 /**
@@ -79,13 +96,61 @@ export async function listCompanionRoutinesV2(input: {
   companionId: string;
   database: Db;
 }): Promise<CompanionRoutine[]> {
-  const result = await input.database.execute(sql`
+  const result = await input.database.execute<{ routine: unknown }>(sql`
     select routine from public.companion_api_list_routines(
       ${input.orgId}::uuid,
       ${input.companionId}::uuid
     )
   `);
-  return rows<{ routine: unknown }>(result).map((row) => parseRoutine(row.routine));
+  return rows(result).map((row) => companionRoutineSchema.parse(row.routine));
+}
+
+/** PostgreSQL-only routine history read; this never contacts or wakes the Companion Box. */
+export async function listCompanionRoutineRunsV2(input: {
+  orgId: string;
+  companionId: string;
+  routineId: string;
+  limit?: number;
+  cursor?: string;
+  database: Db;
+}): Promise<CompanionRoutineRunList> {
+  const limit = input.limit ?? 50;
+  const result = await input.database.execute<{ run: unknown }>(sql`
+    select run from public.companion_api_list_routine_runs(
+      ${input.orgId}::uuid,
+      ${input.companionId}::uuid,
+      ${input.routineId}::uuid,
+      ${input.cursor ?? null}::uuid,
+      ${limit + 1}::integer
+    )
+  `);
+  const parsed = rows(result).map((row) =>
+    companionRoutineRunSummarySchema.parse(row.run));
+  const hasMore = parsed.length > limit;
+  const runs = hasMore ? parsed.slice(0, limit) : parsed;
+  return {
+    runs,
+    next_cursor: hasMore ? runs.at(-1)?.run_id ?? null : null,
+  };
+}
+
+/** Read one run by its durable turn id, including only its private routine-session transcript. */
+export async function getCompanionRoutineRunV2(input: {
+  orgId: string;
+  companionId: string;
+  runId: string;
+  database: Db;
+}): Promise<CompanionRoutineRunDetail> {
+  const result = await input.database.execute<{ run: unknown }>(sql`
+    select run from public.companion_api_get_routine_run(
+      ${input.orgId}::uuid,
+      ${input.companionId}::uuid,
+      ${input.runId}::uuid
+    )
+  `);
+  const [row] = rows(result);
+  if (!row) throw new CompanionRoutineRunNotFoundError();
+  return companionRoutineRunDetailSchema.parse(row.run);
 }
 
 export async function createCompanionRoutineV2(input: {
@@ -107,7 +172,7 @@ export async function createCompanionRoutineV2(input: {
     enabled: input.enabled ?? true,
   });
   const nextFireAt = scheduleNextFire(draft.cron, draft.timezone, draft.enabled);
-  const result = await input.database.execute(sql`
+  const result = await input.database.execute<{ routine: unknown }>(sql`
     select public.companion_api_create_routine(
       ${input.orgId}::uuid,
       ${input.companionId}::uuid,
@@ -120,9 +185,9 @@ export async function createCompanionRoutineV2(input: {
       ${instant(nextFireAt)}::timestamptz
     ) as routine
   `);
-  const [row] = rows<{ routine: unknown }>(result);
+  const [row] = rows(result);
   if (!row) throw new Error("failed to create Companion routine");
-  return parseRoutine(row.routine);
+  return companionRoutineSchema.parse(row.routine);
 }
 
 export async function updateCompanionRoutineV2(input: {
@@ -148,7 +213,7 @@ export async function updateCompanionRoutineV2(input: {
   });
   const nextFireAt = scheduleNextFire(draft.cron, draft.timezone, draft.enabled);
   try {
-    const result = await input.database.execute(sql`
+    const result = await input.database.execute<{ routine: unknown }>(sql`
       select public.companion_api_update_routine(
         ${input.orgId}::uuid,
         ${input.companionId}::uuid,
@@ -161,10 +226,11 @@ export async function updateCompanionRoutineV2(input: {
         ${instant(nextFireAt)}::timestamptz
       ) as routine
     `);
-    const [row] = rows<{ routine: unknown }>(result);
+    const [row] = rows(result);
     if (!row) throw new Error("failed to update Companion routine");
-    return parseRoutine(row.routine);
+    return companionRoutineSchema.parse(row.routine);
   } catch (error) {
+    if (!(error instanceof Error)) throw error;
     if (hasDatabaseErrorCode(error, "P0002")) throw new CompanionRoutineNotFoundError();
     throw error;
   }
@@ -185,6 +251,7 @@ export async function deleteCompanionRoutineV2(input: {
       )
     `);
   } catch (error) {
+    if (!(error instanceof Error)) throw error;
     if (hasDatabaseErrorCode(error, "P0002")) throw new CompanionRoutineNotFoundError();
     throw error;
   }
@@ -237,14 +304,7 @@ export async function claimDueCompanionRoutines(input: {
   timezone: string;
   scheduledFor: Date;
 }>> {
-  const result = await input.database.execute(sql`
-    select * from public.companion_claim_due_routines(
-      ${input.workerId},
-      ${input.limit ?? 25},
-      ${input.leaseSeconds ?? 60}
-    )
-  `);
-  return rows<{
+  const result = await input.database.execute<{
     org_id: string;
     companion_id: string;
     routine_id: string;
@@ -253,7 +313,14 @@ export async function claimDueCompanionRoutines(input: {
     cron: string;
     timezone: string;
     scheduled_for: Date | string;
-  }>(result).map((row) => ({
+  }>(sql`
+    select * from public.companion_claim_due_routines(
+      ${input.workerId},
+      ${input.limit ?? 25},
+      ${input.leaseSeconds ?? 60}
+    )
+  `);
+  return rows(result).map((row) => ({
     orgId: String(row.org_id),
     companionId: String(row.companion_id),
     routineId: String(row.routine_id),
@@ -276,7 +343,7 @@ export async function fireCompanionRoutine(input: {
   nextFireAt: Date;
   database: Db;
 }): Promise<{ outcome: string; replayed: boolean }> {
-  const result = await input.database.execute(sql`
+  const result = await input.database.execute<{ outcome: string; replayed: boolean }>(sql`
     select * from public.companion_fire_routine(
       ${input.workerId},
       ${input.orgId}::uuid,
@@ -286,7 +353,7 @@ export async function fireCompanionRoutine(input: {
       ${instant(input.nextFireAt)}::timestamptz
     )
   `);
-  const [row] = rows<{ outcome: string; replayed: boolean }>(result);
+  const [row] = rows(result);
   if (!row) throw new Error("Companion routine fire returned no row");
   return { outcome: row.outcome, replayed: row.replayed };
 }

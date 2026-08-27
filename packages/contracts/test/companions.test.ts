@@ -15,6 +15,9 @@ import {
   companionRoutineProposalMessageSchema,
   companionRoutineProposalSchema,
   companionRoutineSchema,
+  companionRoutineRunDetailSchema,
+  companionRoutineRunListQuerySchema,
+  companionRoutineRunSummarySchema,
   companionTriggerProposalMessageSchema,
   companionTriggerProposalSchema,
   companionTriggerSchema,
@@ -757,6 +760,60 @@ describe("Companion chat contracts", () => {
       created_at: "2026-08-19T12:00:00.000Z",
       updated_at: "2026-08-19T12:00:00.000Z",
     }).name).toBe("Standup");
+  });
+
+  it("keeps surfaced routine payloads out of the private run transcript contract", () => {
+    const summary = companionRoutineRunSummarySchema.parse({
+      run_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      companion_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      routine: {
+        id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        name: "Standup",
+      },
+      status: "succeeded",
+      outcome: "surfaced",
+      surface_mode: "notify",
+      main_entry_event_id: "routine-return:notice",
+      relay_turn_id: null,
+      created_at: "2026-08-19T12:00:00.000Z",
+      started_at: "2026-08-19T12:00:01.000Z",
+      settled_at: "2026-08-19T12:00:10.000Z",
+      error: null,
+    });
+    expect(summary.surface_mode).toBe("notify");
+    expect(companionRoutineRunDetailSchema.parse({
+      ...summary,
+      internal_entries: [{
+        event_id: "routine:work:1",
+        ordinal: 0,
+        role: "assistant",
+        content: "Checked the deployment before returning.",
+        reasoning: null,
+        created_at: "2026-08-19T12:00:09.000Z",
+      }],
+    }).internal_entries).toHaveLength(1);
+    expect(() => companionRoutineRunDetailSchema.parse({
+      ...summary,
+      internal_entries: [],
+      surfaced_payload: "This belongs only in the main thread.",
+    })).toThrow();
+    expect(() => companionRoutineRunSummarySchema.parse({
+      ...summary,
+      surface_mode: "relay",
+      relay_turn_id: null,
+    })).toThrow();
+    expect(() => companionRoutineRunSummarySchema.parse({
+      ...summary,
+      outcome: "no_output",
+      surface_mode: null,
+      main_entry_event_id: null,
+      status: "failed",
+    })).toThrow();
+    expect(companionRoutineRunListQuerySchema.parse({}).limit).toBe(50);
+    expect(companionRoutineRunListQuerySchema.parse({
+      cursor: summary.run_id,
+    }).cursor).toBe(summary.run_id);
+    expect(() => companionRoutineRunListQuerySchema.parse({ limit: 101 })).toThrow();
   });
 
   it("accepts a Box frame only as an inline image and never as a URL a browser would fetch", () => {

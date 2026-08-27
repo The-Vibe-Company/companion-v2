@@ -104,6 +104,11 @@ Runtime state is explicit and durable:
   resolved content type, size, digest, sanitized filename, and position. Deleting a row journals its
   storage key into the durable object-deletion outbox in the same transaction, so an object cannot
   outlive the entry, the Companion, or the tenant.
+- A scheduled routine fire continues to use its routine-origin `companion_turns.id` as the durable
+  run id. `companion_routine_run_entries` is the private, no-wake transcript projection for that
+  run, and `companion_routine_returns` is its at-most-one terminal bridge to the main thread. The
+  return row stores only mode and durable references; surfaced content exists once, on its ordinary
+  main-thread entry.
 
 All rows are org-scoped and force-RLS-enabled. API, worker, and runtime use distinct
 `NOSUPERUSER NOBYPASSRLS NOINHERIT` roles. Runtime claims, renewals, checkpoints, and settlements use
@@ -226,6 +231,35 @@ Layout 14 installs a small Node broker under systemd between runtime commands an
   exit separately;
 - malformed or oversized lines advance without persisting their raw content;
 - unknown event types are counted and ignored rather than treated as user-fatal errors.
+
+The routine-isolation cutover extends this broker layout without adding a second harness or runtime
+owner. A routine-origin turn is still claimed and serialized by the Companion's one PostgreSQL
+lease, but runtime launches the same Pi binary with the same staged tools, skills, plugins, model,
+and provider material under a run-scoped session directory and broker socket. The main Pi daemon is
+idle and never receives the routine prompt. PostgreSQL, rather than the ephemeral Box session
+directory, is the durable routine-history authority.
+
+That run-scoped Pi receives one routine-only terminal tool. Its first accepted call is the run's
+return value and immediately shuts down that Pi process. `notify` commits one visible Companion
+entry to the main thread and no turn; `relay` commits the same kind of visible entry and an
+idempotent ordinary turn that feeds that entry to the main Pi. Neither mode copies the payload into
+the private run transcript. A normal settlement without a terminal call is successful
+`no_output`. This bridge is atomic and replay-safe: a unique return row makes the first accepted
+call win, and no post-return Pi event can create another main-thread effect.
+
+The rollout is deliberately additive: first land the run/return schema and read API, then web and
+iOS history readers, and only then switch execution and the main-thread projection. Until the final
+cutover, routine-origin turns retain their existing ordinary-turn behavior. The additive read model
+projects a succeeded ordinary-turn reply as a virtual `notify`: its existing final assistant entry
+is referenced as the main-thread payload and omitted from the compatibility history transcript, so
+it is neither mislabeled `no_output` nor duplicated. Client-only filtering is not an acceptable
+final architecture because it would make privacy, unread state, notifications, and future clients
+depend on duplicating the same hiding rule.
+
+The isolated routine Pi receives a pinned, content-addressed main-conversation background made from
+the latest accepted main-Pi compaction summary plus a deterministic recent transcript tail. This is
+runtime-only material, never a public API resource. Its source, 4,000-token budget, refresh rules,
+and takeover contract are specified in [Routine Pi context substrate](routine-pi-context-substrate.md).
 
 Staging writes a composed operating brief to `~/.companion/runtime/state/instructions.txt` and Pi
 receives it as `--append-system-prompt`. The brief describes the runtime contract Pi is held to —

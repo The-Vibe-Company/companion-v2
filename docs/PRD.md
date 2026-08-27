@@ -92,8 +92,18 @@ explicitly recoverable interruption even after the browser, API, or one runtime 
   (`uuidv5(routineId|scheduledFor)`), so at-least-once ticks collapse to one turn.
 - Missed fires are not replayed: a scheduled instant older than ten minutes is skipped. An active
   turn for the same routine skips the next fire. Five consecutive failures disable the routine.
-- The thread projects a routine origin on the user entry. The UI hides that prompt and shows
-  `Routine: <name>` above the ordinary reply.
+- The durable routine-origin turn is the run identity, but runtime executes it in a run-scoped Pi
+  session with the same authorized model, Skills, plugins, tools, and operating brief. The main Pi
+  session never receives the routine prompt or private transcript.
+- The thread projects a compact clickable `Routine: <name>` marker. Owner, Editor, and Viewer can
+  open the run's full private transcript from that marker or the routine's connected-resource row.
+- A routine may finish silently as `no_output` or call one terminal `surface_to_main` return. Both
+  `notify` and `relay` write the payload exactly once as a visible Companion entry in main-thread
+  history; only `relay` queues a turn for the main Pi to read and answer. The routine Pi terminates
+  at the accepted return and cannot continue. Its private history never duplicates the payload.
+- Each isolated run pins a runtime-only, content-addressed background snapshot built from the latest
+  accepted main-Pi compaction summary and a deterministic bounded main-thread tail. There is no
+  member-facing context-substrate endpoint.
 - Web and native iOS create new cron schedules in the member's stored timezone and render future
   fire instants in that timezone. Existing routine cron/timezone values remain authoritative on the
   server; viewing them converts their absolute next-fire instant to the current member timezone.

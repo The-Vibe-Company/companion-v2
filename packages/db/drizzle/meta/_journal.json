@@ -946,6 +946,13 @@
       "when": 1791392800000,
       "tag": "0134_slack_gmail_config_proposal",
       "breakpoints": true
+    },
+    {
+      "idx": 135,
+      "version": "7",
+      "when": 1791479200000,
+      "tag": "0135_companion_routine_run_history",
+      "breakpoints": true
     }
   ]
 }

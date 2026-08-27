@@ -34,6 +34,7 @@ import {
   CompanionRuntimeTransitionError,
   CompanionRoutineInvalidError,
   CompanionRoutineNotFoundError,
+  CompanionRoutineRunNotFoundError,
   CompanionTriggerNotFoundError,
   CompanionDecisionConflictError,
   CompanionDecisionNotFoundError,
@@ -66,11 +67,13 @@ import {
   failCompanionTriggerFire,
   fireCompanionTrigger,
   getCompanionDecisionV2,
+  getCompanionRoutineRunV2,
   getCompanionTriggerForWebhook,
   getCompanion,
   getCompanionV2,
   listCompanionsV2,
   listCompanionRoutinesV2,
+  listCompanionRoutineRunsV2,
   listCompanionTriggersV2,
   readCompanionAttachmentV2,
   readCompanionThreadV2,
@@ -116,6 +119,7 @@ import {
   createCompanionInputSchema,
   createCompanionTranscriptionSessionInputSchema,
   createCompanionRoutineInputSchema,
+  companionRoutineRunListQuerySchema,
   createCompanionTriggerInputSchema,
   declaredCompanionAttachmentContentType,
   isCompanionAttachmentImage,
@@ -209,6 +213,8 @@ function defaultCompanionRouteDependencies() {
     getCompanionV2,
     listCompanionsV2,
     listCompanionRoutinesV2,
+    listCompanionRoutineRunsV2,
+    getCompanionRoutineRunV2,
     createCompanionRoutineV2,
     updateCompanionRoutineV2,
     deleteCompanionRoutineV2,
@@ -473,6 +479,7 @@ function errorStatus<T>(error: T): number {
   if (error instanceof CompanionNotFoundError) return 404;
   if (error instanceof CompanionDecisionNotFoundError) return 404;
   if (error instanceof CompanionRoutineNotFoundError) return 404;
+  if (error instanceof CompanionRoutineRunNotFoundError) return 404;
   if (error instanceof CompanionTriggerNotFoundError) return 404;
   if (error instanceof CompanionRoutineInvalidError) return 400;
   if (error instanceof CompanionDecisionConflictError) return 409;
@@ -583,6 +590,8 @@ export function registerCompanionRoutes(
     getCompanionV2,
     listCompanionsV2,
     listCompanionRoutinesV2,
+    listCompanionRoutineRunsV2,
+    getCompanionRoutineRunV2,
     createCompanionRoutineV2,
     updateCompanionRoutineV2,
     deleteCompanionRoutineV2,
@@ -1230,6 +1239,43 @@ export function registerCompanionRoutes(
         listCompanionRoutinesV2({ orgId, companionId, database }));
       c.header("Cache-Control", "private, no-store");
       return c.json({ routines });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.get("/v1/companions/:id/routines/:routineId/runs", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const routineId = companionIdSchema.parse(c.req.param("routineId"));
+      const query = companionRoutineRunListQuerySchema.parse({
+        limit: c.req.query("limit"),
+        cursor: c.req.query("cursor"),
+      });
+      const history = await tenant(c, ({ orgId, database }) =>
+        listCompanionRoutineRunsV2({
+          orgId,
+          companionId,
+          routineId,
+          limit: query.limit,
+          cursor: query.cursor,
+          database,
+        }));
+      c.header("Cache-Control", "private, no-store");
+      return c.json(history);
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.get("/v1/companions/:id/routine-runs/:runId", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const runId = companionIdSchema.parse(c.req.param("runId"));
+      const run = await tenant(c, ({ orgId, database }) =>
+        getCompanionRoutineRunV2({ orgId, companionId, runId, database }));
+      c.header("Cache-Control", "private, no-store");
+      return c.json({ run });
     } catch (error) {
       return routeError(c, error);
     }
