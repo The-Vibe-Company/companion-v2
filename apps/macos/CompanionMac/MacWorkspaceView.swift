@@ -14,6 +14,7 @@ final class CompanionMacWorkspaceModel {
     private(set) var errorMessage: String?
     private(set) var actionMessage: String?
     private(set) var actionError: String?
+    private(set) var pendingDeletionIDs: Set<String> = []
 
     init(sessionStore: SessionStore) {
         self.sessionStore = sessionStore
@@ -40,7 +41,7 @@ final class CompanionMacWorkspaceModel {
         if !silently { loading = true }
         do {
             let next = try await sessionStore.listCompanions()
-            rosterState.reconcile(with: next)
+            rosterState.reconcile(with: visibleCompanionsReconcilingDeletions(next))
             errorMessage = nil
             if let selectedCompanionID,
                companions.contains(where: { $0.id == selectedCompanionID }) {
@@ -57,8 +58,11 @@ final class CompanionMacWorkspaceModel {
     func startPolling() async {
         await refresh()
         while !Task.isCancelled {
-            let hasActiveWork = companions.contains {
-                $0.runtime.replying || $0.runtime.state == .provisioning || $0.runtime.state == .stopping
+            let hasActiveWork = !pendingDeletionIDs.isEmpty || companions.contains {
+                $0.runtime.replying
+                    || $0.runtime.state == .provisioning
+                    || $0.runtime.state == .stopping
+                    || $0.deletionOperation?.isActive == true
             }
             try? await Task.sleep(for: .seconds(hasActiveWork ? 8 : 45))
             guard !Task.isCancelled else { return }
@@ -100,6 +104,7 @@ final class CompanionMacWorkspaceModel {
     }
 
     func duplicate(_ companion: CompanionSummary) {
+        guard companion.access.canDeleteCompanion, !isDeletionInProgress(companion) else { return }
         actionError = nil
         Task {
             do {
@@ -114,20 +119,34 @@ final class CompanionMacWorkspaceModel {
     }
 
     func delete(_ companion: CompanionSummary) {
-        guard companion.access.canDeleteCompanion else { return }
+        guard companion.access.canDeleteCompanion, !isDeletionInProgress(companion) else { return }
         actionError = nil
-        let removed = rosterState.removeOptimistically(companionID: companion.id)
+        let wasSelected = selectedCompanionID == companion.id
+        pendingDeletionIDs.insert(companion.id)
+        _ = rosterState.removeOptimistically(companionID: companion.id)
         if selectedCompanionID == companion.id { selectedCompanionID = nil }
         Task {
             do {
-                _ = try await sessionStore.deleteCompanion(
+                let operation = try await sessionStore.deleteCompanion(
                     companionID: companion.id,
                     requestID: UUID()
                 )
-                if removed != nil { rosterState.acceptDeletion(companionID: companion.id) }
-                actionMessage = "Deletion requested for \(companion.name)."
+                if !operation.isActive { pendingDeletionIDs.remove(companion.id) }
+                let restored = rosterState.reconcileDeletionResponse(
+                    companionID: companion.id,
+                    operation: operation
+                )
+                if operation.isActive {
+                    actionMessage = "Deletion requested for \(companion.name)."
+                } else {
+                    if wasSelected, restored != nil { selectedCompanionID = companion.id }
+                    actionMessage = nil
+                    actionError = operation.error?.message ?? "\(companion.name) could not be deleted and was restored."
+                }
             } catch {
-                _ = rosterState.restoreDeletion(companionID: companion.id)
+                pendingDeletionIDs.remove(companion.id)
+                let restored = rosterState.restoreDeletion(companionID: companion.id)
+                if wasSelected, restored != nil { selectedCompanionID = companion.id }
                 actionError = companionMacErrorMessage(error, fallback: "The Companion could not be deleted.")
             }
         }
@@ -144,7 +163,7 @@ final class CompanionMacWorkspaceModel {
         patch: CompanionMemberStatePatch,
         success: String
     ) {
-        guard !loading else { return }
+        guard !loading, !isDeletionInProgress(companion) else { return }
         actionError = nil
         Task {
             do {
@@ -158,6 +177,34 @@ final class CompanionMacWorkspaceModel {
                 actionError = companionMacErrorMessage(error, fallback: "That roster change could not be saved.")
             }
         }
+    }
+
+    private func isDeletionInProgress(_ companion: CompanionSummary) -> Bool {
+        pendingDeletionIDs.contains(companion.id) || companion.deletionOperation?.isActive == true
+    }
+
+    private func visibleCompanionsReconcilingDeletions(
+        _ next: [CompanionSummary]
+    ) -> [CompanionSummary] {
+        var retainedPendingIDs: Set<String> = []
+        var visible: [CompanionSummary] = []
+
+        for companion in next {
+            if companion.deletionOperation?.isActive == true {
+                retainedPendingIDs.insert(companion.id)
+                continue
+            }
+            if pendingDeletionIDs.contains(companion.id), companion.deletionOperation == nil {
+                // A list response can briefly lag the accepted delete operation. Keep that stale
+                // projection hidden until the API reports a terminal operation or removes it.
+                retainedPendingIDs.insert(companion.id)
+                continue
+            }
+            visible.append(companion)
+        }
+
+        pendingDeletionIDs = retainedPendingIDs
+        return visible
     }
 }
 
@@ -470,10 +517,10 @@ private struct CompanionMacRosterSidebar: View {
                 Button("Mark as unread", systemImage: "envelope.badge") {
                     model.markUnread(companion)
                 }
-                Button("Duplicate", systemImage: "plus.square.on.square") {
-                    model.duplicate(companion)
-                }
                 if companion.access.canDeleteCompanion {
+                    Button("Duplicate", systemImage: "plus.square.on.square") {
+                        model.duplicate(companion)
+                    }
                     Divider()
                     Button("Delete", systemImage: "trash", role: .destructive) { onDelete(companion) }
                 }

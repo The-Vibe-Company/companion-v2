@@ -15,6 +15,7 @@ final class CompanionMacChatModel {
     private(set) var errorMessage: String?
     private(set) var actionError: String?
     private var projection = CompanionThreadProjection()
+    @ObservationIgnored private let mutationGate = CompanionThreadMutationGate()
 
     init(companion: CompanionSummary, sessionStore: SessionStore) {
         self.companion = companion
@@ -109,6 +110,9 @@ final class CompanionMacChatModel {
 
     func decide(requestID: String, action: CompanionDecisionAction) async {
         guard canSend else { return }
+        let mutationID = "decision:\(requestID)"
+        guard await mutationGate.acquire(mutationID: mutationID) else { return }
+        projection.invalidateRefreshes()
         actionError = nil
         do {
             let next = try await sessionStore.decideCompanionDecision(
@@ -118,8 +122,11 @@ final class CompanionMacChatModel {
             )
             projection.replaceAfterMutation(with: next)
             thread = next
+            await mutationGate.release(mutationID: mutationID)
         } catch {
             actionError = companionMacErrorMessage(error, fallback: "That decision could not be submitted.")
+            await reload(silently: true)
+            await mutationGate.release(mutationID: mutationID)
         }
     }
 
@@ -140,6 +147,9 @@ final class CompanionMacChatModel {
 
     func cancelInterruptedTurn() async {
         guard canSend, let turn = thread?.interruptedTurn else { return }
+        let mutationID = "cancel:\(turn.id)"
+        guard await mutationGate.acquire(mutationID: mutationID) else { return }
+        projection.invalidateRefreshes()
         actionError = nil
         do {
             let next = try await sessionStore.cancelCompanionTurn(
@@ -148,14 +158,18 @@ final class CompanionMacChatModel {
             )
             projection.replaceAfterMutation(with: next)
             thread = next
+            await mutationGate.release(mutationID: mutationID)
         } catch {
             actionError = companionMacErrorMessage(error, fallback: "The interrupted turn could not be cancelled.")
+            await reload(silently: true)
+            await mutationGate.release(mutationID: mutationID)
         }
     }
 }
 
 struct CompanionMacChatView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private let companion: CompanionSummary
     let onCompanionChanged: (CompanionSummary) -> Void
     let onSettings: (CompanionSummary) -> Void
     let onOpenDesktop: (CompanionSummary) -> Void
@@ -173,6 +187,7 @@ struct CompanionMacChatView: View {
         onSettings: @escaping (CompanionSummary) -> Void,
         onOpenDesktop: @escaping (CompanionSummary) -> Void
     ) {
+        self.companion = companion
         self.onCompanionChanged = onCompanionChanged
         self.onSettings = onSettings
         self.onOpenDesktop = onOpenDesktop
@@ -190,6 +205,9 @@ struct CompanionMacChatView: View {
         .background(Color.companionMacCanvas)
         .task(id: model.companion.id) {
             await model.start()
+        }
+        .onChange(of: companion) { _, companion in
+            model.updateCompanion(companion)
         }
         .onChange(of: model.companion) { _, companion in
             onCompanionChanged(companion)
@@ -448,6 +466,10 @@ struct CompanionMacChatView: View {
     private func importFiles(_ urls: [URL]) {
         attachmentError = nil
         for url in urls.prefix(companionMessageAttachmentMaximumCount - attachments.count) {
+            let hasSecurityScope = url.startAccessingSecurityScopedResource()
+            defer {
+                if hasSecurityScope { url.stopAccessingSecurityScopedResource() }
+            }
             do {
                 let data = try Data(contentsOf: url, options: .mappedIfSafe)
                 let attachment = try CompanionMessageAttachment(

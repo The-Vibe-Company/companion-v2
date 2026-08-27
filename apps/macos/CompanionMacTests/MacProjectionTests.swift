@@ -51,6 +51,40 @@ final class MacProjectionTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testClearingDesktopInvalidatesAnInFlightSignedHandoff() throws {
+        let state = CompanionMacDesktopWindowState()
+        state.begin(companionID: "companion-a", companionName: "A", access: .owner)
+        let staleGeneration = state.requestGeneration
+        state.clear()
+
+        let desktop = try JSONDecoder().decode(CompanionDesktop.self, from: Data(#"""
+        {"desktop_url":"https://desktop.example.test/session?token=secret","provisioning":false,"automation":"computer","transport":"vnc"}
+        """#.utf8))
+        state.install(desktop, generation: staleGeneration, companionID: "companion-a")
+
+        XCTAssertNil(state.desktopURL)
+        XCTAssertEqual(state.phase, .empty)
+        XCTAssertGreaterThan(state.requestGeneration, staleGeneration)
+    }
+
+    @MainActor
+    func testSwitchingDesktopCompanionsRejectsTheOlderResponse() throws {
+        let state = CompanionMacDesktopWindowState()
+        state.begin(companionID: "companion-a", companionName: "A", access: .owner)
+        let staleGeneration = state.requestGeneration
+        state.begin(companionID: "companion-b", companionName: "B", access: .editor)
+
+        let desktop = try JSONDecoder().decode(CompanionDesktop.self, from: Data(#"""
+        {"desktop_url":"https://desktop.example.test/session?token=secret","provisioning":false,"automation":"computer","transport":"vnc"}
+        """#.utf8))
+        state.install(desktop, generation: staleGeneration, companionID: "companion-a")
+
+        XCTAssertEqual(state.companionID, "companion-b")
+        XCTAssertNil(state.desktopURL)
+        XCTAssertEqual(state.phase, .requesting)
+    }
+
     private func makeCompanions() throws -> [CompanionSummary] {
         let payload = #"[
           {"id":"pinned","name":"Pinned","persona":"Operations","model_id":"model","selected_skill_ids":[],"selected_mcp_account_ids":[],"icon":{"shape":1,"mouth":1,"accessory":1,"color":2},"access":"owner","pinned":true,"hidden":false,"unread":false,"last_message":{"preview":"Ready","role":"assistant","created_at":"2026-08-26T12:00:00Z"},"runtime":{"state":"running","daemon_state":"running","replying":false,"provider_ids":["provider"]}},

@@ -9,15 +9,23 @@ enum CompanionMacGoogleSignInError: Error {
 @MainActor
 final class CompanionMacGoogleAuthentication: NSObject, ASWebAuthenticationPresentationContextProviding {
     private var session: ASWebAuthenticationSession?
+    private var presentationWindow: NSWindow?
 
     func authenticate(at url: URL, callbackScheme: String) async throws -> URL {
-        try await withCheckedThrowingContinuation { continuation in
+        guard let window = NSApp.keyWindow
+                ?? NSApp.mainWindow
+                ?? NSApp.windows.first(where: { $0.isVisible }) else {
+            throw CompanionMacGoogleSignInError.unavailable
+        }
+        presentationWindow = window
+        return try await withCheckedThrowingContinuation { continuation in
             let authentication = ASWebAuthenticationSession(
                 url: url,
                 callbackURLScheme: callbackScheme
             ) { [weak self] callbackURL, error in
                 Task { @MainActor in
                     self?.session = nil
+                    self?.presentationWindow = nil
                     if let callbackURL {
                         continuation.resume(returning: callbackURL)
                     } else if let authError = error as? ASWebAuthenticationSessionError,
@@ -33,6 +41,7 @@ final class CompanionMacGoogleAuthentication: NSObject, ASWebAuthenticationPrese
             session = authentication
             guard authentication.start() else {
                 session = nil
+                presentationWindow = nil
                 continuation.resume(throwing: CompanionMacGoogleSignInError.unavailable)
                 return
             }
@@ -40,19 +49,8 @@ final class CompanionMacGoogleAuthentication: NSObject, ASWebAuthenticationPrese
     }
 
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-        // The main window is the only presentation anchor we need. If a caller invokes Google
-        // sign-in while the app is launching, AppKit's key window may not exist yet; the first
-        // visible window is a safe fallback and avoids creating a hidden credential-bearing UI.
-        if let window = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible }) {
-            return window
-        }
-        let window = NSWindow(
-            contentRect: .zero,
-            styleMask: [.borderless],
-            backing: .buffered,
-            defer: true
-        )
-        window.isReleasedWhenClosed = false
-        return window
+        // `authenticate` retains a real visible AppKit window before starting the session.
+        // AuthenticationServices requests this anchor synchronously while that session is alive.
+        presentationWindow!
     }
 }

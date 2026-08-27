@@ -229,6 +229,12 @@ public enum CompanionRuntimeRestartTarget: String, Codable, Equatable, Hashable,
 public enum CompanionDesktopTransport: String, Codable, Equatable, Hashable, Sendable {
     case vnc
     case webrtc
+    case unknown
+
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = Self(rawValue: value) ?? .unknown
+    }
 }
 
 /// One short-lived, authorized handoff to the Companion's existing Box desktop.

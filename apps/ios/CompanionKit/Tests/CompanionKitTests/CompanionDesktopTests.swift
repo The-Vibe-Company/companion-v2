@@ -41,6 +41,21 @@ func decodesTheSharedDesktopHandoffContract() throws {
 }
 
 @Test
+func desktopHandoffKeepsUnknownTransportForwardCompatible() throws {
+    let desktop = try JSONDecoder().decode(CompanionDesktop.self, from: Data(#"""
+    {
+      "desktop_url":"https://desktop.example.test/session",
+      "provisioning":false,
+      "automation":"computer",
+      "transport":"future-stream"
+    }
+    """#.utf8))
+
+    #expect(desktop.desktopURL?.host == "desktop.example.test")
+    #expect(desktop.transport == .unknown)
+}
+
+@Test
 func desktopHandoffMayBeProvisioningWithoutAURL() throws {
     let desktop = try JSONDecoder().decode(CompanionDesktop.self, from: Data(#"""
     {

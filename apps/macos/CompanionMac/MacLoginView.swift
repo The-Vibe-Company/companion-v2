@@ -112,6 +112,9 @@ struct CompanionMacLoginView: View {
         Task {
             do {
                 try await sessionStore.signIn(email: email, password: password)
+            } catch let apiError as APIError where apiError.code == "EMAIL_NOT_VERIFIED" {
+                error = "Your email is not verified. We sent a new verification code; finish verification in the web app, then try again."
+                password = ""
             } catch let apiError as APIError {
                 error = apiError.status == 0
                     ? "The server could not be reached. Check the Conductor stack or API URL."

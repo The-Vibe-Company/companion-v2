@@ -14,7 +14,13 @@ struct CompanionMacRootView: View {
                     Task { await sessionStore.retryRestore() }
                 }
             case .signedOut:
-                CompanionMacLoginView()
+                if sessionStore.bootstrapError != nil {
+                    CompanionMacBootstrapView(error: sessionStore.bootstrapError) {
+                        Task { await sessionStore.retryRestore() }
+                    }
+                } else {
+                    CompanionMacLoginView()
+                }
             case .onboarding(let session):
                 CompanionMacOnboardingView(session: session)
             case .active(let session):

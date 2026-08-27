@@ -29,7 +29,7 @@ final class CompanionMacDesktopWindowState {
         self.companionID = companionID
         self.companionName = companionName
         self.access = access
-        requestGeneration += 1
+        requestGeneration &+= 1
         request()
     }
 
@@ -41,7 +41,8 @@ final class CompanionMacDesktopWindowState {
         phase = .requesting
     }
 
-    func install(_ desktop: CompanionDesktop) {
+    func install(_ desktop: CompanionDesktop, generation: Int, companionID: String) {
+        guard requestGeneration == generation, self.companionID == companionID else { return }
         // The model is intentionally copied into short-lived memory only. In particular, do not
         // write this URL to UserDefaults, a log, a pasteboard, or a restoration activity.
         desktopURL = desktop.desktopURL
@@ -53,7 +54,8 @@ final class CompanionMacDesktopWindowState {
             : .loaded
     }
 
-    func fail() {
+    func fail(generation: Int, companionID: String) {
+        guard requestGeneration == generation, self.companionID == companionID else { return }
         desktopURL = nil
         provisioning = false
         transportLabel = nil
@@ -62,6 +64,9 @@ final class CompanionMacDesktopWindowState {
     }
 
     func clear() {
+        // Keep this token monotonic. Resetting it would let a response from a closed window match
+        // a later open and reinstall an expired bearer URL across the session boundary.
+        requestGeneration &+= 1
         companionID = nil
         companionName = "Companion"
         access = .viewer
@@ -70,15 +75,18 @@ final class CompanionMacDesktopWindowState {
         transportLabel = nil
         errorMessage = nil
         phase = .empty
-        requestGeneration = 0
     }
 }
 
 struct CompanionMacDesktopWindow: View {
     @Environment(SessionStore.self) private var sessionStore
     @Environment(CompanionMacDesktopWindowState.self) private var desktopWindow
-    @State private var loading = false
+    @State private var activeRequestGeneration: Int?
     @State private var webViewError: String?
+
+    private var loading: Bool {
+        activeRequestGeneration == desktopWindow.requestGeneration
+    }
 
     var body: some View {
         Group {
@@ -176,19 +184,23 @@ struct CompanionMacDesktopWindow: View {
     }
 
     private func reconnect() async {
-        guard !loading, desktopWindow.canOperate, let companionID = desktopWindow.companionID else { return }
-        loading = true
+        guard desktopWindow.canOperate, let companionID = desktopWindow.companionID else { return }
+        let generation = desktopWindow.requestGeneration
+        guard activeRequestGeneration != generation else { return }
+        activeRequestGeneration = generation
         webViewError = nil
         desktopWindow.request()
         do {
             // This endpoint is a read-only observation of an already-running Box. It never starts
             // a Box and the returned signed URL is held only in the dedicated window state.
             let desktop = try await sessionStore.openCompanionDesktop(companionID: companionID)
-            desktopWindow.install(desktop)
+            desktopWindow.install(desktop, generation: generation, companionID: companionID)
         } catch {
-            desktopWindow.fail()
+            desktopWindow.fail(generation: generation, companionID: companionID)
         }
-        loading = false
+        if activeRequestGeneration == generation {
+            activeRequestGeneration = nil
+        }
     }
 
     private func validatedDesktopURL(_ url: URL) -> URL? {

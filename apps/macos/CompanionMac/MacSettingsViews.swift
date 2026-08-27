@@ -61,9 +61,11 @@ struct CompanionMacCompanionSettingsView: View {
                         }
                         .disabled(!canEdit)
                         .onChange(of: providerID) { _, value in
-                            if let provider = connectedProviders.first(where: { $0.id == value }),
-                               !provider.models.contains(where: { $0.id == modelID }) {
-                                modelID = provider.defaultModelID ?? ""
+                            if let provider = connectedProviders.first(where: { $0.id == value }) {
+                                modelID = provider.defaultModelID
+                                    .flatMap { defaultID in provider.models.first(where: { $0.id == defaultID })?.id }
+                                    ?? provider.models.first?.id
+                                    ?? ""
                             }
                         }
                         if let provider = selectedProvider {
@@ -191,7 +193,7 @@ struct CompanionMacCompanionSettingsView: View {
 
     private var canSave: Bool {
         canEdit && !saving && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !providerID.isEmpty && !modelID.isEmpty
+            && selectedProvider?.models.contains(where: { $0.id == modelID }) == true
     }
 
     private var canManagePlugins: Bool {
@@ -222,12 +224,20 @@ struct CompanionMacCompanionSettingsView: View {
             skills = skillValue
             plugins = pluginValue
             connectedResources = resourcesValue
-            if providerID.isEmpty {
+            let connected = providerResponseValue.connectedDefinitions
+            if !connected.contains(where: { $0.id == providerID }) {
                 providerID = providerResponseValue.defaultProviderID
-                    ?? providerResponseValue.connectedDefinitions.first?.id
+                    .flatMap { defaultID in connected.first(where: { $0.id == defaultID })?.id }
+                    ?? connected.first?.id
                     ?? ""
             }
-            if modelID.isEmpty { modelID = selectedProvider?.defaultModelID ?? "" }
+            if let provider = connected.first(where: { $0.id == providerID }),
+               !provider.models.contains(where: { $0.id == modelID }) {
+                modelID = provider.defaultModelID
+                    .flatMap { defaultID in provider.models.first(where: { $0.id == defaultID })?.id }
+                    ?? provider.models.first?.id
+                    ?? ""
+            }
             errorMessage = nil
         } catch {
             errorMessage = companionMacErrorMessage(error, fallback: "Companion settings are temporarily unavailable.")
@@ -339,7 +349,14 @@ struct CompanionMacCreateCompanionView: View {
                             }
                         }
                         .onChange(of: providerID) { _, value in
-                            modelID = connectedProviders.first(where: { $0.id == value })?.defaultModelID ?? ""
+                            guard let provider = connectedProviders.first(where: { $0.id == value }) else {
+                                modelID = ""
+                                return
+                            }
+                            modelID = provider.defaultModelID
+                                .flatMap { defaultID in provider.models.first(where: { $0.id == defaultID })?.id }
+                                ?? provider.models.first?.id
+                                ?? ""
                         }
                         if let provider = selectedProvider {
                             Picker("Model", selection: $modelID) {
@@ -420,7 +437,7 @@ struct CompanionMacCreateCompanionView: View {
 
     private var canCreate: Bool {
         !saving && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !providerID.isEmpty && !modelID.isEmpty
+            && selectedProvider?.models.contains(where: { $0.id == modelID }) == true
     }
 
     private func load() async {
@@ -436,8 +453,17 @@ struct CompanionMacCreateCompanionView: View {
             providers = providerValue
             skills = skillValue
             plugins = pluginValue
-            providerID = providerValue.defaultProviderID ?? providerValue.connectedDefinitions.first?.id ?? ""
-            modelID = connectedProviders.first(where: { $0.id == providerID })?.defaultModelID ?? ""
+            let connected = providerValue.connectedDefinitions
+            providerID = providerValue.defaultProviderID
+                .flatMap { defaultID in connected.first(where: { $0.id == defaultID })?.id }
+                ?? connected.first?.id
+                ?? ""
+            if let provider = connected.first(where: { $0.id == providerID }) {
+                modelID = provider.defaultModelID
+                    .flatMap { defaultID in provider.models.first(where: { $0.id == defaultID })?.id }
+                    ?? provider.models.first?.id
+                    ?? ""
+            }
         } catch {
             errorMessage = companionMacErrorMessage(error, fallback: "Provider settings are temporarily unavailable.")
         }
@@ -522,7 +548,7 @@ struct CompanionMacMemberSettingsView: View {
                         if saving { ProgressView().controlSize(.small) }
                         else { Text("Save") }
                     }
-                    .disabled(saving)
+                    .disabled(!canSave)
                 }
             }
         }
@@ -530,19 +556,29 @@ struct CompanionMacMemberSettingsView: View {
     }
 
     private func save() async {
-        guard !saving else { return }
+        guard canSave else { return }
         saving = true
         errorMessage = nil
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let currentName = (session.user.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             _ = try await sessionStore.updateUserProfile(
-                name: name.trimmingCharacters(in: .whitespacesAndNewlines),
-                timezone: timezone
+                name: trimmedName.isEmpty || trimmedName == currentName ? nil : trimmedName,
+                timezone: timezone == session.user.timezone ? nil : timezone
             )
             dismiss()
         } catch {
             errorMessage = companionMacErrorMessage(error, fallback: "Your profile could not be saved.")
         }
         saving = false
+    }
+
+    private var canSave: Bool {
+        guard !saving else { return false }
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let currentName = (session.user.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let nameChanged = !trimmedName.isEmpty && trimmedName != currentName
+        return nameChanged || timezone != session.user.timezone
     }
 }
 
@@ -553,6 +589,7 @@ struct CompanionMacProviderManagementView: View {
     @State private var selectedProviderID = ""
     @State private var credential = ""
     @State private var authorizationCode = ""
+    @State private var oauth: CompanionProviderOAuthStart?
     @State private var loading = true
     @State private var working = false
     @State private var message: String?
@@ -616,11 +653,26 @@ struct CompanionMacProviderManagementView: View {
                                 Task { await beginSubscription(provider.id) }
                             }
                             .disabled(working)
-                            TextField("Authorization code (if requested)", text: $authorizationCode)
-                            Button("Complete authorization") {
-                                Task { await completeSubscription() }
+
+                            if let oauth, oauth.providerID == provider.id {
+                                switch oauth.flow {
+                                case .authorizationCode:
+                                    TextField("Authorization code", text: $authorizationCode)
+                                    Button("Complete authorization") {
+                                        Task { await completeSubscription() }
+                                    }
+                                    .disabled(working || authorizationCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                case .deviceCode:
+                                    if let userCode = oauth.userCode {
+                                        LabeledContent("Device code", value: userCode)
+                                            .textSelection(.enabled)
+                                    }
+                                    Button("Check authorization") {
+                                        Task { await pollDeviceCode() }
+                                    }
+                                    .disabled(working)
+                                }
                             }
-                            .disabled(working || authorizationCode.isEmpty)
                         }
                     }
                 } footer: {
@@ -640,6 +692,16 @@ struct CompanionMacProviderManagementView: View {
         }
         .frame(minWidth: 600, minHeight: 520)
         .task { await reload() }
+        .onChange(of: selectedProviderID) { _, _ in
+            guard oauth != nil else { return }
+            oauth = nil
+            authorizationCode = ""
+            Task { await sessionStore.cancelCompanionProviderOAuth() }
+        }
+        .onDisappear {
+            guard oauth != nil else { return }
+            Task { await sessionStore.cancelCompanionProviderOAuth() }
+        }
     }
 
     private var connectedDefinitions: [CompanionProviderDefinition] {
@@ -707,10 +769,14 @@ struct CompanionMacProviderManagementView: View {
         defer { working = false }
         do {
             let flow = try await sessionStore.startCompanionProviderOAuth(providerID: providerID)
+            oauth = flow
+            authorizationCode = ""
             if let url = flow.authorizationURL ?? flow.verificationURL {
                 NSWorkspace.shared.open(url)
-                message = flow.userCode.map { "Enter code \($0) in the provider window, then complete authorization." }
-                    ?? "Complete authorization in the provider window, then enter the returned code."
+                message = flow.flow == .deviceCode
+                    ? flow.userCode.map { "Enter code \($0) in the provider window, then check authorization." }
+                        ?? "Approve the device in the provider window, then check authorization."
+                    : "Complete authorization in the provider window, then enter the returned code."
             }
         } catch {
             errorMessage = companionMacErrorMessage(error, fallback: "Provider authorization could not be started.")
@@ -718,7 +784,9 @@ struct CompanionMacProviderManagementView: View {
     }
 
     private func completeSubscription() async {
-        guard !working, !authorizationCode.isEmpty else { return }
+        guard !working,
+              oauth?.flow == .authorizationCode,
+              !authorizationCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         working = true
         defer { working = false }
         do {
@@ -726,10 +794,29 @@ struct CompanionMacProviderManagementView: View {
                 authorizationCode: authorizationCode.trimmingCharacters(in: .whitespacesAndNewlines)
             )
             authorizationCode = ""
+            oauth = nil
             message = "Provider connected."
             await reload()
         } catch {
             errorMessage = companionMacErrorMessage(error, fallback: "Provider authorization could not be completed.")
+        }
+    }
+
+    private func pollDeviceCode() async {
+        guard !working, oauth?.flow == .deviceCode else { return }
+        working = true
+        defer { working = false }
+        do {
+            let result = try await sessionStore.pollCompanionProviderOAuth()
+            if result.status == .connected {
+                oauth = nil
+                message = "Provider connected."
+                await reload()
+            } else {
+                message = "Authorization is still pending. Approve it in the provider window, then check again."
+            }
+        } catch {
+            errorMessage = companionMacErrorMessage(error, fallback: "Provider authorization status could not be checked.")
         }
     }
 }
@@ -826,11 +913,65 @@ struct CompanionMacPluginManagementView: View {
     }
 
     private var canSave: Bool {
-        !provider.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && (transport == .http
-                ? URL(string: endpoint.trimmingCharacters(in: .whitespacesAndNewlines))?.scheme != nil
-                : !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        guard providerSlug.range(of: "^[a-z][a-z0-9-]{0,62}$", options: .regularExpression) != nil,
+              !trimmedLabel.isEmpty,
+              trimmedLabel.count <= 40,
+              hasValidCredentialPair else { return false }
+        switch transport {
+        case .http:
+            guard trimmedEndpoint.count <= 4_096,
+                  let url = URL(string: trimmedEndpoint),
+                  let scheme = url.scheme?.lowercased(),
+                  url.host != nil else { return false }
+            return scheme == "https" || scheme == "http"
+        case .stdio:
+            return !trimmedCommand.isEmpty
+                && trimmedCommand.count <= 1_024
+                && !trimmedCommand.contains("\n")
+                && !trimmedCommand.contains("\r")
+                && !trimmedCommand.contains("\0")
+                && parsedArguments.count <= 100
+                && parsedArguments.allSatisfy { $0.count <= 8_192 && !$0.contains("\0") }
+        }
+    }
+
+    private var providerSlug: String {
+        provider.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private var trimmedLabel: String {
+        label.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var trimmedEndpoint: String {
+        endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var trimmedCommand: String {
+        command.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var parsedArguments: [String] {
+        args.split(whereSeparator: { $0.isNewline })
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    private var hasValidCredentialPair: Bool {
+        let name = credentialName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = credentialValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.isEmpty && value.isEmpty { return true }
+        guard !name.isEmpty,
+              !value.isEmpty,
+              name.count <= 128,
+              value.count <= 32_768,
+              !value.contains("\n"),
+              !value.contains("\r"),
+              !value.contains("\0") else { return false }
+        let pattern = transport == .stdio
+            ? "^[A-Za-z_][A-Za-z0-9_]{0,127}$"
+            : "^[A-Za-z_][A-Za-z0-9_-]{0,127}$"
+        return name.range(of: pattern, options: .regularExpression) != nil
     }
 
     private func reload() async {
@@ -847,19 +988,19 @@ struct CompanionMacPluginManagementView: View {
         guard canSave, !working else { return }
         working = true
         defer { working = false }
+        let normalizedCredentialName = credentialName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedCredentialValue = credentialValue.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             _ = try await sessionStore.saveCompanionPlugin(
                 SaveCompanionPluginInput(
-                    provider: provider.trimmingCharacters(in: .whitespacesAndNewlines),
-                    label: label.trimmingCharacters(in: .whitespacesAndNewlines),
+                    provider: providerSlug,
+                    label: trimmedLabel,
                     transport: transport,
-                    url: transport == .http ? endpoint.trimmingCharacters(in: .whitespacesAndNewlines) : nil,
-                    command: transport == .stdio ? command.trimmingCharacters(in: .whitespacesAndNewlines) : nil,
-                    args: transport == .stdio
-                        ? args.split(whereSeparator: { $0.isNewline }).map(String.init)
-                        : [],
-                    credentialName: credentialName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : credentialName,
-                    credentialValue: credentialValue.isEmpty ? nil : credentialValue
+                    url: transport == .http ? trimmedEndpoint : nil,
+                    command: transport == .stdio ? trimmedCommand : nil,
+                    args: transport == .stdio ? parsedArguments : [],
+                    credentialName: normalizedCredentialName.isEmpty ? nil : normalizedCredentialName,
+                    credentialValue: normalizedCredentialValue.isEmpty ? nil : normalizedCredentialValue
                 )
             )
             label = ""
