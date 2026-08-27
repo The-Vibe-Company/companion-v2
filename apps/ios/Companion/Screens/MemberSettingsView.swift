@@ -8,7 +8,7 @@ struct MemberSettingsView: View {
 
     let session: Session
     @AppStorage(CompanionPreferenceKeys.automaticReview) private var automaticReview = true
-    @AppStorage(CompanionPreferenceKeys.automaticTimezone) private var automaticTimezone: Bool
+    @AppStorage private var automaticTimezone: Bool
     @AppStorage(CompanionPreferenceKeys.notifications) private var notificationsEnabled = true
     @AppStorage(CompanionPreferenceKeys.appearance) private var appearanceValue = CompanionAppearancePreference.system.rawValue
     @AppStorage(CompanionPreferenceKeys.haptics) private var hapticsEnabled = true
