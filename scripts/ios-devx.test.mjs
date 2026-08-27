@@ -251,6 +251,7 @@ test("native chat reading restoration stays deterministic and delegated to Apple
   assert.match(chat, /\.onScrollTargetVisibilityChange\(/);
   assert.match(chat, /isRestoringReadingPosition \? 0 : 1/);
   assert.match(chat, /previousThread != nil/);
+  assert.doesNotMatch(chat, /requestScroll\(to: \.bottom\)/);
   assert.match(coordination, /func position\(for companionID: String\)/);
   assert.match(coordination, /public mutating func restore\(/);
   assert.match(uiTests, /testTranscriptWindowDemoRestoresReadingPositionAfterCompanionSwitch/);

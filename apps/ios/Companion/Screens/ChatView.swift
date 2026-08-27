@@ -923,7 +923,7 @@ struct ChatView: View {
                 // Text height can grow after the original follow-tail scroll. Re-anchor once the
                 // final markdown document is restored so a reader following the tail is not left
                 // just above the bottom.
-                requestScroll(to: .bottom)
+                requestScroll(to: .bottom(animated: true))
             }
         }
         assistantTailRevealTask = task
