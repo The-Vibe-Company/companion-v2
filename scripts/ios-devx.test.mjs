@@ -168,6 +168,7 @@ test("long-thread composer and poll work stay behind narrow invalidation boundar
   assert.doesNotMatch(chat, /@State private var draft\b/);
   assert.match(chat, /ChatComposer\(/);
   assert.match(composer, /@State private var draft = ""/);
+  assert.match(chat, /TranscriptRowView: View, @MainActor Equatable/);
   assert.match(chat, /TranscriptRowView\([\s\S]*?\.equatable\(\)/);
   assert.match(chat, /CompanionTranscriptPollDiff\(/);
   assert.match(chat, /if previousThread != next\s*\{\s*threadProjection\.update\(next\)/);

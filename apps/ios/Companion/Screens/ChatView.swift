@@ -1568,7 +1568,7 @@ private struct TranscriptRowInput: Equatable {
     let decisionCatalog: CompanionDecisionCatalog
 }
 
-private struct TranscriptRowView: View, Equatable {
+private struct TranscriptRowView: View, @MainActor Equatable {
     let input: TranscriptRowInput
     let onDecide: @MainActor (CompanionDecisionAction) async throws -> Void
     let onOpenPlugins: () -> Void
