@@ -289,15 +289,14 @@ struct ChatView: View {
                     reduceMotion ? nil : .easeOut(duration: 0.18),
                     value: isNearBottom
                 )
-                .onChange(of: scrollContentRevision) {
-                    Task { @MainActor in
-                        // Let the accepted transcript window complete one layout turn before
-                        // resolving its lazy scroll targets. Requests raised by the same update
-                        // remain coalesced in the coordinator until this physical-scroll boundary.
-                        await Task.yield()
-                        guard let request = scrollCoordinator.takePendingRequest() else { return }
-                        performScroll(to: request, with: proxy)
-                    }
+                .task(id: scrollContentRevision) {
+                    // Unlike onChange, an id-scoped task also runs for the value installed with a
+                    // newly rendered transcript. A newer revision cancels this task before the
+                    // coordinator is consumed, coalescing same-turn producers at one boundary.
+                    await Task.yield()
+                    guard !Task.isCancelled,
+                          let request = scrollCoordinator.takePendingRequest() else { return }
+                    performScroll(to: request, with: proxy)
                 }
             }
         }
