@@ -120,6 +120,11 @@ visible and connect its tap target to the demo reply's collapsed reasoning discl
 Combine `-companion-roster-demo -companion-notification-demo` to inject a version-1 response payload
 and verify deferred navigation to Luna's chat without contacting APNs.
 
+Native chat layout regressions use the deterministic transcript-window demo. Linux quality tests
+statically verify that its selected UI assertions remain wired into Apple Quality; the macOS 26
+lane performs the actual Swift build and simulator geometry checks. This keeps cloud development
+deterministic without installing or invoking XcodeBuildMCP in CI.
+
 Queued messages stay collapsed above the composer until opened. Owner and Editor can remove an
 unstarted queued turn through the shared cancel route; Viewer remains read-only. The shared `/v1`
 contract does not expose a queued-message edit mutation, so iOS does not offer editing or invent a

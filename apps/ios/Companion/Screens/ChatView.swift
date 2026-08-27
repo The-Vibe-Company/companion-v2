@@ -174,16 +174,19 @@ struct ChatView: View {
                     } action: { _, bottomDistance in
                         isNearBottom = bottomDistance <= bottomProximityThreshold
                     }
-
-                    if !isNearBottom {
-                        scrollToBottomButton {
-                            requestScroll(to: .bottom)
+                    .overlay(alignment: .bottomTrailing) {
+                        if !isNearBottom {
+                            scrollToBottomButton {
+                                requestScroll(to: .bottom)
+                            }
+                            .padding(.trailing, 16)
+                            .padding(.bottom, 12)
+                            .transition(
+                                reduceMotion
+                                    ? .identity
+                                    : .move(edge: .bottom).combined(with: .opacity)
+                            )
                         }
-                        .transition(
-                            reduceMotion
-                                ? .identity
-                                : .move(edge: .bottom).combined(with: .opacity)
-                        )
                     }
 
                     bottomControls(
@@ -311,21 +314,17 @@ struct ChatView: View {
     }
 
     private func scrollToBottomButton(action: @escaping () -> Void) -> some View {
-        HStack {
-            Spacer()
-            Button(action: action) {
-                Image(systemName: "arrow.down")
-                    .font(.system(size: 17, weight: .semibold))
-                    .frame(width: 46, height: 46)
-            }
-            .buttonStyle(.glass)
-            .buttonBorderShape(.circle)
-            .tint(visualTheme.accent)
-            .accessibilityLabel("Scroll to latest message")
-            .accessibilityIdentifier("chat.scroll-to-bottom")
+        Button(action: action) {
+            Image(systemName: "arrow.down")
+                .font(.system(size: 17, weight: .semibold))
+                .frame(width: 46, height: 46)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 6)
+        .buttonStyle(.glass)
+        .buttonBorderShape(.circle)
+        .tint(visualTheme.accent)
+        .shadow(color: visualTheme.shadow.opacity(0.2), radius: 8, y: 3)
+        .accessibilityLabel("Scroll to latest message")
+        .accessibilityIdentifier("chat.scroll-to-bottom")
     }
 
     private func dayMarker(for date: Date) -> some View {
