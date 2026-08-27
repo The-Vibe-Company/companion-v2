@@ -309,6 +309,15 @@ unselected accounts cannot use it. An explicit upstream `401` before any MCP res
 one refresh and one retry. Timeouts, disconnects, redirects, and other ambiguous outcomes are never
 replayed.
 
+Slack follows the same selected-account boundary without pretending Slack's user-token MCP endpoint
+is a Bot User integration. API owns the fixed Slack OAuth v2 authorize and token endpoints. For a
+selected Slack account, the loopback gateway terminates a small stateless MCP surface and maps only
+`slack_chat_post_message` to `https://slack.com/api/chat.postMessage`; it accepts bounded
+conversation IDs, text, and optional thread fields, disables unfurling, expurgates provider errors,
+and never automatically replays an ambiguous send. The deployment's Slack client secret is
+API-only. Receiving Slack events requires the separate signed webhook/trigger design and is not
+enabled by this send surface.
+
 Gmail uses a deployment-owned Google web OAuth client distinct from Better Auth sign-in and pins
 Google's Developer Preview remote at `https://gmailmcp.googleapis.com/mcp/v1`. The account requests
 `gmail.readonly` and `gmail.compose`, but the loopback gateway exposes only `search_threads`,

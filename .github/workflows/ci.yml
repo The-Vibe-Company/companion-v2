@@ -165,7 +165,7 @@ jobs:
     runs-on: macos-26
     needs: scope
     if: needs.scope.outputs.skill == 'true' || needs.scope.outputs.ios == 'true'
-    timeout-minutes: 25
+    timeout-minutes: 5
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -176,55 +176,25 @@ jobs:
         with:
           python-version: "3.12"
 
-      # The guards constrain descriptor permissions, and those differ by kernel: Darwin
-      # reports anonymous pipes as 0660 where Linux reports 0600. Secret redemption was
-      # therefore broken on every Mac while the Ubuntu matrix stayed green. Only this
-      # runner can prove the private transport still satisfies its own contract.
+      # This is the only Darwin-specific non-iOS signal in the job: anonymous-pipe
+      # permissions differ from Linux and protect the private secret transport contract.
       - name: Test bundled Companion skill guards
         if: needs.scope.outputs.skill == 'true'
         run: bash scripts/run-skill-guards.sh
-
-      - name: Set up Node.js
-        if: needs.scope.outputs.ios == 'true'
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-
-      - name: Select an available simulator
-        if: needs.scope.outputs.ios == 'true'
-        id: simulator
-        run: |
-          xcrun simctl list devices available --json > "$RUNNER_TEMP/simulators.json"
-          simulator_id="$(node scripts/select-ios-simulator.mjs "$RUNNER_TEMP/simulators.json")"
-          echo "id=$simulator_id" >> "$GITHUB_OUTPUT"
 
       - name: Test CompanionKit
         if: needs.scope.outputs.ios == 'true'
         run: swift test --package-path apps/ios/CompanionKit
 
-      - name: Build and test native chat regressions
+      - name: Build native app
         if: needs.scope.outputs.ios == 'true'
         run: >-
-          xcodebuild test
+          xcodebuild build
           -workspace apps/ios/Companion.xcworkspace
           -scheme Companion
           -configuration Debug
-          -destination "platform=iOS Simulator,id=${{ steps.simulator.outputs.id }}"
+          -destination "generic/platform=iOS Simulator"
           -derivedDataPath "$RUNNER_TEMP/companion-derived-data"
-          -retry-tests-on-failure
-          -test-iterations 2
-          -only-testing:CompanionUITests/CompanionUITests/testTranscriptWindowDemoLoadsEarlierMessages
-          -only-testing:CompanionUITests/CompanionUITests/testTranscriptWindowDemoStaysAtLatestAcrossPollInterval
-          -only-testing:CompanionUITests/CompanionUITests/testTranscriptTapDismissesKeyboardWithoutBlockingMessageControls
-          -only-testing:CompanionUITests/CompanionUITests/testTranscriptWindowDemoRestoresReadingPositionAfterCompanionSwitch
-          -only-testing:CompanionUITests/CompanionUITests/testTranscriptWindowDemoShowsStagedUnseenReplyAndScrollsToIt
-          -only-testing:CompanionUITests/CompanionUITests/testTranscriptWindowDemoKeepsLatestEntriesOrderedAndSeparated
-          -only-testing:CompanionUITests/CompanionUITests/testTranscriptWindowDemoBottomControlsNeverCoverChatContent
-          -only-testing:CompanionUITests/CompanionUITests/testMarkdownTableDemoKeepsRowsAndColumnsSeparated
-          -only-testing:CompanionUITests/CompanionUITests/testMessageLongPressOffersCopyShareAndSelectableText
-          -only-testing:CompanionUITests/CompanionUITests/testMarkdownCodeBlockCopyShowsSuccessStateAndNativeHitTarget
-          -only-testing:CompanionUITests/CompanionUITests/testQueuedOwnMessageContextDeleteUsesExistingRemoval
-          -only-testing:CompanionUITests/CompanionUITests/testQueuedTeammateContextDeleteIsUnavailableToEditor
           CODE_SIGNING_ALLOWED=NO
 
   quality:

@@ -47,7 +47,7 @@ connections support encrypted API keys plus the shared Claude authorization-code
 flows. The live server catalog includes Claude, Codex, Kimi, Moonshot, z.ai, OpenAI API, and Google
 Gemini; the app renders that catalog rather than maintaining a divergent mobile allowlist. Members
 can connect multiple labeled accounts for each product-owned plugin category — Linear, GitHub,
-Notion, Conductor, and Gmail — through the existing brokered OAuth flow. Gmail can search and
+Notion, Conductor, Slack, and Gmail — through the existing brokered OAuth flow. Gmail can search and
 read email, then create drafts for review in Gmail; it never sends mail. Custom MCP plugins remain
 available over HTTP or a Box command with an optional encrypted credential, using the same shared
 endpoints and transports as the browser client.
@@ -68,8 +68,8 @@ permission.
 
 This is client dictation into an ordinary text message, not Companion voice mode: it creates no
 audio message or runtime capability and makes no Box/Pi change. Linux/static quality checks verify
-the privacy wiring and selected UI contract; CompanionKit's mock-WebSocket protocol tests plus the
-native build/UI-test compilation are delegated to the existing macOS 26 **Apple Quality** job. No
+the privacy wiring, while CompanionKit's mock-WebSocket protocol tests and the native app build run
+in the existing macOS 26 **Apple Quality** job. Rendered UI validation stays local and manual. No
 Google key is required for those deterministic tests. A real end-to-end transcription remains a
 manual provider check with the owner-supplied key stored only in the API deployment environment.
 
@@ -151,10 +151,11 @@ visible and connect its tap target to the demo reply's collapsed reasoning discl
 Combine `-companion-roster-demo -companion-notification-demo` to inject a version-1 response payload
 and verify deferred navigation to Luna's chat without contacting APNs.
 
-Native chat layout regressions use the deterministic transcript-window demo. Linux quality tests
-statically verify that its selected UI assertions remain wired into Apple Quality; the macOS 26
-lane performs the actual Swift build and simulator geometry checks. This keeps cloud development
-deterministic without installing or invoking XcodeBuildMCP in CI.
+Native chat layout regressions use the deterministic transcript-window demo for focused local and
+manual UI verification. Apple Quality's iOS path stays below five minutes by running the
+`CompanionKit` behavior tests and compiling the complete app for a generic iOS Simulator
+destination without booting one or invoking XCUITests. Its separate conditional skill path keeps
+the Darwin-only private-transport guard.
 The poll-stability assertion launches that fixture, observes the latest entry across one real
 four-second poll, and verifies that the latest entry remains hittable without a scroll-to-bottom
 overlay. Initial placement is the loaded scroll view's role-scoped bottom layout anchor; it is not
@@ -162,15 +163,15 @@ an imperative request and does not apply again when poll, markdown, composer, or
 resize the content. Every later scroll decision is delegated to the shared
 `CompanionScrollCoordinator`, so repeated unchanged snapshots do not compete with the rendered
 viewport.
-Keyboard-dismissal regressions use the same static-plus-Apple-Quality split: the Linux guard keeps
-the simultaneous transcript tap and selected UI test wired, while the macOS fixture focuses the
-composer, taps a message, verifies the keyboard disappears, and then opens a tool card to prove
-message controls still receive their taps. The focus change is intentionally silent; dismissing a
-keyboard does not produce haptic feedback.
+Linux quality still protects the keyboard-dismissal gesture mechanics without launching the app;
+the rendered fixture remains local and manual. It focuses the composer, taps a message, verifies
+the keyboard disappears, and then opens a tool card to prove message controls still receive their
+taps. The focus change is intentionally silent; dismissing a keyboard does not produce haptic
+feedback.
 The same fixture can switch between Luna and Orbit to verify that the roster-scoped, in-memory
 reading-position store restores the first visible message without animated hydration. CompanionKit
-tests cover per-Companion isolation and window restoration, while Apple Quality owns the rendered
-switch-and-return assertion.
+tests cover per-Companion isolation and window restoration; the rendered switch-and-return check
+remains available for local interactive verification.
 
 Queued messages stay collapsed above the composer until opened. Owner and Editor can remove an
 unstarted queued turn through the shared cancel route; Viewer remains read-only. The shared `/v1`

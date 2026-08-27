@@ -273,6 +273,13 @@
   color: #111110;
 }
 
+.companions-plugin-icon--slack,
+.companions-plugin-dialog--slack .og-dialog__ic {
+  background: #4a154b;
+  border-color: #4a154b;
+  color: #fff;
+}
+
 .companions-plugin-icon--gmail,
 .companions-plugin-dialog--gmail .og-dialog__ic {
   background: oklch(0.63 0.21 29);

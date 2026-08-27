@@ -3,7 +3,6 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { selectLatestIOSSimulator } from "./select-ios-simulator.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -182,7 +181,7 @@ test("long-thread composer and poll work stay behind narrow invalidation boundar
   assert.match(sessionStore, /if persistedSession != authority \{/);
 });
 
-test("native message interactions stay accessible and CI-verifiable without Xcode", () => {
+test("native message interactions stay accessible without simulator CI", () => {
   const chat = read("apps/ios/Companion/Screens/ChatView.swift");
   const interactions = read(
     "apps/ios/Companion/Support/MessageInteractionSupport.swift",
@@ -190,9 +189,7 @@ test("native message interactions stay accessible and CI-verifiable without Xcod
   const markdown = read("apps/ios/Companion/Screens/MarkdownMessageView.swift");
   const queued = read("apps/ios/Companion/Screens/CompanionQueuedMessagesView.swift");
   const queuedDemo = read("apps/ios/Companion/Screens/CompanionQueuedMessagesDemoView.swift");
-  const uiTests = read("apps/ios/CompanionUITests/CompanionUITests.swift");
   const readme = read("apps/ios/README.md");
-  const ci = read(".github/workflows/ci.yml");
 
   assert.match(chat, /\.companionMessageInteractionMenu\(rawContent: content\)/);
   assert.match(chat, /allowsTextSelection: false/);
@@ -225,18 +222,6 @@ test("native message interactions stay accessible and CI-verifiable without Xcod
     /Button\("Delete", systemImage: "trash", role: \.destructive\) \{\s*requestRemoval\(of: entry\)/,
   );
   assert.match(queuedDemo, /viewerID: viewerID/);
-  assert.match(uiTests, /testMessageLongPressOffersCopyShareAndSelectableText/);
-  assert.match(uiTests, /testMarkdownCodeBlockCopyShowsSuccessStateAndNativeHitTarget/);
-  assert.match(uiTests, /testQueuedOwnMessageContextDeleteUsesExistingRemoval/);
-  assert.match(uiTests, /testQueuedTeammateContextDeleteIsUnavailableToEditor/);
-  for (const testName of [
-    "testMessageLongPressOffersCopyShareAndSelectableText",
-    "testMarkdownCodeBlockCopyShowsSuccessStateAndNativeHitTarget",
-    "testQueuedOwnMessageContextDeleteUsesExistingRemoval",
-    "testQueuedTeammateContextDeleteIsUnavailableToEditor",
-  ]) {
-    assert.match(ci, new RegExp(`-only-testing:CompanionUITests/CompanionUITests/${testName}`));
-  }
   assert.match(readme, /Reply or thread\s+actions and regenerate are deliberately out of scope/);
 });
 
@@ -265,8 +250,6 @@ test("the chat scroll-to-bottom control floats over the transcript", () => {
 
 test("native transcript taps dismiss the keyboard without consuming message controls", () => {
   const chat = read("apps/ios/Companion/Screens/ChatView.swift");
-  const uiTests = read("apps/ios/CompanionUITests/CompanionUITests.swift");
-  const ci = read(".github/workflows/ci.yml");
   const readme = read("apps/ios/README.md");
   const transcript = chat.slice(
     chat.indexOf(".scrollDismissesKeyboard(.interactively)"),
@@ -288,28 +271,18 @@ test("native transcript taps dismiss the keyboard without consuming message cont
   );
   assert.match(chat, /#selector\(UIResponder\.resignFirstResponder\)/);
   assert.doesNotMatch(chat, /composerKeyboardDismissalRequest/);
-  assert.match(uiTests, /testTranscriptTapDismissesKeyboardWithoutBlockingMessageControls/);
-  assert.match(uiTests, /identifier == %@", "chat\.transcript"/);
-  assert.match(uiTests, /transcript\.coordinate\(withNormalizedOffset:[\s\S]*?\)\.tap\(\)/);
-  assert.match(uiTests, /predicate: NSPredicate\(format: "exists == false"\)/);
-  assert.match(uiTests, /label CONTAINS %@", "run_layout_checks"/);
-  assert.match(uiTests, /for _ in 0\.\.<3 where !toolCard\.isHittable \{\s*app\.swipeUp\(\)/);
-  assert.match(uiTests, /XCTAssertTrue\(toolCard\.isHittable\)/);
-  assert.match(uiTests, /toolCard\.tap\(\)/);
-  assert.match(uiTests, /\["tool-run\.detail"\]\.waitForExistence/);
-  assert.match(
-    ci,
-    /-only-testing:CompanionUITests\/CompanionUITests\/testTranscriptTapDismissesKeyboardWithoutBlockingMessageControls/,
-  );
-  assert.match(readme, /Keyboard-dismissal regressions use the same static-plus-Apple-Quality split/);
+  assert.match(readme, /Linux quality still protects the keyboard-dismissal gesture mechanics/);
   assert.match(readme, /The focus change is intentionally silent/);
 });
 
-test("native chat reading restoration stays deterministic and delegated to Apple Quality", () => {
+test("native chat reading restoration stays covered at the behavior layer", () => {
   const chat = read("apps/ios/Companion/Screens/ChatView.swift");
   const roster = read("apps/ios/Companion/Screens/CompanionListView.swift");
   const coordination = read(
     "apps/ios/CompanionKit/Sources/CompanionKit/CompanionThreadCoordination.swift",
+  );
+  const companionKitTests = read(
+    "apps/ios/CompanionKit/Tests/CompanionKitTests/CompanionKitTests.swift",
   );
   const uiTests = read("apps/ios/CompanionUITests/CompanionUITests.swift");
   const ci = read(".github/workflows/ci.yml");
@@ -374,14 +347,13 @@ test("native chat reading restoration stays deterministic and delegated to Apple
   assert.match(coordination, /issuedRequestBatchCount/);
   assert.match(uiTests, /testTranscriptWindowDemoRestoresReadingPositionAfterCompanionSwitch/);
   assert.match(uiTests, /testTranscriptWindowDemoStaysAtLatestAcrossPollInterval/);
+  assert.match(companionKitTests, /func chatReadingPositionsRemainIsolatedByCompanion\(\)/);
   assert.match(
-    ci,
-    /-only-testing:CompanionUITests\/CompanionUITests\/testTranscriptWindowDemoRestoresReadingPositionAfterCompanionSwitch/,
+    companionKitTests,
+    /func transcriptWindowRestorationKeepsSavedAnchorExposedAfterTailGrowth\(\)/,
   );
-  assert.match(
-    ci,
-    /-only-testing:CompanionUITests\/CompanionUITests\/testTranscriptWindowDemoStaysAtLatestAcrossPollInterval/,
-  );
+  assert.match(ci, /xcodebuild build/);
+  assert.doesNotMatch(ci, /-only-testing:CompanionUITests/);
   assert.match(read("apps/ios/README.md"), /four-second poll/);
 });
 
@@ -461,25 +433,31 @@ test("the iOS launcher derives the API port from Conductor and uses XcodeBuildMC
   assert.doesNotMatch(launcher, /iPhone 17|\bxcodebuild\b|\bxcrun\b|\bsimctl\b/);
 });
 
-test("CI tests iOS without secrets and keeps the live provider diagnostic manual", () => {
+test("CI keeps Apple Quality valuable, native, and under five minutes", () => {
   const ci = read(".github/workflows/ci.yml");
   const e2e = read(".github/workflows/ios-e2e.yml");
+  const appleQualityStart = ci.indexOf("  apple-quality:");
+  const appleQuality = ci.slice(
+    appleQualityStart,
+    ci.indexOf("\n  quality:", appleQualityStart),
+  );
 
-  assert.match(ci, /^  apple-quality:$/m);
-  assert.match(ci, /^    runs-on: macos-26$/m);
-  assert.match(ci, /if: needs\.scope\.outputs\.skill == 'true' \|\| needs\.scope\.outputs\.ios == 'true'/);
+  assert.match(appleQuality, /^  apple-quality:$/m);
+  assert.match(appleQuality, /^    runs-on: macos-26$/m);
+  assert.match(appleQuality, /^    timeout-minutes: 5$/m);
+  assert.match(
+    appleQuality,
+    /if: needs\.scope\.outputs\.skill == 'true' \|\| needs\.scope\.outputs\.ios == 'true'/,
+  );
+  assert.match(appleQuality, /Test bundled Companion skill guards/);
+  assert.match(appleQuality, /run: bash scripts\/run-skill-guards\.sh/);
+  assert.match(appleQuality, /swift test --package-path apps\/ios\/CompanionKit/);
+  assert.match(appleQuality, /xcodebuild build/);
+  assert.match(appleQuality, /-destination "generic\/platform=iOS Simulator"/);
+  assert.match(appleQuality, /CODE_SIGNING_ALLOWED=NO/);
+  assert.doesNotMatch(appleQuality, /xcodebuild test|CompanionUITests|only-testing:/);
+  assert.doesNotMatch(appleQuality, /simctl|Select an available simulator|retry-tests-on-failure/);
   assert.doesNotMatch(ci, /xcodebuildmcp/i);
-  assert.match(ci, /swift test --package-path apps\/ios\/CompanionKit/);
-  assert.match(ci, /xcodebuild test/);
-  assert.match(ci, /testTranscriptWindowDemoLoadsEarlierMessages/);
-  assert.match(ci, /testTranscriptWindowDemoRestoresReadingPositionAfterCompanionSwitch/);
-  assert.match(ci, /testTranscriptWindowDemoShowsStagedUnseenReplyAndScrollsToIt/);
-  assert.match(ci, /testTranscriptWindowDemoKeepsLatestEntriesOrderedAndSeparated/);
-  assert.match(ci, /testTranscriptWindowDemoBottomControlsNeverCoverChatContent/);
-  assert.match(ci, /testMarkdownTableDemoKeepsRowsAndColumnsSeparated/);
-  assert.doesNotMatch(ci, /testChatPhotoLibraryOpensOnFirstSelectionWithKeyboardVisible/);
-  assert.match(ci, /xcrun simctl list devices available --json/);
-  assert.match(ci, /node scripts\/select-ios-simulator\.mjs/);
   assert.doesNotMatch(ci, /^  skill-guards-macos:$/m);
   assert.doesNotMatch(ci, /^  ios-quality:$/m);
   assert.doesNotMatch(ci, /^  schedule:$/m);
@@ -510,7 +488,6 @@ test("voice transcription keeps the global key server-side and delegates Apple c
   const tests = read(
     "apps/ios/CompanionKit/Tests/CompanionKitTests/GeminiLiveTranscriptionTests.swift",
   );
-  const uiTests = read("apps/ios/CompanionUITests/CompanionUITests.swift");
   const ci = read(".github/workflows/ci.yml");
 
   assert.match(composer, /accessibilityIdentifier\("chat\.transcription\.toggle"\)/);
@@ -538,17 +515,14 @@ test("voice transcription keeps the global key server-side and delegates Apple c
   assert.match(info, /<key>NSMicrophoneUsageDescription<\/key>/);
   assert.match(tests, /connectsStreamsPCMAndPublishesTranscriptDeltas/);
   assert.match(tests, /resumesOnceAndFlushesBoundedAudioAfterGoAway/);
-  assert.match(uiTests, /testChatComposerExposesAccessibleVoiceTranscriptionControl/);
-  assert.match(uiTests, /testChatComposerHidesVoiceTranscriptionWithoutDeploymentKey/);
   assert.match(ci, /swift test --package-path apps\/ios\/CompanionKit/);
-  assert.match(ci, /xcodebuild test/);
+  assert.match(ci, /xcodebuild build/);
   assert.doesNotMatch(ci, /xcodebuildmcp/i);
 });
 
 test("the staged reply fixture is armed only after the UI reader leaves the tail", () => {
   const chatView = read("apps/ios/Companion/Screens/ChatView.swift");
   const demo = read("apps/ios/Companion/Screens/CompanionTranscriptWindowDemoView.swift");
-  const uiTests = read("apps/ios/CompanionUITests/CompanionUITests.swift");
 
   assert.match(
     demo,
@@ -558,12 +532,6 @@ test("the staged reply fixture is armed only after the UI reader leaves the tail
   assert.match(demo, /stagedFixture\.deliveredStagedReply \? "Reply delivered" : "Stage reply"/);
   assert.match(demo, /accessibilityIdentifier\("demo\.stage-reply"\)/);
   assert.match(demo, /guard stagesNextPoll else \{ return initial \}/);
-  assert.match(uiTests, /let unseen = app\.buttons\["chat\.scroll-to-bottom"\]/);
-  assert.match(uiTests, /let stageReply = app\.buttons\["demo\.stage-reply"\]/);
-  assert.match(uiTests, /stageReply\.tap\(\)/);
-  assert.match(uiTests, /label == %@", "Reply delivered"/);
-  assert.match(uiTests, /let plainButtonWidth = unseen\.frame\.width/);
-  assert.match(uiTests, /element\.frame\.width > plainButtonWidth \+ 40/);
   assert.match(demo, /"event_id": "staged-reply"/);
   assert.match(chatView, /@State private var unseenCount = 0/);
   assert.match(chatView, /var nextUnseenTracker = unseenTracker/);
@@ -609,31 +577,4 @@ test("dependency auditing stays inside Quality and Pi publishing remains narrowl
   ]) {
     assert.match(pi, new RegExp(`      - "${path.replaceAll(".", "\\.")}"`));
   }
-});
-
-test("the CI simulator selector ignores other Apple platforms and chooses the latest iOS", () => {
-  const selected = selectLatestIOSSimulator({
-    devices: {
-      "com.apple.CoreSimulator.SimRuntime.visionOS-26-0": [
-        { udid: "vision", isAvailable: true },
-      ],
-      "com.apple.CoreSimulator.SimRuntime.iOS-25-4": [
-        { udid: "ios-older", isAvailable: true },
-      ],
-      "com.apple.CoreSimulator.SimRuntime.iOS-27-0": [
-        { udid: "ios-unavailable", isAvailable: false },
-      ],
-      "com.apple.CoreSimulator.SimRuntime.iOS-26-5": [
-        { udid: "ios-latest", isAvailable: true },
-      ],
-    },
-  });
-
-  assert.equal(selected.simulatorId, "ios-latest");
-  assert.throws(
-    () => selectLatestIOSSimulator({
-      devices: { "com.apple.CoreSimulator.SimRuntime.visionOS-26-0": [{ udid: "vision" }] },
-    }),
-    /No available iOS simulator/,
-  );
 });

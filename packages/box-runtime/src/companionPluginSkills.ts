@@ -29,6 +29,35 @@ const COMMON_TRIGGER_RULES = [
 
 export const COMPANION_PLUGIN_SKILLS: Array<CompanionPluginSkill & { provider: string }> = [
   {
+    provider: "slack",
+    slug: "plugin-slack",
+    name: "Slack plugin",
+    description:
+      "Use when sending messages through the attached Slack Bot User account to channels, direct messages, or threads.",
+    content: [
+      "---",
+      "name: slack-plugin",
+      'description: "Use when sending a message through the attached Slack Bot User account to a known channel, direct message, or thread."',
+      "allowed-tools: mcp",
+      "---",
+      "",
+      "# Slack plugin",
+      "",
+      "The Slack plugin gives you the `slack_chat_post_message` MCP tool. It can send a bounded",
+      "message to a Slack conversation ID (`C…`, `G…`, or `D…`). Add `thread_ts` to reply in a",
+      "thread, and use `reply_broadcast` only when the person explicitly wants the reply surfaced",
+      "to the whole channel.",
+      "",
+      "Ask for the exact conversation ID when it is missing or ambiguous. The bot must already be",
+      "a member of private channels and group conversations. Sending is an external side effect:",
+      "confirm the destination and message when the request leaves either unclear. Never claim a",
+      "message was delivered unless the tool returns `sent: true`.",
+      "",
+      "This release does not receive Slack messages. Slack event triggers are a separate capability;",
+      "do not promise that replies or channel messages will wake this Companion.",
+    ].join("\n"),
+  },
+  {
     provider: "github",
     slug: "plugin-github",
     name: "GitHub plugin",

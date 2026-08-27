@@ -69,14 +69,9 @@ test("API changes run database, browser, and container checks", () => {
 });
 
 test("iOS changes request the native macOS lane", () => {
-  for (const file of [
-    "apps/ios/Companion/Screens/LoginView.swift",
-    "scripts/select-ios-simulator.mjs",
-  ]) {
-    const result = classifyFiles([file]);
-    assert.equal(result.ios, true, file);
-    assert.equal(result.quality, true, file);
-  }
+  const result = classifyFiles(["apps/ios/Companion/Screens/LoginView.swift"]);
+  assert.equal(result.ios, true);
+  assert.equal(result.quality, true);
 });
 
 test("runtime and simulator changes run PostgreSQL, runtime, and container checks", () => {

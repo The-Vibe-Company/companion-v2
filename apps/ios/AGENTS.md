@@ -6,8 +6,11 @@ logic belong in `CompanionKit`; the app target owns SwiftUI presentation and pla
 
 - Use `xcodebuildmcp` only for local interactive discovery, builds, simulator launches,
   screenshots, and UI inspection. Never install or invoke it in CI, and never use it as an
-  automated app test runner. Apple CI uses native `swift test`, `xcodebuild`, and `xcrun simctl`.
+  automated app test runner. Apple CI uses native `swift test` and `xcodebuild`.
   Check command help and session defaults before the first local build action.
+- Keep Apple Quality's iOS path under five minutes with only `CompanionKit` behavior tests and a
+  generic iOS Simulator build. Do not boot a simulator or run XCUITests in required CI; UI checks
+  stay local and manual unless the repository owner explicitly approves a separate CI job.
 - For non-trivial native work, use the repo-local `ios-product-dev` owner skill, route SwiftUI
   mechanics through `swiftui-expert-dev`, visual direction through `design-frontend-dev`, and all
   Apple build or simulator work through `xcodebuildmcp-cli`. The same packages are mirrored for

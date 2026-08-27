@@ -297,6 +297,104 @@ describe("Companion MCP loopback gateway", () => {
     expect(upstreamAuthorizations).toEqual([`Bearer access-${conductorAccountId}`]);
   });
 
+  it("serves a narrow Slack MCP tool and keeps the bot token in the loopback gateway", async () => {
+    const calls: Array<{ url: string; authorization: string | null; body: unknown }> = [];
+    const gateway = await startGatewayWithAccounts(async (rawUrl, init) => {
+      if (String(rawUrl).startsWith(apiUrl)) return tokenResponse("xoxb-secret", null);
+      calls.push({
+        url: String(rawUrl),
+        authorization: new Headers(init?.headers).get("authorization"),
+        body: JSON.parse(String(init?.body)),
+      });
+      return Response.json({ ok: true, channel: "C123ABC", ts: "1720000000.123456" });
+    }, [{
+      accountId,
+      credentialGeneration,
+      upstreamUrl: "https://slack.com/api/chat.postMessage",
+      github: false,
+      slack: true,
+    }]);
+
+    // SAFETY: this fixture controls the gateway response and asserts its tools/list contract below.
+    const listed = await fetch(`${gateway.origin}/mcp/${accountId}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    }).then(async (response) => await response.json()) as {
+      result: { tools: Array<{ name: string }> };
+    };
+    expect(listed.result.tools.map((tool) => tool.name)).toEqual(["slack_chat_post_message"]);
+
+    // SAFETY: this fixture controls the gateway response and asserts its tools/call contract below.
+    const sent = await fetch(`${gateway.origin}/mcp/${accountId}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: {
+          name: "slack_chat_post_message",
+          arguments: {
+            channel: "C123ABC",
+            text: "Build completed",
+            thread_ts: "1719999999.000001",
+          },
+        },
+      }),
+    }).then(async (response) => await response.json()) as {
+      result: { structuredContent: { sent: boolean; channel: string; ts: string } };
+    };
+    expect(sent.result.structuredContent).toEqual({
+      sent: true,
+      channel: "C123ABC",
+      ts: "1720000000.123456",
+    });
+    expect(calls).toEqual([{
+      url: "https://slack.com/api/chat.postMessage",
+      authorization: "Bearer xoxb-secret",
+      body: {
+        channel: "C123ABC",
+        text: "Build completed",
+        thread_ts: "1719999999.000001",
+        unfurl_links: false,
+        unfurl_media: false,
+      },
+    }]);
+    expect(JSON.stringify(sent)).not.toContain("xoxb-secret");
+  });
+
+  it("expurgates Slack provider failures from MCP results", async () => {
+    const gateway = await startGatewayWithAccounts(async (rawUrl) => {
+      if (String(rawUrl).startsWith(apiUrl)) return tokenResponse("xoxb-secret", null);
+      return Response.json({ ok: false, error: "provider-secret-detail" });
+    }, [{
+      accountId,
+      credentialGeneration,
+      upstreamUrl: "https://slack.com/api/chat.postMessage",
+      github: false,
+      slack: true,
+    }]);
+
+    // SAFETY: this fixture controls the gateway error response and reads only the asserted flag.
+    const failed = await fetch(`${gateway.origin}/mcp/${accountId}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: {
+          name: "slack_chat_post_message",
+          arguments: { channel: "D123ABC", text: "Hello" },
+        },
+      }),
+    }).then(async (response) => await response.json()) as { result: { isError: boolean } };
+    expect(failed.result.isError).toBe(true);
+    expect(JSON.stringify(failed)).not.toContain("provider-secret-detail");
+    expect(JSON.stringify(failed)).not.toContain("xoxb-secret");
+  });
+
   it("filters a curated tool catalog and refuses calls outside it before upstream access", async () => {
     let upstreamRequests = 0;
     const gateway = await startGatewayWithAccounts(async (rawUrl, init) => {
@@ -438,6 +536,7 @@ async function startGatewayWithAccounts(
     credentialGeneration: string;
     upstreamUrl: string;
     github: boolean;
+    slack?: true;
     allowedTools?: string[];
   }>,
   now: () => number = Date.now,
