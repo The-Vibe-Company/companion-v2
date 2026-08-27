@@ -56,6 +56,7 @@ import {
   createCompanionV2,
   createCompanionRoutineV2,
   createCompanionTriggerV2,
+  createCompanionTranscriptionSession,
   deleteCompanionRoutineV2,
   deleteCompanionTriggerV2,
   duplicateCompanionV2,
@@ -66,6 +67,7 @@ import {
   fireCompanionTrigger,
   getCompanionDecisionV2,
   getCompanionTriggerForWebhook,
+  getCompanion,
   getCompanionV2,
   listCompanionsV2,
   listCompanionRoutinesV2,
@@ -110,7 +112,9 @@ import {
   type CompanionThread,
   type CompanionTurn,
   type SendCompanionMessageInput,
+  companionTranscriptionSessionSchema,
   createCompanionInputSchema,
+  createCompanionTranscriptionSessionInputSchema,
   createCompanionRoutineInputSchema,
   createCompanionTriggerInputSchema,
   declaredCompanionAttachmentContentType,
@@ -200,12 +204,14 @@ function defaultCompanionRouteDependencies() {
     enqueueCompanionOperationV2,
     enqueueCompanionTurnV2,
     getCompanionDecisionV2,
+    getCompanion,
     getCompanionV2,
     listCompanionsV2,
     listCompanionRoutinesV2,
     createCompanionRoutineV2,
     updateCompanionRoutineV2,
     deleteCompanionRoutineV2,
+    createCompanionTranscriptionSession,
     answerCompanionRoutineDecisionV2,
     listCompanionTriggersV2,
     createCompanionTriggerV2,
@@ -242,8 +248,15 @@ const VIEWER_RUNTIME_ERROR: CompanionRuntimeSafeError = {
  * the Owner/Editor operating boundary. Keep the same turn shape so polling remains stable while
  * replacing both the turn-level and attempt-level error with one non-actionable projection.
  */
-function projectThreadForHttp(thread: CompanionThread): CompanionThread {
-  if (thread.access !== "viewer") return thread;
+function projectThreadForHttp(
+  thread: CompanionThread,
+  transcriptionAvailable: boolean,
+): CompanionThread {
+  const projectedThread = {
+    ...thread,
+    transcription_available: transcriptionAvailable,
+  };
+  if (thread.access !== "viewer") return projectedThread;
 
   const projectTurn = (turn: CompanionTurn | null): CompanionTurn | null => turn === null
     ? null
@@ -261,7 +274,7 @@ function projectThreadForHttp(thread: CompanionThread): CompanionThread {
       };
 
   return {
-    ...thread,
+    ...projectedThread,
     active_turn: projectTurn(thread.active_turn),
     interrupted_turn: projectTurn(thread.interrupted_turn),
   };
@@ -544,6 +557,8 @@ export function registerCompanionRoutes(
   dependencies: CompanionRouteDependencies = {},
 ): void {
   if (!companionsEnabled(env)) return;
+  const transcriptionApiKey = env.COMPANION_GEMINI_TRANSCRIPTION_API_KEY?.trim() ?? "";
+  const transcriptionAvailable = transcriptionApiKey.length > 0;
 
   const {
     actorFromContext,
@@ -563,12 +578,14 @@ export function registerCompanionRoutes(
     enqueueCompanionOperationV2,
     enqueueCompanionTurnV2,
     getCompanionDecisionV2,
+    getCompanion,
     getCompanionV2,
     listCompanionsV2,
     listCompanionRoutinesV2,
     createCompanionRoutineV2,
     updateCompanionRoutineV2,
     deleteCompanionRoutineV2,
+    createCompanionTranscriptionSession,
     answerCompanionRoutineDecisionV2,
     listCompanionTriggersV2,
     createCompanionTriggerV2,
@@ -706,6 +723,50 @@ export function registerCompanionRoutes(
       return routeError(c, error);
     }
   });
+
+  app.post(
+    "/v1/companions/:id/transcription-sessions",
+    async (c, next) => {
+      try {
+        actorFromContext(c);
+      } catch (error) {
+        return routeError(c, error);
+      }
+      await next();
+    },
+    bodyLimit({
+      maxSize: 1024,
+      onError: (c) => jsonError(c, "transcription session request exceeds the 1 KB limit", 413),
+    }),
+    async (c) => {
+      c.header("Cache-Control", "private, no-store");
+      c.header("Pragma", "no-cache");
+      try {
+        const companionId = companionIdSchema.parse(c.req.param("id"));
+        // The body exists only for a uniform POST shape. No audio, language, model, or other
+        // provider setting is accepted from a client; the core exchange below owns the fixed config.
+        const rawBody = await c.req.text();
+        createCompanionTranscriptionSessionInputSchema.parse(
+          rawBody.trim().length === 0 ? {} : JSON.parse(rawBody),
+        );
+        const session = await tenant(c, async ({ actor, orgId, database }) => {
+          const companion = await getCompanion({ actor, orgId, companionId, database });
+          if (companion.access === "viewer") throw new CompanionRuntimeForbiddenError();
+          return await createCompanionTranscriptionSession({
+            actor,
+            orgId,
+            companionId,
+            companion,
+            apiKey: transcriptionApiKey,
+            database,
+          });
+        });
+        return c.json(companionTranscriptionSessionSchema.parse(session));
+      } catch (error) {
+        return routeError(c, error);
+      }
+    },
+  );
 
   app.get("/v1/companion-providers", async (c) => {
     try {
@@ -1430,7 +1491,7 @@ export function registerCompanionRoutes(
       const thread = await tenant(c, ({ actor, orgId, database }) =>
         readCompanionThreadV2({ actor, orgId, companionId, database }));
       c.header("Cache-Control", "private, no-store");
-      return c.json({ thread: projectThreadForHttp(thread) });
+      return c.json({ thread: projectThreadForHttp(thread, transcriptionAvailable) });
     } catch (error) {
       return routeError(c, error);
     }
@@ -1661,6 +1722,7 @@ export function registerCompanionRoutes(
         ) {
           return projectThreadForHttp(
             await readCompanionThreadV2({ actor, orgId, companionId, database }),
+            transcriptionAvailable,
           );
         }
         if (pending.requestKind === "config_proposal") {
@@ -1730,6 +1792,7 @@ export function registerCompanionRoutes(
         }
         return projectThreadForHttp(
           await readCompanionThreadV2({ actor, orgId, companionId, database }),
+          transcriptionAvailable,
         );
       });
       return c.json({ thread }, 202);
@@ -1765,7 +1828,7 @@ export function registerCompanionRoutes(
       const accepted = await tenant(c, async ({ actor, orgId, database }) => {
         const turn = await cancelCompanionTurnV2({ orgId, companionId, turnId, database });
         const thread = await readCompanionThreadV2({ actor, orgId, companionId, database });
-        return { turn, thread: projectThreadForHttp(thread) };
+        return { turn, thread: projectThreadForHttp(thread, transcriptionAvailable) };
       });
       return c.json(accepted, 202);
     } catch (error) {

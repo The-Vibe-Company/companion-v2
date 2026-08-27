@@ -446,11 +446,15 @@ struct CompanionSettingsDemoView: View {
     @State private var deletionRequested = false
 
     private let access: CompanionAccess
+    private let transcriptionAvailable: Bool
 
     init() {
         let rawAccess = ProcessInfo.processInfo.environment["COMPANION_SETTINGS_DEMO_ACCESS"] ?? "owner"
         let access = CompanionAccess(rawValue: rawAccess) ?? .viewer
         self.access = access
+        transcriptionAvailable = ProcessInfo.processInfo.environment[
+            "COMPANION_SETTINGS_DEMO_TRANSCRIPTION_AVAILABLE"
+        ] == "true"
         _companion = State(initialValue: CompanionSettingsDemoFixtures.companion(access: access))
     }
 
@@ -465,7 +469,10 @@ struct CompanionSettingsDemoView: View {
             } else {
                 ChatView(
                     companion: companion,
-                    services: CompanionSettingsDemoFixtures.chatServices(access: access)
+                    services: CompanionSettingsDemoFixtures.chatServices(
+                        access: access,
+                        transcriptionAvailable: transcriptionAvailable
+                    )
                 ) {
                     showingSettings = true
                 }
@@ -530,7 +537,10 @@ private enum CompanionSettingsDemoFixtures {
         decode(#"{"id":"66666666-6666-4666-8666-666666666666","provider":"github","label":"personal","transport":"http","endpoint":"https://api.githubcopilot.com/mcp","connected":true,"created_at":"2026-08-25T08:00:00.000Z","updated_at":"2026-08-25T08:00:00.000Z"}"#),
     ]
 
-    static func chatServices(access: CompanionAccess) -> ChatServices {
+    static func chatServices(
+        access: CompanionAccess,
+        transcriptionAvailable: Bool
+    ) -> ChatServices {
         let currentCompanion = companion(access: access)
         let currentThread: CompanionThread = decode(#"""
         {
@@ -538,6 +548,7 @@ private enum CompanionSettingsDemoFixtures {
           "viewer_id":"user-1",
           "read_only":\#(access == .viewer ? "true" : "false"),
           "can_send":\#(access == .viewer ? "false" : "true"),
+          "transcription_available":\#(transcriptionAvailable ? "true" : "false"),
           "entries":[],
           "queued_count":0,
           "interrupted_turn":null
