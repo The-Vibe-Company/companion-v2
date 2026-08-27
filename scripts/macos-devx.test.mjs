@@ -49,6 +49,11 @@ test("the macOS bootstrap keeps credentials, mutations, and native inputs lifecy
   const chatView = read("apps/macos/CompanionMac/MacChatView.swift");
   const workspaceView = read("apps/macos/CompanionMac/MacWorkspaceView.swift");
   const settings = read("apps/macos/CompanionMac/MacSettingsViews.swift");
+  const deleteFunction = workspaceView.match(
+    /    func delete\(_ companion: CompanionSummary\)[\s\S]*?(?=\n    func applyCreated)/,
+  )?.[0];
+
+  assert.ok(deleteFunction, "MacWorkspaceView must keep its delete action");
 
   assert.match(packageJSON, /test:anti-slop[^\n]+scripts\/macos-devx\.test\.mjs/);
   assert.doesNotMatch(project, /DEVELOPMENT_TEAM = K28B69CWQ7/);
@@ -68,8 +73,8 @@ test("the macOS bootstrap keeps credentials, mutations, and native inputs lifecy
   assert.match(workspaceView, /reconcileDeletionResponse[\s\S]*?operation\.isActive/);
   assert.match(workspaceView, /pendingDeletionIDs\.insert\(companion\.id\)/);
   assert.match(workspaceView, /if deletionRequestsInFlight\.isEmpty[\s\S]*?rosterState\.reconcile/);
-  assert.match(workspaceView, /deletionRequestsInFlight\.insert\(companion\.id\)[\s\S]*?removeOptimistically/);
-  assert.match(workspaceView, /catch[\s\S]*?deletionRequestsInFlight\.remove\(companion\.id\)[\s\S]*?restoreDeletion/);
+  assert.match(deleteFunction, /deletionRequestsInFlight\.insert\(companion\.id\)[\s\S]*?removeOptimistically/);
+  assert.match(deleteFunction, /catch \{[\s\S]*?deletionRequestsInFlight\.remove\(companion\.id\)[\s\S]*?pendingDeletionIDs\.remove\(companion\.id\)[\s\S]*?restoreDeletion/);
   assert.match(workspaceView, /visibleCompanionsReconcilingDeletions[\s\S]*?companion\.deletionOperation\?\.isActive == true[\s\S]*?retainedPendingIDs\.insert/);
   assert.match(workspaceView, /func duplicate[\s\S]*?!isDeletionInProgress\(companion\)/);
   assert.match(workspaceView, /performMemberStateUpdate[\s\S]*?!isDeletionInProgress\(companion\)/);
