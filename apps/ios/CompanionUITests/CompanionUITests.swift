@@ -672,7 +672,7 @@ final class CompanionUITests: XCTestCase {
         )
         wait(for: [keyboardDismissed], timeout: 2)
 
-        let toolCard = app.buttons["tool-run.open-details.layout-check"]
+        let toolCard = app.buttons["tool-run.open-details.long-8"]
         for _ in 0..<3 where !toolCard.exists {
             app.swipeDown()
         }
