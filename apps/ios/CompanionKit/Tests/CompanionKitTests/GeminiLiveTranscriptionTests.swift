@@ -181,6 +181,35 @@ func resumesOnceAndFlushesBoundedAudioAfterGoAway() async throws {
 }
 
 @Test
+func resumesWhileFinishingAndResendsAudioStreamEnd() async throws {
+    let firstSocket = MockGeminiLiveWebSocket()
+    let secondSocket = MockGeminiLiveWebSocket()
+    let socketFactory = MockGeminiSocketFactory([firstSocket, secondSocket])
+    let client = GeminiLiveTranscriptionClient(factory: .init(makeSocket: socketFactory.make))
+    let stream = try await client.connect(token: "short-lived-token")
+    var iterator = stream.makeAsyncIterator()
+
+    await firstSocket.enqueue(.string(
+        #"{"setupComplete":{},"sessionResumptionUpdate":{"newHandle":"finish-handle"}}"#
+    ))
+    #expect(try await iterator.next() == .ready)
+    try await client.finishAudio()
+    await firstSocket.fail()
+    #expect(try await iterator.next() == .reconnecting)
+
+    await secondSocket.enqueue(.string(#"{"setupComplete":{}}"#))
+    #expect(try await iterator.next() == .ready)
+    let snapshot = await secondSocket.snapshot()
+    #expect(snapshot.sent.count == 2)
+    let end = try #require(try JSONSerialization.jsonObject(with: snapshot.sent[1]) as? [String: Any])
+    let realtimeInput = try #require(end["realtimeInput"] as? [String: Any])
+    #expect(realtimeInput["audioStreamEnd"] as? Bool == true)
+
+    await secondSocket.enqueue(.string(#"{"serverContent":{"turnComplete":true}}"#))
+    #expect(try await iterator.next() == .completed)
+}
+
+@Test
 func boundsConnectionAndCompletionWaits() async throws {
     let connectionSocket = MockGeminiLiveWebSocket()
     let connectionClient = GeminiLiveTranscriptionClient(
@@ -215,9 +244,7 @@ func requestsAnEphemeralSessionThroughTheSharedCompanionEndpoint() async throws 
     let urlSession = URLSession(configuration: configuration)
     let apiURL = try #require(URL(string: "https://api.example.test"))
     TranscriptionSessionURLProtocol.handler = { request in
-        #expect(request.url?.absoluteString.contains(
-            "/v1/companions/companion%20one/transcription-sessions"
-        ) == true)
+        #expect(request.url?.path == "/v1/companions/companion one/transcription-sessions")
         #expect(request.httpMethod == "POST")
         #expect(request.value(forHTTPHeaderField: "Cookie") == "session=secret")
         #expect(request.value(forHTTPHeaderField: "x-companion-org") == "org-one")

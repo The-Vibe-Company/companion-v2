@@ -152,6 +152,22 @@ describe("Companion transcription session API", () => {
     expect(createSessionMock).not.toHaveBeenCalled();
   });
 
+  it("authenticates before rejecting an oversized request body", async () => {
+    const response = await appWithRoutes().request(new Request(
+      `http://localhost/v1/companions/${COMPANION_ID}/transcription-sessions`,
+      {
+        method: "POST",
+        body: JSON.stringify({ padding: "x".repeat(2048) }),
+        headers: { "content-type": "application/json" },
+      },
+    ));
+
+    expect(response.status).toBe(413);
+    expect(actorMock).toHaveBeenCalledOnce();
+    expect(getCompanionMock).not.toHaveBeenCalled();
+    expect(createSessionMock).not.toHaveBeenCalled();
+  });
+
   it("does not expose provider credential or Google error payloads", async () => {
     const providerKey = "google-long-lived-key";
     createSessionMock.mockRejectedValueOnce(new CompanionProviderError(

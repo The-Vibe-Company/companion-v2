@@ -293,6 +293,7 @@ final class VoiceTranscriptionController {
     }
 
     func cancel() {
+        guard phase != .idle || !liveTranscript.isEmpty || completion != nil else { return }
         generation &+= 1
         let activeGeneration = generation
         startTask?.cancel()
@@ -306,6 +307,11 @@ final class VoiceTranscriptionController {
         finishTask?.cancel()
         finishTask = nil
         completion = nil
+        finalTranscript = ""
+        interimTranscript = ""
+        reconnecting = false
+        level = 0
+        startedAt = nil
         phase = .finishing
         microphone.stop()
         finishTask = Task { [weak self] in
@@ -314,9 +320,6 @@ final class VoiceTranscriptionController {
             guard generation == activeGeneration else { return }
             finishTask = nil
             phase = .idle
-            reconnecting = false
-            level = 0
-            startedAt = nil
         }
     }
 

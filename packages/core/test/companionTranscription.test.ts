@@ -90,7 +90,9 @@ describe("Companion Gemini Live transcription sessions", () => {
       expires_at: new Date(now + COMPANION_TRANSCRIPTION_TOKEN_TTL_MS).toISOString(),
       model: "gemini-3.5-transcribe-live",
     });
-    expect(JSON.stringify(fetchImpl.mock.results)).not.toContain(apiKey);
+    const [requestUrl, requestInit] = fetchImpl.mock.calls[0]!;
+    expect(String(requestUrl)).not.toContain(apiKey);
+    expect(String(requestInit?.body)).not.toContain(apiKey);
   });
 
   it("denies Viewer access before reading credentials or contacting Google", async () => {

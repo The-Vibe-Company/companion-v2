@@ -715,44 +715,59 @@ export function registerCompanionRoutes(
     }
   });
 
-  app.post("/v1/companions/:id/transcription-sessions", async (c) => {
-    c.header("Cache-Control", "private, no-store");
-    c.header("Pragma", "no-cache");
-    try {
-      const companionId = companionIdSchema.parse(c.req.param("id"));
-      // The body exists only for a uniform POST shape. No audio, language, model, or other
-      // provider setting is accepted from a client; the core exchange below owns the fixed config.
-      const rawBody = await c.req.text();
-      createCompanionTranscriptionSessionInputSchema.parse(
-        rawBody.trim().length === 0 ? {} : JSON.parse(rawBody),
-      );
-      const session = await tenant(c, async ({ actor, orgId, database }) => {
-        const companion = await getCompanion({ actor, orgId, companionId, database });
-        if (companion.access === "viewer") throw new CompanionRuntimeForbiddenError();
-        let masterKey: Buffer;
-        try {
-          masterKey = loadSecretsMasterKey(env.COMPANION_SECRETS_MASTER_KEY);
-        } catch {
-          throw new CompanionProviderError(
-            "provider_auth_invalid",
-            "Google Gemini transcription credentials are unavailable.",
-            "google",
-          );
-        }
-        return await createCompanionTranscriptionSession({
-          actor,
-          orgId,
-          companionId,
-          companion,
-          masterKey,
-          database,
+  app.post(
+    "/v1/companions/:id/transcription-sessions",
+    async (c, next) => {
+      try {
+        actorFromContext(c);
+      } catch (error) {
+        return routeError(c, error);
+      }
+      await next();
+    },
+    bodyLimit({
+      maxSize: 1024,
+      onError: (c) => jsonError(c, "transcription session request exceeds the 1 KB limit", 413),
+    }),
+    async (c) => {
+      c.header("Cache-Control", "private, no-store");
+      c.header("Pragma", "no-cache");
+      try {
+        const companionId = companionIdSchema.parse(c.req.param("id"));
+        // The body exists only for a uniform POST shape. No audio, language, model, or other
+        // provider setting is accepted from a client; the core exchange below owns the fixed config.
+        const rawBody = await c.req.text();
+        createCompanionTranscriptionSessionInputSchema.parse(
+          rawBody.trim().length === 0 ? {} : JSON.parse(rawBody),
+        );
+        const session = await tenant(c, async ({ actor, orgId, database }) => {
+          const companion = await getCompanion({ actor, orgId, companionId, database });
+          if (companion.access === "viewer") throw new CompanionRuntimeForbiddenError();
+          let masterKey: Buffer;
+          try {
+            masterKey = loadSecretsMasterKey(env.COMPANION_SECRETS_MASTER_KEY);
+          } catch {
+            throw new CompanionProviderError(
+              "provider_auth_invalid",
+              "Google Gemini transcription credentials are unavailable.",
+              "google",
+            );
+          }
+          return await createCompanionTranscriptionSession({
+            actor,
+            orgId,
+            companionId,
+            companion,
+            masterKey,
+            database,
+          });
         });
-      });
-      return c.json(companionTranscriptionSessionSchema.parse(session));
-    } catch (error) {
-      return routeError(c, error);
-    }
-  });
+        return c.json(companionTranscriptionSessionSchema.parse(session));
+      } catch (error) {
+        return routeError(c, error);
+      }
+    },
+  );
 
   app.get("/v1/companion-providers", async (c) => {
     try {

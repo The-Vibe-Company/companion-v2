@@ -402,7 +402,7 @@ test("CI tests iOS without secrets and keeps the live provider diagnostic manual
 });
 
 test("voice transcription keeps the workspace key server-side and delegates Apple checks", () => {
-  const chat = read("apps/ios/Companion/Screens/ChatView.swift");
+  const composer = read("apps/ios/Companion/Screens/ChatComposer.swift");
   const status = read("apps/ios/Companion/Screens/VoiceTranscriptionStatusView.swift");
   const controller = read("apps/ios/Companion/Support/VoiceTranscriptionController.swift");
   const client = read(
@@ -415,15 +415,18 @@ test("voice transcription keeps the workspace key server-side and delegates Appl
   const uiTests = read("apps/ios/CompanionUITests/CompanionUITests.swift");
   const ci = read(".github/workflows/ci.yml");
 
-  assert.match(chat, /accessibilityIdentifier\("chat\.transcription\.toggle"\)/);
-  assert.match(chat, /frame\(width: 46, height: 46\)/);
+  assert.match(composer, /accessibilityIdentifier\("chat\.transcription\.toggle"\)/);
+  assert.match(composer, /frame\(width: 46, height: 46\)/);
   assert.match(status, /Audio is sent to Google while recording\./);
   assert.match(controller, /AVAudioApplication\.requestRecordPermission/);
   assert.match(controller, /sampleRate: 16_000/);
   assert.match(controller, /private var finishTask: Task<Void, Never>\?/);
   assert.match(controller, /guard generation == activeGeneration/);
-  assert.doesNotMatch(chat, /Task \{ await transcription\.cancel\(\) \}/);
-  assert.match(chat, /transcription\.cancel\(\)/);
+  assert.match(controller, /finalTranscript = ""/);
+  assert.doesNotMatch(composer, /Task \{ await transcription\.cancel\(\) \}/);
+  assert.match(composer, /transcription\.cancel\(\)/);
+  assert.match(composer, /onChange\(of: canSend\)/);
+  assert.match(client, /if isFinishing \{\s*try await sendAudioStreamEnd/);
   assert.match(client, /BidiGenerateContentConstrained/);
   assert.match(client, /models\/\\\(Self\.model\)/);
   assert.match(client, /"SMART"/);

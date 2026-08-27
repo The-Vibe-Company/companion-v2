@@ -331,8 +331,7 @@ public actor GeminiLiveTranscriptionClient {
     }
 
     private func reconnectIfPossible() async -> Bool {
-        guard !isFinishing,
-              reconnectAttempts < 1,
+        guard reconnectAttempts < 1,
               let handle = resumptionHandle,
               !handle.isEmpty else {
             return false
