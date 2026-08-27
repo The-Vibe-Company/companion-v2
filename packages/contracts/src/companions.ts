@@ -97,6 +97,7 @@ export const COMPANION_PROVIDER_CATALOG = [
     models: [
       { id: "glm-4.7", name: "GLM-4.7", default: true },
       { id: "glm-5-turbo", name: "GLM-5-Turbo" },
+      { id: "glm-5.3-flash", name: "GLM 5.3 Flash" },
     ],
   },
   {
@@ -133,6 +134,61 @@ export const COMPANION_PROVIDER_CATALOG = [
     input?: readonly CompanionModelInput[];
   }>;
 }>;
+
+type CompanionProviderCatalogModel = {
+  id: string;
+  name: string;
+  default?: true;
+  input?: CompanionModelInput[];
+};
+
+/**
+ * Curated stopgaps for models a supported provider has released before Pi publishes them.
+ * Keep capabilities conservative here; a same-id Pi entry replaces this metadata during merge.
+ */
+export const COMPANION_PROVIDER_SUPPLEMENTARY_MODELS = {
+  zai: [
+    { id: "glm-5.3-flash", name: "GLM 5.3 Flash" },
+  ],
+} as const satisfies Partial<Record<
+  (typeof COMPANION_PROVIDER_CATALOG)[number]["id"],
+  ReadonlyArray<{
+    id: string;
+    name: string;
+    default?: true;
+    input?: readonly CompanionModelInput[];
+  }>
+>>;
+
+/** Curated models fill catalog gaps; a same-id source entry remains authoritative. */
+export function supplementCompanionProviderModels(
+  providerId: string,
+  models: ReadonlyArray<{
+    id: string;
+    name: string;
+    default?: true;
+    input?: readonly CompanionModelInput[];
+  }>,
+): CompanionProviderCatalogModel[] {
+  const supplementary: ReadonlyArray<{
+    id: string;
+    name: string;
+    default?: true;
+    input?: readonly CompanionModelInput[];
+  }> = Object.entries(COMPANION_PROVIDER_SUPPLEMENTARY_MODELS)
+    .find(([candidateId]) => candidateId === providerId)?.[1] ?? [];
+  const merged = new Map<string, CompanionProviderCatalogModel>();
+  for (const model of [...supplementary, ...models]) {
+    const clone: CompanionProviderCatalogModel = {
+      id: model.id,
+      name: model.name,
+    };
+    if (model.default !== undefined) clone.default = model.default;
+    if (model.input !== undefined) clone.input = [...model.input];
+    merged.set(model.id, clone);
+  }
+  return [...merged.values()];
+}
 
 export function companionProviderDefaultModel(providerId: string): string | undefined {
   return COMPANION_PROVIDER_CATALOG

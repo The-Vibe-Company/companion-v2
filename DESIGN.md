@@ -275,8 +275,9 @@ The focused model-provider dialog keeps API-key connection to one write-only fie
 subscription connection uses a browser authorization code and Codex uses a device code; neither
 surface asks for `auth.json` or renders access and refresh tokens. Connected entries feed the first
 step of the shared picker used by both creation and Companion settings; its second step shows only
-the selected provider's live pi.dev models. The server bounds that fetch, caches the last-known
-catalog, and falls back to bundled models so the picker never becomes empty.
+the selected provider's server-owned model catalog. The server bounds the live pi.dev fetch, caches
+the last-known catalog, supplements released models Pi has not published yet, and falls back to
+bundled models so the picker never becomes empty.
 
 Prefer tables and structured rows for resources. Companion lists skills, labels, versions, dependencies, members, scopes, comments, releases, databases, and audit events. These surfaces should be compact and sortable/filterable over time, not inflated into repeated marketing cards.
 
