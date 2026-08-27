@@ -51,6 +51,9 @@ private enum CompanionTranscriptWindowDemoFixtures {
     static let usesShortThread = ProcessInfo.processInfo.environment[
         "COMPANION_TRANSCRIPT_DEMO_SHORT"
     ] == "1"
+    static let usesStagedPoll = ProcessInfo.processInfo.environment[
+        "COMPANION_TRANSCRIPT_DEMO_STAGED_POLL"
+    ] == "1"
 
     static let companion: CompanionSummary = decode(#"""
     {
@@ -223,8 +226,16 @@ private enum CompanionTranscriptWindowDemoFixtures {
         let fixtureThread = thread
         let fixtureCompanion = companion
         let secondFixtureCompanion = secondCompanion
+        let stagedFixture = usesStagedPoll
+            ? DemoStagedThreadFixture(initial: fixtureThread)
+            : nil
         return ChatServices(
-            thread: { _ in fixtureThread },
+            thread: { companionID in
+                if companionID == fixtureCompanion.id, let stagedFixture {
+                    return await stagedFixture.nextThread()
+                }
+                return fixtureThread
+            },
             listCompanions: { [fixtureCompanion, secondFixtureCompanion] },
             decide: { _, _, _ in fixtureThread },
             retryTurn: { _, _, _ in throw CompanionTranscriptWindowDemoError.unavailable },
@@ -237,6 +248,35 @@ private enum CompanionTranscriptWindowDemoFixtures {
 
     private static func decode<Value: Decodable>(_ json: String) -> Value {
         try! JSONDecoder().decode(Value.self, from: Data(json.utf8))
+    }
+}
+
+private actor DemoStagedThreadFixture {
+    private let initial: CompanionThread
+    private var pollCount = 0
+
+    init(initial: CompanionThread) {
+        self.initial = initial
+    }
+
+    func nextThread() -> CompanionThread {
+        pollCount += 1
+        guard pollCount >= 2 else { return initial }
+
+        let encoded = try! JSONEncoder().encode(initial)
+        var payload = try! JSONSerialization.jsonObject(with: encoded) as! [String: Any]
+        var entries = payload["entries"] as! [[String: Any]]
+        guard let index = entries.lastIndex(where: { entry in
+            entry["queued"] as? Bool != true && entry["role"] as? String == "assistant"
+        }) else {
+            return initial
+        }
+
+        let content = entries[index]["content"] as? String ?? ""
+        entries[index]["content"] = "\(content) Staged poll content has arrived."
+        payload["entries"] = entries
+        let data = try! JSONSerialization.data(withJSONObject: payload)
+        return try! JSONDecoder().decode(CompanionThread.self, from: data)
     }
 }
 

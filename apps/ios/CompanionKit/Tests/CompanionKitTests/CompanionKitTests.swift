@@ -1726,6 +1726,204 @@ func transcriptWindowResetStartsDisclosureOver() {
 }
 
 @Test
+func transcriptUnseenTrackerCountsOnlyDistinctAwayEvents() {
+    func entry(
+        _ eventID: String,
+        ordinal: Int,
+        content: String,
+        role: String = "assistant",
+        queued: Bool = false
+    ) -> TranscriptEntry {
+        let payload: [String: Any] = [
+            "event_id": eventID,
+            "ordinal": ordinal,
+            "role": role,
+            "content": content,
+            "author_id": NSNull(),
+            "author_name": NSNull(),
+            "decision": NSNull(),
+            "tool": NSNull(),
+            "turn_id": NSNull(),
+            "queued": queued,
+            "attachments": [Any](),
+            "created_at": "2026-08-26T12:00:00.000Z",
+        ]
+        return try! JSONDecoder().decode(
+            TranscriptEntry.self,
+            from: JSONSerialization.data(withJSONObject: payload)
+        )
+    }
+
+    let first = entry("reply-1", ordinal: 1, content: "First")
+    let second = entry("reply-2", ordinal: 2, content: "Second")
+    let queued = entry("queued-1", ordinal: 3, content: "Waiting", queued: true)
+    var tracker = CompanionTranscriptUnseenTracker()
+
+    #expect(tracker.observe(entries: [first], isNearBottom: false) == 0)
+    #expect(tracker.unseenEventIDs.isEmpty)
+
+    // New data observed at the bottom establishes the latest baseline without a badge.
+    #expect(tracker.observe(entries: [first, second, queued], isNearBottom: true) == 0)
+    let nearBottomRevision = entry("reply-1", ordinal: 1, content: "First, extended at bottom")
+    #expect(tracker.observe(entries: [nearBottomRevision, second, queued], isNearBottom: true) == 0)
+
+    let revisedSecond = entry("reply-2", ordinal: 2, content: "Second, extended")
+    #expect(tracker.observe(entries: [nearBottomRevision, revisedSecond, queued], isNearBottom: false) == 1)
+    #expect(tracker.unseenEventIDs == ["reply-2"])
+
+    // Repeated polls for the same event do not increment the distinct-ID count.
+    #expect(tracker.observe(entries: [nearBottomRevision, revisedSecond, queued], isNearBottom: false) == 1)
+    let third = entry("reply-3", ordinal: 4, content: "Third")
+    #expect(tracker.observe(entries: [nearBottomRevision, revisedSecond, third, queued], isNearBottom: false) == 2)
+    #expect(tracker.unseenEventIDs == ["reply-2", "reply-3"])
+}
+
+@Test
+func transcriptUnseenTrackerCountsCompactCardRevisions() {
+    func entry(
+        _ eventID: String,
+        ordinal: Int,
+        role: String,
+        toolStatus: String? = nil,
+        toolDetail: String? = nil,
+        decisionStatus: String? = nil
+    ) -> TranscriptEntry {
+        let tool: Any
+        if let toolStatus {
+            tool = [
+                "call_id": "call-1",
+                "kind": "shell",
+                "name": "verify",
+                "title": toolStatus == "running" ? "Verifying" : "Verified",
+                "status": toolStatus,
+                "detail": toolDetail
+                    ?? String(repeating: "x", count: toolStatus == "running" ? 4_000 : 8_000),
+                "screenshot": NSNull(),
+            ] as [String: Any]
+        } else {
+            tool = NSNull()
+        }
+        let decision: Any
+        if let decisionStatus {
+            let decidedByID: Any = decisionStatus == "pending" ? NSNull() : "owner-1"
+            let decidedByName: Any = decisionStatus == "pending" ? NSNull() : "Stan"
+            let decidedAt: Any = decisionStatus == "pending"
+                ? NSNull()
+                : "2026-08-26T12:01:00.000Z"
+            decision = [
+                "request_id": "decision-1",
+                "kind": "shell",
+                "name": "shell",
+                "title": "Run verification",
+                "detail": NSNull(),
+                "status": decisionStatus,
+                "answer": NSNull(),
+                "decided_by_id": decidedByID,
+                "decided_by_name": decidedByName,
+                "decided_at": decidedAt,
+                "expires_at": "2026-08-26T12:10:00.000Z",
+                "proposal": NSNull(),
+            ] as [String: Any]
+        } else {
+            decision = NSNull()
+        }
+        let payload: [String: Any] = [
+            "event_id": eventID,
+            "ordinal": ordinal,
+            "role": role,
+            "content": "",
+            "author_id": NSNull(),
+            "author_name": NSNull(),
+            "decision": decision,
+            "tool": tool,
+            "turn_id": NSNull(),
+            "queued": false,
+            "attachments": [Any](),
+            "created_at": "2026-08-26T12:00:00.000Z",
+        ]
+        return try! JSONDecoder().decode(
+            TranscriptEntry.self,
+            from: JSONSerialization.data(withJSONObject: payload)
+        )
+    }
+
+    let runningTool = entry("tool-1", ordinal: 1, role: "tool", toolStatus: "running")
+    let pendingDecision = entry(
+        "decision-1",
+        ordinal: 2,
+        role: "assistant",
+        decisionStatus: "pending"
+    )
+    var tracker = CompanionTranscriptUnseenTracker()
+    _ = tracker.observe(entries: [runningTool, pendingDecision], isNearBottom: true)
+
+    let revisedRunningTool = entry(
+        "tool-1",
+        ordinal: 1,
+        role: "tool",
+        toolStatus: "running",
+        toolDetail: String(repeating: "y", count: 4_000)
+    )
+    #expect(tracker.observe(entries: [revisedRunningTool, pendingDecision], isNearBottom: false) == 1)
+
+    let completedTool = entry("tool-1", ordinal: 1, role: "tool", toolStatus: "ok")
+    #expect(tracker.observe(entries: [completedTool, pendingDecision], isNearBottom: false) == 1)
+    let answeredDecision = entry(
+        "decision-1",
+        ordinal: 2,
+        role: "assistant",
+        decisionStatus: "answered"
+    )
+    #expect(tracker.observe(entries: [completedTool, answeredDecision], isNearBottom: false) == 2)
+    #expect(tracker.unseenEventIDs == ["tool-1", "decision-1"])
+
+    // Unchanged compact markers remain distinct-ID stable even with large card details.
+    #expect(tracker.observe(entries: [completedTool, answeredDecision], isNearBottom: false) == 2)
+}
+
+@Test
+func transcriptUnseenTrackerClearsAtBottomAndResetRestoresBaseline() {
+    func entry(_ eventID: String, ordinal: Int, content: String) -> TranscriptEntry {
+        let payload: [String: Any] = [
+            "event_id": eventID,
+            "ordinal": ordinal,
+            "role": "assistant",
+            "content": content,
+            "author_id": NSNull(),
+            "author_name": NSNull(),
+            "decision": NSNull(),
+            "tool": NSNull(),
+            "turn_id": NSNull(),
+            "queued": false,
+            "attachments": [Any](),
+            "created_at": "2026-08-26T12:00:00.000Z",
+        ]
+        return try! JSONDecoder().decode(
+            TranscriptEntry.self,
+            from: JSONSerialization.data(withJSONObject: payload)
+        )
+    }
+
+    let initial = entry("reply-1", ordinal: 1, content: "First")
+    let arrival = entry("reply-2", ordinal: 2, content: "Arrival")
+    var tracker = CompanionTranscriptUnseenTracker()
+    _ = tracker.observe(entries: [initial], isNearBottom: true)
+    #expect(tracker.observe(entries: [initial, arrival], isNearBottom: false) == 1)
+
+    tracker.markReaderAtBottom()
+    #expect(tracker.unseenCount == 0)
+    #expect(tracker.unseenEventIDs.isEmpty)
+
+    let nextArrival = entry("reply-3", ordinal: 3, content: "Next arrival")
+    #expect(tracker.observe(entries: [initial, arrival, nextArrival], isNearBottom: false) == 1)
+    #expect(tracker.observe(entries: [initial, arrival, nextArrival], isNearBottom: true) == 0)
+
+    tracker.reset()
+    #expect(tracker.unseenCount == 0)
+    #expect(tracker.observe(entries: [initial, arrival], isNearBottom: false) == 0)
+}
+
+@Test
 func threadMutationGateRejectsDoubleTapAndAllowsRetry() async {
     let gate = CompanionThreadMutationGate()
     let firstQuestion = await gate.acquire(mutationID: "decision:question-1")

@@ -723,6 +723,34 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    func testTranscriptWindowDemoShowsStagedUnseenReplyAndScrollsToIt() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-transcript-window-demo"]
+        app.launchEnvironment["COMPANION_TRANSCRIPT_DEMO_STAGED_POLL"] = "1"
+        app.launch()
+
+        let latest = app.descendants(matching: .any)["chat.entry.long-120"]
+        XCTAssertTrue(latest.waitForExistence(timeout: 5))
+        app.swipeDown()
+
+        let unseen = app.buttons["chat.scroll-to-bottom"]
+        let unseenLabel = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", "1 new reply"),
+            object: unseen
+        )
+        wait(for: [unseenLabel], timeout: 8)
+        XCTAssertEqual(unseen.value as? String, "1 new reply")
+        unseen.tap()
+
+        let latestVisible = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isHittable == true"),
+            object: latest
+        )
+        wait(for: [latestVisible], timeout: 3)
+        XCTAssertTrue(latest.isHittable)
+    }
+
+    @MainActor
     func testTranscriptWindowDemoKeepsLatestEntriesOrderedAndSeparated() throws {
         let app = XCUIApplication()
         app.launchArguments = ["-companion-transcript-window-demo"]
