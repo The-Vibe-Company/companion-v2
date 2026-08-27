@@ -1326,6 +1326,8 @@ export const companionThreadSchema = z.object({
   access: companionAccessSchema,
   read_only: z.boolean(),
   can_send: z.boolean(),
+  /** API-projected deployment capability; absent on older servers and false when unconfigured. */
+  transcription_available: z.boolean().optional(),
   entries: z.array(companionTranscriptEntrySchema),
   /** The one non-terminal turn currently owning Pi, if any. */
   active_turn: companionActiveTurnSchema.nullable(),
@@ -1377,8 +1379,8 @@ export type CreateCompanionTranscriptionSessionInput = z.infer<
 >;
 
 /**
- * A short-lived, single-use Google Live API token. The long-lived workspace provider key is never
- * part of this response (or any client-controlled request).
+ * A short-lived, single-use Google Live API token. The deployment-owned API key is never part of
+ * this response (or any client-controlled request).
  */
 export const companionTranscriptionSessionSchema = z.object({
   token: z.string().trim().min(1),

@@ -1,53 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Db } from "@companion/db";
-
 import {
   COMPANION_TRANSCRIPTION_NEW_SESSION_TTL_MS,
   COMPANION_TRANSCRIPTION_TOKEN_TTL_MS,
   CompanionRuntimeForbiddenError,
   createCompanionTranscriptionSession,
 } from "../src/companions";
-import { encryptOpaqueValue } from "../src/secretsCrypto";
 
 const orgId = "11111111-1111-4111-8111-111111111111";
 const companionId = "22222222-2222-4222-8222-222222222222";
 const actor = { id: "actor-1", email: "actor@example.test", name: "Actor" };
-const masterKey = Buffer.alloc(32, 29);
-const apiKey = "google-workspace-key";
-const generation = "33333333-3333-4333-8333-333333333333";
+const apiKey = "google-global-transcription-key";
 const now = Date.parse("2026-08-27T10:00:00.000Z");
 
-function providerRow(authMethod: "api_key" | "subscription" = "api_key") {
-  const envelope = encryptOpaqueValue({
-    orgId,
-    purpose: "companion-provider-credential",
-    subjectId: `google:${generation}`,
-    value: JSON.stringify({ type: "api_key", key: apiKey }),
-  }, masterKey);
-  return {
-    authMethod,
-    credentialGeneration: generation,
-    ...envelope,
-  };
-}
-
-function databaseWithProvider(row: ReturnType<typeof providerRow> | null): Db {
-  const database = {
-    select: vi.fn(() => ({
-      from: vi.fn(() => ({
-        where: vi.fn(() => ({
-          limit: vi.fn(async () => row ? [row] : []),
-        })),
-      })),
-    })),
-  };
-  // SAFETY: this fake implements the only Drizzle query chain used by the focused core test.
-  // oxlint-disable-next-line anti-slop/no-chained-type-assertions -- the fake intentionally models one query chain only
-  return database as unknown as Db;
-}
-
 describe("Companion Gemini Live transcription sessions", () => {
-  it("exchanges only the workspace Google key for one constrained short-lived session", async () => {
+  it("exchanges only the global Google key for one constrained short-lived session", async () => {
     const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       expect(init?.headers).toMatchObject({
         "Content-Type": "application/json",
@@ -80,8 +46,7 @@ describe("Companion Gemini Live transcription sessions", () => {
       orgId,
       companionId,
       companion: { access: "owner" },
-      masterKey,
-      database: databaseWithProvider(providerRow()),
+      apiKey,
       // SAFETY: this mock implements the fetch call shape exercised by the core exchange.
       fetchImpl: fetchImpl as typeof fetch,
       now: () => now,
@@ -98,50 +63,31 @@ describe("Companion Gemini Live transcription sessions", () => {
   it("denies Viewer access before reading credentials or contacting Google", async () => {
     // SAFETY: the mock is only used to prove that the authorization guard prevents a call.
     const fetchImpl = vi.fn() as typeof fetch;
-    const database = databaseWithProvider(providerRow());
-
     await expect(createCompanionTranscriptionSession({
       actor,
       orgId,
       companionId,
       companion: { access: "viewer" },
-      masterKey,
-      database,
+      apiKey,
       fetchImpl,
       now: () => now,
     })).rejects.toBeInstanceOf(CompanionRuntimeForbiddenError);
-    expect(database.select).not.toHaveBeenCalled();
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it("fails closed when Google is missing or not configured with an API key", async () => {
-    // SAFETY: the mock is only used to prove provider setup failures do not contact Google.
+  it("fails closed when the global Google key is missing", async () => {
+    // SAFETY: the mock is only used to prove missing deployment configuration does not contact Google.
     const fetchImpl = vi.fn() as typeof fetch;
     await expect(createCompanionTranscriptionSession({
       actor,
       orgId,
       companionId,
       companion: { access: "editor" },
-      masterKey,
-      database: databaseWithProvider(null),
+      apiKey: "   ",
       fetchImpl,
       now: () => now,
     })).rejects.toMatchObject({
       code: "provider_not_configured",
-      providerId: "google",
-    });
-
-    await expect(createCompanionTranscriptionSession({
-      actor,
-      orgId,
-      companionId,
-      companion: { access: "owner" },
-      masterKey,
-      database: databaseWithProvider(providerRow("subscription")),
-      fetchImpl,
-      now: () => now,
-    })).rejects.toMatchObject({
-      code: "provider_auth_invalid",
       providerId: "google",
     });
     expect(fetchImpl).not.toHaveBeenCalled();
@@ -161,8 +107,7 @@ describe("Companion Gemini Live transcription sessions", () => {
         orgId,
         companionId,
         companion: { access: "owner" },
-        masterKey,
-        database: databaseWithProvider(providerRow()),
+        apiKey,
         fetchImpl,
         now: () => now,
       })).rejects.toMatchObject({
@@ -174,8 +119,7 @@ describe("Companion Gemini Live transcription sessions", () => {
         orgId,
         companionId,
         companion: { access: "owner" },
-        masterKey,
-        database: databaseWithProvider(providerRow()),
+        apiKey,
         // SAFETY: the provider failure fixture implements the fetch response contract.
         fetchImpl: vi.fn(failure) as typeof fetch,
         now: () => now,

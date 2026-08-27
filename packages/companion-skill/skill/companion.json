@@ -1,7 +1,7 @@
 {
   "$schema": "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json",
   "name": "companion",
-  "version": "1.90.0",
+  "version": "1.91.0",
   "icon": "boxes",
   "title": "Companion",
   "description": "Manage and safely install SKILL.md packages through delegated Agent Auth, including pinned public releases, publishing, updates, dependencies, secrets, hosted Skill Databases, local install tracking, and Companion self-update.",
@@ -29,11 +29,20 @@
     ],
     "changelog": [
       {
+        "version": "1.91.0",
+        "date": "2026-08-27",
+        "changes": [
+          "Rebuilds the bundled Agent Auth client after shared Companion contracts added deployment-wide voice-transcription availability metadata.",
+          "Keeps the global API transcription key, iOS microphone capture, Google audio, and hosted Companion runtime behavior outside delegated Skills Hub capabilities.",
+          "No change to Companion skill commands, permissions, or installation behavior."
+        ]
+      },
+      {
         "version": "1.90.0",
         "date": "2026-08-27",
         "changes": [
-          "Rebuilds the bundled Agent Auth client after the shared Companion contracts added short-lived voice-transcription session metadata.",
-          "Keeps iOS microphone capture, Google transcription, and hosted Companion runtime behavior outside delegated Skills Hub capabilities.",
+          "Rebuilds the bundled Agent Auth client after shared Companion contracts added short-lived voice-transcription sessions and deployment availability metadata.",
+          "Keeps the global API transcription key, iOS microphone capture, Google audio, and hosted Companion runtime behavior outside delegated Skills Hub capabilities.",
           "No change to Companion skill commands, permissions, or installation behavior."
         ]
       },

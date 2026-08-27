@@ -969,6 +969,7 @@ func decodesViewerAndAuthorIdentityForSharedThreads() throws {
       "viewer_id":"viewer-1",
       "read_only":false,
       "can_send":true,
+      "transcription_available":true,
       "entries":[{
         "event_id":"msg:17f8b827-8a06-4ef8-9352-58cc03c849a4",
         "ordinal":1,
@@ -984,6 +985,7 @@ func decodesViewerAndAuthorIdentityForSharedThreads() throws {
     """#.utf8)
     let thread = try JSONDecoder().decode(CompanionThread.self, from: data)
     #expect(thread.viewerID == "viewer-1")
+    #expect(thread.transcriptionAvailable == true)
     #expect(thread.entries.first?.authorID == "editor-2")
     #expect(thread.entries.first?.authorName == "Morgan")
     #expect(thread.entries.first?.attachments == [])

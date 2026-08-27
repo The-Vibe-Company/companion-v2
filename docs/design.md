@@ -377,12 +377,13 @@ New explicit recovery actions are:
 
 Native iOS composer dictation uses
 `POST /v1/companions/:id/transcription-sessions`. The route requires current Owner/Editor access,
-decrypts the workspace's existing Google API-key provider connection only in API memory, and vends
-a single-use, short-lived Gemini token constrained to `gemini-3.5-transcribe-live` transcription.
-The client then sends microphone audio directly to Google's constrained Live WebSocket. The API
-returns no long-lived key and never proxies, stores, logs, or projects audio. This shared,
-capability-named endpoint is not a client-surface discriminator; another first-party client could
-adopt the same contract later.
+uses the API-only `COMPANION_GEMINI_TRANSCRIPTION_API_KEY`, and vends a single-use, short-lived
+Gemini token constrained to `gemini-3.5-transcribe-live` transcription. This deployment-owned key
+enables the capability for every workspace. Thread reads expose only a boolean availability bit so
+clients omit the control when the key is absent. The client then sends microphone audio directly to
+Google's constrained Live WebSocket. The API returns no long-lived key and never proxies, stores,
+logs, or projects audio. This shared, capability-named endpoint is not a client-surface
+discriminator; another first-party client could adopt the same contract later.
 
 `POST /v1/hooks/triggers/:triggerId/:secret` fires a webhook-fired Companion trigger — the
 event-driven sibling of a routine. Like the Stripe webhook it is registered before session

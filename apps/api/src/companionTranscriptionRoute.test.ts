@@ -15,7 +15,7 @@ import { db } from "@companion/db";
 
 const COMPANION_ID = "11111111-1111-4111-8111-111111111111";
 const ORG_ID = "22222222-2222-4222-8222-222222222222";
-const MASTER_KEY = Buffer.alloc(32, 7).toString("base64");
+const API_KEY = "google-global-transcription-key";
 const actor = { id: "user-1", email: "owner@example.test", name: "Owner" };
 const companion = (access: Companion["access"]): Pick<Companion, "access"> => ({ access });
 
@@ -44,7 +44,7 @@ function appWithRoutes() {
   registerCompanionRoutes(app, {
     COMPANION_COMPANIONS_ENABLED: "true",
     COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS: "example.test",
-    COMPANION_SECRETS_MASTER_KEY: MASTER_KEY,
+    COMPANION_GEMINI_TRANSCRIPTION_API_KEY: API_KEY,
   }, {
     actorFromContext: actorMock,
     orgIdFromContext: orgMock,
@@ -96,7 +96,7 @@ describe("Companion transcription session API", () => {
       actor,
       orgId: ORG_ID,
       companionId: COMPANION_ID,
-      masterKey: Buffer.alloc(32, 7),
+      apiKey: API_KEY,
     }));
   });
 

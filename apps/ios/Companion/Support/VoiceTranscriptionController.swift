@@ -445,7 +445,7 @@ final class VoiceTranscriptionController {
         let message: String
         if let apiError = error as? APIError,
            apiError.code == "provider_not_configured" {
-            message = "Connect Google Gemini in Providers to use transcription."
+            message = "Voice transcription is not configured for this deployment."
         } else {
             message = (error as? LocalizedError)?.errorDescription
                 ?? "Transcription stopped. Check your connection and try again."

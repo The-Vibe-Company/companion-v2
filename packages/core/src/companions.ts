@@ -26,7 +26,7 @@ import {
 } from "@companion/contracts";
 import { db, schema, type Db } from "@companion/db";
 import { canManageOrg } from "./authz";
-import { decryptOpaqueValue, encryptOpaqueValue, loadSecretsMasterKey } from "./secretsCrypto";
+import { encryptOpaqueValue } from "./secretsCrypto";
 import { assertMember, getOrgRole, listSkills, type ActorContext } from "./services";
 import type { CompanionPluginStoredOAuthCredential } from "./companionPluginOAuth";
 import { getCompanionProviderCatalog } from "./companionProviderCatalog";
@@ -40,10 +40,6 @@ const TRANSCRIPTION_AUTH_TOKEN_URL = "https://generativelanguage.googleapis.com/
 export const COMPANION_TRANSCRIPTION_NEW_SESSION_TTL_MS = 60_000;
 export const COMPANION_TRANSCRIPTION_TOKEN_TTL_MS = 10 * 60_000;
 
-const transcriptionProviderCredentialSchema = z.object({
-  type: z.literal("api_key"),
-  key: z.string().min(1).refine((value) => value.trim().length > 0),
-}).strict();
 const transcriptionAuthTokenResponseSchema = z.object({
   name: z.string().trim().min(1),
 }).strip();
@@ -563,9 +559,9 @@ function transcriptionProviderError(
 }
 
 /**
- * Resolve one workspace Google API key and exchange it for the constrained Live transcription
- * token. This capability intentionally does not involve the Companion Box, Pi, runtime, or
- * transcript: audio goes directly from the first-party client to Google's Live API.
+ * Exchange the deployment-owned Google transcription key for one constrained Live token. The
+ * global key enables the same input method for every authorized Companion member and never enters
+ * a client, Box, Pi, runtime, transcript, or tenant row.
  */
 export async function createCompanionTranscriptionSession(input: {
   actor: ActorContext;
@@ -573,7 +569,7 @@ export async function createCompanionTranscriptionSession(input: {
   companionId: string;
   /** Route callers pass the already-authorized PostgreSQL projection to avoid a second lookup. */
   companion?: Pick<Companion, "access">;
-  masterKey?: Buffer;
+  apiKey: string;
   database?: Db;
   fetchImpl?: typeof fetch;
   now?: () => number;
@@ -587,62 +583,11 @@ export async function createCompanionTranscriptionSession(input: {
   });
   if (!canWakeCompanion(companion.access)) throw new CompanionRuntimeForbiddenError();
 
-  // Select only the Google connection and only the encrypted fields needed for this exchange. A
-  // subscription credential is never decrypted or sent to a provider that is not its owner.
-  const [connection] = await database
-    .select({
-      authMethod: schema.companionProviderConnections.authMethod,
-      credentialGeneration: schema.companionProviderConnections.credentialGeneration,
-      ciphertext: schema.companionProviderConnections.ciphertext,
-      iv: schema.companionProviderConnections.iv,
-      authTag: schema.companionProviderConnections.authTag,
-      wrappedDek: schema.companionProviderConnections.wrappedDek,
-      wrapIv: schema.companionProviderConnections.wrapIv,
-      wrapAuthTag: schema.companionProviderConnections.wrapAuthTag,
-      keyId: schema.companionProviderConnections.keyId,
-    })
-    .from(schema.companionProviderConnections)
-    .where(and(
-      eq(schema.companionProviderConnections.orgId, input.orgId),
-      eq(schema.companionProviderConnections.providerId, TRANSCRIPTION_PROVIDER_ID),
-    ))
-    .limit(1);
-
-  if (!connection) {
+  const apiKey = input.apiKey.trim();
+  if (!apiKey) {
     throw transcriptionProviderError(
       "provider_not_configured",
       "Google Gemini transcription is not configured.",
-    );
-  }
-  if (connection.authMethod !== "api_key") {
-    throw transcriptionProviderError(
-      "provider_auth_invalid",
-      "Google Gemini transcription requires a workspace API key.",
-    );
-  }
-
-  let apiKey: string;
-  try {
-    const plaintext = decryptOpaqueValue({
-      orgId: input.orgId,
-      purpose: PROVIDER_CREDENTIAL_PURPOSE,
-      subjectId: `${TRANSCRIPTION_PROVIDER_ID}:${connection.credentialGeneration}`,
-      ciphertext: connection.ciphertext,
-      iv: connection.iv,
-      authTag: connection.authTag,
-      wrappedDek: connection.wrappedDek,
-      wrapIv: connection.wrapIv,
-      wrapAuthTag: connection.wrapAuthTag,
-      keyId: connection.keyId,
-    }, input.masterKey ?? loadSecretsMasterKey());
-    // SAFETY: the plaintext is authenticated by decryptOpaqueValue; the schema below accepts only
-    // the exact API-key envelope written by saveCompanionProvider.
-    apiKey = transcriptionProviderCredentialSchema.parse(JSON.parse(plaintext)).key;
-  } catch {
-    // Do not expose whether decryption, parsing, or the deployment key was the failing step.
-    throw transcriptionProviderError(
-      "provider_auth_invalid",
-      "Google Gemini transcription credentials are unavailable.",
     );
   }
 

@@ -52,10 +52,10 @@ read email, then create drafts for review in Gmail; it never sends mail. Custom 
 available over HTTP or a Box command with an optional encrypted credential, using the same shared
 endpoints and transports as the browser client.
 
-The chat composer also supports iOS-only voice transcription. An Owner or Admin first connects the
-workspace's Google Gemini API key through the existing Providers screen; the value remains
-envelope-encrypted in `companion_provider_connections` and is never returned to the app. When an
-Owner or Editor taps the microphone in an accessible Companion thread,
+The chat composer also supports iOS-only voice transcription when the API deployment has a non-empty
+`COMPANION_GEMINI_TRANSCRIPTION_API_KEY`. That API-only setting enables the capability globally;
+the thread payload exposes only `transcription_available`, and the app omits the microphone entirely
+when it is false or absent. When an Owner or Editor taps the microphone in an accessible thread,
 `POST /v1/companions/:id/transcription-sessions` reauthorizes that access and asks Google for a
 single-use, short-lived token constrained to `gemini-3.5-transcribe-live`, text output, automatic
 language detection, Smart transcription, and session resumption. CompanionKit then connects
@@ -71,8 +71,7 @@ audio message or runtime capability and makes no Box/Pi change. Linux/static qua
 the privacy wiring and selected UI contract; CompanionKit's mock-WebSocket protocol tests plus the
 native build/UI-test compilation are delegated to the existing macOS 26 **Apple Quality** job. No
 Google key is required for those deterministic tests. A real end-to-end transcription remains a
-manual provider check with the owner-supplied key stored as the workspace Google provider
-connection.
+manual provider check with the owner-supplied key stored only in the API deployment environment.
 
 The implementation follows Google's current dedicated transcription wire contract rather than the
 earlier general Live-agent shape in the reference snippet: setup uses `inputAudioTranscription`,

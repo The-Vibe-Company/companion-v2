@@ -104,4 +104,6 @@ same API, not reduced product surfaces: Skills, Plugins, MCP connections, files,
 triggers, sharing, settings, and the remaining browser workflows migrate milestone by milestone.
 Native iOS dictation is an input method exception: microphone audio is transiently sent directly to
 Google for transcription and becomes editable composer text before an ordinary message is sent. It
-does not create an audio turn or change Runtime v2.
+does not create an audio turn or change Runtime v2. A deployment-owned API key enables it for every
+workspace; without that key, the API reports the capability unavailable and native clients hide the
+microphone.

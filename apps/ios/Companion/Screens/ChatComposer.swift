@@ -12,6 +12,7 @@ struct ChatComposer: View {
     let companionName: String
     let companionIcon: CompanionSummary.Icon?
     let canSend: Bool?
+    let transcriptionAvailable: Bool
     let isReplying: Bool
     let hasLiveReasoning: Bool
     let error: String?
@@ -83,9 +84,9 @@ struct ChatComposer: View {
                         .accessibilityLabel("Attachment error: \(attachmentError)")
                 }
 
-                if transcription.isBusy
+                if transcriptionAvailable && (transcription.isBusy
                     || !transcription.liveTranscript.isEmpty
-                    || transcriptionFailed {
+                    || transcriptionFailed) {
                     VoiceTranscriptionStatusView(controller: transcription)
                         .padding(.horizontal, 2)
                 }
@@ -140,31 +141,33 @@ struct ChatComposer: View {
                             .companionGlass(radius: 23, interactive: true)
                             .accessibilityIdentifier("chat.composer")
 
-                        Button(action: toggleTranscription) {
-                            Group {
-                                if transcription.phase == .requestingPermission
-                                    || transcription.phase == .connecting
-                                    || transcription.phase == .finishing {
-                                    ProgressView().controlSize(.small)
-                                } else {
-                                    Image(systemName: transcription.isRecording ? "stop.fill" : "mic.fill")
+                        if transcriptionAvailable {
+                            Button(action: toggleTranscription) {
+                                Group {
+                                    if transcription.phase == .requestingPermission
+                                        || transcription.phase == .connecting
+                                        || transcription.phase == .finishing {
+                                        ProgressView().controlSize(.small)
+                                    } else {
+                                        Image(systemName: transcription.isRecording ? "stop.fill" : "mic.fill")
+                                    }
                                 }
+                                .font(.system(size: 16, weight: .semibold))
+                                .frame(width: 46, height: 46)
                             }
-                            .font(.system(size: 16, weight: .semibold))
-                            .frame(width: 46, height: 46)
+                            .buttonStyle(.glass)
+                            .buttonBorderShape(.circle)
+                            .tint(transcription.isBusy ? Color.companionDanger : accent)
+                            .disabled(transcriptionButtonDisabled)
+                            .accessibilityLabel(transcriptionButtonLabel)
+                            .accessibilityValue(transcriptionAccessibilityValue)
+                            .accessibilityHint(
+                                transcription.isBusy
+                                    ? "Stops recording and adds the transcript to the message field."
+                                    : "Records speech and sends audio to Google for live transcription."
+                            )
+                            .accessibilityIdentifier("chat.transcription.toggle")
                         }
-                        .buttonStyle(.glass)
-                        .buttonBorderShape(.circle)
-                        .tint(transcription.isBusy ? Color.companionDanger : accent)
-                        .disabled(transcriptionButtonDisabled)
-                        .accessibilityLabel(transcriptionButtonLabel)
-                        .accessibilityValue(transcriptionAccessibilityValue)
-                        .accessibilityHint(
-                            transcription.isBusy
-                                ? "Stops recording and adds the transcript to the message field."
-                                : "Records speech and sends audio to Google for live transcription."
-                        )
-                        .accessibilityIdentifier("chat.transcription.toggle")
 
                         Button(action: send) {
                             Group {
@@ -217,6 +220,9 @@ struct ChatComposer: View {
         }
         .onChange(of: canSend) { _, nextCanSend in
             if nextCanSend != true { transcription.cancel() }
+        }
+        .onChange(of: transcriptionAvailable) { _, available in
+            if !available { transcription.cancel() }
         }
         .onChange(of: transcription.completion) { _, completion in
             guard let completion else { return }
@@ -291,7 +297,7 @@ struct ChatComposer: View {
             transcription.stop()
             return
         }
-        guard canSend == true else { return }
+        guard canSend == true, transcriptionAvailable else { return }
         let targetCompanionID = companionID
         transcription.start {
             try await sessionStore.createCompanionTranscriptionSession(

@@ -248,8 +248,15 @@ const VIEWER_RUNTIME_ERROR: CompanionRuntimeSafeError = {
  * the Owner/Editor operating boundary. Keep the same turn shape so polling remains stable while
  * replacing both the turn-level and attempt-level error with one non-actionable projection.
  */
-function projectThreadForHttp(thread: CompanionThread): CompanionThread {
-  if (thread.access !== "viewer") return thread;
+function projectThreadForHttp(
+  thread: CompanionThread,
+  transcriptionAvailable: boolean,
+): CompanionThread {
+  const projectedThread = {
+    ...thread,
+    transcription_available: transcriptionAvailable,
+  };
+  if (thread.access !== "viewer") return projectedThread;
 
   const projectTurn = (turn: CompanionTurn | null): CompanionTurn | null => turn === null
     ? null
@@ -267,7 +274,7 @@ function projectThreadForHttp(thread: CompanionThread): CompanionThread {
       };
 
   return {
-    ...thread,
+    ...projectedThread,
     active_turn: projectTurn(thread.active_turn),
     interrupted_turn: projectTurn(thread.interrupted_turn),
   };
@@ -550,6 +557,8 @@ export function registerCompanionRoutes(
   dependencies: CompanionRouteDependencies = {},
 ): void {
   if (!companionsEnabled(env)) return;
+  const transcriptionApiKey = env.COMPANION_GEMINI_TRANSCRIPTION_API_KEY?.trim() ?? "";
+  const transcriptionAvailable = transcriptionApiKey.length > 0;
 
   const {
     actorFromContext,
@@ -743,22 +752,12 @@ export function registerCompanionRoutes(
         const session = await tenant(c, async ({ actor, orgId, database }) => {
           const companion = await getCompanion({ actor, orgId, companionId, database });
           if (companion.access === "viewer") throw new CompanionRuntimeForbiddenError();
-          let masterKey: Buffer;
-          try {
-            masterKey = loadSecretsMasterKey(env.COMPANION_SECRETS_MASTER_KEY);
-          } catch {
-            throw new CompanionProviderError(
-              "provider_auth_invalid",
-              "Google Gemini transcription credentials are unavailable.",
-              "google",
-            );
-          }
           return await createCompanionTranscriptionSession({
             actor,
             orgId,
             companionId,
             companion,
-            masterKey,
+            apiKey: transcriptionApiKey,
             database,
           });
         });
@@ -1492,7 +1491,7 @@ export function registerCompanionRoutes(
       const thread = await tenant(c, ({ actor, orgId, database }) =>
         readCompanionThreadV2({ actor, orgId, companionId, database }));
       c.header("Cache-Control", "private, no-store");
-      return c.json({ thread: projectThreadForHttp(thread) });
+      return c.json({ thread: projectThreadForHttp(thread, transcriptionAvailable) });
     } catch (error) {
       return routeError(c, error);
     }
@@ -1723,6 +1722,7 @@ export function registerCompanionRoutes(
         ) {
           return projectThreadForHttp(
             await readCompanionThreadV2({ actor, orgId, companionId, database }),
+            transcriptionAvailable,
           );
         }
         if (pending.requestKind === "config_proposal") {
@@ -1792,6 +1792,7 @@ export function registerCompanionRoutes(
         }
         return projectThreadForHttp(
           await readCompanionThreadV2({ actor, orgId, companionId, database }),
+          transcriptionAvailable,
         );
       });
       return c.json({ thread }, 202);
@@ -1827,7 +1828,7 @@ export function registerCompanionRoutes(
       const accepted = await tenant(c, async ({ actor, orgId, database }) => {
         const turn = await cancelCompanionTurnV2({ orgId, companionId, turnId, database });
         const thread = await readCompanionThreadV2({ actor, orgId, companionId, database });
-        return { turn, thread: projectThreadForHttp(thread) };
+        return { turn, thread: projectThreadForHttp(thread, transcriptionAvailable) };
       });
       return c.json(accepted, 202);
     } catch (error) {

@@ -401,8 +401,10 @@ test("CI tests iOS without secrets and keeps the live provider diagnostic manual
   assert.match(e2e, /node scripts\/ios-e2e-fixture\.mjs cleanup/);
 });
 
-test("voice transcription keeps the workspace key server-side and delegates Apple checks", () => {
+test("voice transcription keeps the global key server-side and delegates Apple checks", () => {
   const composer = read("apps/ios/Companion/Screens/ChatComposer.swift");
+  const routes = read("apps/api/src/companionRoutes.ts");
+  const envExample = read(".env.example");
   const status = read("apps/ios/Companion/Screens/VoiceTranscriptionStatusView.swift");
   const controller = read("apps/ios/Companion/Support/VoiceTranscriptionController.swift");
   const client = read(
@@ -416,7 +418,12 @@ test("voice transcription keeps the workspace key server-side and delegates Appl
   const ci = read(".github/workflows/ci.yml");
 
   assert.match(composer, /accessibilityIdentifier\("chat\.transcription\.toggle"\)/);
+  assert.match(composer, /if transcriptionAvailable \{/);
+  assert.match(composer, /onChange\(of: transcriptionAvailable\)/);
   assert.match(composer, /frame\(width: 46, height: 46\)/);
+  assert.match(routes, /COMPANION_GEMINI_TRANSCRIPTION_API_KEY\?\.trim\(\)/);
+  assert.match(routes, /transcription_available: transcriptionAvailable/);
+  assert.match(envExample, /^COMPANION_GEMINI_TRANSCRIPTION_API_KEY=$/m);
   assert.match(status, /Audio is sent to Google while recording\./);
   assert.match(controller, /AVAudioApplication\.requestRecordPermission/);
   assert.match(controller, /sampleRate: 16_000/);
@@ -436,6 +443,7 @@ test("voice transcription keeps the workspace key server-side and delegates Appl
   assert.match(tests, /connectsStreamsPCMAndPublishesTranscriptDeltas/);
   assert.match(tests, /resumesOnceAndFlushesBoundedAudioAfterGoAway/);
   assert.match(uiTests, /testChatComposerExposesAccessibleVoiceTranscriptionControl/);
+  assert.match(uiTests, /testChatComposerHidesVoiceTranscriptionWithoutDeploymentKey/);
   assert.match(ci, /swift test --package-path apps\/ios\/CompanionKit/);
   assert.match(ci, /xcodebuild test/);
   assert.doesNotMatch(ci, /xcodebuildmcp/i);

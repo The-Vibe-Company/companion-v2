@@ -964,10 +964,12 @@ window cannot wake Box, while Viewer access remains PostgreSQL-only.
 The native composer may transcribe microphone input into editable text before send. This remains
 outside Runtime v2: an authenticated Owner/Editor requests a constrained, single-use Gemini Live
 token through `POST /v1/companions/:id/transcription-sessions`, then the device streams PCM directly
-to Google. The workspace Google API key remains encrypted in the existing provider connection and
-is never returned to iOS; the API never relays or stores audio. Stopping dictation leaves ordinary
-text in the composer, and only the later message send creates a durable turn. Viewer has no composer
-or transcription control, and no transcription action contacts or wakes Box/Pi.
+to Google. The API-only `COMPANION_GEMINI_TRANSCRIPTION_API_KEY` enables this input method for every
+workspace and is never returned to iOS; when it is absent, thread projections mark transcription
+unavailable and clients omit the microphone. The API never relays or stores audio. Stopping
+dictation leaves ordinary text in the composer, and only the later message send creates a durable
+turn. Viewer has no composer or transcription control, and no transcription action contacts or
+wakes Box/Pi.
 
 After an active session is restored, the app requests alert/sound permission and registers its
 current APNs token through the shared cookie-authenticated API. The installation UUID is stable per

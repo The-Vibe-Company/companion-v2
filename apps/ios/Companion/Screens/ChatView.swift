@@ -464,6 +464,7 @@ struct ChatView: View {
                 companionName: currentCompanion.name,
                 companionIcon: currentCompanion.icon,
                 canSend: thread?.canSend,
+                transcriptionAvailable: thread?.transcriptionAvailable == true,
                 isReplying: isReplying,
                 hasLiveReasoning: liveReasoningEventID != nil,
                 error: thread == nil ? nil : error,
