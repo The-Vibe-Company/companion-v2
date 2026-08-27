@@ -2121,9 +2121,10 @@ private struct ChatBubbleRowLayout: Layout {
         cache: inout ()
     ) -> CGSize {
         guard let subview = subviews.first else { return .zero }
-        let availableWidth = proposal.width ?? CompanionChatBubbleLayout.absoluteMaximumWidth
+        let availableWidth = proposal.width.map(Double.init)
+            ?? CompanionChatBubbleLayout.absoluteMaximumWidth
         let maximumWidth = CGFloat(
-            CompanionChatBubbleLayout.maximumWidth(in: Double(availableWidth))
+            CompanionChatBubbleLayout.maximumWidth(in: availableWidth)
         )
         let childSize = subview.sizeThatFits(.init(width: maximumWidth, height: proposal.height))
         return CGSize(width: proposal.width ?? childSize.width, height: childSize.height)

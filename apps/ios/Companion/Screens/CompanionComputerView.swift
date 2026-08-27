@@ -1,4 +1,5 @@
 import CompanionKit
+import Foundation
 import SwiftUI
 import WebKit
 
