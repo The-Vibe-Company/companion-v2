@@ -723,11 +723,13 @@ func rosterRepartitionsMemberStateResponsesUntilServerOrderingReconciles() throw
     var roster = CompanionRosterState(companions: [pinned, nova, orbit])
 
     let newlyPinned = try rosterCompanion(id: nova.id, name: nova.name, pinned: true)
-    #expect(roster.replaceAndRepartition(newlyPinned))
+    let replacedPinned = roster.replaceAndRepartition(newlyPinned)
+    #expect(replacedPinned)
     #expect(roster.companions.map(\.id) == [pinned.id, nova.id, orbit.id])
 
     let newlyHidden = try rosterCompanion(id: pinned.id, name: pinned.name, hidden: true)
-    #expect(roster.replaceAndRepartition(newlyHidden))
+    let replacedHidden = roster.replaceAndRepartition(newlyHidden)
+    #expect(replacedHidden)
     #expect(roster.companions.map(\.id) == [nova.id, orbit.id, pinned.id])
     #expect(roster.sections.hidden.map(\.id) == [pinned.id])
 }
@@ -739,7 +741,8 @@ func rosterKeepsOrderForUnreadOnlyMemberStateResponses() throws {
     var roster = CompanionRosterState(companions: [luna, nova])
 
     let unreadLuna = try rosterCompanion(id: luna.id, name: luna.name, unread: true)
-    #expect(roster.replaceAndRepartition(unreadLuna))
+    let replacedUnread = roster.replaceAndRepartition(unreadLuna)
+    #expect(replacedUnread)
     #expect(roster.companions.map(\.id) == [luna.id, nova.id])
     #expect(roster.companions.first?.unread == true)
 }
