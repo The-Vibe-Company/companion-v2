@@ -15,6 +15,7 @@ final class CompanionMacWorkspaceModel {
     private(set) var actionMessage: String?
     private(set) var actionError: String?
     private(set) var pendingDeletionIDs: Set<String> = []
+    private var deletionRequestsInFlight: Set<String> = []
 
     init(sessionStore: SessionStore) {
         self.sessionStore = sessionStore
@@ -41,7 +42,11 @@ final class CompanionMacWorkspaceModel {
         if !silently { loading = true }
         do {
             let next = try await sessionStore.listCompanions()
-            rosterState.reconcile(with: visibleCompanionsReconcilingDeletions(next))
+            // Keep the optimistic snapshot intact until the delete request settles. A list poll
+            // that overlaps the request must not make a later failure impossible to roll back.
+            if deletionRequestsInFlight.isEmpty {
+                rosterState.reconcile(with: visibleCompanionsReconcilingDeletions(next))
+            }
             errorMessage = nil
             if let selectedCompanionID,
                companions.contains(where: { $0.id == selectedCompanionID }) {
@@ -123,6 +128,7 @@ final class CompanionMacWorkspaceModel {
         actionError = nil
         let wasSelected = selectedCompanionID == companion.id
         pendingDeletionIDs.insert(companion.id)
+        deletionRequestsInFlight.insert(companion.id)
         _ = rosterState.removeOptimistically(companionID: companion.id)
         if selectedCompanionID == companion.id { selectedCompanionID = nil }
         Task {
@@ -131,6 +137,7 @@ final class CompanionMacWorkspaceModel {
                     companionID: companion.id,
                     requestID: UUID()
                 )
+                deletionRequestsInFlight.remove(companion.id)
                 if !operation.isActive { pendingDeletionIDs.remove(companion.id) }
                 let restored = rosterState.reconcileDeletionResponse(
                     companionID: companion.id,
@@ -144,6 +151,7 @@ final class CompanionMacWorkspaceModel {
                     actionError = operation.error?.message ?? "\(companion.name) could not be deleted and was restored."
                 }
             } catch {
+                deletionRequestsInFlight.remove(companion.id)
                 pendingDeletionIDs.remove(companion.id)
                 let restored = rosterState.restoreDeletion(companionID: companion.id)
                 if wasSelected, restored != nil { selectedCompanionID = companion.id }
