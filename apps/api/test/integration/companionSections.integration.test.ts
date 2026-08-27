@@ -1,7 +1,10 @@
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
+import { z } from "zod";
 
 import {
   assignCompanionSection,
@@ -25,10 +28,25 @@ import {
   type TestActor,
 } from "./testDatabase";
 
-type DatabaseFailure = Error & { code?: string };
+const databaseFailureNodeSchema = z.object({
+  code: z.string().optional(),
+  cause: z.unknown().optional(),
+}).passthrough();
+type DatabaseFailure = Error & { code?: string; cause?: unknown };
 
 function hasDatabaseCode(expected: string): (error: DatabaseFailure) => boolean {
-  return (error) => error.code === expected || error.message.includes(expected);
+  return (error) => {
+    const seen = new Set<unknown>();
+    let current: unknown = error;
+    while (current !== null && !seen.has(current)) {
+      const node = databaseFailureNodeSchema.safeParse(current);
+      if (!node.success) break;
+      seen.add(current);
+      if (node.data.code === expected) return true;
+      current = node.data.cause ?? null;
+    }
+    return false;
+  };
 }
 
 /**
@@ -43,6 +61,41 @@ describe("Companion sections", () => {
   const apiDatabaseUrl = process.env.DATABASE_API_URL;
   const apiSql = apiDatabaseUrl ? postgres(apiDatabaseUrl, { max: 2 }) : null;
   const apiDb: Db | null = apiSql ? drizzle(apiSql, { schema }) : null;
+
+  beforeAll(async () => {
+    if (!apiSql) throw new Error("Companion section integration requires DATABASE_API_URL");
+    const [session] = await apiSql<Array<{ role: string }>>`
+      select current_user::text as role
+    `;
+    if (!session) throw new Error("Companion section integration could not resolve the API role");
+    // Migration-protocol tests deliberately rewrite capability ACLs on the shared disposable
+    // database. Reapply the production grant hook so this feature's RLS/capability assertions stay
+    // order-independent and cover every existing capability used by its response projection.
+    const grantsSource = await readFile(fileURLToPath(
+      new URL("../../../../packages/db/runtime-role-grants.sql", import.meta.url),
+    ), "utf8");
+    const beginMarker = "-- companion-runtime-grants-begin";
+    const endMarker = "-- companion-runtime-grants-end";
+    const begin = grantsSource.indexOf(beginMarker);
+    const end = grantsSource.indexOf(endMarker);
+    if (begin < 0 || end <= begin) throw new Error("runtime grant hook markers are missing");
+    const grantBlock = grantsSource.slice(begin + beginMarker.length, end).trim();
+    const workerRole = process.env.DATABASE_WORKER_ROLE ?? "companion_worker";
+    const runtimeRole = process.env.DATABASE_COMPANION_RUNTIME_ROLE ?? "companion_runtime_v2";
+    const ownerDatabaseUrl = process.env.DATABASE_URL;
+    if (!ownerDatabaseUrl) throw new Error("Companion section integration requires DATABASE_URL");
+    const grantSql = postgres(ownerDatabaseUrl, { max: 1 });
+    try {
+      await grantSql`select
+        set_config('companion.api_role', ${session.role}, false),
+        set_config('companion.worker_role', ${workerRole}, false),
+        set_config('companion.companion_runtime_role', ${runtimeRole}, false),
+        set_config('companion.retired_runtime_role', '', false)`;
+      await grantSql.unsafe(grantBlock);
+    } finally {
+      await grantSql.end();
+    }
+  });
 
   async function asActor<T>(actor: TestActor, action: (database: Db) => Promise<T>): Promise<T> {
     return withTenantContext({ orgId: fixture.orgA, userId: actor.id }, action);
@@ -100,7 +153,7 @@ describe("Companion sections", () => {
     await integrationSql.end();
   });
 
-  it("grants the API role only the section capability functions", async () => {
+  it("exposes sections to the API role only through capability functions", async () => {
     const section = await asApiActor(fixture.developer, (database) => createCompanionSection({
       actor: fixture.developer,
       orgId: fixture.orgA,

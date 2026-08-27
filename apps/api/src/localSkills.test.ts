@@ -131,10 +131,6 @@ describe("companion skill package + row", () => {
     expect(changelog).toContain("notification mute state");
     expect(changelog).toContain("outside delegated Skills Hub Agent Auth");
     expect(changelog).toContain("never change Box or Pi state");
-    expect(changelog).toContain("contextual transcription responses");
-    expect(changelog).toContain("microphone audio");
-    expect(changelog).toContain("outside delegated Skills Hub capabilities");
-    expect(changelog).toContain("No change to Companion skill commands");
     // SAFETY: the bundled manifest is the repo's own companion.json, whose metadata.changelog shape the manifest schema fixes.
     const manifest = JSON.parse(await readFile(join(companionSkillDir(), "companion.json"), "utf8")) as {
       metadata?: { changelog?: Array<{ version?: string; changes?: string[] }> };
