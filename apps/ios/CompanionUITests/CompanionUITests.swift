@@ -693,6 +693,36 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    func testTranscriptWindowDemoRestoresReadingPositionAfterCompanionSwitch() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-transcript-window-demo"]
+        app.launch()
+
+        let savedAnchor = app.descendants(matching: .any)["chat.entry.long-101"]
+        for _ in 0..<12 where !savedAnchor.isHittable {
+            app.swipeDown()
+        }
+        XCTAssertTrue(savedAnchor.waitForExistence(timeout: 3))
+        XCTAssertTrue(savedAnchor.isHittable)
+        XCTAssertTrue(app.buttons["chat.scroll-to-bottom"].exists)
+
+        let switchCompanion = app.buttons["chat.demo.switch-companion"]
+        XCTAssertTrue(switchCompanion.waitForExistence(timeout: 2))
+        switchCompanion.tap()
+        XCTAssertTrue(app.buttons["Switch to Luna"].waitForExistence(timeout: 3))
+        switchCompanion.tap()
+        XCTAssertTrue(app.buttons["Switch to Orbit"].waitForExistence(timeout: 3))
+
+        let restoredAnchor = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isHittable == true"),
+            object: savedAnchor
+        )
+        wait(for: [restoredAnchor], timeout: 3)
+        XCTAssertTrue(savedAnchor.isHittable)
+        XCTAssertFalse(app.descendants(matching: .any)["chat.entry.long-120"].isHittable)
+    }
+
+    @MainActor
     func testTranscriptWindowDemoKeepsLatestEntriesOrderedAndSeparated() throws {
         let app = XCUIApplication()
         app.launchArguments = ["-companion-transcript-window-demo"]

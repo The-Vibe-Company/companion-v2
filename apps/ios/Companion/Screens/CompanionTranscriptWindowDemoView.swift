@@ -4,21 +4,50 @@ import Foundation
 import SwiftUI
 
 struct CompanionTranscriptWindowDemoView: View {
+    @State private var selectedCompanionID = CompanionTranscriptWindowDemoFixtures.companionID
+    @State private var readingPositions = CompanionChatReadingPositionStore()
+
     var body: some View {
+        let companionID = selectedCompanionID
         NavigationStack {
             ChatView(
-                companion: CompanionTranscriptWindowDemoFixtures.companion,
+                companion: selectedCompanion,
+                readingPosition: readingPositions.position(for: companionID),
                 onPlugins: {},
                 services: CompanionTranscriptWindowDemoFixtures.services,
+                onReadingPositionChange: { position in
+                    readingPositions.record(position, for: companionID)
+                },
                 onSettings: {}
             )
+            .id(companionID)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(selectedCompanionID == CompanionTranscriptWindowDemoFixtures.companionID
+                        ? "Switch to Orbit"
+                        : "Switch to Luna") {
+                        selectedCompanionID = selectedCompanionID
+                            == CompanionTranscriptWindowDemoFixtures.companionID
+                            ? CompanionTranscriptWindowDemoFixtures.secondCompanionID
+                            : CompanionTranscriptWindowDemoFixtures.companionID
+                    }
+                    .accessibilityIdentifier("chat.demo.switch-companion")
+                }
+            }
         }
+    }
+
+    private var selectedCompanion: CompanionSummary {
+        selectedCompanionID == CompanionTranscriptWindowDemoFixtures.companionID
+            ? CompanionTranscriptWindowDemoFixtures.companion
+            : CompanionTranscriptWindowDemoFixtures.secondCompanion
     }
 }
 
 @MainActor
 private enum CompanionTranscriptWindowDemoFixtures {
     static let companionID = "c96ab360-00f3-4497-a51a-51442db8add1"
+    static let secondCompanionID = "d97bc471-11f4-45a8-b62b-62553ec9bee2"
     static let usesShortThread = ProcessInfo.processInfo.environment[
         "COMPANION_TRANSCRIPT_DEMO_SHORT"
     ] == "1"
@@ -36,6 +65,22 @@ private enum CompanionTranscriptWindowDemoFixtures {
       "unread":false,
       "last_message":{"preview":"The release matrix is now stable.","role":"assistant","created_at":"2026-08-26T12:00:00.000Z"},
       "runtime":{"state":"running","replying":true,"last_error":null,"provider_ids":["anthropic"],"latest_operation":null}
+    }
+    """#)
+
+    static let secondCompanion: CompanionSummary = decode(#"""
+    {
+      "id":"d97bc471-11f4-45a8-b62b-62553ec9bee2",
+      "name":"Orbit",
+      "persona":"Keep another long conversation legible",
+      "model_id":"claude-sonnet",
+      "selected_skill_ids":[],
+      "icon":{"shape":2,"mouth":2,"accessory":5,"color":4},
+      "access":"owner",
+      "hidden":false,
+      "unread":false,
+      "last_message":{"preview":"The second release matrix is stable.","role":"assistant","created_at":"2026-08-26T12:00:00.000Z"},
+      "runtime":{"state":"running","replying":false,"last_error":null,"provider_ids":["anthropic"],"latest_operation":null}
     }
     """#)
 
@@ -177,9 +222,10 @@ private enum CompanionTranscriptWindowDemoFixtures {
     static let services: ChatServices = {
         let fixtureThread = thread
         let fixtureCompanion = companion
+        let secondFixtureCompanion = secondCompanion
         return ChatServices(
             thread: { _ in fixtureThread },
-            listCompanions: { [fixtureCompanion] },
+            listCompanions: { [fixtureCompanion, secondFixtureCompanion] },
             decide: { _, _, _ in fixtureThread },
             retryTurn: { _, _, _ in throw CompanionTranscriptWindowDemoError.unavailable },
             cancelTurn: { _, _ in fixtureThread },

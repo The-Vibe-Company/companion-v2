@@ -1653,6 +1653,61 @@ func transcriptWindowRefreshCanPreserveEntriesWhileReadingHistory() {
 }
 
 @Test
+func chatReadingPositionsRemainIsolatedByCompanion() {
+    var store = CompanionChatReadingPositionStore()
+    let luna = CompanionChatReadingPosition(
+        anchorEventID: "luna-42",
+        isFollowingTail: false,
+        exposedEntryCount: 100,
+        transcriptEntryCount: 120
+    )
+    let orbit = CompanionChatReadingPosition(
+        anchorEventID: "orbit-80",
+        isFollowingTail: true,
+        exposedEntryCount: 50,
+        transcriptEntryCount: 80
+    )
+
+    store.record(luna, for: "luna")
+    store.record(orbit, for: "orbit")
+
+    #expect(store.position(for: "luna") == luna)
+    #expect(store.position(for: "orbit") == orbit)
+    #expect(store.position(for: "new-companion") == nil)
+}
+
+@Test
+func transcriptWindowRestorationKeepsSavedAnchorExposedAfterTailGrowth() {
+    var window = CompanionTranscriptWindow()
+
+    window.restore(
+        totalCount: 125,
+        previouslyExposedCount: 50,
+        previousTotalCount: 120,
+        anchorIndex: 70
+    )
+
+    #expect(window.exposedCount == 55)
+    #expect(window.visibleRange == (70..<125))
+    #expect(window.hasEarlierEntries)
+}
+
+@Test
+func transcriptWindowRestorationExpandsFarEnoughForAnOlderSavedAnchor() {
+    var window = CompanionTranscriptWindow()
+
+    window.restore(
+        totalCount: 125,
+        previouslyExposedCount: 50,
+        previousTotalCount: 120,
+        anchorIndex: 20
+    )
+
+    #expect(window.exposedCount == 105)
+    #expect(window.visibleRange == (20..<125))
+}
+
+@Test
 func transcriptWindowResetStartsDisclosureOver() {
     var window = CompanionTranscriptWindow(totalCount: 120)
     let expansion = window.loadEarlier()
