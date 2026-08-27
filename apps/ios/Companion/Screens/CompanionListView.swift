@@ -456,20 +456,16 @@ struct CompanionListView: View {
             let next: [CompanionSummary]
             let nextSections: [CompanionSection]
             if let services {
-                async let companionResult = services.listCompanions()
-                async let sectionResult = services.listSections()
-                next = try await companionResult
+                next = try await services.listCompanions()
                 do {
-                    nextSections = try await sectionResult
+                    nextSections = try await services.listSections()
                 } catch {
                     nextSections = try CompanionSectionCompatibility.fallback(for: error)
                 }
             } else {
-                async let companionResult = sessionStore.listCompanions()
-                async let sectionResult = sessionStore.listCompanionSections()
-                next = try await companionResult
+                next = try await sessionStore.listCompanions()
                 do {
-                    nextSections = try await sectionResult
+                    nextSections = try await sessionStore.listCompanionSections()
                 } catch {
                     nextSections = try CompanionSectionCompatibility.fallback(for: error)
                 }
