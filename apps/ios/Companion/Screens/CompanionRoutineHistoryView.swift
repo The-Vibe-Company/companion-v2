@@ -282,13 +282,7 @@ struct CompanionRoutineHistoryView: View {
     }
 
     private func formattedTimestamp(_ value: String) -> String? {
-        guard let date = routineDate(value) else { return nil }
-        return MemberTimezone.formatInstant(date, in: displayTimezone)
-    }
-
-    private func routineDate(_ value: String) -> Date? {
-        (try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(value))
-            ?? (try? Date.ISO8601FormatStyle().parse(value))
+        MemberTimezone.formatInstant(value, in: displayTimezone)
     }
 
     private func outcomeLabel(_ run: CompanionRoutineRunSummary) -> String {
@@ -728,7 +722,7 @@ private struct CompanionRoutineRunDetailView: View {
             return
         } catch {
             guard !Task.isCancelled, generation == loadGeneration else { return }
-            error = companionDisplayMessage(error, fallback: "This routine run could not be loaded.")
+            self.error = companionDisplayMessage(error, fallback: "This routine run could not be loaded.")
         }
         if generation == loadGeneration { loading = false }
     }
@@ -738,9 +732,7 @@ private struct CompanionRoutineRunDetailView: View {
     }
 
     private func formattedTimestamp(_ value: String) -> String? {
-        guard let date = (try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(value))
-                ?? (try? Date.ISO8601FormatStyle().parse(value)) else { return nil }
-        return MemberTimezone.formatInstant(date, in: displayTimezone)
+        MemberTimezone.formatInstant(value, in: displayTimezone)
     }
 
     private func outcomeLabel(_ run: CompanionRoutineRunDetail) -> String {
