@@ -8,7 +8,7 @@ struct CompanionRoutineHistoryTarget: Identifiable, Equatable, Sendable {
     let name: String
 
     var id: String {
-        "\(routineID ?? \"deleted\"):\(runID ?? \"history\")"
+        "\(routineID ?? "deleted"):\(runID ?? "history")"
     }
 }
 
@@ -232,7 +232,7 @@ struct CompanionRoutineHistoryView: View {
     }
 
     private var listTaskID: String {
-        "\(companionID):\(target.routineID ?? \"none\"):\(target.runID ?? \"list\")"
+        "\(companionID):\(target.routineID ?? "none"):\(target.runID ?? "list")"
     }
 
     private func loadRuns(cursor: String? = nil) async {
