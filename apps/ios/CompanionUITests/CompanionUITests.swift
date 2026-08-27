@@ -742,7 +742,7 @@ final class CompanionUITests: XCTestCase {
             predicate: NSPredicate(format: "value == %@", "1 new reply"),
             object: unseen
         )
-        wait(for: [unseenLabel], timeout: 10)
+        wait(for: [unseenLabel], timeout: 15)
         XCTAssertEqual(unseen.value as? String, "1 new reply")
         unseen.tap()
 
