@@ -236,6 +236,7 @@ struct ChatView: View {
                     .scrollDismissesKeyboard(.interactively)
                     .scrollIndicators(.hidden)
                     .accessibilityIdentifier("chat.transcript")
+                    .accessibilityValue(transcriptScrollDiagnostics)
                     .simultaneousGesture(
                         DragGesture(minimumDistance: 2)
                             .onChanged { _ in stopFollowingTailForReveal() }
@@ -1189,9 +1190,23 @@ struct ChatView: View {
 
     private func markInitialBottomReady(for renderedRevision: Int) {
         guard renderedRevision == scrollContentRevision,
-              scrollCoordinator.pendingRequest?.source == .initial,
               initialBottomReadyRevision != renderedRevision else { return }
         initialBottomReadyRevision = renderedRevision
+    }
+
+    private var transcriptScrollDiagnostics: String {
+        guard ProcessInfo.processInfo.arguments.contains(
+            "-companion-transcript-window-demo"
+        ) else { return "" }
+        return [
+            "revision=\(scrollContentRevision)",
+            "ready=\(initialBottomReadyRevision.map(String.init) ?? "none")",
+            "pending=\(scrollCoordinator.pendingRequest?.source.rawValue ?? "none")",
+            "batches=\(scrollCoordinator.issuedRequestBatchCount)",
+            "outstanding=\(scrollCoordinator.isProgrammaticBottomScrollOutstanding)",
+            "follow=\(scrollCoordinator.followState.rawValue)",
+            "target=\(bottomScrollTargetID)",
+        ].joined(separator: ";")
     }
 
     private func finishReadingPositionRestoration() {

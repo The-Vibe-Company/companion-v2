@@ -677,7 +677,10 @@ final class CompanionUITests: XCTestCase {
         app.launch()
 
         let latest = app.staticTexts["Long-thread message 120"]
-        XCTAssertTrue(latest.waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            latest.waitForExistence(timeout: 5),
+            "Scroll diagnostics: \(app.descendants(matching: .any)["chat.transcript"].value)"
+        )
         app.swipeDown()
 
         let scrollToBottom = app.buttons["chat.scroll-to-bottom"]
@@ -732,7 +735,10 @@ final class CompanionUITests: XCTestCase {
         for _ in 0..<12 where !savedAnchor.isHittable {
             app.swipeDown()
         }
-        XCTAssertTrue(savedAnchor.waitForExistence(timeout: 3))
+        XCTAssertTrue(
+            savedAnchor.waitForExistence(timeout: 3),
+            "Scroll diagnostics: \(app.descendants(matching: .any)["chat.transcript"].value)"
+        )
         XCTAssertTrue(savedAnchor.isHittable)
         XCTAssertTrue(app.buttons["chat.scroll-to-bottom"].exists)
 
@@ -807,7 +813,10 @@ final class CompanionUITests: XCTestCase {
         let latest = app.descendants(matching: .any)["chat.entry.long-120"]
         if !latest.waitForExistence(timeout: 3) {
             let scrollToBottom = app.buttons["chat.scroll-to-bottom"]
-            XCTAssertTrue(scrollToBottom.waitForExistence(timeout: 3))
+            XCTAssertTrue(
+                scrollToBottom.waitForExistence(timeout: 3),
+                "Scroll diagnostics: \(app.descendants(matching: .any)["chat.transcript"].value)"
+            )
             scrollToBottom.tap()
         }
 

@@ -320,6 +320,8 @@ test("native chat reading restoration stays deterministic and delegated to Apple
     /pendingRequest\.source == \.initial[\s\S]*initialBottomReadyRevision/,
   );
   assert.equal(chat.match(/scrollCoordinator\.takePendingRequest\(\)/g)?.length, 1);
+  assert.match(chat, /batches=\\\(scrollCoordinator\.issuedRequestBatchCount\)/);
+  assert.match(uiTests, /Scroll diagnostics:/);
   const scrollOwner = chat.indexOf("private func performScroll");
   assert.notEqual(scrollOwner, -1);
   assert.doesNotMatch(chat.slice(0, scrollOwner), /proxy\.scrollTo\(/);
