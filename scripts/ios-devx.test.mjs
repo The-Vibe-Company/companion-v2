@@ -230,6 +230,8 @@ test("the chat scroll-to-bottom control floats over the transcript", () => {
     chat.indexOf("private func dayMarker"),
   );
   assert.match(button, /\.buttonStyle\(\.glass\)/);
+  assert.equal(button.match(/Button\(action: action\)/g)?.length, 1);
+  assert.match(button, /\.buttonBorderShape\(unseenCount > 0 \? \.capsule : \.circle\)/);
   assert.match(button, /\.shadow\(color: visualTheme\.shadow\.opacity\(0\.2\), radius: 8, y: 3\)/);
 });
 

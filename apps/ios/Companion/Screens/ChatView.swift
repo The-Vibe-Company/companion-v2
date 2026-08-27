@@ -377,42 +377,33 @@ struct ChatView: View {
         .accessibilityIdentifier("chat.load-earlier")
     }
 
-    @ViewBuilder
     private func scrollToBottomButton(action: @escaping () -> Void) -> some View {
-        if unseenCount > 0 {
-            Button(action: action) {
-                HStack(spacing: 8) {
-                    Image(systemName: "arrow.down")
-                        .font(.system(size: 17, weight: .semibold))
+        Button(action: action) {
+            HStack(spacing: unseenCount > 0 ? 8 : 0) {
+                Image(systemName: "arrow.down")
+                    .font(.system(size: 17, weight: .semibold))
+                    .frame(width: unseenCount > 0 ? nil : 46, height: 46)
+                if unseenCount > 0 {
                     Text(unseenMessage(count: unseenCount))
                         .font(.caption.weight(.semibold))
                         .lineLimit(1)
                 }
-                .frame(minHeight: 46)
-                .padding(.horizontal, 14)
             }
-            .buttonStyle(.glass)
-            .buttonBorderShape(.capsule)
-            .tint(visualTheme.accent)
-            .shadow(color: visualTheme.shadow.opacity(0.2), radius: 8, y: 3)
-            .accessibilityLabel("\(unseenMessage(count: unseenCount)). Scroll to latest message")
-            .accessibilityValue(unseenMessage(count: unseenCount))
-            .accessibilityHint("Double tap to scroll to the latest message.")
-            .accessibilityIdentifier("chat.scroll-to-bottom")
-        } else {
-            Button(action: action) {
-                Image(systemName: "arrow.down")
-                    .font(.system(size: 17, weight: .semibold))
-                    .frame(width: 46, height: 46)
-            }
-            .buttonStyle(.glass)
-            .buttonBorderShape(.circle)
-            .tint(visualTheme.accent)
-            .shadow(color: visualTheme.shadow.opacity(0.2), radius: 8, y: 3)
-            .accessibilityLabel("Scroll to latest message")
-            .accessibilityHint("Double tap to scroll to the latest message.")
-            .accessibilityIdentifier("chat.scroll-to-bottom")
+            .frame(minHeight: 46)
+            .padding(.horizontal, unseenCount > 0 ? 14 : 0)
         }
+        .buttonStyle(.glass)
+        .buttonBorderShape(unseenCount > 0 ? .capsule : .circle)
+        .tint(visualTheme.accent)
+        .shadow(color: visualTheme.shadow.opacity(0.2), radius: 8, y: 3)
+        .accessibilityLabel(
+            unseenCount > 0
+                ? "\(unseenMessage(count: unseenCount)). Scroll to latest message"
+                : "Scroll to latest message"
+        )
+        .accessibilityValue(unseenCount > 0 ? unseenMessage(count: unseenCount) : "")
+        .accessibilityHint("Double tap to scroll to the latest message.")
+        .accessibilityIdentifier("chat.scroll-to-bottom")
     }
 
     private func unseenMessage(count: Int) -> String {
