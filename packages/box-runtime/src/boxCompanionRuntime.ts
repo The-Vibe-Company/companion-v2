@@ -50,6 +50,7 @@ import {
   type CompanionPiJournalRecord,
   type PiJsonObject,
 } from "./companionPiBroker";
+import { companionPiModelsJson, COMPANION_PI_MODELS_PATH } from "./companionPiModels";
 import {
   COMPANION_BOX_AGENT_AUTH_PATH,
   COMPANION_BOX_AGENT_DEFAULT_PORT,
@@ -2633,6 +2634,7 @@ done`,
     const allowed = new Set([
       ".companion/pi/auth.json",
       ".companion/pi/mcp.json",
+      COMPANION_PI_MODELS_PATH,
       ".companion/runtime/state/mcp-gateway.json",
       ".companion/runtime/state/mcp-accounts.json",
       ".companion/runtime/state/skills.json",
@@ -3185,6 +3187,11 @@ fi`,
       {
         path: ".companion/pi/mcp.json",
         content: `${JSON.stringify(mcp.config, null, 2)}\n`,
+        mode: 0o600,
+      },
+      {
+        path: COMPANION_PI_MODELS_PATH,
+        content: companionPiModelsJson(Object.keys(input.providerAuth)[0], input.modelId),
         mode: 0o600,
       },
       {

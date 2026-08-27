@@ -250,7 +250,11 @@ acknowledgement, and settlement crash boundaries.
 Pi catalog normalization preserves the model `input` capabilities. Image work sent to a text-only
 model fails explicitly with a stable capability error. Capability data comes from Pi's catalog or a
 bounded bundled fallback, plus bounded curated supplements for released models Pi has not published
-yet. Pi's same-id entry wins as soon as it appears; there is no global learned capability table.
+yet. When a selected supplement is also absent from the pinned Pi release, material staging writes
+an exact `~/.companion/pi/models.json` custom-model snapshot with its provider transport and input
+capabilities. Other selections stage an empty provider map, clearing any obsolete override. The
+override is removed when the pinned Pi catalog publishes the model, so Pi's native same-id metadata
+wins; there is no global learned capability table.
 
 ## Resources and credentials
 

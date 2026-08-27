@@ -81,10 +81,14 @@ describe("Companion provider contracts", () => {
   it("supplements the z.ai fallback without overriding later Pi metadata", () => {
     const zaiFallback = COMPANION_PROVIDER_CATALOG.find((provider) => provider.id === "zai");
     expect(zaiFallback?.models).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: "glm-5.3-flash", name: "GLM 5.3 Flash" }),
+      expect.objectContaining({
+        id: "glm-5.3-flash",
+        name: "GLM 5.3 Flash",
+        input: ["text", "image"],
+      }),
     ]));
     expect(COMPANION_PROVIDER_SUPPLEMENTARY_MODELS.zai).toEqual([
-      { id: "glm-5.3-flash", name: "GLM 5.3 Flash" },
+      { id: "glm-5.3-flash", name: "GLM 5.3 Flash", input: ["text", "image"] },
     ]);
 
     expect(supplementCompanionProviderModels("zai", [
