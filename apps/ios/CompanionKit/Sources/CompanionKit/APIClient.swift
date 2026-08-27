@@ -439,6 +439,30 @@ public actor APIClient {
         ).companion
     }
 
+    public func updateCompanionMemberState(
+        companionID: String,
+        patch: CompanionMemberStatePatch
+    ) async throws -> CompanionSummary {
+        let id = Self.encodedPathComponent(companionID)
+        let body = try encoder.encode(patch)
+        return try await decode(
+            CompanionEnvelope.self,
+            path: "/v1/companions/\(id)/member-state",
+            method: "PATCH",
+            body: body
+        ).companion
+    }
+
+    public func duplicateCompanion(companionID: String) async throws -> CompanionSummary {
+        let id = Self.encodedPathComponent(companionID)
+        return try await decode(
+            CompanionEnvelope.self,
+            path: "/v1/companions/\(id)/duplicate",
+            method: "POST",
+            body: nil
+        ).companion
+    }
+
     public func updateCompanionPluginSelection(
         companionID: String,
         selectedMCPAccountIDs: [String]

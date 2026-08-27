@@ -5,6 +5,8 @@ import CompanionKit
 struct CompanionListServices {
     let listCompanions: () async throws -> [CompanionSummary]
     let deleteCompanion: (String, UUID) async throws -> CompanionOperationSummary
+    let updateMemberState: (String, CompanionMemberStatePatch) async throws -> CompanionSummary
+    let duplicateCompanion: (String) async throws -> CompanionSummary
 }
 
 struct CompanionListView: View {
@@ -26,6 +28,8 @@ struct CompanionListView: View {
     @State private var companionToDelete: CompanionSummary?
     @State private var deleteRequestIDs: [String: UUID] = [:]
     @State private var deletingCompanionIDs: Set<String> = []
+    @State private var rosterActionCompanionIDs: Set<String> = []
+    @State private var showingHidden = false
     @State private var rosterNotice: String?
     @State private var rosterActionError: String?
 
@@ -42,7 +46,7 @@ struct CompanionListView: View {
                         loadingState
                     } else if let error, companions.isEmpty {
                         errorState(error)
-                    } else if visibleCompanions.isEmpty {
+                    } else if matchingCompanions.isEmpty {
                         emptyState
                     } else {
                         roster
@@ -141,63 +145,70 @@ struct CompanionListView: View {
     }
 
     private var roster: some View {
-        ScrollView {
-            LazyVStack(spacing: 12) {
-                if let rosterActionError {
-                    CompanionErrorNotice(message: rosterActionError)
-                } else if let rosterNotice {
-                    CompanionSuccessNotice(message: rosterNotice)
-                }
+        List {
+            if let rosterActionError {
+                CompanionErrorNotice(message: rosterActionError)
+                    .rosterListRow()
+            } else if let rosterNotice {
+                CompanionSuccessNotice(message: rosterNotice)
+                    .rosterListRow()
+            }
 
-                HStack {
-                    Text("Your durable conversations")
-                        .font(.subheadline)
-                        .foregroundStyle(Color.companionMuted)
-                    Spacer()
-                    Text("\(visibleCompanions.count)")
-                        .font(.caption.monospacedDigit().weight(.semibold))
-                        .foregroundStyle(Color.companionMuted)
-                }
-                .padding(.horizontal, 4)
+            HStack {
+                Text("Your durable conversations")
+                    .font(.subheadline)
+                    .foregroundStyle(Color.companionMuted)
+                Spacer()
+                Text("\(visibleCompanions.count)")
+                    .font(.caption.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(Color.companionMuted)
+            }
+            .rosterListRow(verticalInset: 4)
 
-                ForEach(visibleCompanions) { companion in
-                    NavigationLink(value: CompanionRoute.chat(companion.id)) {
-                        CompanionRow(
-                            companion: companion,
-                            deletionOperation: effectiveDeletion(for: companion)
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("companion.row.\(companion.id)")
-                    .contextMenu {
-                        Button("Settings", systemImage: "gearshape") {
-                            path.append(.settings(companion.id))
-                        }
-
-                        if companion.access.canDeleteCompanion {
-                            Divider()
-                            if deletingCompanionIDs.contains(companion.id) {
-                                Button("Deleting…", systemImage: "clock") {}
-                                    .disabled(true)
-                            } else if effectiveDeletion(for: companion)?.isActive == true {
-                                Button("Deletion requested", systemImage: "clock") {}
-                                    .disabled(true)
-                            } else {
-                                Button(deleteMenuLabel(for: companion), systemImage: "trash", role: .destructive) {
-                                    companionToDelete = companion
-                                }
-                            }
-                        }
-                    }
-                    .accessibilityAction(named: "Settings") {
-                        path.append(.settings(companion.id))
-                    }
+            if !filteredSections.pinned.isEmpty {
+                Section {
+                    ForEach(filteredSections.pinned) { companionRow($0) }
+                } header: {
+                    rosterSectionHeader("Pinned", count: filteredSections.pinned.count)
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 10)
-            .padding(.bottom, 28)
+
+            if !filteredSections.unpinned.isEmpty {
+                Section {
+                    ForEach(filteredSections.unpinned) { companionRow($0) }
+                } header: {
+                    rosterSectionHeader("Companions", count: filteredSections.unpinned.count)
+                }
+            }
+
+            if !filteredSections.hidden.isEmpty {
+                Section {
+                    if showingHidden || !query.isEmpty {
+                        ForEach(filteredSections.hidden) { companionRow($0) }
+                    }
+                } header: {
+                    Button {
+                        withRosterAnimation { showingHidden.toggle() }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text("Hidden")
+                            Text("\(filteredSections.hidden.count)")
+                                .monospacedDigit()
+                            Spacer()
+                            Image(systemName: (showingHidden || !query.isEmpty) ? "chevron.down" : "chevron.right")
+                                .font(.caption.weight(.semibold))
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!query.isEmpty)
+                    .accessibilityLabel("Hidden Companions, \(filteredSections.hidden.count)")
+                    .accessibilityValue((showingHidden || !query.isEmpty) ? "Expanded" : "Collapsed")
+                }
+            }
         }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
         .refreshable { await reload() }
         .scrollIndicators(.hidden)
     }
@@ -245,13 +256,147 @@ struct CompanionListView: View {
         .padding(24)
     }
 
+    private var filteredSections: CompanionRosterSections {
+        let sections = rosterState.sections
+        return CompanionRosterSections(
+            pinned: sections.pinned.filter(matchesSearch),
+            unpinned: sections.unpinned.filter(matchesSearch),
+            hidden: sections.hidden.filter(matchesSearch)
+        )
+    }
+
     private var visibleCompanions: [CompanionSummary] {
-        companions.filter { companion in
-            guard !companion.hidden else { return false }
-            guard !query.isEmpty else { return true }
-            return companion.name.localizedStandardContains(query)
-                || (companion.lastMessage?.preview.localizedStandardContains(query) ?? false)
-                || (companion.persona?.localizedStandardContains(query) ?? false)
+        filteredSections.pinned + filteredSections.unpinned
+    }
+
+    private var matchingCompanions: [CompanionSummary] {
+        visibleCompanions + filteredSections.hidden
+    }
+
+    private func matchesSearch(_ companion: CompanionSummary) -> Bool {
+        guard !query.isEmpty else { return true }
+        return companion.name.localizedStandardContains(query)
+            || (companion.lastMessage?.preview.localizedStandardContains(query) ?? false)
+            || (companion.persona?.localizedStandardContains(query) ?? false)
+    }
+
+    private func rosterSectionHeader(_ title: String, count: Int) -> some View {
+        HStack(spacing: 6) {
+            Text(title)
+            Text("\(count)")
+                .monospacedDigit()
+        }
+        .textCase(nil)
+        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder
+    private func companionRow(_ companion: CompanionSummary) -> some View {
+        let busy = rosterActionCompanionIDs.contains(companion.id)
+            || deletingCompanionIDs.contains(companion.id)
+        NavigationLink(value: CompanionRoute.chat(companion.id)) {
+            CompanionRow(
+                companion: companion,
+                deletionOperation: effectiveDeletion(for: companion)
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(busy)
+        .accessibilityIdentifier("companion.row.\(companion.id)")
+        .contextMenu { companionContextMenu(for: companion, busy: busy) }
+        .swipeActions(edge: .leading, allowsFullSwipe: false) {
+            Button("Settings", systemImage: "gearshape") {
+                path.append(.settings(companion.id))
+            }
+            .tint(Color.companionInk)
+        }
+        .swipeActions(edge: .trailing) {
+            if canRequestDeletion(of: companion), !busy {
+                Button("Delete", systemImage: "trash", role: .destructive) {
+                    companionToDelete = companion
+                }
+            }
+        }
+        .accessibilityActions {
+            Button("Settings") { path.append(.settings(companion.id)) }
+            if companion.hidden {
+                Button("Unhide") {
+                    Task { await updateMemberState(companion, patch: .init(hidden: false)) }
+                }
+            } else {
+                Button(companion.pinned ? "Unpin" : "Pin") {
+                    Task { await updateMemberState(companion, patch: .init(pinned: !companion.pinned)) }
+                }
+                if !companion.unread {
+                    Button("Mark as unread") {
+                        Task { await updateMemberState(companion, patch: .init(unread: true)) }
+                    }
+                }
+                if companion.access.canDeleteCompanion {
+                    Button("Duplicate") { Task { await duplicate(companion) } }
+                }
+                Button("Hide") {
+                    Task { await updateMemberState(companion, patch: .init(hidden: true)) }
+                }
+            }
+            if canRequestDeletion(of: companion), !busy {
+                Button("Delete") { companionToDelete = companion }
+            }
+        }
+        .rosterListRow()
+    }
+
+    @ViewBuilder
+    private func companionContextMenu(for companion: CompanionSummary, busy: Bool) -> some View {
+        Button("Settings", systemImage: "gearshape") {
+            path.append(.settings(companion.id))
+        }
+
+        if companion.hidden {
+            Button("Unhide", systemImage: "eye") {
+                Task { await updateMemberState(companion, patch: .init(hidden: false)) }
+            }
+            .disabled(busy)
+        } else {
+            Button(companion.pinned ? "Unpin" : "Pin", systemImage: companion.pinned ? "pin.slash" : "pin") {
+                Task { await updateMemberState(companion, patch: .init(pinned: !companion.pinned)) }
+            }
+            .disabled(busy)
+
+            if !companion.unread {
+                Button("Mark as unread", systemImage: "envelope.badge") {
+                    Task { await updateMemberState(companion, patch: .init(unread: true)) }
+                }
+                .disabled(busy)
+            }
+
+            if companion.access.canDeleteCompanion {
+                Button("Duplicate", systemImage: "plus.square.on.square") {
+                    Task { await duplicate(companion) }
+                }
+                .disabled(busy)
+            }
+
+            Button("Hide", systemImage: "eye.slash") {
+                Task { await updateMemberState(companion, patch: .init(hidden: true)) }
+            }
+            .disabled(busy)
+        }
+
+        if companion.access.canDeleteCompanion {
+            Divider()
+            if deletingCompanionIDs.contains(companion.id) {
+                Button("Deleting…", systemImage: "clock") {}
+                    .disabled(true)
+            } else if effectiveDeletion(for: companion)?.isActive == true {
+                Button("Deletion requested", systemImage: "clock") {}
+                    .disabled(true)
+            } else {
+                Button(deleteMenuLabel(for: companion), systemImage: "trash", role: .destructive) {
+                    companionToDelete = companion
+                }
+                .disabled(busy)
+            }
         }
     }
 
@@ -343,8 +488,95 @@ struct CompanionListView: View {
         rosterState.replace(updated)
     }
 
+    private func updateMemberState(
+        _ companion: CompanionSummary,
+        patch: CompanionMemberStatePatch
+    ) async {
+        guard !rosterActionCompanionIDs.contains(companion.id) else { return }
+        rosterActionCompanionIDs.insert(companion.id)
+        defer { rosterActionCompanionIDs.remove(companion.id) }
+        rosterActionError = nil
+        rosterNotice = nil
+        do {
+            let updated: CompanionSummary
+            if let services {
+                updated = try await services.updateMemberState(companion.id, patch)
+            } else {
+                updated = try await sessionStore.updateCompanionMemberState(
+                    companionID: companion.id,
+                    patch: patch
+                )
+            }
+            withRosterAnimation {
+                rosterState.replaceAndRepartition(updated)
+            }
+            rosterNotice = memberStateNotice(for: updated, patch: patch)
+            AccessibilityNotification.Announcement(rosterNotice ?? "Companion updated.").post()
+            await reload(silently: true)
+        } catch {
+            rosterActionError = companionDisplayMessage(
+                error,
+                fallback: "This Companion could not be updated."
+            )
+        }
+    }
+
+    private func duplicate(_ companion: CompanionSummary) async {
+        guard companion.access.canDeleteCompanion,
+              !rosterActionCompanionIDs.contains(companion.id) else { return }
+        rosterActionCompanionIDs.insert(companion.id)
+        defer { rosterActionCompanionIDs.remove(companion.id) }
+        rosterActionError = nil
+        rosterNotice = nil
+        do {
+            let duplicate: CompanionSummary
+            if let services {
+                duplicate = try await services.duplicateCompanion(companion.id)
+            } else {
+                duplicate = try await sessionStore.duplicateCompanion(companionID: companion.id)
+            }
+            withRosterAnimation { rosterState.prepend(duplicate) }
+            rosterNotice = "\(duplicate.name) created."
+            AccessibilityNotification.Announcement("\(duplicate.name) created.").post()
+            await reload(silently: true)
+        } catch {
+            rosterActionError = companionDisplayMessage(
+                error,
+                fallback: "This Companion could not be duplicated."
+            )
+        }
+    }
+
+    private func memberStateNotice(
+        for companion: CompanionSummary,
+        patch: CompanionMemberStatePatch
+    ) -> String {
+        if let hidden = patch.hidden {
+            return hidden ? "\(companion.name) hidden." : "\(companion.name) unhidden."
+        }
+        if let pinned = patch.pinned {
+            return pinned ? "\(companion.name) pinned." : "\(companion.name) unpinned."
+        }
+        if patch.unread == true { return "\(companion.name) marked as unread." }
+        return "\(companion.name) updated."
+    }
+
+    private func withRosterAnimation(_ updates: () -> Void) {
+        if reduceMotion {
+            updates()
+        } else {
+            withAnimation(.easeOut(duration: 0.18)) { updates() }
+        }
+    }
+
     private func effectiveDeletion(for companion: CompanionSummary) -> CompanionOperationSummary? {
         companion.deletionOperation
+    }
+
+    private func canRequestDeletion(of companion: CompanionSummary) -> Bool {
+        companion.access.canDeleteCompanion
+            && !deletingCompanionIDs.contains(companion.id)
+            && effectiveDeletion(for: companion)?.isActive != true
     }
 
     private func hasActiveWork(_ companion: CompanionSummary) -> Bool {
@@ -511,6 +743,21 @@ struct CompanionRosterDemoView: View {
                 },
                 deleteCompanion: { companionID, requestID in
                     try demoState.delete(companionID: companionID, requestID: requestID)
+                },
+                updateMemberState: { _, patch in
+                    CompanionRosterDemoFixtures.companion(
+                        access: access,
+                        pinned: patch.pinned ?? false,
+                        hidden: patch.hidden ?? false,
+                        unread: patch.unread ?? false
+                    )
+                },
+                duplicateCompanion: { _ in
+                    CompanionRosterDemoFixtures.companion(
+                        id: "e87357f6-b1b7-4afe-bb6c-fd196ec46065",
+                        name: "Luna copy",
+                        access: access
+                    )
                 }
             )
         )
@@ -547,18 +794,26 @@ private enum CompanionRosterDemoFixtures {
         user: .init(id: "demo-user", email: "demo@example.com", name: "Demo")
     )
 
-    static func companion(access: CompanionAccess) -> CompanionSummary {
+    static func companion(
+        id: String = companionID,
+        name: String = "Luna",
+        access: CompanionAccess,
+        pinned: Bool = false,
+        hidden: Bool = false,
+        unread: Bool = false
+    ) -> CompanionSummary {
         decode(#"""
         {
-          "id":"\#(companionID)",
-          "name":"Luna",
+          "id":"\#(id)",
+          "name":"\#(name)",
           "persona":"Keep releases calm",
           "model_id":"claude-sonnet",
           "selected_skill_ids":["11111111-1111-4111-8111-111111111111","22222222-2222-4222-8222-222222222222"],
           "icon":{"shape":6,"mouth":1,"accessory":6,"color":2},
           "access":"\#(access.rawValue)",
-          "hidden":false,
-          "unread":false,
+          "pinned":\#(pinned),
+          "hidden":\#(hidden),
+          "unread":\#(unread),
           "last_message":{"preview":"Release notes are ready.","role":"assistant","created_at":"2026-08-25T08:00:00.000Z"},
           "runtime":{"state":"running","replying":false,"last_error":null,"provider_ids":["anthropic"],"latest_operation":null}
         }
@@ -581,6 +836,16 @@ private enum CompanionRosterDemoFixtures {
     }
 }
 #endif
+
+private extension View {
+    func rosterListRow(verticalInset: CGFloat = 6) -> some View {
+        listRowInsets(
+            EdgeInsets(top: verticalInset, leading: 16, bottom: verticalInset, trailing: 16)
+        )
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
+    }
+}
 
 private enum CompanionRoute: Hashable {
     case chat(String)
@@ -632,10 +897,7 @@ private struct CompanionRow: View {
                         .lineLimit(2)
                     Spacer(minLength: 4)
                     if companion.unread {
-                        Circle()
-                            .fill(visualTheme.accent)
-                            .frame(width: 8, height: 8)
-                            .accessibilityLabel("Unread")
+                        CompanionUnreadBadge(count: 1, tint: visualTheme.accent)
                     }
                 }
             }
@@ -689,5 +951,28 @@ private struct CompanionRow: View {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .short
         return formatter.localizedString(for: date, relativeTo: .now)
+    }
+}
+
+private struct CompanionUnreadBadge: View {
+    let count: Int
+    let tint: Color
+
+    var body: some View {
+        Group {
+            if count == 1 {
+                Circle()
+                    .fill(tint)
+                    .frame(width: 10, height: 10)
+            } else {
+                Text(count > 9 ? "9+" : "\(count)")
+                    .font(.caption2.monospacedDigit().weight(.bold))
+                    .foregroundStyle(Color.companionInk)
+                    .padding(.horizontal, 6)
+                    .frame(minWidth: 22, minHeight: 22)
+                    .background(tint, in: Capsule())
+            }
+        }
+        .accessibilityLabel(count == 1 ? "1 unread message" : "\(count) unread messages")
     }
 }

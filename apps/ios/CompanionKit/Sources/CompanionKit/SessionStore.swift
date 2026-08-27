@@ -388,6 +388,34 @@ public final class SessionStore {
         }
     }
 
+    public func updateCompanionMemberState(
+        companionID: String,
+        patch: CompanionMemberStatePatch
+    ) async throws -> CompanionSummary {
+        do {
+            let companion = try await client.updateCompanionMemberState(
+                companionID: companionID,
+                patch: patch
+            )
+            await persistRollingAuthority()
+            return companion
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func duplicateCompanion(companionID: String) async throws -> CompanionSummary {
+        do {
+            let companion = try await client.duplicateCompanion(companionID: companionID)
+            await persistRollingAuthority()
+            return companion
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
     public func updateCompanionPluginSelection(
         companionID: String,
         selectedMCPAccountIDs: [String]
