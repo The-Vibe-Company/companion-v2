@@ -7,7 +7,7 @@ struct CompanionQueuedMessagesView: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     let entries: [TranscriptEntry]
     let canManage: Bool
-    let viewerID: String? = nil
+    let viewerID: String?
     let accent: Color
     let onRemove: (String) async throws -> Void
 
