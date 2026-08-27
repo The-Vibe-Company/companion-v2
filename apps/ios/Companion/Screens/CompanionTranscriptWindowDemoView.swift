@@ -35,14 +35,18 @@ struct CompanionTranscriptWindowDemoView: View {
                 }
             }
         }
-        .toolbar {
+        .safeAreaInset(edge: .top, spacing: 0) {
             if let stagedFixture = CompanionTranscriptWindowDemoFixtures.stagedFixture {
-                ToolbarItem(placement: .topBarTrailing) {
+                HStack {
+                    Spacer()
                     Button("Stage reply") {
                         stagedFixture.stageNextPoll()
                     }
+                    .buttonStyle(.bordered)
                     .accessibilityIdentifier("demo.stage-reply")
                 }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
             }
         }
     }
