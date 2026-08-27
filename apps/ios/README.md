@@ -109,7 +109,7 @@ same safe retry action available.
 Set `COMPANION_TRANSCRIPT_DEMO_SHORT=1` with `-companion-transcript-window-demo` to exercise the
 same mixed chat surface in a short thread; the default fixture keeps the 120-entry load-more path.
 Set `COMPANION_TRANSCRIPT_DEMO_STAGED_POLL=1` with `-companion-transcript-window-demo` to stage a
-deterministic active assistant-tail update on the first poll after tapping `Stage reply`; this lets
+deterministic active assistant-tail arrival on the first poll after tapping `Stage reply`; this lets
 the native UI regression leave the tail before exercising the unseen-reply pill.
 The queued-message demo accepts `COMPANION_QUEUED_DEMO_ACCESS=owner|editor|viewer`; set
 `COMPANION_QUEUED_DEMO_FAIL_ONCE=1` to verify that a failed removal remains retryable.

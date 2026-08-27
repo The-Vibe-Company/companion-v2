@@ -749,12 +749,14 @@ final class CompanionUITests: XCTestCase {
         XCTAssertEqual(unseen.value as? String, "1 new reply")
         unseen.tap()
 
-        let latestVisible = XCTNSPredicateExpectation(
+        let stagedReply = app.staticTexts["Staged poll content has arrived."]
+        XCTAssertTrue(stagedReply.waitForExistence(timeout: 3))
+        let stagedReplyVisible = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "isHittable == true"),
-            object: latest
+            object: stagedReply
         )
-        wait(for: [latestVisible], timeout: 3)
-        XCTAssertTrue(latest.isHittable)
+        wait(for: [stagedReplyVisible], timeout: 3)
+        XCTAssertTrue(stagedReply.isHittable)
     }
 
     @MainActor

@@ -286,14 +286,20 @@ private final class DemoStagedThreadFixture {
         let encoded = try! JSONEncoder().encode(initial)
         var payload = try! JSONSerialization.jsonObject(with: encoded) as! [String: Any]
         var entries = payload["entries"] as! [[String: Any]]
-        guard let index = entries.lastIndex(where: { entry in
-            entry["queued"] as? Bool != true && entry["role"] as? String == "assistant"
-        }) else {
-            return initial
-        }
-
-        let content = entries[index]["content"] as? String ?? ""
-        entries[index]["content"] = "\(content) Staged poll content has arrived."
+        let nextOrdinal = entries.compactMap { $0["ordinal"] as? Int }.max().map { $0 + 1 } ?? 1
+        entries.append([
+            "event_id": "staged-reply",
+            "ordinal": nextOrdinal,
+            "role": "assistant",
+            "content": "Staged poll content has arrived.",
+            "author_id": NSNull(),
+            "author_name": NSNull(),
+            "decision": NSNull(),
+            "tool": NSNull(),
+            "queued": false,
+            "attachments": [Any](),
+            "created_at": "2026-08-26T12:02:00.000Z",
+        ])
         payload["entries"] = entries
         let data = try! JSONSerialization.data(withJSONObject: payload)
         return try! JSONDecoder().decode(CompanionThread.self, from: data)

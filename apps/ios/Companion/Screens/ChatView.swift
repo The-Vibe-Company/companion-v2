@@ -376,10 +376,8 @@ struct ChatView: View {
     }
 
     @ViewBuilder
-    private func scrollToBottomButton(
-        action: @escaping () -> Void,
-        unseenCount: Int
-    ) -> some View {
+    private func scrollToBottomButton(action: @escaping () -> Void) -> some View {
+        let unseenCount = unseenTracker.unseenCount
         if unseenCount > 0 {
             Button(action: action) {
                 HStack(spacing: 8) {
