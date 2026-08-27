@@ -116,6 +116,7 @@ struct ChatView: View {
     @State private var loadingEarlier = false
     @State private var scrollContentRevision = 0
     @State private var initialBottomReadyRevision: Int?
+    @State private var transcriptScrollPosition = ScrollPosition(idType: String.self)
     @State private var pendingReadingPosition: CompanionChatReadingPosition?
     @State private var lastReportedReadingPosition: CompanionChatReadingPosition?
     @State private var visibleEntryIDs: [String] = []
@@ -163,9 +164,8 @@ struct ChatView: View {
             initialBottomReadyRevision: initialBottomReadyRevision
         )
         CompanionBackdrop {
-            ScrollViewReader { proxy in
-                VStack(spacing: 0) {
-                    ScrollView {
+            VStack(spacing: 0) {
+                ScrollView {
                         VStack(spacing: 16) {
                             LazyVStack(spacing: 16) {
                                 if loading && thread == nil {
@@ -239,8 +239,8 @@ struct ChatView: View {
                             }
                             .scrollTargetLayout()
 
-                            // Keep the coordinator's bottom destination outside the lazy stack.
-                            // Its identity then exists before any programmatic scroll is consumed.
+                            // Keep a layout-readiness probe outside the lazy stack so initial
+                            // delivery waits until the complete transcript content is placed.
                             Color.clear
                                 .frame(height: 1)
                                 .id("bottom")
@@ -267,6 +267,7 @@ struct ChatView: View {
                     .opacity(isRestoringReadingPosition ? 0 : 1)
                     .scrollDismissesKeyboard(.interactively)
                     .scrollIndicators(.hidden)
+                    .scrollPosition($transcriptScrollPosition)
                     .accessibilityIdentifier("chat.transcript")
                     .accessibilityValue(transcriptScrollDiagnostics)
                     .gesture(
@@ -354,31 +355,30 @@ struct ChatView: View {
                         }
                     }
 
-                    bottomControls(
-                        queuedEntries: queuedEntries,
-                        onThinkingTap: revealLiveReasoning
-                    )
-                }
-                .animation(
-                    reduceMotion ? nil : .easeOut(duration: 0.18),
-                    value: isNearBottom
+                bottomControls(
+                    queuedEntries: queuedEntries,
+                    onThinkingTap: revealLiveReasoning
                 )
-                .task(id: renderedScrollDeliveryRevision) {
-                    // Unlike onChange, an id-scoped task also runs for the value installed with a
-                    // newly rendered transcript. A newer revision cancels this task before the
-                    // coordinator is consumed, coalescing same-turn producers at one boundary.
-                    await Task.yield()
-                    guard !Task.isCancelled,
-                          renderedScrollDeliveryRevision.contentRevision
-                            == scrollContentRevision,
-                          let pendingRequest = scrollCoordinator.pendingRequest else { return }
-                    if pendingRequest.source == .initial {
-                        guard renderedScrollDeliveryRevision.initialBottomReadyRevision
-                            == renderedScrollRevision else { return }
-                    }
-                    guard let request = scrollCoordinator.takePendingRequest() else { return }
-                    performScroll(to: request, with: proxy)
+            }
+            .animation(
+                reduceMotion ? nil : .easeOut(duration: 0.18),
+                value: isNearBottom
+            )
+            .task(id: renderedScrollDeliveryRevision) {
+                // Unlike onChange, an id-scoped task also runs for the value installed with a
+                // newly rendered transcript. A newer revision cancels this task before the
+                // coordinator is consumed, coalescing same-turn producers at one boundary.
+                await Task.yield()
+                guard !Task.isCancelled,
+                      renderedScrollDeliveryRevision.contentRevision
+                        == scrollContentRevision,
+                      let pendingRequest = scrollCoordinator.pendingRequest else { return }
+                if pendingRequest.source == .initial {
+                    guard renderedScrollDeliveryRevision.initialBottomReadyRevision
+                        == renderedScrollRevision else { return }
                 }
+                guard let request = scrollCoordinator.takePendingRequest() else { return }
+                performScroll(to: request)
             }
         }
         .navigationBarTitleDisplayMode(.inline)
@@ -1171,21 +1171,18 @@ struct ChatView: View {
         onReadingPositionChange(position)
     }
 
-    private func performScroll(
-        to request: CompanionScrollRequest,
-        with proxy: ScrollViewProxy
-    ) {
+    private func performScroll(to request: CompanionScrollRequest) {
         switch request.destination {
         case .bottom:
-            // Target the last concrete row registered by scrollTargetLayout. A standalone
-            // sentinel can be geometrically ready while ScrollViewProxy still cannot resolve it
-            // in a transcript whose targets are supplied by the lazy layout.
+            // ScrollPosition retains this requested identity across the lazy stack's layout
+            // commit. A one-shot ScrollViewProxy request can be accepted in the same transaction
+            // that reports destination readiness and then silently discarded on long threads.
             let targetID = bottomScrollTargetID
             if reduceMotion || !request.animated {
-                proxy.scrollTo(targetID, anchor: .bottom)
+                transcriptScrollPosition.scrollTo(id: targetID, anchor: .bottom)
             } else {
                 withAnimation(.easeOut(duration: 0.18)) {
-                    proxy.scrollTo(targetID, anchor: .bottom)
+                    transcriptScrollPosition.scrollTo(id: targetID, anchor: .bottom)
                 }
             }
         case .entry(let eventID):
@@ -1194,11 +1191,11 @@ struct ChatView: View {
                 var transaction = Transaction()
                 transaction.disablesAnimations = true
                 withTransaction(transaction) {
-                    proxy.scrollTo(eventID, anchor: anchor)
+                    transcriptScrollPosition.scrollTo(id: eventID, anchor: anchor)
                 }
             } else {
                 withAnimation(.easeInOut(duration: 0.2)) {
-                    proxy.scrollTo(eventID, anchor: anchor)
+                    transcriptScrollPosition.scrollTo(id: eventID, anchor: anchor)
                 }
             }
             if request.source == .restoration {
@@ -1283,6 +1280,7 @@ struct ChatView: View {
         restorationScrollPerformed = false
         lastReportedReadingPosition = nil
         initialBottomReadyRevision = nil
+        transcriptScrollPosition = ScrollPosition(idType: String.self)
         scrollContentRevision &+= 1
     }
 

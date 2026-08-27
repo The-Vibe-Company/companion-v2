@@ -366,8 +366,11 @@ test("native chat reading restoration stays deterministic and delegated to Apple
   assert.match(uiTests, /Scroll diagnostics:/);
   const scrollOwner = chat.indexOf("private func performScroll");
   assert.notEqual(scrollOwner, -1);
-  assert.doesNotMatch(chat.slice(0, scrollOwner), /proxy\.scrollTo\(/);
-  assert.match(chat.slice(scrollOwner), /proxy\.scrollTo\(/);
+  assert.doesNotMatch(chat.slice(0, scrollOwner), /transcriptScrollPosition\.scrollTo\(/);
+  assert.match(chat.slice(scrollOwner), /transcriptScrollPosition\.scrollTo\(/);
+  assert.doesNotMatch(chat, /ScrollViewReader/);
+  assert.match(chat, /\.scrollPosition\(\$transcriptScrollPosition\)/);
+  assert.match(chat, /transcriptScrollPosition = ScrollPosition\(idType: String\.self\)/);
   assert.match(chat.slice(scrollOwner), /let targetID = bottomScrollTargetID/);
   assert.doesNotMatch(chat.slice(scrollOwner), /proxy\.scrollTo\("bottom"/);
   assert.match(chat, /return entries\.last\?\.id \?\? "bottom"/);
