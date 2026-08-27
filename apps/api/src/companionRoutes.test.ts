@@ -192,6 +192,11 @@ const thread = {
   last_read_ordinal: null,
 };
 
+const projectedThread = {
+  ...thread,
+  transcription_available: true,
+};
+
 const operatorTurnError = {
   code: "provider_account_revoked",
   message: "Provider account acct_internal_42 rejected credential generation 17.",
@@ -241,6 +246,7 @@ function registerCompanionRoutes(
   registerCompanionRoutesImpl(app, {
     COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS: "example.test",
     COMPANION_SECRETS_MASTER_KEY: Buffer.alloc(32, 7).toString("base64"),
+    COMPANION_GEMINI_TRANSCRIPTION_API_KEY: "google-global-transcription-key",
     ...env,
   }, {
     ...contextMocks,
@@ -531,6 +537,9 @@ describe("Companions Runtime v2 API", () => {
     ]);
 
     expect(responses.map((response) => response.status)).toEqual([200, 200, 200, 200]);
+    await expect(responses[2]!.json()).resolves.toEqual({
+      thread: { ...thread, transcription_available: true },
+    });
     expect(await responses[3]!.json()).toEqual({ companion });
     expect(coreMocks.listCompanionsV2).toHaveBeenCalledWith(expect.objectContaining({
       withLastMessage: true,
@@ -540,6 +549,21 @@ describe("Companions Runtime v2 API", () => {
     for (const response of responses) {
       expect(response.headers.get("cache-control")).toBe("private, no-store");
     }
+  });
+
+  it("projects transcription as unavailable when the deployment key is absent", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, {
+      COMPANION_COMPANIONS_ENABLED: "true",
+      COMPANION_GEMINI_TRANSCRIPTION_API_KEY: "   ",
+    });
+
+    const response = await app.request(`/v1/companions/${COMPANION_ID}/thread`);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      thread: { ...thread, transcription_available: false },
+    });
   });
 
   it("replaces Viewer turn and attempt diagnostics with one generic non-actionable error", async () => {
@@ -1053,7 +1077,10 @@ describe("Companions Runtime v2 API", () => {
       jsonPost(`/v1/companions/${COMPANION_ID}/turns/${TURN_ID}/cancel`, {}),
     );
     expect(response.status).toBe(202);
-    await expect(response.json()).resolves.toEqual({ turn: cancelledTurn, thread });
+    await expect(response.json()).resolves.toEqual({
+      turn: cancelledTurn,
+      thread: projectedThread,
+    });
     expect(coreMocks.cancelCompanionTurnV2).toHaveBeenCalledWith(expect.objectContaining({
       companionId: COMPANION_ID,
       turnId: TURN_ID,
@@ -1068,7 +1095,7 @@ describe("Companions Runtime v2 API", () => {
       }),
     );
     expect(response.status).toBe(202);
-    await expect(response.json()).resolves.toEqual({ thread });
+    await expect(response.json()).resolves.toEqual({ thread: projectedThread });
     expect(coreMocks.answerCompanionDecisionV2).toHaveBeenCalledWith(expect.objectContaining({
       companionId: COMPANION_ID,
       requestId: "question-1",
@@ -1096,7 +1123,7 @@ describe("Companions Runtime v2 API", () => {
       }),
     );
     expect(response.status).toBe(202);
-    await expect(response.json()).resolves.toEqual({ thread });
+    await expect(response.json()).resolves.toEqual({ thread: projectedThread });
     expect(coreMocks.answerCompanionConfigDecisionV2).toHaveBeenCalledWith(expect.objectContaining({
       companionId: COMPANION_ID,
       requestId: "config-1",
@@ -1126,7 +1153,7 @@ describe("Companions Runtime v2 API", () => {
       }),
     );
     expect(response.status).toBe(202);
-    await expect(response.json()).resolves.toEqual({ thread });
+    await expect(response.json()).resolves.toEqual({ thread: projectedThread });
     expect(coreMocks.answerCompanionRoutineDecisionV2).toHaveBeenCalledWith(expect.objectContaining({
       companionId: COMPANION_ID,
       requestId: "routine-1",
@@ -1156,7 +1183,7 @@ describe("Companions Runtime v2 API", () => {
       }),
     );
     expect(response.status).toBe(202);
-    await expect(response.json()).resolves.toEqual({ thread });
+    await expect(response.json()).resolves.toEqual({ thread: projectedThread });
     expect(coreMocks.answerCompanionRoutineDecisionV2).not.toHaveBeenCalled();
     expect(coreMocks.answerCompanionDecisionV2).not.toHaveBeenCalled();
   });
@@ -1218,7 +1245,7 @@ describe("Companions Runtime v2 API", () => {
       }),
     );
     expect(response.status).toBe(202);
-    await expect(response.json()).resolves.toEqual({ thread });
+    await expect(response.json()).resolves.toEqual({ thread: projectedThread });
     expect(coreMocks.answerCompanionTriggerDecisionV2).toHaveBeenCalledWith(expect.objectContaining({
       companionId: COMPANION_ID,
       requestId: "trigger-1",

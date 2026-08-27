@@ -98,7 +98,7 @@ Email content is external untrusted data and never becomes runtime instruction.
 ## Explicit exclusions
 
 Historical Projects and generic skill runs remain removed. This release adds no multi-Bot
-coordination, group Bot chat, handoffs, proactive jobs, voice, file library, file versioning,
+coordination, group Bot chat, handoffs, proactive jobs, Companion voice conversation/runtime audio, file library, file versioning,
 artifact surface outside the thread, harness selection, Box-provider marketplace, container catalog,
 deployment management, or generic AI application builder. Scheduled Companion routines are in
 scope: Owner/Editor-gated cron prompts that enqueue ordinary turns. Webhook-fired Companion
@@ -107,3 +107,8 @@ ordinary turns. Chat files are in scope and bounded: images and documents sent w
 images Pi hands back from a turn. The iOS and macOS apps are complete Companion clients over the
 same API, not reduced product surfaces: Skills, Plugins, MCP connections, files, routines,
 triggers, sharing, settings, and the remaining browser workflows migrate milestone by milestone.
+Native iOS dictation is an input method exception: microphone audio is transiently sent directly to
+Google for transcription and becomes editable composer text before an ordinary message is sent. It
+does not create an audio turn or change Runtime v2. A deployment-owned API key enables it for every
+workspace; without that key, the API reports the capability unavailable and native clients hide the
+microphone.

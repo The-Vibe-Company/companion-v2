@@ -1327,6 +1327,8 @@ export const companionThreadSchema = z.object({
   access: companionAccessSchema,
   read_only: z.boolean(),
   can_send: z.boolean(),
+  /** API-projected deployment capability; absent on older servers and false when unconfigured. */
+  transcription_available: z.boolean().optional(),
   entries: z.array(companionTranscriptEntrySchema),
   /** The one non-terminal turn currently owning Pi, if any. */
   active_turn: companionActiveTurnSchema.nullable(),
@@ -1363,6 +1365,30 @@ export function companionMessageEventId(clientMessageId: string): string {
 
 export const companionClientSurfaceSchema = z.enum(["web", "mobile_web", "native_mobile"]);
 export type CompanionClientSurface = z.infer<typeof companionClientSurfaceSchema>;
+
+/**
+ * The one model exposed by the first-party dictation capability. This is deliberately separate
+ * from the selectable Companion provider catalog: dictation is a constrained Google Live API
+ * session and never changes the Companion's model or runtime configuration.
+ */
+export const COMPANION_TRANSCRIPTION_MODEL = "gemini-3.5-transcribe-live" as const;
+
+/** A transcription-session request has no caller-controlled settings or payload. */
+export const createCompanionTranscriptionSessionInputSchema = z.object({}).strict();
+export type CreateCompanionTranscriptionSessionInput = z.infer<
+  typeof createCompanionTranscriptionSessionInputSchema
+>;
+
+/**
+ * A short-lived, single-use Google Live API token. The deployment-owned API key is never part of
+ * this response (or any client-controlled request).
+ */
+export const companionTranscriptionSessionSchema = z.object({
+  token: z.string().trim().min(1),
+  expires_at: z.string().datetime(),
+  model: z.literal(COMPANION_TRANSCRIPTION_MODEL),
+}).strict();
+export type CompanionTranscriptionSession = z.infer<typeof companionTranscriptionSessionSchema>;
 
 export const sendCompanionMessageInputSchema = z.object({
   content: z.string().trim().min(1).max(16_384),

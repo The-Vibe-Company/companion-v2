@@ -968,6 +968,16 @@ view with keyboard navigation. Owner/Editor desktop access presents a freshly mi
 dedicated `WKWebView` window. The URL is held in memory only and reminted for reconnect; opening the
 window cannot wake Box, while Viewer access remains PostgreSQL-only.
 
+The native composer may transcribe microphone input into editable text before send. This remains
+outside Runtime v2: an authenticated Owner/Editor requests a constrained, single-use Gemini Live
+token through `POST /v1/companions/:id/transcription-sessions`, then the device streams PCM directly
+to Google. The API-only `COMPANION_GEMINI_TRANSCRIPTION_API_KEY` enables this input method for every
+workspace and is never returned to iOS; when it is absent, thread projections mark transcription
+unavailable and clients omit the microphone. The API never relays or stores audio. Stopping
+dictation leaves ordinary text in the composer, and only the later message send creates a durable
+turn. Viewer has no composer or transcription control, and no transcription action contacts or
+wakes Box/Pi.
+
 After an active session is restored, the app requests alert/sound permission and registers its
 current APNs token through the shared cookie-authenticated API. The installation UUID is stable per
 bundle, while a new login idempotently reassigns it; logout first attempts the idempotent delete.
@@ -1048,9 +1058,10 @@ the Companion's own Box, with no Box, thread, ACL, or identity of its own; the e
 remain in force for Companion-to-Companion handoff and group Bot chat.
 
 Runtime v2 adds no generic Projects/skill runs, multi-Bot team or handoff, group Bot chat, proactive
-task, voice, file library, file versioning, artifact surface outside a thread, alternate harness,
+task, Companion voice conversation or runtime audio, file library, file versioning, artifact surface outside a thread, alternate harness,
 alternate Box provider, pool, generic model/provider marketplace, container catalog, deployment
-platform, or AI app builder. Bounded chat attachments, scheduled Companion routines, and
+platform, or AI app builder. Transient native dictation into unsent editable text is a client input
+method, not a runtime voice capability. Bounded chat attachments, scheduled Companion routines, and
 webhook-fired Companion triggers are in scope and are specified above.
 It adds no SSE, Box-to-control-plane push bearer, detached API executor, automatic Full Box repair,
 automatic replay after ambiguous dispatch, or global learned capability table. The Box agent's

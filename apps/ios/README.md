@@ -52,6 +52,33 @@ read email, then create drafts for review in Gmail; it never sends mail. Custom 
 available over HTTP or a Box command with an optional encrypted credential, using the same shared
 endpoints and transports as the browser client.
 
+The chat composer also supports iOS-only voice transcription when the API deployment has a non-empty
+`COMPANION_GEMINI_TRANSCRIPTION_API_KEY`. That API-only setting enables the capability globally;
+the thread payload exposes only `transcription_available`, and the app omits the microphone entirely
+when it is false or absent. When an Owner or Editor taps the microphone in an accessible thread,
+`POST /v1/companions/:id/transcription-sessions` reauthorizes that access and asks Google for a
+single-use, short-lived token constrained to `gemini-3.5-transcribe-live`, text output, automatic
+language detection, Smart transcription, and session resumption. CompanionKit then connects
+directly to Gemini's constrained Live WebSocket and streams 16 kHz mono PCM in bounded chunks.
+Interim text stays beside the composer; stopping commits the final transcript into the editable
+message field. The long-lived key never enters the app binary or API response, and audio never
+passes through or persists in Companion's API, PostgreSQL, object storage, Box, Pi, or transcript.
+The recording surface says that audio is sent to Google and requires the standard iOS microphone
+permission.
+
+This is client dictation into an ordinary text message, not Companion voice mode: it creates no
+audio message or runtime capability and makes no Box/Pi change. Linux/static quality checks verify
+the privacy wiring and selected UI contract; CompanionKit's mock-WebSocket protocol tests plus the
+native build/UI-test compilation are delegated to the existing macOS 26 **Apple Quality** job. No
+Google key is required for those deterministic tests. A real end-to-end transcription remains a
+manual provider check with the owner-supplied key stored only in the API deployment environment.
+
+The implementation follows Google's current dedicated transcription wire contract rather than the
+earlier general Live-agent shape in the reference snippet: setup uses `inputAudioTranscription`,
+audio uses `realtimeInput`, and stop sends `audioStreamEnd`. `mediaResolution`, client content, and
+context-window compression are not sent for this audio-only model; recordings stop with margin
+inside its documented ten-minute session limit.
+
 Push Notifications are requested immediately after the first active session. Debug registers
 `dev.companion.mobile.dev` with the APNs sandbox; Release registers `dev.companion.mobile` with
 production APNs. A tap waits for session and roster restoration, verifies the workspace and current
@@ -128,6 +155,11 @@ Native chat layout regressions use the deterministic transcript-window demo. Lin
 statically verify that its selected UI assertions remain wired into Apple Quality; the macOS 26
 lane performs the actual Swift build and simulator geometry checks. This keeps cloud development
 deterministic without installing or invoking XcodeBuildMCP in CI.
+Keyboard-dismissal regressions use the same static-plus-Apple-Quality split: the Linux guard keeps
+the simultaneous transcript tap and selected UI test wired, while the macOS fixture focuses the
+composer, taps a message, verifies the keyboard disappears, and then opens a tool card to prove
+message controls still receive their taps. The focus change is intentionally silent; dismissing a
+keyboard does not produce haptic feedback.
 The same fixture can switch between Luna and Orbit to verify that the roster-scoped, in-memory
 reading-position store restores the first visible message without animated hydration. CompanionKit
 tests cover per-Companion isolation and window restoration, while Apple Quality owns the rendered

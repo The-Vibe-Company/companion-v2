@@ -506,6 +506,21 @@ public final class SessionStore {
         }
     }
 
+    public func createCompanionTranscriptionSession(
+        companionID: String
+    ) async throws -> CompanionTranscriptionSession {
+        do {
+            let session = try await client.createCompanionTranscriptionSession(
+                companionID: companionID
+            )
+            await persistRollingAuthority()
+            return session
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
     public func saveCompanionProvider(
         providerID: String,
         credential: String

@@ -8,9 +8,11 @@ import UniformTypeIdentifiers
 /// Owns all transient composer state so typing and attachment preparation do not invalidate the
 /// transcript projection. The parent only receives a submitted, already-trimmed payload.
 struct ChatComposer: View {
+    let companionID: String
     let companionName: String
     let companionIcon: CompanionSummary.Icon?
     let canSend: Bool?
+    let transcriptionAvailable: Bool
     let isReplying: Bool
     let hasLiveReasoning: Bool
     let error: String?
@@ -20,6 +22,7 @@ struct ChatComposer: View {
     let onThinkingTap: () -> Void
     let onSend: (String, [CompanionMessageAttachment]) -> Void
 
+    @Environment(SessionStore.self) private var sessionStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var draft = ""
     @State private var draftAttachments: [CompanionMessageAttachment] = []
@@ -28,6 +31,7 @@ struct ChatComposer: View {
     @State private var showPhotoPicker = false
     @State private var showDocumentPicker = false
     @State private var selectingAttachments = false
+    @State private var transcription = VoiceTranscriptionController()
     @FocusState private var composerFocused: Bool
 
     var body: some View {
@@ -80,6 +84,13 @@ struct ChatComposer: View {
                         .accessibilityLabel("Attachment error: \(attachmentError)")
                 }
 
+                if transcriptionAvailable && (transcription.isBusy
+                    || !transcription.liveTranscript.isEmpty
+                    || transcriptionFailed) {
+                    VoiceTranscriptionStatusView(controller: transcription)
+                        .padding(.horizontal, 2)
+                }
+
                 GlassEffectContainer(spacing: 12) {
                     HStack(alignment: .bottom, spacing: 10) {
                         Menu {
@@ -130,6 +141,34 @@ struct ChatComposer: View {
                             .companionGlass(radius: 23, interactive: true)
                             .accessibilityIdentifier("chat.composer")
 
+                        if transcriptionAvailable {
+                            Button(action: toggleTranscription) {
+                                Group {
+                                    if transcription.phase == .requestingPermission
+                                        || transcription.phase == .connecting
+                                        || transcription.phase == .finishing {
+                                        ProgressView().controlSize(.small)
+                                    } else {
+                                        Image(systemName: transcription.isRecording ? "stop.fill" : "mic.fill")
+                                    }
+                                }
+                                .font(.system(size: 16, weight: .semibold))
+                                .frame(width: 46, height: 46)
+                            }
+                            .buttonStyle(.glass)
+                            .buttonBorderShape(.circle)
+                            .tint(transcription.isBusy ? Color.companionDanger : accent)
+                            .disabled(transcriptionButtonDisabled)
+                            .accessibilityLabel(transcriptionButtonLabel)
+                            .accessibilityValue(transcriptionAccessibilityValue)
+                            .accessibilityHint(
+                                transcription.isBusy
+                                    ? "Stops recording and adds the transcript to the message field."
+                                    : "Records speech and sends audio to Google for live transcription."
+                            )
+                            .accessibilityIdentifier("chat.transcription.toggle")
+                        }
+
                         Button(action: send) {
                             Group {
                                 if sending {
@@ -176,17 +215,104 @@ struct ChatComposer: View {
             allowsMultipleSelection: true,
             onCompletion: importDocuments
         )
+        .onChange(of: companionID) {
+            transcription.cancel()
+        }
+        .onChange(of: canSend) { _, nextCanSend in
+            if nextCanSend != true { transcription.cancel() }
+        }
+        .onChange(of: transcriptionAvailable) { _, available in
+            if !available { transcription.cancel() }
+        }
+        .onChange(of: transcription.completion) { _, completion in
+            guard let completion else { return }
+            draft = mergedDraft(draft, completion.text)
+            composerFocused = true
+            transcription.acknowledgeCompletion()
+        }
+        .onDisappear {
+            transcription.cancel()
+        }
     }
 
     private var sendDisabled: Bool {
         sending
             || selectingAttachments
+            || transcription.isBusy
             || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || canSend == false
     }
 
     private var attachDisabled: Bool {
-        sending || selectingAttachments || remainingAttachmentCapacity == 0 || canSend == false
+        sending
+            || selectingAttachments
+            || transcription.isBusy
+            || remainingAttachmentCapacity == 0
+            || canSend == false
+    }
+
+    private var transcriptionButtonDisabled: Bool {
+        if case .finishing = transcription.phase { return true }
+        return !transcription.isBusy && (sending || selectingAttachments || canSend != true)
+    }
+
+    private var transcriptionFailed: Bool {
+        if case .failed = transcription.phase { return true }
+        return false
+    }
+
+    private var transcriptionButtonLabel: String {
+        switch transcription.phase {
+        case .requestingPermission, .connecting:
+            "Cancel voice transcription"
+        case .recording:
+            "Stop recording"
+        case .finishing:
+            "Finishing voice transcription"
+        case .idle, .failed:
+            "Start voice transcription"
+        }
+    }
+
+    private var transcriptionAccessibilityValue: String {
+        switch transcription.phase {
+        case .recording:
+            transcription.reconnecting ? "Recording, reconnecting" : "Recording"
+        case .requestingPermission:
+            "Waiting for microphone permission"
+        case .connecting:
+            "Connecting"
+        case .finishing:
+            "Finishing"
+        case .failed(let message):
+            message
+        case .idle:
+            "Not recording"
+        }
+    }
+
+    private func toggleTranscription() {
+        composerFocused = false
+        if transcription.isBusy {
+            transcription.stop()
+            return
+        }
+        guard canSend == true, transcriptionAvailable else { return }
+        let targetCompanionID = companionID
+        transcription.start {
+            try await sessionStore.createCompanionTranscriptionSession(
+                companionID: targetCompanionID
+            )
+        }
+    }
+
+    private func mergedDraft(_ current: String, _ transcript: String) -> String {
+        let dictated = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return dictated
+        }
+        guard !dictated.isEmpty else { return current }
+        return current + (current.last?.isWhitespace == true ? "" : " ") + dictated
     }
 
     private var remainingAttachmentCapacity: Int {
