@@ -551,7 +551,7 @@ struct ConnectCuratedPluginView: View {
     }
 }
 
-private struct AddPluginView: View {
+struct AddPluginView: View {
     @Environment(SessionStore.self) private var sessionStore
     @Environment(\.dismiss) private var dismiss
     let onConnected: () -> Void
