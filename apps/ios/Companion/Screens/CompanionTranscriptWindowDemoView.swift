@@ -240,10 +240,11 @@ private enum CompanionTranscriptWindowDemoFixtures {
         let fixtureThread = thread
         let fixtureCompanion = companion
         let secondFixtureCompanion = secondCompanion
+        let fixtureStagedReply = stagedFixture
         return ChatServices(
             thread: { companionID in
-                if companionID == fixtureCompanion.id, let stagedFixture {
-                    return stagedFixture.nextThread()
+                if companionID == fixtureCompanion.id, let fixtureStagedReply {
+                    return fixtureStagedReply.nextThread()
                 }
                 return fixtureThread
             },
