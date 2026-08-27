@@ -47,7 +47,8 @@ connections support encrypted API keys plus the shared Claude authorization-code
 flows. The live server catalog includes Claude, Codex, Kimi, Moonshot, z.ai, OpenAI API, and Google
 Gemini; the app renders that catalog rather than maintaining a divergent mobile allowlist. Members
 can connect multiple labeled accounts for each product-owned plugin category — Linear, GitHub,
-Notion, and Conductor — through the existing brokered OAuth flow. Custom MCP plugins remain
+Notion, Conductor, and Gmail — through the existing brokered OAuth flow. Gmail can search and
+read email, then create drafts for review in Gmail; it never sends mail. Custom MCP plugins remain
 available over HTTP or a Box command with an optional encrypted credential, using the same shared
 endpoints and transports as the browser client.
 
@@ -134,6 +135,11 @@ of guessing that a yielded render task has completed layout, then scrolls to the
 registered by the lazy target layout. Its scroll decision is delegated to the shared
 `CompanionScrollCoordinator`, so repeated
 unchanged snapshots do not compete with the rendered viewport.
+Keyboard-dismissal regressions use the same static-plus-Apple-Quality split: the Linux guard keeps
+the simultaneous transcript tap and selected UI test wired, while the macOS fixture focuses the
+composer, taps a message, verifies the keyboard disappears, and then opens a tool card to prove
+message controls still receive their taps. The focus change is intentionally silent; dismissing a
+keyboard does not produce haptic feedback.
 The same fixture can switch between Luna and Orbit to verify that the roster-scoped, in-memory
 reading-position store restores the first visible message without animated hydration. CompanionKit
 tests cover per-Companion isolation and window restoration, while Apple Quality owns the rendered

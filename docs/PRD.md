@@ -69,6 +69,9 @@ explicitly recoverable interruption even after the browser, API, or one runtime 
 - Runtime revalidates membership, Companion ACL, selected Skills, plugins, and provider access
   before each Box interaction. A configuration change during a turn applies after settlement and
   before the next turn.
+- The curated Gmail plugin uses a labeled member OAuth account to search/read mail and create drafts
+  for review. It never sends or mutates the mailbox in v1; runtime enforces that boundary with an
+  exact MCP tool allow-list rather than relying on the broader `gmail.compose` scope.
 - Sending is the only normal wake action. There is no Wake button and no first-keystroke prewarm.
   A successful Pi acknowledgement refreshes Box TTL to six hours.
 - Pi-only recycle is the automatic repair. Full Box restart and permanent deletion are explicit,

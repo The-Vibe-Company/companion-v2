@@ -33,6 +33,12 @@ private let curatedCompanionPlugins = [
         title: "Conductor",
         detail: "Cloud workspaces, sessions, and coding agents."
     ),
+    CuratedCompanionPlugin(
+        id: "com.google.workspace/gmail",
+        provider: "gmail",
+        title: "Gmail",
+        detail: "Search and read email, and create drafts for review in Gmail. It never sends mail."
+    ),
 ]
 
 struct PluginManagementView: View {
@@ -337,7 +343,7 @@ private struct ConnectCuratedPluginView: View {
                         }
 
                         Label(
-                            "Authorization happens on \(plugin.title). Tokens stay encrypted and write-only.",
+                            authorizationDetail,
                             systemImage: "lock.shield.fill"
                         )
                         .font(.footnote)
@@ -380,6 +386,13 @@ private struct ConnectCuratedPluginView: View {
 
     private var trimmedLabel: String {
         label.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var authorizationDetail: String {
+        if plugin.provider.lowercased() == "gmail" {
+            return "Authorize read and draft access on Google. Companion cannot send mail; drafts stay in Gmail for your review. Tokens remain encrypted and write-only."
+        }
+        return "Authorization happens on \(plugin.title). Tokens stay encrypted and write-only."
     }
 
     private func connect() async {
@@ -625,6 +638,7 @@ struct PluginMark: View {
         case "notion": return "doc.richtext"
         case "slack": return "number"
         case "conductor": return "square.stack.3d.up.fill"
+        case "gmail": return "envelope.fill"
         default: return "puzzlepiece.extension.fill"
         }
     }
@@ -636,6 +650,7 @@ struct PluginMark: View {
         case "notion": return Color.white.opacity(0.82)
         case "slack": return Color(red: 1.0, green: 0.84, blue: 0.90)
         case "conductor": return Color(red: 0.78, green: 0.90, blue: 1.0)
+        case "gmail": return Color(red: 0.90, green: 0.26, blue: 0.22)
         default: return Color.companionAccentGold.opacity(0.34)
         }
     }

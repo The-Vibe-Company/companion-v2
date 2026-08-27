@@ -1,6 +1,7 @@
 import Foundation
 import CompanionKit
 import SwiftUI
+import UIKit
 
 @MainActor
 struct ChatServices {
@@ -53,6 +54,37 @@ private final class ChatRefreshGate {
 
     func accepts(_ refresh: Int) -> Bool {
         refresh == revision
+    }
+}
+
+private struct TranscriptKeyboardDismissGesture: UIGestureRecognizerRepresentable {
+    let onTap: () -> Void
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            true
+        }
+    }
+
+    func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIGestureRecognizer(context: Context) -> UITapGestureRecognizer {
+        let recognizer = UITapGestureRecognizer()
+        recognizer.cancelsTouchesInView = false
+        recognizer.delegate = context.coordinator
+        return recognizer
+    }
+
+    func handleUIGestureRecognizerAction(
+        _ recognizer: UITapGestureRecognizer,
+        context: Context
+    ) {
+        onTap()
     }
 }
 
@@ -237,6 +269,16 @@ struct ChatView: View {
                     .scrollIndicators(.hidden)
                     .accessibilityIdentifier("chat.transcript")
                     .accessibilityValue(transcriptScrollDiagnostics)
+                    .gesture(
+                        TranscriptKeyboardDismissGesture {
+                            UIApplication.shared.sendAction(
+                                #selector(UIResponder.resignFirstResponder),
+                                to: nil,
+                                from: nil,
+                                for: nil
+                            )
+                        }
+                    )
                     .simultaneousGesture(
                         DragGesture(minimumDistance: 2)
                             .onChanged { _ in stopFollowingTailForReveal() }

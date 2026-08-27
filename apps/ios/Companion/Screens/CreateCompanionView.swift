@@ -337,6 +337,7 @@ struct CreateCompanionView: View {
         case "linear": return "Linear"
         case "notion": return "Notion"
         case "conductor": return "Conductor"
+        case "gmail": return "Gmail"
         default:
             return provider.split(separator: "-").map { $0.capitalized }.joined(separator: " ")
         }

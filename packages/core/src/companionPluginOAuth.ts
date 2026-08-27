@@ -27,6 +27,20 @@ interface CompanionPluginOAuthServerConfig {
   dynamicRegistration: boolean;
 }
 
+/**
+ * Gmail's remote MCP server currently exposes label mutations as well as the v1 read/draft tools.
+ * Runtime enforces this allow-list at the loopback gateway so a remote tool-catalog expansion can
+ * never turn the Gmail plugin into send or mailbox-mutation authority without a Companion release.
+ */
+export const COMPANION_GMAIL_MCP_ALLOWED_TOOLS = [
+  "create_draft",
+  "get_message",
+  "get_thread",
+  "list_drafts",
+  "list_labels",
+  "search_threads",
+] as const;
+
 export const COMPANION_PLUGIN_OAUTH_SERVERS = {
   "app.linear/linear": {
     provider: "linear",
@@ -64,6 +78,25 @@ export const COMPANION_PLUGIN_OAUTH_SERVERS = {
     scopes: ["mcp:tools", "offline_access"],
     allowedOrigins: ["https://api.conductor.build"],
     dynamicRegistration: true,
+  },
+  "com.google.workspace/gmail": {
+    provider: "gmail",
+    remoteUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+    resourceMetadataUrl:
+      "https://gmailmcp.googleapis.com/.well-known/oauth-protected-resource/mcp/v1",
+    authorizationServer: "https://accounts.google.com/",
+    authorizationMetadataUrl:
+      "https://accounts.google.com/.well-known/oauth-authorization-server",
+    scopes: [
+      "https://www.googleapis.com/auth/gmail.readonly",
+      "https://www.googleapis.com/auth/gmail.compose",
+    ],
+    allowedOrigins: [
+      "https://gmailmcp.googleapis.com",
+      "https://accounts.google.com",
+      "https://oauth2.googleapis.com",
+    ],
+    dynamicRegistration: false,
   },
 } as const satisfies Record<CompanionPluginOAuthServerName, CompanionPluginOAuthServerConfig>;
 
@@ -218,6 +251,36 @@ function githubClient(env: NodeJS.ProcessEnv): CompanionPluginOAuthClient {
   return { clientId, clientSecret, tokenEndpointAuthMethod: "client_secret_post" };
 }
 
+function gmailClient(env: NodeJS.ProcessEnv): CompanionPluginOAuthClient {
+  const clientId = env.COMPANION_MCP_GMAIL_CLIENT_ID?.trim();
+  const clientSecret = env.COMPANION_MCP_GMAIL_CLIENT_SECRET?.trim();
+  if (!clientId || !clientSecret) {
+    throw new CompanionPluginOAuthError(
+      "Gmail MCP OAuth is not configured.",
+      "oauth_not_configured",
+    );
+  }
+  return { clientId, clientSecret, tokenEndpointAuthMethod: "client_secret_post" };
+}
+
+function isEnvironmentClient(serverName: CompanionPluginOAuthServerName): boolean {
+  return serverName === "io.github.github/github-mcp-server"
+    || serverName === "com.google.workspace/gmail";
+}
+
+function environmentClient(
+  serverName: CompanionPluginOAuthServerName,
+  env: NodeJS.ProcessEnv,
+): CompanionPluginOAuthClient {
+  return serverName === "io.github.github/github-mcp-server"
+    ? githubClient(env)
+    : gmailClient(env);
+}
+
+function usesResourceIndicator(serverName: CompanionPluginOAuthServerName): boolean {
+  return !isEnvironmentClient(serverName);
+}
+
 /**
  * Discover and register an OAuth client for one curated OAuth-first MCP remote. Every URL is
  * constrained to that pin's known origins, so malformed discovery metadata cannot become SSRF.
@@ -285,42 +348,46 @@ export async function beginCompanionPluginOAuth(input: {
       server.allowedOrigins,
       discoveryFailure,
     );
-    const registrationEndpoint = allowedUrl(
-      authorizationMetadata.registration_endpoint,
-      server.allowedOrigins,
-      discoveryFailure,
-    );
-    const registrationFailure = new CompanionPluginOAuthError(
-      "The MCP server could not register this Companion deployment.",
-      "oauth_registration_failed",
-    );
-    const registered = await oauthJson(
-      registrationEndpoint,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          client_name: "Companion",
-          redirect_uris: [input.redirectUri],
-          grant_types: ["authorization_code", "refresh_token"],
-          response_types: ["code"],
-          token_endpoint_auth_method: "none",
-        }),
-      },
-      fetchImpl,
-      registrationFailure,
-    );
-    const clientId = requiredString(registered.client_id, registrationFailure);
-    const clientSecretParsed = jsonStringSchema.safeParse(registered.client_secret);
-    const clientSecret = clientSecretParsed.success && clientSecretParsed.data
-      ? clientSecretParsed.data
-      : null;
-    const reportedMethod = registered.token_endpoint_auth_method;
-    const tokenEndpointAuthMethod =
-      reportedMethod === "client_secret_basic" || reportedMethod === "client_secret_post"
-        ? reportedMethod
-        : clientSecret ? "client_secret_post" : "none";
-    client = { clientId, clientSecret, tokenEndpointAuthMethod };
+    if (server.dynamicRegistration) {
+      const registrationEndpoint = allowedUrl(
+        authorizationMetadata.registration_endpoint,
+        server.allowedOrigins,
+        discoveryFailure,
+      );
+      const registrationFailure = new CompanionPluginOAuthError(
+        "The MCP server could not register this Companion deployment.",
+        "oauth_registration_failed",
+      );
+      const registered = await oauthJson(
+        registrationEndpoint,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            client_name: "Companion",
+            redirect_uris: [input.redirectUri],
+            grant_types: ["authorization_code", "refresh_token"],
+            response_types: ["code"],
+            token_endpoint_auth_method: "none",
+          }),
+        },
+        fetchImpl,
+        registrationFailure,
+      );
+      const clientId = requiredString(registered.client_id, registrationFailure);
+      const clientSecretParsed = jsonStringSchema.safeParse(registered.client_secret);
+      const clientSecret = clientSecretParsed.success && clientSecretParsed.data
+        ? clientSecretParsed.data
+        : null;
+      const reportedMethod = registered.token_endpoint_auth_method;
+      const tokenEndpointAuthMethod =
+        reportedMethod === "client_secret_basic" || reportedMethod === "client_secret_post"
+          ? reportedMethod
+          : clientSecret ? "client_secret_post" : "none";
+      client = { clientId, clientSecret, tokenEndpointAuthMethod };
+    } else {
+      client = environmentClient(serverName, input.env ?? process.env);
+    }
   }
 
   const verifier = codeVerifier();
@@ -344,8 +411,13 @@ export async function beginCompanionPluginOAuth(input: {
   authorizationUrl.searchParams.set("code_challenge", companionPluginOAuthCodeChallenge(verifier));
   authorizationUrl.searchParams.set("code_challenge_method", "S256");
   authorizationUrl.searchParams.set("scope", scope);
-  if (serverName !== "io.github.github/github-mcp-server") {
+  if (usesResourceIndicator(serverName)) {
     authorizationUrl.searchParams.set("resource", resource);
+  }
+  if (serverName === "com.google.workspace/gmail") {
+    authorizationUrl.searchParams.set("access_type", "offline");
+    authorizationUrl.searchParams.set("include_granted_scopes", "true");
+    authorizationUrl.searchParams.set("prompt", "consent select_account");
   }
   return { authorizationUrl: authorizationUrl.toString(), flow };
 }
@@ -373,6 +445,7 @@ function parseTokens(
   raw: Record<string, CompanionPluginOAuthJsonValue>,
   failure: CompanionPluginOAuthError,
   previousRefreshToken: string | null = null,
+  previousScope: string | null = null,
 ): CompanionPluginOAuthTokens {
   const accessToken = requiredString(raw.access_token, failure);
   if (/[\r\n\0]/.test(accessToken)) throw failure;
@@ -393,9 +466,17 @@ function parseTokens(
       ? null
       : new Date(Date.now() + expiresIn * 1000).toISOString(),
     // SAFETY: safeParse above proved raw.scope is a string.
-    scope: jsonStringSchema.safeParse(raw.scope).success ? raw.scope as string : null,
+    scope: jsonStringSchema.safeParse(raw.scope).success ? raw.scope as string : previousScope,
     tokenType: "Bearer",
   };
+}
+
+function hasGmailScopes(scope: string | null): boolean {
+  if (!scope) return false;
+  const scopes = new Set(scope.split(/\s+/).filter(Boolean));
+  return COMPANION_PLUGIN_OAUTH_SERVERS["com.google.workspace/gmail"].scopes.every(
+    (required) => scopes.has(required),
+  );
 }
 
 /** Exchange an authorization code without ever returning provider response bodies in errors. */
@@ -415,7 +496,7 @@ export async function completeCompanionPluginOAuth(input: {
     redirect_uri: input.redirectUri,
     code_verifier: input.flow.codeVerifier,
   });
-  if (input.flow.serverName !== "io.github.github/github-mcp-server") {
+  if (usesResourceIndicator(input.flow.serverName)) {
     body.set("resource", input.flow.resource);
   }
   const authentication = clientAuthentication(input.flow.client, body);
@@ -433,6 +514,12 @@ export async function completeCompanionPluginOAuth(input: {
     "The MCP server did not return a usable OAuth credential.",
     "oauth_exchange_failed",
   ));
+  if (input.flow.serverName === "com.google.workspace/gmail" && !hasGmailScopes(tokens.scope)) {
+    throw new CompanionPluginOAuthError(
+      "Gmail did not grant both read and draft access.",
+      "oauth_exchange_failed",
+    );
+  }
   const github = input.flow.serverName === "io.github.github/github-mcp-server";
   const githubIdentity = github
     ? await githubUserIdentity({
@@ -447,8 +534,8 @@ export async function completeCompanionPluginOAuth(input: {
     serverName: input.flow.serverName,
     tokenEndpoint: input.flow.tokenEndpoint,
     resource: input.flow.resource,
-    // GitHub's client secret belongs to the deployment, not an account. Keep it in env only.
-    client: github
+    // Deployment OAuth client secrets never belong in each member account envelope.
+    client: isEnvironmentClient(input.flow.serverName)
       ? { ...input.flow.client, clientSecret: null }
       : input.flow.client,
   };
@@ -478,11 +565,13 @@ export async function refreshCompanionPluginOAuth(input: {
     refresh_token: input.credential.refreshToken,
   });
   const github = input.credential.serverName === "io.github.github/github-mcp-server";
-  if (!github) body.set("resource", input.credential.resource);
+  if (usesResourceIndicator(input.credential.serverName)) {
+    body.set("resource", input.credential.resource);
+  }
   let client = input.credential.client;
-  if (github) {
+  if (isEnvironmentClient(input.credential.serverName)) {
     try {
-      client = githubClient(input.env ?? process.env);
+      client = environmentClient(input.credential.serverName, input.env ?? process.env);
     } catch {
       throw failure;
     }
@@ -500,7 +589,15 @@ export async function refreshCompanionPluginOAuth(input: {
     failure,
     input.signal,
   );
-  const tokens = parseTokens(raw, failure, input.credential.refreshToken);
+  const tokens = parseTokens(
+    raw,
+    failure,
+    input.credential.refreshToken,
+    input.credential.scope,
+  );
+  if (input.credential.serverName === "com.google.workspace/gmail" && !hasGmailScopes(tokens.scope)) {
+    throw failure;
+  }
   const githubIdentity = github
     ? await githubUserIdentity({
       accessToken: tokens.accessToken,

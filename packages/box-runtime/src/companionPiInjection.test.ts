@@ -76,6 +76,33 @@ describe("Pi MCP injection", () => {
     expect(JSON.stringify(injected)).not.toContain("GITHUB_MCP_AUTH");
   });
 
+  it("passes a Gmail tool allow-list to the loopback gateway", () => {
+    const accountId = "11111111-1111-4111-8111-111111111111";
+    const credentialGeneration = "22222222-2222-4222-8222-222222222222";
+    const allowedTools = ["search_threads", "get_message", "create_draft"];
+    const injected = buildMcpAdapterInjection([{
+      account: {
+        id: accountId,
+        label: "Gmail work",
+        transport: "http",
+        url: "https://gmailmcp.googleapis.com/mcp/v1",
+        headers: { Authorization: "GMAIL_MCP_AUTH" },
+        lifecycle: "lazy",
+        direct_tools: false,
+      },
+      oauthBroker: { credentialGeneration, github: false, allowedTools },
+    }]);
+
+    expect(injected.gatewayAccounts).toEqual([{
+      accountId,
+      credentialGeneration,
+      upstreamUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+      github: false,
+      allowedTools,
+    }]);
+    expect(JSON.stringify(injected)).not.toContain("GMAIL_MCP_AUTH");
+  });
+
   it("installs a GitHub-only credential helper that never embeds a token", () => {
     expect(COMPANION_GIT_CREDENTIAL_HELPER_SOURCE).toContain("protocol=https");
     expect(COMPANION_GIT_CREDENTIAL_HELPER_SOURCE).toContain("host=github.com");

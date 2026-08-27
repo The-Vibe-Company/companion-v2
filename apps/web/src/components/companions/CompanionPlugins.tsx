@@ -308,6 +308,8 @@ function CatalogConnectDialog({
       title={`Connect ${server.title}`}
       desc={server.provider === "github"
         ? "Give this account a short label such as work or personal. GitHub is used for MCP tools and for git clone, commit, and push."
+        : server.provider === "gmail"
+          ? "Give this account a short label such as work or personal. Gmail can read and search mail, then create drafts for you to review in Gmail. It never sends email."
         : "Give this account a short label such as work or personal."}
       onClose={onClose}
       closeDisabled={busy}
@@ -357,6 +359,8 @@ function CatalogConnectDialog({
         <p className="companions-new-form__hint">
           {server.provider === "github"
             ? "Authorize GitHub once. After you attach this account to a Companion, it can use GitHub tools plus git clone, commit, and push. Tokens remain write-only and encrypted."
+            : server.provider === "gmail"
+              ? "Authorize read and draft access on Google. Companion cannot send mail; every draft stays in Gmail for your review. Tokens remain write-only and encrypted."
             : "You will authorize this account on the provider's website. Tokens remain write-only and encrypted."}
         </p>
       </form>
@@ -426,7 +430,9 @@ export function CompanionPlugins({
         tone: "success",
         message: url.searchParams.get("provider") === "github"
           ? "GitHub connected for MCP and git."
-          : "MCP account connected.",
+          : url.searchParams.get("provider") === "gmail"
+            ? "Gmail connected for reading and drafts."
+            : "MCP account connected.",
       });
     } else {
       const oauthError = url.searchParams.get("oauth_error");
@@ -516,7 +522,7 @@ export function CompanionPlugins({
           {groups.length === 0 ? (
             <div className="companions-plugin-empty">
               <p>No plugins connected yet.</p>
-              <p>Connect Linear, GitHub, Notion, or Conductor below, or add a custom MCP server.</p>
+              <p>Connect Linear, GitHub, Notion, Conductor, or Gmail below, or add a custom MCP server.</p>
             </div>
           ) : (
             <div className="companions-plugin-list">

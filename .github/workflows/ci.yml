@@ -215,6 +215,7 @@ jobs:
           -test-iterations 2
           -only-testing:CompanionUITests/CompanionUITests/testTranscriptWindowDemoLoadsEarlierMessages
           -only-testing:CompanionUITests/CompanionUITests/testTranscriptWindowDemoStaysAtLatestAcrossPollInterval
+          -only-testing:CompanionUITests/CompanionUITests/testTranscriptTapDismissesKeyboardWithoutBlockingMessageControls
           -only-testing:CompanionUITests/CompanionUITests/testTranscriptWindowDemoRestoresReadingPositionAfterCompanionSwitch
           -only-testing:CompanionUITests/CompanionUITests/testTranscriptWindowDemoShowsStagedUnseenReplyAndScrollsToIt
           -only-testing:CompanionUITests/CompanionUITests/testTranscriptWindowDemoKeepsLatestEntriesOrderedAndSeparated
