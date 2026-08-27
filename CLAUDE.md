@@ -143,8 +143,12 @@ and runtime database URL only to `apps/runtime` without changing the published w
 - Changes under `packages/companion-skill/skill/` require a version bump, top changelog entry, and
   `pnpm --filter @companion/companion-skill update:integrity`.
 - Run `pnpm verify:change`; exit 2 means printed follow-up gates are still required.
-- Never install or invoke `xcodebuildmcp` in CI, and never use it as an automated app test
-  runner. Apple CI must use the native `swift test`, `xcodebuild`, and `xcrun simctl` commands;
+- Every required CI test must protect an identifiable product promise at the lowest layer that
+  proves it. Apple Quality is capped at five minutes; its iOS path runs only `CompanionKit`
+  behavior tests plus a generic iOS Simulator build, while the conditional skill path retains the
+  Darwin-only private-transport guard. Never boot a simulator or run XCUITests in that gate. Keep
+  UI validation local and manual unless the repository owner explicitly approves a separate CI job.
+- Never install or invoke `xcodebuildmcp` in CI. Apple CI uses native `swift test` and `xcodebuild`;
   reserve XcodeBuildMCP for local interactive agent work.
 - Before adding a GitHub Actions workflow, CI job, required check, or trigger, obtain explicit
   approval from the repository owner.
