@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 private final class UploadProgressDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     private let onProgress: @Sendable (Double) -> Void
@@ -19,6 +20,34 @@ private final class UploadProgressDelegate: NSObject, URLSessionTaskDelegate, @u
     }
 }
 
+final class NoRedirectURLSessionDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
+    }
+}
+
+struct APIClientRedirectDelegateFactory: @unchecked Sendable {
+    private let builder: (Bool) -> URLSessionTaskDelegate?
+
+    init(builder: @escaping (Bool) -> URLSessionTaskDelegate?) {
+        self.builder = builder
+    }
+
+    func make(followRedirects: Bool) -> URLSessionTaskDelegate? {
+        builder(followRedirects)
+    }
+
+    static let production = Self { followRedirects in
+        followRedirects ? nil : NoRedirectURLSessionDelegate()
+    }
+}
+
 public struct APIError: Error, LocalizedError, Equatable, Sendable {
     public let status: Int
     public let code: String?
@@ -36,9 +65,11 @@ public struct APIError: Error, LocalizedError, Equatable, Sendable {
 public actor APIClient {
     public struct GoogleAuthorization: Equatable, Sendable {
         public let proxyURL: URL
+        public let nativeState: String
 
-        public init(proxyURL: URL) {
+        public init(proxyURL: URL, nativeState: String) {
             self.proxyURL = proxyURL
+            self.nativeState = nativeState
         }
     }
 
@@ -89,6 +120,20 @@ public actor APIClient {
         let routine: CompanionRoutine
     }
 
+    private struct RoutineRunListEnvelope: Decodable {
+        let runs: [CompanionRoutineRunSummary]
+        let nextCursor: String?
+
+        enum CodingKeys: String, CodingKey {
+            case runs
+            case nextCursor = "next_cursor"
+        }
+    }
+
+    private struct RoutineRunDetailEnvelope: Decodable {
+        let run: CompanionRoutineRunDetail
+    }
+
     private struct TriggerListEnvelope: Decodable {
         let triggers: [CompanionTrigger]
     }
@@ -102,15 +147,45 @@ public actor APIClient {
         let redirect: Bool
     }
 
+    private enum PluginOAuthRedirect {
+        case connected
+        case failed(String)
+    }
+
     private let baseURL: URL
     private let session: URLSession
+    private let redirectDelegateFactory: APIClientRedirectDelegateFactory
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
     private var authority: Session?
     private var providerOAuthCookie: String?
+    private var companionPluginOAuthCookie: String?
+    private var googleOAuthState: String?
+    private var companionPluginOAuthState: String?
+    private var companionPluginOAuthCallbackURL: URL?
 
     public init(baseURL: URL, session: URLSession? = nil) {
         self.baseURL = baseURL
+        self.redirectDelegateFactory = .production
+        if let session {
+            self.session = session
+        } else {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.httpShouldSetCookies = false
+            configuration.httpCookieAcceptPolicy = .never
+            configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+            configuration.timeoutIntervalForRequest = 30
+            self.session = URLSession(configuration: configuration)
+        }
+    }
+
+    init(
+        baseURL: URL,
+        session: URLSession? = nil,
+        redirectDelegateFactory: APIClientRedirectDelegateFactory
+    ) {
+        self.baseURL = baseURL
+        self.redirectDelegateFactory = redirectDelegateFactory
         if let session {
             self.session = session
         } else {
@@ -162,11 +237,22 @@ public actor APIClient {
     public func signOut() async {
         _ = try? await perform(path: "/v1/auth/logout", method: "POST", body: nil)
         authority = nil
+        companionPluginOAuthCookie = nil
+        googleOAuthState = nil
+        companionPluginOAuthState = nil
+        companionPluginOAuthCallbackURL = nil
     }
 
     public func beginGoogleSignIn(callbackScheme: String) async throws -> GoogleAuthorization {
         authority = nil
-        let callbackURL = "\(callbackScheme)://"
+        let nativeState = try Self.randomOAuthState()
+        googleOAuthState = nativeState
+        var started = false
+        defer {
+            if !started { googleOAuthState = nil }
+        }
+        let originURL = "\(callbackScheme)://"
+        let callbackURL = "\(originURL)?native_state=\(nativeState)"
         let body = try encoder.encode([
             "provider": "google",
             "callbackURL": callbackURL,
@@ -178,7 +264,7 @@ public actor APIClient {
             method: "POST",
             body: body,
             additionalHeaders: [
-                "expo-origin": callbackURL,
+                "expo-origin": originURL,
                 "x-skip-oauth-proxy": "true",
             ]
         )
@@ -203,15 +289,24 @@ public actor APIClient {
         guard let proxyURL = components?.url else {
             throw APIError(status: 0, code: "invalid_google_url", message: "Google sign-in could not be started.")
         }
-        return GoogleAuthorization(proxyURL: proxyURL)
+        started = true
+        return GoogleAuthorization(proxyURL: proxyURL, nativeState: nativeState)
     }
 
-    public func completeGoogleSignIn(callbackURL: URL) async throws -> Session {
-        let items = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false)?.queryItems
-        guard let setCookie = items?.first(where: { $0.name == "cookie" })?.value,
+    public func completeGoogleSignIn(
+        callbackURL: URL,
+        callbackScheme: String
+    ) async throws -> Session {
+        guard let expectedNativeState = googleOAuthState,
+              let setCookie = CompanionOAuthCallbackPolicy.googleCookie(
+            from: callbackURL,
+            callbackScheme: callbackScheme,
+            expectedNativeState: expectedNativeState
+        ),
               let cookie = Self.sessionCookie(fromSetCookieHeader: setCookie) else {
             throw APIError(status: 401, code: "invalid_google_callback", message: "Google did not return a session.")
         }
+        defer { googleOAuthState = nil }
         authority = Session(
             cookie: cookie,
             orgID: nil,
@@ -222,6 +317,11 @@ public actor APIClient {
         let authenticated = Session(cookie: authority?.cookie ?? cookie, identity: identity)
         authority = authenticated
         return authenticated
+    }
+
+    public func cancelGoogleSignIn(expectedNativeState: String) {
+        guard googleOAuthState == expectedNativeState else { return }
+        googleOAuthState = nil
     }
 
     public func whoAmI() async throws -> WhoAmI {
@@ -285,6 +385,47 @@ public actor APIClient {
             RoutineListEnvelope.self,
             path: "/v1/companions/\(companion)/routines"
         ).routines
+    }
+
+    /// Reads a bounded, newest-first routine history page. This is PostgreSQL-backed by the API
+    /// and never starts or contacts the Companion runtime.
+    public func listCompanionRoutineRuns(
+        companionID: String,
+        routineID: String,
+        limit: Int = 50,
+        cursor: String? = nil
+    ) async throws -> CompanionRoutineRunList {
+        let companion = Self.encodedPathComponent(companionID)
+        let routine = Self.encodedPathComponent(routineID)
+        var query = "limit=\(limit)"
+        if let cursor {
+            query += "&cursor=\(Self.encodedQueryComponent(cursor))"
+        }
+        let envelope = try await decode(
+            RoutineRunListEnvelope.self,
+            path: "/v1/companions/\(companion)/routines/\(routine)/runs?\(query)"
+        )
+        return CompanionRoutineRunList(runs: envelope.runs, nextCursor: envelope.nextCursor)
+    }
+
+    /// Reads one bounded page of the private routine transcript. Surfaced output remains in main
+    /// chat; this route only returns the routine's internal entries.
+    public func readCompanionRoutineRun(
+        companionID: String,
+        runID: String,
+        entryLimit: Int = 50,
+        entryCursor: Int? = nil
+    ) async throws -> CompanionRoutineRunDetail {
+        let companion = Self.encodedPathComponent(companionID)
+        let run = Self.encodedPathComponent(runID)
+        var query = "entry_limit=\(entryLimit)"
+        if let entryCursor {
+            query += "&entry_cursor=\(entryCursor)"
+        }
+        return try await decode(
+            RoutineRunDetailEnvelope.self,
+            path: "/v1/companions/\(companion)/routine-runs/\(run)?\(query)"
+        ).run
     }
 
     public func listCompanionTriggers(companionID: String) async throws -> [CompanionTrigger] {
@@ -668,23 +809,113 @@ public actor APIClient {
         ).account
     }
 
-    /// Builds the authenticated POST loaded by the in-app OAuth browser. Performing the start
-    /// request inside that browser keeps its short-lived, HttpOnly callback cookie in the same
-    /// isolated cookie store as the provider redirect without introducing a mobile-only API.
-    public func companionPluginOAuthRequest(
+    /// Starts the existing authenticated flow and retains only its short-lived callback cookie
+    /// in this client actor until the exact Universal Link callback is consumed.
+    public func startCompanionPluginOAuth(
         serverName: String,
         label: String
-    ) throws -> URLRequest {
+    ) async throws -> CompanionPluginOAuthStart {
+        companionPluginOAuthCookie = nil
+        companionPluginOAuthState = nil
+        companionPluginOAuthCallbackURL = nil
         let body = try encoder.encode([
             "server_name": serverName,
             "label": label,
         ])
-        return try makeRequest(
+        let (data, response) = try await perform(
             path: "/v1/companion-plugins/oauth/start",
             method: "POST",
             body: body,
             timeout: 12
         )
+        guard let cookie = Self.cookie(prefix: "companion_mcp_oauth_", from: response) else {
+            throw APIError(
+                status: 500,
+                code: "missing_oauth_session",
+                message: "The server did not return a plugin sign-in session."
+            )
+        }
+        let started: CompanionPluginOAuthStart
+        do {
+            started = try decoder.decode(CompanionPluginOAuthStart.self, from: data)
+        } catch {
+            companionPluginOAuthCookie = nil
+            throw APIError(
+                status: 500,
+                code: "invalid_response",
+                message: "The plugin sign-in response was unreadable."
+            )
+        }
+        guard let callbackURL = Self.pluginOAuthCallbackURL(from: started.authorizationURL),
+              let callbackState = CompanionOAuthCallbackPolicy.queryValue(
+                  named: "state",
+                  from: started.authorizationURL
+              ),
+              !callbackState.isEmpty else {
+            companionPluginOAuthCookie = nil
+            throw APIError(
+                status: 500,
+                code: "missing_oauth_binding",
+                message: "The plugin sign-in response did not include a valid callback binding."
+            )
+        }
+        companionPluginOAuthCookie = cookie
+        companionPluginOAuthState = callbackState
+        companionPluginOAuthCallbackURL = callbackURL
+        return started
+    }
+
+    public func completeCompanionPluginOAuth(callbackURL: URL) async throws {
+        guard let expectedCallbackURL = companionPluginOAuthCallbackURL,
+              let expectedCallbackState = companionPluginOAuthState,
+              CompanionOAuthCallbackPolicy.isPluginCallback(
+                  callbackURL,
+                  expectedCallbackURL: expectedCallbackURL
+              ),
+              CompanionOAuthCallbackPolicy.queryValue(named: "state", from: callbackURL) == expectedCallbackState else {
+            throw APIError(
+                status: 400,
+                code: "invalid_oauth_callback",
+                message: "The plugin sign-in callback was not recognized."
+            )
+        }
+        defer {
+            companionPluginOAuthCookie = nil
+            companionPluginOAuthState = nil
+            companionPluginOAuthCallbackURL = nil
+        }
+        let headers = try companionPluginOAuthHeaders()
+        let (_, response) = try await perform(
+            url: callbackURL,
+            method: "GET",
+            body: nil,
+            acceptedStatuses: 200..<400,
+            timeout: 35,
+            additionalHeaders: headers,
+            followRedirects: false
+        )
+
+        guard response.statusCode == 303,
+              let location = Self.header(named: "location", from: response),
+              let redirect = Self.pluginOAuthRedirect(
+                  from: location,
+                  expectedCallbackURL: expectedCallbackURL
+              ) else {
+            throw APIError(
+                status: response.statusCode,
+                code: "invalid_oauth_redirect",
+                message: "The plugin sign-in response was not recognized."
+            )
+        }
+        if case .failed(let error) = redirect {
+            throw APIError(status: 400, code: error, message: "The provider did not complete authorization.")
+        }
+    }
+
+    public func cancelCompanionPluginOAuth() {
+        companionPluginOAuthCookie = nil
+        companionPluginOAuthState = nil
+        companionPluginOAuthCallbackURL = nil
     }
 
     public func deleteCompanionPlugin(accountID: String) async throws {
@@ -842,6 +1073,18 @@ public actor APIClient {
         return ["Cookie": cookies.joined(separator: "; ")]
     }
 
+    private func companionPluginOAuthHeaders() throws -> [String: String] {
+        guard let companionPluginOAuthCookie else {
+            throw APIError(
+                status: 400,
+                code: "oauth_not_started",
+                message: "Start plugin sign-in before completing it."
+            )
+        }
+        let cookies = [authority?.cookie, companionPluginOAuthCookie].compactMap { $0 }
+        return ["Cookie": cookies.joined(separator: "; ")]
+    }
+
     @discardableResult
     private func perform(
         path: String,
@@ -852,10 +1095,41 @@ public actor APIClient {
         timeout: TimeInterval = 30,
         additionalHeaders: [String: String] = [:],
         uploadProgress: (@Sendable (Double) -> Void)? = nil,
-        uploadFile: URL? = nil
+        uploadFile: URL? = nil,
+        followRedirects: Bool = true
+    ) async throws -> (Data, HTTPURLResponse) {
+        guard let url = URL(string: path, relativeTo: baseURL)?.absoluteURL else {
+            throw APIError(status: 0, code: "invalid_url", message: "The API address is invalid.")
+        }
+        return try await perform(
+            url: url,
+            method: method,
+            body: body,
+            acceptedStatuses: acceptedStatuses,
+            additionallyAcceptedStatus: additionallyAcceptedStatus,
+            timeout: timeout,
+            additionalHeaders: additionalHeaders,
+            uploadProgress: uploadProgress,
+            uploadFile: uploadFile,
+            followRedirects: followRedirects
+        )
+    }
+
+    @discardableResult
+    private func perform(
+        url: URL,
+        method: String,
+        body: Data?,
+        acceptedStatuses: Range<Int> = 200..<300,
+        additionallyAcceptedStatus: Int? = nil,
+        timeout: TimeInterval = 30,
+        additionalHeaders: [String: String] = [:],
+        uploadProgress: (@Sendable (Double) -> Void)? = nil,
+        uploadFile: URL? = nil,
+        followRedirects: Bool = true
     ) async throws -> (Data, HTTPURLResponse) {
         var request = try makeRequest(
-            path: path,
+            url: url,
             method: method,
             body: body,
             timeout: timeout,
@@ -874,7 +1148,8 @@ public actor APIClient {
                     delegate: delegate
                 )
             } else {
-                (data, response) = try await session.data(for: request)
+                let redirectDelegate = redirectDelegateFactory.make(followRedirects: followRedirects)
+                (data, response) = try await session.data(for: request, delegate: redirectDelegate)
             }
         } catch {
             throw APIError(status: 0, code: "network_error", message: "The server could not be reached.")
@@ -908,9 +1183,25 @@ public actor APIClient {
         timeout: TimeInterval,
         additionalHeaders: [String: String] = [:]
     ) throws -> URLRequest {
-        guard let url = URL(string: path, relativeTo: baseURL) else {
+        guard let url = URL(string: path, relativeTo: baseURL)?.absoluteURL else {
             throw APIError(status: 0, code: "invalid_url", message: "The API address is invalid.")
         }
+        return try makeRequest(
+            url: url,
+            method: method,
+            body: body,
+            timeout: timeout,
+            additionalHeaders: additionalHeaders
+        )
+    }
+
+    private func makeRequest(
+        url: URL,
+        method: String,
+        body: Data?,
+        timeout: TimeInterval,
+        additionalHeaders: [String: String] = [:]
+    ) throws -> URLRequest {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.httpBody = body
@@ -1032,13 +1323,24 @@ public actor APIClient {
     }
 
     private static func cookie(suffix: String, from response: HTTPURLResponse) -> String? {
+        cookie(matching: { $0.hasSuffix(suffix) }, from: response)
+    }
+
+    private static func cookie(prefix: String, from response: HTTPURLResponse) -> String? {
+        cookie(matching: { $0.hasPrefix(prefix) }, from: response)
+    }
+
+    private static func cookie(
+        matching predicate: (String) -> Bool,
+        from response: HTTPURLResponse
+    ) -> String? {
         var fields: [String: String] = [:]
         for (key, value) in response.allHeaderFields {
             guard let key = key as? String else { continue }
             fields[key] = String(describing: value)
         }
         let cookies = HTTPCookie.cookies(withResponseHeaderFields: fields, for: response.url ?? URL(string: "https://localhost")!)
-        if let cookie = cookies.first(where: { $0.name.hasSuffix(suffix) }) {
+        if let cookie = cookies.first(where: { predicate($0.name) }) {
             return "\(cookie.name)=\(cookie.value)"
         }
         guard let header = header(named: "set-cookie", from: response) else { return nil }
@@ -1047,10 +1349,89 @@ public actor APIClient {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .compactMap { value -> String? in
                 guard let pair = value.split(separator: ";", maxSplits: 1).first,
-                      pair.split(separator: "=", maxSplits: 1).first?.hasSuffix(suffix) == true else { return nil }
+                      let name = pair.split(separator: "=", maxSplits: 1).first,
+                      predicate(String(name)) else { return nil }
                 return String(pair)
             }
             .first
+    }
+
+    private static func pluginOAuthCallbackURL(from authorizationURL: URL) -> URL? {
+        guard let rawCallbackURL = CompanionOAuthCallbackPolicy.queryValue(
+            named: "redirect_uri",
+            from: authorizationURL
+        ),
+              let callbackURL = URL(string: rawCallbackURL),
+              CompanionOAuthCallbackPolicy.isPluginCallback(
+                  callbackURL,
+                  expectedCallbackURL: callbackURL
+              ) else {
+            return nil
+        }
+        return callbackURL
+    }
+
+    private static func pluginOAuthRedirect(
+        from location: String,
+        expectedCallbackURL: URL
+    ) -> PluginOAuthRedirect? {
+        guard let redirectURL = URL(
+            string: location.trimmingCharacters(in: .whitespacesAndNewlines),
+            relativeTo: expectedCallbackURL
+        )?.absoluteURL,
+              let expectedScheme = expectedCallbackURL.scheme,
+              let expectedHost = expectedCallbackURL.host,
+              (expectedScheme.caseInsensitiveCompare("https") == .orderedSame
+                  || expectedScheme.caseInsensitiveCompare("http") == .orderedSame),
+              expectedCallbackURL.path == CompanionOAuthCallbackPolicy.pluginCallbackPath,
+              expectedCallbackURL.user == nil,
+              expectedCallbackURL.password == nil,
+              expectedCallbackURL.fragment == nil,
+              redirectURL.scheme?.caseInsensitiveCompare(expectedScheme) == .orderedSame,
+              redirectURL.host?.caseInsensitiveCompare(expectedHost) == .orderedSame,
+              redirectURL.path == "/companions",
+              Self.effectivePort(for: redirectURL) == Self.effectivePort(for: expectedCallbackURL),
+              redirectURL.user == nil,
+              redirectURL.password == nil,
+              redirectURL.fragment == nil,
+              let queryItems = URLComponents(url: redirectURL, resolvingAgainstBaseURL: false)?.queryItems else {
+            return nil
+        }
+
+        let oauth = queryItems.filter { $0.name == "oauth" }
+        let errors = queryItems.filter { $0.name == "oauth_error" }
+        guard oauth.count <= 1, errors.count <= 1, oauth.isEmpty || errors.isEmpty else { return nil }
+        if oauth.count == 1 {
+            guard oauth[0].value == "connected" else { return nil }
+            return .connected
+        }
+        guard errors.count == 1, let value = errors[0].value, !value.isEmpty else { return nil }
+        return .failed(value)
+    }
+
+    private static func effectivePort(for url: URL) -> Int? {
+        if let port = url.port { return port }
+        switch url.scheme?.lowercased() {
+        case "https": return 443
+        case "http": return 80
+        default: return nil
+        }
+    }
+
+    private static func randomOAuthState() throws -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        let status = bytes.withUnsafeMutableBytes { buffer -> Int32 in
+            guard let baseAddress = buffer.baseAddress else { return errSecParam }
+            return SecRandomCopyBytes(kSecRandomDefault, buffer.count, baseAddress)
+        }
+        guard status == errSecSuccess else {
+            throw APIError(
+                status: 0,
+                code: "oauth_state_unavailable",
+                message: "Sign-in could not be started securely."
+            )
+        }
+        return bytes.map { String(format: "%02x", $0) }.joined()
     }
 
     private static func header(named name: String, from response: HTTPURLResponse) -> String? {
@@ -1060,6 +1441,11 @@ public actor APIClient {
     }
 
     private static func encodedPathComponent(_ value: String) -> String {
+        let unreserved = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        return value.addingPercentEncoding(withAllowedCharacters: unreserved) ?? value
+    }
+
+    private static func encodedQueryComponent(_ value: String) -> String {
         let unreserved = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
         return value.addingPercentEncoding(withAllowedCharacters: unreserved) ?? value
     }

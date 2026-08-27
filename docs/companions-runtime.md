@@ -558,6 +558,12 @@ becomes `succeeded`, `failed`, or `interrupted`, and for each newly projected pe
 Owner actor, so the same author rule applies without a second recipient model. Device/event
 uniqueness makes replayed settlement and claim takeover idempotent.
 
+At the routine-isolation cutover, routine-run settlement itself is excluded from this generic
+terminal-turn notification trigger. A terminal `notify` return creates its visible main-thread entry
+and push delivery in the same transaction but does not enqueue the main Pi. A terminal `relay`
+return creates the visible entry plus a main-Pi turn; the main Pi's eventual reply or error uses the
+ordinary notification path, avoiding two alerts for one relay.
+
 The success alert is `<name> replied` with the latest normalized assistant text, capped at 180
 characters; image-only output uses a generic preview. Decisions use `<name> needs your answer` and
 the bounded title. Failure/interruption use their stable expurgated runtime message. Reasoning,
@@ -598,10 +604,60 @@ routine is `skipped_pileup`. Skips still advance `next_fire_at` and drop the lea
 classified failures disable the routine. After delete, `routine_id` on historical turns is set null
 and `routine_name` remains as the transcript header.
 
-`companion_api_read_thread` projects `routine {id, name}` on the originating user entry. The prompt
-stays in `content`; first-party clients hide that bubble. The conversation-list projection masks it
-the same way: a routine-origin last message carries an empty `preview` and the `routine_name`, so no
-surface outside the thread reads the fire as a line the Owner typed.
+During the additive migration, the routine-origin turn id is also its stable run id, and a plain
+`routine_snapshot_id` preserves the routine UUID after definition deletion. Read-only history APIs
+list runs by that snapshot and read one run by id without Box contact. The private
+`companion_routine_run_entries` projection contains only events produced inside the run-scoped Pi
+session. Detail reads page forward by durable entry ordinal, cap each page at 100 entries and 8 MiB
+of stored entry material, and return a continuation cursor so the complete transcript remains
+viewable without materializing an unbounded response. `companion_routine_returns` contains no
+message payload: it references the one ordinary
+main-thread entry created by the terminal return and, for `relay`, the ordinary turn queued for the
+main Pi. While the pre-cutover main-session fire path remains active, the history reader uses the
+turn association as a compatibility projection: a succeeded final assistant entry is a virtual
+`notify` reference and is excluded from the run transcript. This preserves the existing surfaced
+reply without falsely calling it `no_output` or storing a second copy.
+
+The final execution path keeps the existing worker boundary: `apps/worker` only persists the
+exactly-once routine-origin turn and never contacts Box or Pi. `apps/runtime` claims that turn under
+the Companion's existing single-work lease, revalidates the Owner and current capabilities, and
+launches the same Pi binary with the same tools and configuration in a run-scoped session directory.
+The main Pi session remains idle and receives neither the routine prompt nor its private transcript.
+This is session isolation inside the one Companion runtime, not a second harness, Box, or concurrent
+runtime owner.
+
+Before Box contact, each run also pins the content-addressed main-conversation background specified
+in [Routine Pi context substrate](routine-pi-context-substrate.md). The latest valid main-Pi
+compaction summary plus a bounded recent main-thread tail is runtime material, not a member-facing
+endpoint; the pinned id and digest make takeover reconstruct identical bytes.
+
+The routine-only `surface_to_main` tool is a terminal return, never a conversational tool:
+
+- `notify` atomically writes one visible Companion entry to main-thread history and creates no turn,
+  so the main Pi does not answer it;
+- `relay` atomically writes the same kind of visible entry and queues an idempotent main-Pi turn that
+  reads and responds to it;
+- the first accepted return wins and runtime terminates the run-scoped Pi immediately; later broker
+  events cannot produce work or another bridge;
+- a routine Pi that settles normally without calling the tool succeeds as `no_output`, with no
+  main-thread message or push.
+
+The return payload appears exactly once in the main thread in both modes and is never duplicated in
+the routine transcript. Failures and interruptions remain safe, bounded run-history status rather
+than synthetic chat messages. The main thread shows the routine-origin user projection as a compact
+clickable `Routine: <name>` marker carrying `run_id`; opening it reads the private run transcript.
+Routine rows in connected resources expose the same newest-first history to Owner, Editor, and
+Viewer. Viewer history keeps the same bounded generic runtime-error projection as Viewer thread
+reads; recovery codes, messages, and actions remain Owner/Editor-only. The conversation-list preview
+masks the fire marker itself, but a surfaced return is an ordinary visible Companion entry and
+therefore becomes normal conversation history.
+
+This target behavior is activated only after the schema/read API and both first-party history views
+are deployed. Until that cutover, `companion_api_read_thread` continues its compatibility projection:
+`routine {id, name}` on the originating user entry, prompt retained in `content`, first-party bubble
+hidden, and routine Pi output in the ordinary thread. Server-side partitioning replaces that
+compatibility path; client-side filtering alone is explicitly rejected because it cannot provide a
+single authorization, unread, notification, and retention boundary.
 
 `next_fire_at` is stored with millisecond precision. The worker claims a routine, carries that
 instant through a JavaScript `Date`, and hands it back as the fire fence; microseconds would be
@@ -735,7 +791,9 @@ existing Box gains the current brief at its next staging (`start`, `restart_pi`,
 The full brief is the first-party contract. Only already-persisted Expo turns carrying the deprecated
 compatibility discriminator retain the narrowed historical staging behavior; new clients must not
 send that discriminator. Routines, triggers, `propose_routine`, and `propose_trigger` remain
-available in both the full contract and that compatibility path, and a fire is an ordinary turn.
+available in both the full contract and that compatibility path. Until the routine-isolation
+cutover, a fire is processed by the ordinary main Pi session; after cutover it remains an ordinary
+durable turn for queueing and exactly-once identity but executes in the run-scoped Pi session above.
 
 **Outputs.** The layout-14 broker creates and empties `~/outbox` inside the serialized prompt
 command, after proving Pi idle and immediately before prompt delivery. The positive ACK includes the
@@ -934,15 +992,19 @@ The SwiftUI client in `apps/ios` targets iOS 26 and later, and the SwiftUI clien
 targets macOS 14 and later; Android is not supported. Both are full first-party clients over the
 existing `/v1` API rather than separate or reduced platform APIs. They reuse
 the existing Better Auth cookie session: email login captures `set-cookie`, while Google login uses
-Better Auth's authorization proxy and the system browser before adopting the returned cookie into
+Better Auth's authorization proxy and the member's default browser before adopting the returned cookie into
 Keychain-backed session state. A new Google account completes onboarding by joining a
 domain-matched organization or creating a named workspace. The app resolves the current
 organization through `whoami` and sends the cookie plus `x-companion-org` on each REST request.
 The native roster and chat ship with Companion creation, the full server-owned provider catalog,
 Claude and Codex subscription authorization, encrypted API-key connections, and MCP connection
 management. Its Plugins surface groups the existing accounts by provider, permits multiple labeled
-accounts for each product-owned Linear, GitHub, Notion, Conductor, Slack, and Gmail category through the shared
-brokered OAuth routes, and retains custom HTTP or command MCP connections. Skills, files, routines,
+accounts for each product-owned Linear, GitHub, Notion, Conductor, Slack, and Gmail category through
+the shared brokered OAuth routes, and retains custom HTTP or command MCP connections. Curated plugin
+OAuth also opens in the default browser: the provider keeps the existing HTTPS redirect URI, while
+an exact Universal Link returns `code` and signed `state` to the app for completion through the
+authenticated API client and its memory-only callback cookie. The app rejects every other host/path
+and refuses to follow the callback's final web redirect. Skills, files, routines,
 triggers, sharing, settings, and the remaining control-plane workflows continue migrating to this
 same client without mobile-only APIs.
 

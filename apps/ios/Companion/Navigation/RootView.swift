@@ -12,6 +12,7 @@ struct RootView: View {
         storage: KeychainSessionStorage(service: "\(AppConfig.callbackScheme).session"),
         notificationInstallationID: RootView.notificationInstallationID
     )
+    @State private var externalOAuth = ExternalOAuthCoordinator()
 
     var body: some View {
         Group {
@@ -52,6 +53,14 @@ struct RootView: View {
 #endif
         }
         .environment(sessionStore)
+        .environment(externalOAuth)
+        .onOpenURL { url in
+            _ = externalOAuth.handle(url: url)
+        }
+        .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
+            guard let url = activity.webpageURL else { return }
+            _ = externalOAuth.handle(url: url)
+        }
         .task {
 #if DEBUG
             let arguments = ProcessInfo.processInfo.arguments

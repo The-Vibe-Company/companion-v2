@@ -51,6 +51,9 @@ export const companionTurnStatusEnum = pgEnum("companion_turn_status", [
   "queued", "starting", "dispatching", "running", "needs_input",
   "succeeded", "failed", "interrupted", "cancelled",
 ]);
+export const companionRoutineSurfaceModeEnum = pgEnum("companion_routine_surface_mode", [
+  "relay", "notify",
+]);
 export const companionNotificationEnvironmentEnum = pgEnum("companion_notification_environment", [
   "sandbox", "production",
 ]);
@@ -979,6 +982,8 @@ export const companionTurns = pgTable(
      */
     routineId: uuid("routine_id").references(() => companionRoutines.id, { onDelete: "set null" }),
     routineName: text("routine_name"),
+    /** Immutable routine id snapshot; unlike routine_id it survives routine deletion. */
+    routineSnapshotId: uuid("routine_snapshot_id"),
     /**
      * Originating trigger, if this turn was a webhook fire. Same snapshot rules as a routine:
      * `trigger_id` is SET NULL if the trigger is deleted; `trigger_name` still labels the transcript.
@@ -1009,6 +1014,8 @@ export const companionTurns = pgTable(
     errorCheck: check("companion_turns_error_check", sql`((${t.lastErrorCode} is null) = (${t.lastErrorMessage} is null)) and ((${t.lastErrorCode} is null) = (${t.lastErrorAction} is null)) and (${t.lastErrorCode} is null or ${t.lastErrorCode} ~ '^[a-z][a-z0-9_]{0,63}$') and (${t.lastErrorMessage} is null or (char_length(${t.lastErrorMessage}) <= 500 and ${t.lastErrorMessage} !~ E'[\\n\\r]')) and (${t.status} not in ('failed','interrupted') or ${t.lastErrorCode} is not null) and (${t.status} not in ('succeeded','cancelled') or ${t.lastErrorCode} is null)`),
     messageEvent: index("companion_turns_message_event_idx").on(t.companionId, t.messageEventId),
     routineOriginCheck: check("companion_turns_routine_origin_check", sql`(${t.routineId} is null or ${t.routineName} is not null) and (${t.routineName} is null or (char_length(${t.routineName}) between 1 and 80 and ${t.routineName} !~ E'[\\n\\r]'))`),
+    routineSnapshotCheck: check("companion_turns_routine_snapshot_check", sql`${t.routineSnapshotId} is null or ${t.routineName} is not null`),
+    routineSnapshot: index("companion_turns_routine_snapshot_idx").on(t.orgId, t.companionId, t.routineSnapshotId, t.queueSequence, t.id).where(sql`${t.routineSnapshotId} is not null`),
     triggerOriginCheck: check("companion_turns_trigger_origin_check", sql`(${t.triggerId} is null or ${t.triggerName} is not null) and (${t.triggerName} is null or (char_length(${t.triggerName}) between 1 and 80 and ${t.triggerName} !~ E'[\\n\\r]')) and not (${t.routineName} is not null and ${t.triggerName} is not null)`),
   }),
 );
@@ -1604,6 +1611,11 @@ export const companionTranscriptEntries = pgTable(
     /** Member who sent a user message; null for Pi output and for entries written before sharing. */
     authorId: text("author_id").references(() => user.id, { onDelete: "set null" }),
     /**
+     * Execution turn that produced this projection. Nullable for pre-history rows and ordinary
+     * compatibility projections; routine/internal readers use it as the durable run association.
+     */
+    turnId: uuid("turn_id"),
+    /**
      * Name of the routine that enqueued this user message, snapshotted so it survives the routine's
      * deletion. `companion_turns` carries the same snapshot, but that table is private to the
      * runtime function owner, and the conversation-list preview is an ordinary API-role read of the
@@ -1624,6 +1636,12 @@ export const companionTranscriptEntries = pgTable(
       foreignColumns: [companions.orgId, companions.id],
       name: "companion_transcript_entries_companion_fk",
     }),
+    turnFk: foreignKey({
+      columns: [t.orgId, t.companionId, t.turnId],
+      foreignColumns: [companionTurns.orgId, companionTurns.companionId, companionTurns.id],
+      name: "companion_transcript_entries_turn_fk",
+    }).onDelete("cascade"),
+    turn: index("companion_transcript_entries_turn_idx").on(t.orgId, t.companionId, t.turnId).where(sql`${t.turnId} is not null`),
     ordered: unique("companion_transcript_entries_ordinal_uq").on(t.companionId, t.ordinal),
     nonnegativeOrdinal: check(
       "companion_transcript_entries_ordinal_check",
@@ -1676,6 +1694,132 @@ export const companionTranscriptEntries = pgTable(
     triggerOnUserEntries: check(
       "companion_transcript_entries_trigger_check",
       sql`(${t.triggerName} is null or (${t.role}::text = 'user' and char_length(${t.triggerName}) between 1 and 80 and ${t.triggerName} !~ E'[\n\r]')) and not (${t.routineName} is not null and ${t.triggerName} is not null)`,
+    ),
+  }),
+);
+
+/**
+ * Private transcript projected by the isolated routine Pi. It is deliberately separate from the
+ * main thread projection: a terminal surface references its one main-thread entry instead of
+ * copying the payload into this history. The run id is the routine-origin companion turn id.
+ */
+export const companionRoutineRunEntries = pgTable(
+  "companion_routine_run_entries",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    companionId: uuid("companion_id").notNull(),
+    runId: uuid("run_id").notNull(),
+    eventId: text("event_id").notNull(),
+    ordinal: integer("ordinal").notNull(),
+    role: companionTranscriptRoleEnum("role").notNull(),
+    content: text("content").notNull(),
+    reasoning: text("reasoning"),
+    tool: jsonb("tool").$type<CompanionStoredToolRun>(),
+    decision: jsonb("decision").$type<CompanionStoredDecision>(),
+    createdAt: now(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.companionId, t.runId, t.eventId] }),
+    runFk: foreignKey({
+      columns: [t.orgId, t.companionId, t.runId],
+      foreignColumns: [companionTurns.orgId, companionTurns.companionId, companionTurns.id],
+      name: "companion_routine_run_entries_run_fk",
+    }).onDelete("cascade"),
+    ordered: unique("companion_routine_run_entries_ordinal_uq").on(
+      t.companionId, t.runId, t.ordinal,
+    ),
+    run: index("companion_routine_run_entries_run_idx").on(
+      t.orgId, t.companionId, t.runId, t.ordinal,
+    ),
+    eventCheck: check(
+      "companion_routine_run_entries_event_check",
+      sql`char_length(${t.eventId}) between 1 and 200 and ${t.eventId} !~ E'[\\n\\r]'`,
+    ),
+    ordinalCheck: check(
+      "companion_routine_run_entries_ordinal_check",
+      sql`${t.ordinal} >= 0`,
+    ),
+    boundedContent: check(
+      "companion_routine_run_entries_content_check",
+      sql`octet_length(${t.content}) <= 1048576`,
+    ),
+    boundedReasoning: check(
+      "companion_routine_run_entries_reasoning_check",
+      sql`${t.reasoning} is null or octet_length(${t.reasoning}) <= 48000`,
+    ),
+    reasoningRoleOnly: check(
+      "companion_routine_run_entries_reasoning_role_check",
+      sql`${t.reasoning} is null or ${t.role}::text = 'assistant'`,
+    ),
+    toolRoleOnly: check(
+      "companion_routine_run_entries_tool_role_check",
+      sql`(${t.role}::text = 'tool') = (${t.tool} is not null)`,
+    ),
+    boundedTool: check(
+      "companion_routine_run_entries_tool_size_check",
+      sql`${t.tool} is null or octet_length(${t.tool}::text) <= 262144`,
+    ),
+    decisionRoleOnly: check(
+      "companion_routine_run_entries_decision_role_check",
+      sql`(${t.role}::text = 'decision') = (${t.decision} is not null)`,
+    ),
+    boundedDecision: check(
+      "companion_routine_run_entries_decision_size_check",
+      sql`${t.decision} is null or octet_length(${t.decision}::text) <= 262144`,
+    ),
+  }),
+);
+
+/**
+ * Exactly-once terminal surface projection for a routine run. The main entry lives in the ordinary
+ * thread and is referenced by event id; only relay mode creates a separate main-Pi turn. No payload
+ * column exists here, preventing a second copy of surfaced content in routine history.
+ */
+export const companionRoutineReturns = pgTable(
+  "companion_routine_returns",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    companionId: uuid("companion_id").notNull(),
+    runId: uuid("run_id").notNull(),
+    mode: companionRoutineSurfaceModeEnum("mode").notNull(),
+    mainEntryEventId: text("main_entry_event_id").notNull(),
+    relayTurnId: uuid("relay_turn_id"),
+    createdAt: now(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.companionId, t.runId] }),
+    runFk: foreignKey({
+      columns: [t.orgId, t.companionId, t.runId],
+      foreignColumns: [companionTurns.orgId, companionTurns.companionId, companionTurns.id],
+      name: "companion_routine_returns_run_fk",
+    }).onDelete("cascade"),
+    mainEntryFk: foreignKey({
+      columns: [t.companionId, t.mainEntryEventId],
+      foreignColumns: [companionTranscriptEntries.companionId, companionTranscriptEntries.eventId],
+      name: "companion_routine_returns_main_entry_fk",
+    }).onDelete("cascade"),
+    relayTurnFk: foreignKey({
+      columns: [t.orgId, t.companionId, t.relayTurnId],
+      foreignColumns: [companionTurns.orgId, companionTurns.companionId, companionTurns.id],
+      name: "companion_routine_returns_relay_turn_fk",
+    }).onDelete("cascade"),
+    mainEntryUnique: unique("companion_routine_returns_main_entry_uq").on(
+      t.companionId, t.mainEntryEventId,
+    ),
+    relayTurnUnique: unique("companion_routine_returns_relay_turn_uq").on(
+      t.companionId, t.relayTurnId,
+    ),
+    modeRelationCheck: check(
+      "companion_routine_returns_mode_relation_check",
+      sql`(${t.mode}::text = 'relay') = (${t.relayTurnId} is not null)`,
+    ),
+    mainEntryCheck: check(
+      "companion_routine_returns_main_entry_check",
+      sql`char_length(${t.mainEntryEventId}) between 1 and 200 and ${t.mainEntryEventId} !~ E'[\\n\\r]'`,
     ),
   }),
 );

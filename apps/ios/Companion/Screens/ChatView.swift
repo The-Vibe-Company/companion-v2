@@ -13,6 +13,8 @@ struct ChatServices {
     let listSkills: () async throws -> [CompanionSkillReference]
     let listPlugins: () async throws -> [CompanionPluginAccount]
     let listProviders: () async throws -> CompanionProvidersResponse
+    let listRoutineRuns: ((String, String, Int, String?) async throws -> CompanionRoutineRunList)? = nil
+    let readRoutineRun: ((String, String, Int, Int?) async throws -> CompanionRoutineRunDetail)? = nil
 }
 
 private struct AssistantTailReveal: Equatable, Sendable {
@@ -114,6 +116,7 @@ struct ChatView: View {
     @State private var assistantTailReveal: AssistantTailReveal?
     @State private var assistantTailRevealTask: Task<Void, Never>?
     @State private var selectedToolDetail: ToolRunDetailRoute?
+    @State private var routineHistoryTarget: CompanionRoutineHistoryTarget?
 
     private let bottomProximityThreshold: CGFloat = 80
 
@@ -186,7 +189,15 @@ struct ChatView: View {
                                             onReasoningExpansionChange: { isExpanded in
                                                 setReasoningExpanded(isExpanded, for: entry.eventID)
                                             },
-                                            onOpenToolDetails: { selectedToolDetail = $0 }
+                                            onOpenToolDetails: { selectedToolDetail = $0 },
+                                            onOpenRoutineRun: { routine in
+                                                guard let runID = routine.runID else { return }
+                                                routineHistoryTarget = CompanionRoutineHistoryTarget(
+                                                    routineID: routine.id,
+                                                    runID: runID,
+                                                    name: routine.name
+                                                )
+                                            }
                                         )
                                         .equatable()
                                         .id(entry.id)
@@ -363,6 +374,20 @@ struct ChatView: View {
             CompanionToolRunDetailView(tool: route.tool, timestamp: route.timestamp)
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
+        }
+        .sheet(item: $routineHistoryTarget) { target in
+            NavigationStack {
+                CompanionRoutineHistoryView(
+                    companionID: currentCompanion.id,
+                    target: target,
+                    services: routineHistoryServices
+                )
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Done") { routineHistoryTarget = nil }
+                    }
+                }
+            }
         }
         .task(id: companion.id) {
             await reload()
@@ -574,6 +599,22 @@ struct ChatView: View {
 
     private var visualTheme: CompanionVisualTheme {
         CompanionVisualTheme(icon: currentCompanion.icon)
+    }
+
+    private var routineHistoryServices: CompanionRoutineHistoryServices? {
+        guard let services else { return nil }
+        let companionID = currentCompanion.id
+        let listRuns: ((String, Int, String?) async throws -> CompanionRoutineRunList)? = services.listRoutineRuns.map { loader in
+            { routineID, limit, cursor in
+                try await loader(companionID, routineID, limit, cursor)
+            }
+        }
+        let readRun: ((String, Int, Int?) async throws -> CompanionRoutineRunDetail)? = services.readRoutineRun.map { loader in
+            { runID, limit, cursor in
+                try await loader(companionID, runID, limit, cursor)
+            }
+        }
+        return CompanionRoutineHistoryServices(listRuns: listRuns, readRun: readRun)
     }
 
     private var isNearBottom: Bool {
@@ -1763,6 +1804,7 @@ private struct TranscriptRowView: View, @MainActor Equatable {
     let onOpenPlugins: () -> Void
     let onReasoningExpansionChange: (Bool) -> Void
     let onOpenToolDetails: (ToolRunDetailRoute) -> Void
+    let onOpenRoutineRun: (CompanionTranscriptRoutineOrigin) -> Void
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.input == rhs.input
@@ -1770,7 +1812,15 @@ private struct TranscriptRowView: View, @MainActor Equatable {
 
     @ViewBuilder
     var body: some View {
-        if let decision = input.entry.decision {
+        if let routine = input.entry.routine {
+            CompanionRoutineOriginMarker(
+                routine: routine,
+                companionID: input.companionID,
+                attachments: input.entry.attachments,
+                onOpenRun: { onOpenRoutineRun(routine) }
+            )
+            .accessibilityIdentifier("chat.routine-origin.\(input.entry.eventID)")
+        } else if let decision = input.entry.decision {
             CompanionDecisionCard(
                 decision: decision,
                 companionName: input.companionName,
@@ -1828,6 +1878,56 @@ private struct TranscriptRowView: View, @MainActor Equatable {
     private var timeLabel: String? {
         guard let date = parseCompanionTimestamp(input.entry.createdAt) else { return nil }
         return date.formatted(date: .omitted, time: .shortened)
+    }
+}
+
+private struct CompanionRoutineOriginMarker: View {
+    let routine: CompanionTranscriptRoutineOrigin
+    let companionID: String
+    let attachments: [CompanionAttachment]
+    let onOpenRun: () -> Void
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            if routine.runID != nil {
+                Button(action: onOpenRun) {
+                    markerLabel
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Open \(routine.name) routine run")
+                .accessibilityHint("Opens the routine's persisted run history")
+                .accessibilityIdentifier("chat.routine-origin.open-run")
+            } else {
+                markerLabel
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("Routine: \(routine.name)")
+            }
+
+            if !attachments.isEmpty {
+                TranscriptAttachmentList(companionID: companionID, attachments: attachments)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+
+    private var markerLabel: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "clock")
+                .accessibilityHidden(true)
+            Text("Routine: \(routine.name)")
+                .font(.footnote.weight(.semibold))
+                .fixedSize(horizontal: false, vertical: true)
+            if routine.runID != nil {
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .accessibilityHidden(true)
+            }
+        }
+        .foregroundStyle(Color.companionInk)
+        .frame(minHeight: 44)
+        .padding(.horizontal, 12)
+        .companionMaterial(radius: 12)
+        .contentShape(Rectangle())
     }
 }
 

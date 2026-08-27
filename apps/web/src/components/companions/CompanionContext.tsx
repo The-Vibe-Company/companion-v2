@@ -43,6 +43,7 @@ export function CompanionContext({
   routines,
   memberTimezone,
   onRoutinesChange,
+  onOpenRoutineHistory,
   triggers,
   onTriggersChange,
   onJoin,
@@ -61,6 +62,7 @@ export function CompanionContext({
   routines: CompanionRoutine[];
   memberTimezone?: string | null;
   onRoutinesChange: (routines: CompanionRoutine[]) => void;
+  onOpenRoutineHistory: (routine: CompanionRoutine) => void;
   triggers: CompanionTrigger[];
   onTriggersChange: (triggers: CompanionTrigger[]) => void;
   onJoin: () => void;
@@ -229,6 +231,7 @@ export function CompanionContext({
           memberTimezone={memberTimezone}
           canEdit={onSettings !== null}
           onChange={onRoutinesChange}
+          onOpenHistory={onOpenRoutineHistory}
         />
 
         <CompanionTriggers

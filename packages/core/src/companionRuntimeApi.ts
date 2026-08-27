@@ -542,7 +542,10 @@ export async function readCompanionThreadV2(input: {
   `);
   const [row] = rows<ThreadReadRow>(result);
   if (!row) throw new Error("companion thread projection is unavailable");
-  const entries = z.array(companionTranscriptEntrySchema).parse(row.entries) as CompanionTranscriptEntry[];
+  const entries = (z.array(companionTranscriptEntrySchema).parse(row.entries) as CompanionTranscriptEntry[])
+    .map((entry) => entry.routine !== null && entry.turn_id !== null
+      ? { ...entry, routine: { ...entry.routine, run_id: entry.turn_id } }
+      : entry);
   const activeTurn = parseTurn(row.active_turn);
   const interruptedTurn = parseTurn(row.interrupted_turn);
   const queuedCount = integer(row.queued_count);

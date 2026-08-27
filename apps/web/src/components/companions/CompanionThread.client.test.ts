@@ -3,7 +3,12 @@
 
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import type { Companion, CompanionOperation, CompanionThread as Thread } from "@companion/contracts";
+import type {
+  Companion,
+  CompanionOperation,
+  CompanionRoutine,
+  CompanionThread as Thread,
+} from "@companion/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiFetchError } from "@/lib/apiClient";
 import { CompanionThread, type CompanionContextPanel } from "./CompanionThread";
@@ -128,6 +133,7 @@ async function mount(
     onRetryInterrupted?: (turnId: string, retryId: string) => Promise<CompanionOperation>;
     onCancelInterrupted?: (turnId: string) => Promise<void>;
     context?: Partial<CompanionContextPanel>;
+    contextRoutines?: CompanionRoutine[];
   } = {},
 ) {
   const container = document.createElement("div");
@@ -143,6 +149,7 @@ async function mount(
       openingDesktop: false,
       context: contextPanel(overrides.context),
       contextSkills: [],
+      contextRoutines: overrides.contextRoutines ?? [],
       onBack: () => {},
       orgId: "org-1",
       onSend,
@@ -905,6 +912,52 @@ describe("CompanionThread context panel", () => {
     expect(panel(container)?.textContent).not.toContain("coming soon");
     expect(panel(container)?.textContent).toContain("No routines connected.");
     expect(panel(container)?.textContent).toContain("No triggers connected.");
+  });
+
+  it("returns focus to the routine History action after its modal closes", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      runs: [],
+      next_cursor: null,
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    })));
+    const routine: CompanionRoutine = {
+      id: "33333333-3333-4333-8333-333333333333",
+      companion_id: companionId,
+      name: "Weekday brief",
+      prompt: "Prepare the daily launch brief.",
+      cron: "0 9 * * 1-5",
+      timezone: "UTC",
+      enabled: true,
+      next_fire_at: "2026-08-27T13:00:00.000Z",
+      last_fired_at: null,
+      last_error_code: null,
+      last_error_message: null,
+      last_error_at: null,
+      consecutive_failures: 0,
+      created_at: "2026-08-20T09:00:00.000Z",
+      updated_at: "2026-08-26T09:00:00.000Z",
+    };
+    const container = await mount(async () => true, {
+      context: { open: true },
+      contextRoutines: [routine],
+    });
+    const history = actionNamed(container, "History")!;
+
+    await act(async () => {
+      history.focus();
+      history.click();
+    });
+    expect(container.querySelector("[role='dialog']")).not.toBeNull();
+
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      await new Promise((resolve) => window.requestAnimationFrame(resolve));
+    });
+
+    expect(container.querySelector("[role='dialog']")).toBeNull();
+    expect(document.activeElement).toBe(history);
   });
 
   it("shows a runner the live desktop beside the conversation once the Box is running", async () => {
