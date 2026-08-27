@@ -14,7 +14,6 @@ struct CompanionToolRunCard: View {
     let onOpenDetails: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var previewImage: UIImage?
 
@@ -25,10 +24,10 @@ struct CompanionToolRunCard: View {
             summaryRow
                 .background { cardBackground }
                 .overlay {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(borderColor, lineWidth: isFailure ? 1 : 0.7)
+                    Capsule()
+                        .stroke(borderColor, lineWidth: isFailure ? 1 : 0)
                 }
-                .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .accessibilityElement(children: .ignore)
@@ -56,7 +55,7 @@ struct CompanionToolRunCard: View {
                 }
                 .padding(.leading, 38)
             }
-            .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
+            .frame(maxWidth: 420, minHeight: 64, alignment: .leading)
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
         } else {
@@ -68,7 +67,7 @@ struct CompanionToolRunCard: View {
                 if let previewImage { previewThumbnail(previewImage) }
                 openIndicator
             }
-            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .frame(maxWidth: 420, minHeight: 44, alignment: .leading)
             .padding(.horizontal, 12)
             .padding(.vertical, 5)
         }
@@ -77,26 +76,22 @@ struct CompanionToolRunCard: View {
     private var familyIcon: some View {
         Image(systemName: tool.kind.systemImage)
             .font(.subheadline.weight(.semibold))
-            .foregroundStyle(Color(uiColor: .secondaryLabel))
+            .foregroundStyle(Color.companionMuted)
             .frame(width: 28, height: 28)
-            .background(
-                Color(uiColor: .tertiarySystemFill),
-                in: RoundedRectangle(cornerRadius: 7, style: .continuous)
-            )
             .accessibilityHidden(true)
     }
 
     private var titleStack: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("Tool · \(displayToolName)")
-                .font(.system(.caption, design: .monospaced).weight(.semibold))
-                .foregroundStyle(Color(uiColor: .secondaryLabel))
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Color.companionMuted)
                 .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
                 .truncationMode(.middle)
 
             Text(summaryTitle)
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(Color(uiColor: .label))
+                .font(.system(size: 13))
+                .foregroundStyle(Color.companionMuted)
                 .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
                 .truncationMode(.middle)
         }
@@ -137,15 +132,11 @@ struct CompanionToolRunCard: View {
 
     @ViewBuilder
     private var cardBackground: some View {
-        RoundedRectangle(cornerRadius: 10, style: .continuous)
-            .fill(
-                reduceTransparency
-                    ? AnyShapeStyle(Color(uiColor: .secondarySystemBackground))
-                    : AnyShapeStyle(.thinMaterial)
-            )
+        Capsule()
+            .fill(Color.companionSurfaceRaised)
             .overlay {
                 if isFailure {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    Capsule()
                         .fill(statusColor.opacity(0.08))
                 }
             }
@@ -171,7 +162,7 @@ struct CompanionToolRunCard: View {
         switch tool.status {
         case .error: return Color(uiColor: .systemRed)
         case .timeout: return Color(uiColor: .systemOrange)
-        case .running, .ok: return Color(uiColor: .separator)
+        case .running, .ok: return .clear
         }
     }
 

@@ -86,108 +86,70 @@ struct ChatComposer: View {
                         .accessibilityLabel("Attachment error: \(attachmentError)")
                 }
 
-                if transcriptionAvailable && (transcription.isBusy || transcriptionFailed) {
+                if transcriptionAvailable && (transcription.isBusy
+                    || !transcription.liveTranscript.isEmpty
+                    || transcriptionFailed) {
                     VoiceTranscriptionStatusView(controller: transcription)
                         .padding(.horizontal, 2)
                 }
 
-                GlassEffectContainer(spacing: 12) {
-                    HStack(alignment: .bottom, spacing: 10) {
-                        Menu {
-                            Button {
-                                presentPhotoLibrary()
-                            } label: {
-                                Label("Photo library", systemImage: "photo.on.rectangle")
-                            }
-                            Button {
-                                presentDocumentPicker()
-                            } label: {
-                                Label("Choose file", systemImage: "document")
-                            }
+                HStack(alignment: .bottom, spacing: 4) {
+                    Menu {
+                        Button {
+                            presentPhotoLibrary()
                         } label: {
-                            Group {
-                                if selectingAttachments {
-                                    ProgressView().controlSize(.small)
-                                } else {
-                                    Image(systemName: "plus")
-                                }
-                            }
-                            .font(.system(size: 17, weight: .semibold))
-                            .frame(width: 46, height: 46)
+                            Label("Photo library", systemImage: "photo.on.rectangle")
                         }
-                        .buttonStyle(.glass)
-                        .buttonBorderShape(.circle)
-                        .tint(accent)
-                        .disabled(attachDisabled)
-                        .accessibilityLabel(
-                            remainingAttachmentCapacity == 0
-                                ? "Five files attached"
-                                : "Attach a photo or file"
-                        )
-                        .accessibilityIdentifier("chat.attach")
-                        .photosPicker(
-                            isPresented: $showPhotoPicker,
-                            selection: $photoPickerItems,
-                            maxSelectionCount: max(1, remainingAttachmentCapacity),
-                            matching: .images,
-                            preferredItemEncoding: .compatible
-                        )
-
-                        TextField("Message \(companionName)", text: $draft, axis: .vertical)
-                            .lineLimit(1...5)
-                            .focused($composerFocused)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 13)
-                            .companionGlass(radius: 23, interactive: true)
-                            .accessibilityIdentifier("chat.composer")
-
-                        if transcriptionAvailable {
-                            Button(action: toggleTranscription) {
-                                Group {
-                                    if transcription.phase == .requestingPermission
-                                        || transcription.phase == .processing {
-                                        ProgressView().controlSize(.small)
-                                    } else {
-                                        Image(systemName: transcription.isRecording ? "stop.fill" : "mic.fill")
-                                    }
-                                }
-                                .font(.system(size: 16, weight: .semibold))
-                                .frame(width: 46, height: 46)
-                            }
-                            .buttonStyle(.glass)
-                            .buttonBorderShape(.circle)
-                            .tint(transcription.isBusy ? Color.companionDanger : accent)
-                            .disabled(transcriptionButtonDisabled)
-                            .accessibilityLabel(transcriptionButtonLabel)
-                            .accessibilityValue(transcriptionAccessibilityValue)
-                            .accessibilityHint(
-                                transcription.isBusy
-                                    ? "Stops recording and adds the transcript to the message field."
-                                    : "Records speech, then uses recent conversation to improve the transcript."
-                            )
-                            .accessibilityIdentifier("chat.transcription.toggle")
+                        Button {
+                            presentDocumentPicker()
+                        } label: {
+                            Label("Choose file", systemImage: "document")
                         }
-
-                        Button(action: send) {
-                            Group {
-                                if sending {
-                                    ProgressView().controlSize(.small)
-                                } else {
-                                    Image(systemName: "arrow.up")
-                                }
+                    } label: {
+                        Group {
+                            if selectingAttachments {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Image(systemName: "plus")
                             }
-                            .font(.system(size: 17, weight: .bold))
-                            .foregroundStyle(accentForeground)
-                            .frame(width: 46, height: 46)
                         }
-                        .buttonStyle(.glassProminent)
-                        .buttonBorderShape(.circle)
-                        .tint(accent)
-                        .disabled(sendDisabled)
-                        .accessibilityLabel("Send message")
-                        .accessibilityIdentifier("chat.send")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(Color.companionInk)
+                        .frame(width: 44, height: 44)
+                        .background(Color.companionCanvas, in: Circle())
                     }
+                    .buttonStyle(.plain)
+                    .disabled(attachDisabled)
+                    .accessibilityLabel(
+                        remainingAttachmentCapacity == 0
+                            ? "Five files attached"
+                            : "Attach a photo or file"
+                    )
+                    .accessibilityIdentifier("chat.attach")
+                    .photosPicker(
+                        isPresented: $showPhotoPicker,
+                        selection: $photoPickerItems,
+                        maxSelectionCount: max(1, remainingAttachmentCapacity),
+                        matching: .images,
+                        preferredItemEncoding: .compatible
+                    )
+
+                    TextField("Ask \(companionName)", text: $draft, axis: .vertical)
+                        .font(.system(size: 16))
+                        .lineLimit(1...5)
+                        .focused($composerFocused)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 11)
+                        .accessibilityIdentifier("chat.composer")
+
+                    trailingControl
                 }
+                .padding(4)
+                .background(Color.companionSurfaceRaised, in: Capsule())
+                .animation(
+                    reduceMotion ? nil : .easeOut(duration: 0.2),
+                    value: showsSendButton
+                )
 
                 if !draftAttachments.isEmpty,
                    draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -245,6 +207,71 @@ struct ChatComposer: View {
             || canSend == false
     }
 
+    private var showsSendButton: Bool {
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    @ViewBuilder
+    private var trailingControl: some View {
+        if transcription.isBusy {
+            transcriptionButton
+                .transition(.opacity)
+        } else if showsSendButton || !transcriptionAvailable {
+            sendButton
+                .transition(.opacity)
+        } else {
+            transcriptionButton
+                .transition(.opacity)
+        }
+    }
+
+    private var sendButton: some View {
+        Button(action: send) {
+            Group {
+                if sending {
+                    ProgressView().controlSize(.small).tint(.white)
+                } else {
+                    Image(systemName: "arrow.up")
+                }
+            }
+            .font(.system(size: 17, weight: .bold))
+            .foregroundStyle(Color.white)
+            .frame(width: 44, height: 44)
+            .background(Color(red: 0.043, green: 0.043, blue: 0.059), in: Circle())
+        }
+        .buttonStyle(.plain)
+        .disabled(sendDisabled)
+        .accessibilityLabel("Send message")
+        .accessibilityIdentifier("chat.send")
+    }
+
+    private var transcriptionButton: some View {
+        Button(action: toggleTranscription) {
+            Group {
+                if transcription.phase == .requestingPermission
+                    || transcription.phase == .connecting
+                    || transcription.phase == .finishing {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: transcription.isRecording ? "stop.fill" : "mic")
+                }
+            }
+            .font(.system(size: 16, weight: .semibold))
+            .foregroundStyle(transcription.isBusy ? Color.companionDanger : Color.companionMuted)
+            .frame(width: 44, height: 44)
+        }
+        .buttonStyle(.plain)
+        .disabled(transcriptionButtonDisabled)
+        .accessibilityLabel(transcriptionButtonLabel)
+        .accessibilityValue(transcriptionAccessibilityValue)
+        .accessibilityHint(
+            transcription.isBusy
+                ? "Stops recording and adds the transcript to the message field."
+                : "Records speech and sends audio to Google for live transcription."
+        )
+        .accessibilityIdentifier("chat.transcription.toggle")
+    }
+
     private var attachDisabled: Bool {
         sending
             || selectingAttachments
@@ -254,7 +281,7 @@ struct ChatComposer: View {
     }
 
     private var transcriptionButtonDisabled: Bool {
-        if case .processing = transcription.phase { return true }
+        if case .finishing = transcription.phase { return true }
         return !transcription.isBusy && (sending || selectingAttachments || canSend != true)
     }
 
@@ -265,12 +292,12 @@ struct ChatComposer: View {
 
     private var transcriptionButtonLabel: String {
         switch transcription.phase {
-        case .requestingPermission:
+        case .requestingPermission, .connecting:
             "Cancel voice transcription"
         case .recording:
             "Stop recording"
-        case .processing:
-            "Processing voice transcription"
+        case .finishing:
+            "Finishing voice transcription"
         case .idle, .failed:
             "Start voice transcription"
         }
@@ -279,11 +306,13 @@ struct ChatComposer: View {
     private var transcriptionAccessibilityValue: String {
         switch transcription.phase {
         case .recording:
-            "Recording"
+            transcription.reconnecting ? "Recording, reconnecting" : "Recording"
         case .requestingPermission:
             "Waiting for microphone permission"
-        case .processing:
-            "Processing"
+        case .connecting:
+            "Connecting"
+        case .finishing:
+            "Finishing"
         case .failed(let message):
             message
         case .idle:
@@ -299,10 +328,9 @@ struct ChatComposer: View {
         }
         guard canSend == true, transcriptionAvailable else { return }
         let targetCompanionID = companionID
-        transcription.start { audio in
-            try await sessionStore.transcribeCompanionAudio(
-                companionID: targetCompanionID,
-                audio: audio
+        transcription.start {
+            try await sessionStore.createCompanionTranscriptionSession(
+                companionID: targetCompanionID
             )
         }
     }
@@ -327,6 +355,7 @@ struct ChatComposer: View {
         draft = ""
         draftAttachments = []
         attachmentError = nil
+        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
         onSend(content, attachments)
     }
 
