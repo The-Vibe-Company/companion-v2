@@ -642,6 +642,52 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    func testTranscriptTapDismissesKeyboardWithoutBlockingMessageControls() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-transcript-window-demo"]
+        app.launchEnvironment["COMPANION_TRANSCRIPT_DEMO_SHORT"] = "1"
+        app.launch()
+
+        let latestMessage = app.descendants(matching: .any)["chat.entry.long-10"]
+        XCTAssertTrue(latestMessage.waitForExistence(timeout: 12))
+
+        // SwiftUI does not consistently surface the multiline field's identifier to
+        // XCTest, so locate the fixture's sole text field by its element role.
+        let composer = app.textFields.firstMatch
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+
+        composer.tap()
+        composer.typeText("Draft")
+        let keyboard = app.keyboards.firstMatch
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 2))
+
+        // Tap the transcript surface directly so this test does not depend on XCTest
+        // resolving a lazily rendered Markdown descendant while the keyboard is animating.
+        let transcript = app.scrollViews.matching(
+            NSPredicate(format: "identifier == %@", "chat.transcript")
+        ).firstMatch
+        XCTAssertTrue(transcript.isHittable)
+        transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2)).tap()
+        let keyboardDismissed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: keyboard
+        )
+        wait(for: [keyboardDismissed], timeout: 5)
+
+        let toolCard = app.buttons.matching(
+            NSPredicate(format: "label CONTAINS %@", "run_layout_checks")
+        ).firstMatch
+        for _ in 0..<3 where !toolCard.isHittable {
+            app.swipeUp()
+        }
+        XCTAssertTrue(toolCard.isHittable)
+        toolCard.tap()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["tool-run.detail"].waitForExistence(timeout: 3)
+        )
+    }
+
+    @MainActor
     func testTranscriptWindowDemoLoadsEarlierMessages() throws {
         let app = XCUIApplication()
         app.launchArguments = ["-companion-transcript-window-demo"]
