@@ -705,6 +705,7 @@ struct ChatView: View {
                 next = try await sessionStore.thread(companionID: companion.id)
             }
             guard threadProjection.accepts(refresh: generation) else { return }
+            let readerWasNearBottom = isNearBottom
 
             let nextEntries = transcriptEntries(in: next)
             var nextWindow = transcriptWindow
@@ -722,7 +723,7 @@ struct ChatView: View {
             } else {
                 nextWindow.refresh(
                     totalCount: nextEntries.count,
-                    preservingCurrentEntries: !isNearBottom
+                    preservingCurrentEntries: !readerWasNearBottom
                 )
             }
             let visibleRange = nextWindow.visibleRange(for: nextEntries.count)
@@ -751,13 +752,13 @@ struct ChatView: View {
             let shouldFollowTail = !loadingEarlier
                 && previousThread != nil
                 && (transcriptTailChanged(from: previousThread, to: next) || pendingChanged)
-                && isNearBottom
+                && readerWasNearBottom
 
             transcriptWindow = nextWindow
             markdownByEventID = renderedMarkdown
             unseenCount = unseenTracker.observe(
                 entries: nextEntries,
-                isNearBottom: isNearBottom
+                isNearBottom: readerWasNearBottom
             )
             threadProjection.accept(next, refresh: generation)
             refreshSelectedToolDetail(from: next.entries)

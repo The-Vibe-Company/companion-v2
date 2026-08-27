@@ -388,6 +388,8 @@ test("the staged reply fixture is armed only after the UI reader leaves the tail
   assert.match(demo, /"event_id": "staged-reply"/);
   assert.match(chatView, /@State private var unseenCount = 0/);
   assert.match(chatView, /unseenCount = unseenTracker\.observe\(/);
+  assert.match(chatView, /let readerWasNearBottom = isNearBottom/);
+  assert.match(chatView, /isNearBottom: readerWasNearBottom/);
 });
 
 test("GitHub Actions never installs or invokes XcodeBuildMCP", () => {

@@ -749,7 +749,14 @@ final class CompanionUITests: XCTestCase {
             },
             object: unseen
         )
-        wait(for: [unseenPill], timeout: 15)
+        let pillResult = XCTWaiter.wait(for: [unseenPill], timeout: 15)
+        XCTAssertEqual(
+            pillResult,
+            .completed,
+            "Expected arrival pill after staged poll; plain width=\(plainButtonWidth), "
+                + "current frame=\(unseen.frame), label=\(unseen.label), value=\(unseen.value)"
+        )
+        guard pillResult == .completed else { return }
         XCTAssertGreaterThan(unseen.frame.width, plainButtonWidth + 40)
         unseen.tap()
 
