@@ -216,7 +216,7 @@ struct ChatView: View {
                     .scrollIndicators(.hidden)
                     .defaultScrollAnchor(.bottom)
                     .accessibilityIdentifier("chat.transcript")
-                    .simultaneousGesture(
+                    .gesture(
                         TranscriptKeyboardDismissGesture {
                             composerFocused = false
                         }

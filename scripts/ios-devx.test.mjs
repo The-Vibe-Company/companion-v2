@@ -281,7 +281,7 @@ test("native transcript taps dismiss the keyboard without consuming message cont
   assert.match(chat, /recognizer\.cancelsTouchesInView = false/);
   assert.match(
     transcript,
-    /\.simultaneousGesture\(\s*TranscriptKeyboardDismissGesture \{\s*composerFocused = false\s*\}\s*\)/,
+    /\.gesture\(\s*TranscriptKeyboardDismissGesture \{\s*composerFocused = false\s*\}\s*\)/,
   );
   assert.match(uiTests, /testTranscriptTapDismissesKeyboardWithoutBlockingMessageControls/);
   assert.match(uiTests, /transcriptMessage\.tap\(\)/);
