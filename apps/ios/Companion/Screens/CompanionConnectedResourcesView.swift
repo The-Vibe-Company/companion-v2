@@ -17,6 +17,8 @@ struct CompanionConnectedResourcesServices {
     let deleteTrigger: ((String) async throws -> Void)?
     let rotateTriggerSecret: ((String) async throws -> CompanionTrigger)?
     let saveMemberTimezone: ((String) async throws -> String)?
+    let listRoutineRuns: ((String, Int, String?) async throws -> CompanionRoutineRunList)?
+    let readRoutineRun: ((String, Int, Int?) async throws -> CompanionRoutineRunDetail)?
 
     init(
         load: @escaping () async throws -> CompanionConnectedResources,
@@ -31,7 +33,9 @@ struct CompanionConnectedResourcesServices {
         updateTrigger: ((String, UpdateCompanionTriggerInput) async throws -> CompanionTrigger)? = nil,
         deleteTrigger: ((String) async throws -> Void)? = nil,
         rotateTriggerSecret: ((String) async throws -> CompanionTrigger)? = nil,
-        saveMemberTimezone: ((String) async throws -> String)? = nil
+        saveMemberTimezone: ((String) async throws -> String)? = nil,
+        listRoutineRuns: ((String, Int, String?) async throws -> CompanionRoutineRunList)? = nil,
+        readRoutineRun: ((String, Int, Int?) async throws -> CompanionRoutineRunDetail)? = nil
     ) {
         self.load = load
         self.listPlugins = listPlugins
@@ -46,6 +50,8 @@ struct CompanionConnectedResourcesServices {
         self.deleteTrigger = deleteTrigger
         self.rotateTriggerSecret = rotateTriggerSecret
         self.saveMemberTimezone = saveMemberTimezone
+        self.listRoutineRuns = listRoutineRuns
+        self.readRoutineRun = readRoutineRun
     }
 }
 
@@ -520,47 +526,28 @@ struct CompanionConnectedResourcesView: View {
 
     private func routineRow(_ routine: CompanionRoutine) -> some View {
         HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(routine.name)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Color.companionInk)
-                Text(routine.scheduleDescription)
-                    .font(.footnote.weight(.medium))
-                    .foregroundStyle(Color.companionInk.opacity(0.82))
-                HStack(spacing: 7) {
-                    Text(routine.cron)
-                        .font(.caption.monospaced())
-                    Text("·")
-                    Text(routine.timezone)
-                        .font(.caption)
+            NavigationLink {
+                CompanionRoutineHistoryView(
+                    companionID: currentCompanion.id,
+                    target: CompanionRoutineHistoryTarget(
+                        routineID: routine.id,
+                        runID: nil,
+                        name: routine.name
+                    ),
+                    services: routineHistoryServices
+                )
+            } label: {
+                HStack(alignment: .top, spacing: 12) {
+                    routineDetails(routine)
+                    Spacer(minLength: 8)
+                    statusBadge(routine.status)
                 }
-                .foregroundStyle(Color.companionMuted)
-                .fixedSize(horizontal: false, vertical: true)
-                if let nextFire = MemberTimezone.formatInstant(
-                    routine.nextFireAt,
-                    in: effectiveMemberTimezone
-                ) {
-                    Text("Next \(nextFire) · \(effectiveMemberTimezone)")
-                        .font(.caption)
-                        .foregroundStyle(Color.companionMuted)
-                }
-                if let lastFire = MemberTimezone.formatInstant(
-                    routine.lastFiredAt,
-                    in: effectiveMemberTimezone
-                ) {
-                    Text("Last fired \(lastFire) · \(effectiveMemberTimezone)")
-                        .font(.caption)
-                        .foregroundStyle(Color.companionMuted)
-                }
-                if let message = routine.lastErrorMessage {
-                    Text(message)
-                        .font(.caption)
-                        .foregroundStyle(Color.companionDanger)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
-            Spacer(minLength: 8)
-            statusBadge(routine.status)
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(routineAccessibilityLabel(routine)). Open run history")
+            .accessibilityHint("Shows this routine's persisted runs and internal transcripts")
             if canEditResources {
                 if busyResourceID == routine.id {
                     ProgressView()
@@ -589,11 +576,50 @@ struct CompanionConnectedResourcesView: View {
             }
         }
         .padding(16)
-        .accessibilityElement(children: canEditResources ? .contain : .combine)
-        .accessibilityLabel(
-            routineAccessibilityLabel(routine)
-        )
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("companion.resources.routine.\(routine.id)")
+    }
+
+    private func routineDetails(_ routine: CompanionRoutine) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(routine.name)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Color.companionInk)
+            Text(routine.scheduleDescription)
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(Color.companionInk.opacity(0.82))
+            HStack(spacing: 7) {
+                Text(routine.cron)
+                    .font(.caption.monospaced())
+                Text("·")
+                Text(routine.timezone)
+                    .font(.caption)
+            }
+            .foregroundStyle(Color.companionMuted)
+            .fixedSize(horizontal: false, vertical: true)
+            if let nextFire = MemberTimezone.formatInstant(
+                routine.nextFireAt,
+                in: effectiveMemberTimezone
+            ) {
+                Text("Next \(nextFire) · \(effectiveMemberTimezone)")
+                    .font(.caption)
+                    .foregroundStyle(Color.companionMuted)
+            }
+            if let lastFire = MemberTimezone.formatInstant(
+                routine.lastFiredAt,
+                in: effectiveMemberTimezone
+            ) {
+                Text("Last fired \(lastFire) · \(effectiveMemberTimezone)")
+                    .font(.caption)
+                    .foregroundStyle(Color.companionMuted)
+            }
+            if let message = routine.lastErrorMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(Color.companionDanger)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 
     private func triggerRow(_ trigger: CompanionTrigger) -> some View {
@@ -997,6 +1023,14 @@ struct CompanionConnectedResourcesView: View {
 
     private var effectiveMemberTimezone: String {
         sessionStore.memberTimezone ?? MemberTimezone.deviceIdentifier
+    }
+
+    private var routineHistoryServices: CompanionRoutineHistoryServices? {
+        guard let services else { return nil }
+        return CompanionRoutineHistoryServices(
+            listRuns: services.listRoutineRuns,
+            readRun: services.readRoutineRun
+        )
     }
 
     private func saveMemberTimezone(_ identifier: String) async throws -> String {

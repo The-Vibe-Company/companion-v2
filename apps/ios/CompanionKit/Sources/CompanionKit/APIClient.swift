@@ -120,6 +120,20 @@ public actor APIClient {
         let routine: CompanionRoutine
     }
 
+    private struct RoutineRunListEnvelope: Decodable {
+        let runs: [CompanionRoutineRunSummary]
+        let nextCursor: String?
+
+        enum CodingKeys: String, CodingKey {
+            case runs
+            case nextCursor = "next_cursor"
+        }
+    }
+
+    private struct RoutineRunDetailEnvelope: Decodable {
+        let run: CompanionRoutineRunDetail
+    }
+
     private struct TriggerListEnvelope: Decodable {
         let triggers: [CompanionTrigger]
     }
@@ -371,6 +385,47 @@ public actor APIClient {
             RoutineListEnvelope.self,
             path: "/v1/companions/\(companion)/routines"
         ).routines
+    }
+
+    /// Reads a bounded, newest-first routine history page. This is PostgreSQL-backed by the API
+    /// and never starts or contacts the Companion runtime.
+    public func listCompanionRoutineRuns(
+        companionID: String,
+        routineID: String,
+        limit: Int = 50,
+        cursor: String? = nil
+    ) async throws -> CompanionRoutineRunList {
+        let companion = Self.encodedPathComponent(companionID)
+        let routine = Self.encodedPathComponent(routineID)
+        var query = "limit=\(limit)"
+        if let cursor {
+            query += "&cursor=\(Self.encodedQueryComponent(cursor))"
+        }
+        let envelope = try await decode(
+            RoutineRunListEnvelope.self,
+            path: "/v1/companions/\(companion)/routines/\(routine)/runs?\(query)"
+        )
+        return CompanionRoutineRunList(runs: envelope.runs, nextCursor: envelope.nextCursor)
+    }
+
+    /// Reads one bounded page of the private routine transcript. Surfaced output remains in main
+    /// chat; this route only returns the routine's internal entries.
+    public func readCompanionRoutineRun(
+        companionID: String,
+        runID: String,
+        entryLimit: Int = 50,
+        entryCursor: Int? = nil
+    ) async throws -> CompanionRoutineRunDetail {
+        let companion = Self.encodedPathComponent(companionID)
+        let run = Self.encodedPathComponent(runID)
+        var query = "entry_limit=\(entryLimit)"
+        if let entryCursor {
+            query += "&entry_cursor=\(entryCursor)"
+        }
+        return try await decode(
+            RoutineRunDetailEnvelope.self,
+            path: "/v1/companions/\(companion)/routine-runs/\(run)?\(query)"
+        ).run
     }
 
     public func listCompanionTriggers(companionID: String) async throws -> [CompanionTrigger] {
@@ -1365,6 +1420,11 @@ public actor APIClient {
     }
 
     private static func encodedPathComponent(_ value: String) -> String {
+        let unreserved = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        return value.addingPercentEncoding(withAllowedCharacters: unreserved) ?? value
+    }
+
+    private static func encodedQueryComponent(_ value: String) -> String {
         let unreserved = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
         return value.addingPercentEncoding(withAllowedCharacters: unreserved) ?? value
     }

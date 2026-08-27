@@ -654,6 +654,32 @@ test("the staged reply fixture is armed only after the UI reader leaves the tail
   assert.match(chatView, /source: \.poll,\s+animated: false/);
 });
 
+test("native routine history keeps private runs separate and reachable", () => {
+  const chat = read("apps/ios/Companion/Screens/ChatView.swift");
+  const resources = read(
+    "apps/ios/Companion/Screens/CompanionConnectedResourcesView.swift",
+  );
+  const history = read("apps/ios/Companion/Screens/CompanionRoutineHistoryView.swift");
+  const models = read("apps/ios/CompanionKit/Sources/CompanionKit/Models.swift");
+  const client = read("apps/ios/CompanionKit/Sources/CompanionKit/APIClient.swift");
+  const readme = read("apps/ios/README.md");
+
+  assert.match(chat, /if let routine = input\.entry\.routine/);
+  assert.match(chat, /Text\("Routine: \\\(routine\.name\)"\)/);
+  assert.match(chat, /CompanionRoutineHistoryTarget\([\s\S]*?runID: runID/);
+  assert.match(resources, /CompanionRoutineHistoryView\([\s\S]*?routineID: routine\.id/);
+  assert.match(resources, /Shows this routine's persisted runs and internal transcripts/);
+  assert.match(history, /Text\("Internal transcript"\)/);
+  assert.match(history, /case \.noOutput: return "Completed silently"/);
+  assert.match(history, /nextRunsCursor != nil/);
+  assert.match(history, /run\.nextEntryCursor != nil/);
+  assert.match(models, /case routine\s*[\r\n]/);
+  assert.match(models, /case runID = "run_id"/);
+  assert.match(client, /\/routines\/\\\(routine\)\/runs\?\\\(query\)/);
+  assert.match(client, /\/routine-runs\/\\\(run\)\?\\\(query\)/);
+  assert.match(readme, /compact clickable marker instead of a prompt bubble/);
+});
+
 test("GitHub Actions never installs or invokes XcodeBuildMCP", () => {
   const workflows = readdirSync(resolve(ROOT, ".github/workflows"))
     .filter((file) => file.endsWith(".yml") || file.endsWith(".yaml"));

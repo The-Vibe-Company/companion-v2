@@ -29,6 +29,11 @@ one accessible unread indicator rather than inventing an exact message count.
 Connected resources now lives inside those settings as one child management page. It retains the
 native Skills, routines, and triggers status views, lists the member's attached MCP plugin accounts
 by provider and label, and lets the Companion Owner attach or detach already-connected accounts.
+Each routine row also opens its newest-first durable run history, including status, outcome,
+timestamps, bounded internal transcript pages, and safe errors. A routine-origin chat entry is a
+compact clickable marker instead of a prompt bubble; it opens that exact run, while surfaced
+`relay` and `notify` outputs remain ordinary main-thread history. These reads use the shared bounded
+API, remain available to Viewers, and never wake Box or Pi.
 The existing projection returns only the viewing member's private account ids, so Editor attachment
 changes stay read-only in native iOS rather than risk dropping an Owner's hidden selection. Detach
 is the existing `selected_mcp_account_ids` replacement update: it removes the account from this

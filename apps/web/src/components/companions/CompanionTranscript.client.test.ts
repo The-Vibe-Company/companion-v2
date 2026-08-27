@@ -197,6 +197,7 @@ function mount(
   extras: {
     onStop?: (turnId: string) => Promise<void>;
     onCancelQueued?: (turnId: string) => Promise<void>;
+    onOpenRoutineRun?: (routine: NonNullable<CompanionTranscriptEntry["routine"]>) => void;
   } = {},
 ) {
   const container = document.createElement("div");
@@ -215,6 +216,7 @@ function mount(
       onSend,
       onStop: extras.onStop,
       onCancelQueued: extras.onCancelQueued,
+      onOpenRoutineRun: extras.onOpenRoutineRun,
       onThread: (next: Thread) => threads.push(next),
     }));
   });
@@ -819,6 +821,32 @@ describe("a permission card in the thread", () => {
     expect(container.querySelector(".chat-routine-header")?.textContent).toBe("Routine: Standup");
     expect(container.textContent).not.toContain("yesterday's blockers");
     expect(container.textContent).toContain("Standup drafted.");
+  });
+
+  it("opens a routine run from its durable marker without exposing the prompt", () => {
+    const onOpenRoutineRun = vi.fn();
+    const routine = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      name: "Standup",
+      run_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    };
+    const container = mount(thread([entry({
+      role: "user",
+      event_id: "msg:routine-2",
+      content: "Private scheduled prompt",
+      author_id: "user-1",
+      routine,
+    })]), undefined, async () => true, { onOpenRoutineRun });
+
+    const marker = container.querySelector<HTMLButtonElement>(
+      "button[aria-label='Open Standup routine run']",
+    );
+    expect(marker?.textContent).toContain("Routine: Standup");
+    expect(container.textContent).not.toContain("Private scheduled prompt");
+
+    click(marker!);
+
+    expect(onOpenRoutineRun).toHaveBeenCalledWith(routine);
   });
 
   it("attributes a routine proposal to the Companion and shows the schedule", async () => {

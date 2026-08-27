@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type {
   Companion,
   CompanionDesktop,
   CompanionOperation,
   CompanionRoutine,
   CompanionThread as Thread,
+  CompanionTranscriptEntry,
   CompanionTrigger,
 } from "@companion/contracts";
 import { ApiFetchError } from "@/lib/apiClient";
@@ -15,6 +16,10 @@ import { CompanionContext, type CompanionContextSkill } from "./CompanionContext
 import { CompanionTranscript } from "./CompanionTranscript";
 import { companionBoxStatusLabel, companionStatus } from "./status";
 import { CompanionIcon } from "./CompanionIcon";
+import {
+  CompanionRoutineHistory,
+  type RoutineHistoryTarget,
+} from "./CompanionRoutineHistory";
 import { replyExpected } from "./transcript";
 import { useVisualViewportPin } from "./useVisualViewportPin";
 
@@ -252,9 +257,12 @@ export function CompanionThread({
   onRetryInterrupted: (turnId: string, retryId: string) => Promise<CompanionOperation>;
   onCancelInterrupted: (turnId: string) => Promise<void>;
 }) {
+  const chatRef = useRef<HTMLElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
+  const routineHistoryOpenerRef = useRef<HTMLElement | null>(null);
   const [overlay, setOverlay] = useState(false);
+  const [routineHistory, setRoutineHistory] = useState<RoutineHistoryTarget | null>(null);
   const status = companionStatus(companion.runtime.state);
   // "Companion is replying…" is only ever the durable ACKed projection, so the icon animates on
   // exactly the same signal instead of guessing from lifecycle state.
@@ -275,10 +283,60 @@ export function CompanionThread({
   const interruptedTurn = thread?.interrupted_turn ?? null;
   const previousInterruptedIdRef = useRef<string | null>(null);
 
+  const closeRoutineHistory = useCallback(() => {
+    setRoutineHistory(null);
+  }, []);
+  const openRoutineHistory = useCallback((routine: CompanionRoutine) => {
+    routineHistoryOpenerRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    setRoutineHistory({ routineId: routine.id, runId: null, name: routine.name });
+  }, []);
+  const openRoutineRun = useCallback((routine: NonNullable<CompanionTranscriptEntry["routine"]>) => {
+    if (!routine.run_id) return;
+    routineHistoryOpenerRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    setRoutineHistory({ routineId: routine.id, runId: routine.run_id, name: routine.name });
+  }, []);
+
   // Opening a thread unmounts the list control that was focused, so focus moves to this thread.
   useEffect(() => {
     headingRef.current?.focus();
+    setRoutineHistory(null);
   }, [companion.id]);
+
+  useEffect(() => {
+    if (!routineHistory) return;
+    const chat = chatRef.current;
+    if (!chat) return;
+    const blocked = Array.from(chat.children).filter(
+      (child): child is HTMLElement => child instanceof HTMLElement
+        && !child.classList.contains("routine-history-layer"),
+    );
+    const previous = blocked.map((element) => element.inert);
+    blocked.forEach((element) => {
+      element.inert = true;
+    });
+    return () => {
+      blocked.forEach((element, index) => {
+        element.inert = previous[index] ?? false;
+      });
+    };
+  }, [routineHistory]);
+
+  // Restore focus only after the modal has unmounted and the rest of the thread is interactive
+  // again. Doing this in the close handler can race React's inert cleanup in browsers and tests.
+  useEffect(() => {
+    if (routineHistory) return;
+    const opener = routineHistoryOpenerRef.current;
+    routineHistoryOpenerRef.current = null;
+    if (!opener) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (opener.isConnected) opener.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [routineHistory]);
 
   // Once Retry or Cancel releases the blocked turn, return keyboard users to the place work resumes.
   useEffect(() => {
@@ -341,7 +399,7 @@ export function CompanionThread({
   useVisualViewportPin();
 
   return (
-    <section className="chat" aria-label={`Chat with ${companion.name}`}>
+    <section ref={chatRef} className="chat" aria-label={`Chat with ${companion.name}`}>
       <header className="chat-head">
         <button type="button" className="iconbtn chat-back" aria-label="Back to Companions" onClick={onBack}>
           <Icon name="arrow-left" size={16} />
@@ -458,6 +516,7 @@ export function CompanionThread({
           onSend={onSend}
           onStop={onCancelInterrupted}
           onCancelQueued={onCancelInterrupted}
+          onOpenRoutineRun={openRoutineRun}
           onThread={onThread}
         />
         {showContext && overlay && (
@@ -480,6 +539,7 @@ export function CompanionThread({
             routines={contextRoutines}
             memberTimezone={memberTimezone}
             onRoutinesChange={onRoutinesChange ?? (() => undefined)}
+            onOpenRoutineHistory={openRoutineHistory}
             triggers={contextTriggers}
             onTriggersChange={onTriggersChange ?? (() => undefined)}
             onJoin={context.onJoin}
@@ -489,6 +549,16 @@ export function CompanionThread({
           />
         )}
       </div>
+      {routineHistory ? (
+        <CompanionRoutineHistory
+          key={`${routineHistory.routineId ?? "deleted"}:${routineHistory.runId ?? "list"}`}
+          orgId={orgId}
+          companionId={companion.id}
+          target={routineHistory}
+          memberTimezone={memberTimezone}
+          onClose={closeRoutineHistory}
+        />
+      ) : null}
     </section>
   );
 }
