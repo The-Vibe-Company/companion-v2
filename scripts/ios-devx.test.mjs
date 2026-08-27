@@ -256,6 +256,10 @@ test("native chat reading restoration stays deterministic and delegated to Apple
   assert.match(chat, /\.onScrollPhaseChange/);
   assert.match(chat, /scrollCoordinator\.beginUserInteraction/);
   assert.doesNotMatch(chat, /\.defaultScrollAnchor\(/);
+  const acceptedThread = chat.indexOf("threadProjection.accept(next, refresh: generation)");
+  const observedTail = chat.indexOf("let tailChanged = observeActualTail", acceptedThread);
+  assert.notEqual(acceptedThread, -1);
+  assert.ok(observedTail > acceptedThread);
   const scrollOwner = chat.indexOf("private func performScroll");
   assert.notEqual(scrollOwner, -1);
   assert.doesNotMatch(chat.slice(0, scrollOwner), /proxy\.scrollTo\(/);

@@ -779,11 +779,6 @@ struct ChatView: View {
             let tailBaseMarkdown = tailChange.flatMap {
                 markdownByEventID[$0.eventID]?.document
             }
-            let tailChanged = observeActualTail(
-                of: next,
-                source: hasPreviousThread ? .poll : .initial
-            )
-            let readerIsNearBottom = isNearBottom
 
             let persistedEventIDs = Set(next.entries.map(\.eventID))
             pendingMessages.removeAll { pending in
@@ -793,13 +788,14 @@ struct ChatView: View {
                 guard !position.isFollowingTail, restorationAnchorIndex != nil else { return nil }
                 return position.anchorEventID
             }
-            let shouldFollowTail = !loadingEarlier
-                && previousThread != nil
-                && tailChanged
-                && readerIsNearBottom
-
             transcriptWindow = nextWindow
             markdownByEventID = renderedMarkdown
+            threadProjection.accept(next, refresh: generation)
+            let tailChanged = observeActualTail(
+                of: next,
+                source: hasPreviousThread ? .poll : .initial
+            )
+            let readerIsNearBottom = isNearBottom
             var nextUnseenTracker = unseenTracker
             let nextUnseenCount = nextUnseenTracker.observe(
                 entries: nextEntries,
@@ -807,7 +803,10 @@ struct ChatView: View {
             )
             unseenTracker = nextUnseenTracker
             unseenCount = nextUnseenCount
-            threadProjection.accept(next, refresh: generation)
+            let shouldFollowTail = !loadingEarlier
+                && previousThread != nil
+                && tailChanged
+                && readerIsNearBottom
             refreshSelectedToolDetail(from: next.entries)
             error = nil
             if let restorationTarget {
