@@ -8,6 +8,7 @@ import type { BoxSimCommandResult, BoxSimPiController } from "./protocol";
 const CONTROL_BUNDLE_ALLOWED_PATHS = new Set([
   ".companion/pi/auth.json",
   ".companion/pi/mcp.json",
+  ".companion/pi/models.json",
   ".companion/runtime/state/mcp-gateway.json",
   ".companion/runtime/state/mcp-accounts.json",
   ".companion/runtime/state/skills.json",
@@ -52,6 +53,12 @@ const controlBundleManifestSchema = z.object({
     sha256: z.string().optional(),
     content: z.string().optional(),
   })).optional(),
+});
+const piModelsFileSchema = z.object({
+  providers: z.record(z.string(), z.object({
+    baseUrl: z.string(),
+    models: z.array(z.object({ id: z.string() })),
+  })),
 });
 
 export type BoxSimCommandKind =
@@ -166,6 +173,7 @@ export interface BoxSimCommandMachine {
   hostedUrlFactory?: (port: number) => string;
   /** True once the agent registration command enabled and started the agent user unit. */
   agentUnitEnabled: boolean;
+  providerRequests: Array<{ providerId: string; modelId: string; baseUrl: string }>;
   piController?: BoxSimPiController;
 }
 
@@ -199,6 +207,7 @@ export function createBoxSimCommandMachine(input: {
     readOnlyDirectories: new Set<string>(),
     hostedPorts: new Map(),
     agentUnitEnabled: false,
+    providerRequests: [],
   };
 }
 
@@ -678,6 +687,13 @@ async function startDaemon(machine: BoxSimCommandMachine, restart: boolean): Pro
     machine.persistentFiles.delete(stagedPath);
     machine.volatileFiles.set(runtimePath, Buffer.from(staged));
   }
+  const modelError = selectedModelStartupError(machine);
+  if (modelError) {
+    machine.daemon.status = "failed";
+    machine.daemon.rpcReady = false;
+    machine.daemon.stderrLog += `${modelError}\n`;
+    return ok("failed\ncompanion-pi-broker-unready\n");
+  }
   if (!restart && machine.daemon.status === "active") {
     // `systemctl start` is idempotent for an already active unit. In particular it does not create
     // a new Pi invocation; configuration changes use the explicit restart path.
@@ -712,6 +728,35 @@ async function startDaemon(machine: BoxSimCommandMachine, restart: boolean): Pro
   return ok(
     `active\ncompanion-pi-broker-ready\ncompanion-pi-invocation ${machine.daemon.invocationId}\n`,
   );
+}
+
+function selectedModelStartupError(machine: BoxSimCommandMachine): string | null {
+  const selected = machine.persistentFiles.get(".companion/runtime/state/model.txt")
+    ?.toString("utf8").trim();
+  if (selected !== "glm-5.3-flash") return null;
+  return selectedCustomModel(machine)?.modelId === selected
+    ? null
+    : `Error: Model "${selected}" not found. Use --list-models to see available models.`;
+}
+
+function selectedCustomModel(
+  machine: BoxSimCommandMachine,
+): { providerId: string; modelId: string; baseUrl: string } | null {
+  const selected = machine.persistentFiles.get(".companion/runtime/state/model.txt")
+    ?.toString("utf8").trim();
+  const file = machine.persistentFiles.get(".companion/pi/models.json");
+  if (!selected || !file) return null;
+  try {
+    const parsed = piModelsFileSchema.parse(JSON.parse(file.toString("utf8")));
+    for (const [providerId, provider] of Object.entries(parsed.providers)) {
+      if (provider.models.some((model) => model.id === selected)) {
+        return { providerId, modelId: selected, baseUrl: provider.baseUrl };
+      }
+    }
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 function responseFor(command: BoxSimJsonObject, data?: BoxSimJsonObject): BoxSimJsonObject {
@@ -1021,6 +1066,10 @@ async function executeBrokerCommand(
     }))}\n`);
   }
   const initialCursor = brokerCommand.type === "prompt" ? brokerTailCursor(machine) : null;
+  if (brokerCommand.type === "prompt") {
+    const providerRequest = selectedCustomModel(machine);
+    if (providerRequest) machine.providerRequests.push(providerRequest);
+  }
   if (brokerCommand.type === "prompt" && brokerCommand.clearOutbox === true) {
     for (const path of machine.persistentFiles.keys()) {
       if (path.startsWith("outbox/")) machine.persistentFiles.delete(path);

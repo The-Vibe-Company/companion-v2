@@ -17,6 +17,45 @@ afterEach(async () => {
 });
 
 describe("production Box runtime v2 against the simulator", () => {
+  it("stages GLM 5.3 Flash and completes a turn through the fake z.ai route", async () => {
+    const harness = await provision({
+      apiKey: "box_adapter_glm_flash",
+      companionId: "99999999-9999-4999-8999-999999999999",
+      generation: 1,
+      providerId: "zai",
+      modelId: "glm-5.3-flash",
+    });
+    const { boxId, runtime, server } = harness;
+    const machine = server.simulator.commandMachine(boxId);
+    expect(JSON.parse(machine.persistentFiles.get(".companion/pi/models.json")!.toString("utf8")))
+      .toMatchObject({
+        providers: {
+          zai: {
+            baseUrl: "https://api.z.ai/api/coding/paas/v4",
+            models: [{
+              id: "glm-5.3-flash",
+              input: ["text", "image"],
+              contextWindow: 1_000_000,
+              maxTokens: 131_072,
+            }],
+          },
+        },
+      });
+
+    await expect(runtime.dispatchPrompt({
+      boxId,
+      attemptId: "attempt-glm-flash-1",
+      requestId: "dispatch-glm-flash-1",
+      message: "Reply through the simulated z.ai provider.",
+    })).resolves.toMatchObject({ outcome: "accepted" });
+    await waitForBrokerEvent(runtime, boxId, 0, "agent_settled");
+    expect(machine.providerRequests).toEqual([{
+      providerId: "zai",
+      modelId: "glm-5.3-flash",
+      baseUrl: "https://api.z.ai/api/coding/paas/v4",
+    }]);
+  });
+
   it("creates, stages, dispatches, and archives only through explicit narrow checkpoints", async () => {
     const harness = await provision({
       apiKey: "box_adapter_contract",
@@ -199,6 +238,8 @@ async function provision(input: {
   piScenario?: string;
   env?: Record<string, string>;
   agentPort?: number;
+  providerId?: string;
+  modelId?: string;
 }): Promise<{
   server: BoxSimServerHandle;
   runtime: AsciiBoxCompanionRuntime;
@@ -252,9 +293,11 @@ async function provision(input: {
     orgId: "22222222-2222-4222-8222-222222222222",
     boxId,
     clientSurface: "web",
-    providerAuth: { anthropic: { type: "api_key", key: "simulator-only" } },
+    providerAuth: {
+      [input.providerId ?? "anthropic"]: { type: "api_key", key: "simulator-only" },
+    },
     replaceProviderAuth: true,
-    modelId: "simulated-model",
+    modelId: input.modelId ?? "simulated-model",
     mcpCredentials: [],
     mcpAccounts: [],
     skills: [],

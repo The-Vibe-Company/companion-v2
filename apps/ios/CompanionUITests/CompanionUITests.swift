@@ -735,7 +735,11 @@ final class CompanionUITests: XCTestCase {
     @MainActor
     func testTranscriptWindowDemoBottomControlsNeverCoverChatContent() throws {
         let app = XCUIApplication()
-        app.launchArguments = ["-companion-transcript-window-demo"]
+        app.launchArguments = [
+            "-companion-transcript-window-demo",
+            "-UIPreferredContentSizeCategoryName",
+            "UICTContentSizeCategoryAccessibilityExtraExtraExtraLarge",
+        ]
         app.launchEnvironment["COMPANION_TRANSCRIPT_DEMO_SHORT"] = "1"
         app.launch()
 
@@ -759,7 +763,11 @@ final class CompanionUITests: XCTestCase {
             NSPredicate(format: "identifier == %@", "chat.transcript")
         ).firstMatch
         XCTAssertTrue(transcript.exists)
-        XCTAssertLessThanOrEqual(transcript.frame.maxY, scrollToBottom.frame.minY)
+        XCTAssertTrue(
+            transcript.frame.intersects(scrollToBottom.frame),
+            "Scroll-to-bottom must float inside the transcript instead of reserving a layout row"
+        )
+        XCTAssertLessThanOrEqual(scrollToBottom.frame.maxY, transcript.frame.maxY)
         XCTAssertLessThanOrEqual(scrollToBottom.frame.maxY, queue.frame.minY)
 
         XCTAssertTrue(thinking.waitForExistence(timeout: 3))

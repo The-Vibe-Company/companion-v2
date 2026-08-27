@@ -37,7 +37,11 @@ describe("Companion provider catalog supplements", () => {
     const flash = catalog.find((provider) => provider.id === "zai")?.models
       .find((model) => model.id === "glm-5.3-flash");
 
-    expect(flash).toEqual({ id: "glm-5.3-flash", name: "GLM 5.3 Flash" });
+    expect(flash).toEqual({
+      id: "glm-5.3-flash",
+      name: "GLM 5.3 Flash",
+      input: ["text", "image"],
+    });
     expect(companionCatalogModel(catalog, "zai", "glm-5.3-flash"))
       .toBe("glm-5.3-flash");
   });
@@ -52,7 +56,11 @@ describe("Companion provider catalog supplements", () => {
 
     expect(catalog.find((provider) => provider.id === "zai")?.models)
       .toEqual(expect.arrayContaining([
-        expect.objectContaining({ id: "glm-5.3-flash", name: "GLM 5.3 Flash" }),
+        expect.objectContaining({
+          id: "glm-5.3-flash",
+          name: "GLM 5.3 Flash",
+          input: ["text", "image"],
+        }),
       ]));
   });
 

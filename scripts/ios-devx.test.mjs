@@ -212,6 +212,27 @@ test("native message interactions stay accessible and CI-verifiable without Xcod
   assert.match(readme, /Reply or thread\s+actions and regenerate are deliberately out of scope/);
 });
 
+test("the chat scroll-to-bottom control floats over the transcript", () => {
+  const chat = read("apps/ios/Companion/Screens/ChatView.swift");
+  const transcript = chat.slice(
+    chat.indexOf('.accessibilityIdentifier("chat.transcript")'),
+    chat.indexOf("bottomControls(", chat.indexOf('.accessibilityIdentifier("chat.transcript")')),
+  );
+
+  assert.match(transcript, /\.overlay\(alignment: \.bottomTrailing\)/);
+  assert.match(transcript, /scrollToBottomButton\s*\{/);
+  assert.match(transcript, /\.padding\(\.trailing, 16\)/);
+  assert.match(transcript, /\.padding\(\.bottom, 12\)/);
+  assert.match(transcript, /reduceMotion\s*\n\s*\? \.identity/);
+
+  const button = chat.slice(
+    chat.indexOf("private func scrollToBottomButton"),
+    chat.indexOf("private func dayMarker"),
+  );
+  assert.match(button, /\.buttonStyle\(\.glass\)/);
+  assert.match(button, /\.shadow\(color: visualTheme\.shadow\.opacity\(0\.2\), radius: 8, y: 3\)/);
+});
+
 test("the project is synchronized, shared, and backed by CompanionKit", () => {
   const project = read("apps/ios/Companion.xcodeproj/project.pbxproj");
   const scheme = read("apps/ios/Companion.xcodeproj/xcshareddata/xcschemes/Companion.xcscheme");
