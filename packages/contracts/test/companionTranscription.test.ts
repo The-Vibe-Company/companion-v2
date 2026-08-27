@@ -1,40 +1,47 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  COMPANION_TRANSCRIPTION_AUDIO_CONTENT_TYPE,
+  COMPANION_TRANSCRIPTION_AUDIO_MAX_BYTES,
+  COMPANION_LEGACY_TRANSCRIPTION_MODEL,
   COMPANION_TRANSCRIPTION_MODEL,
-  companionThreadSchema,
   companionTranscriptionSessionSchema,
   createCompanionTranscriptionSessionInputSchema,
+  companionThreadSchema,
+  companionTranscriptionSchema,
 } from "../src/companions";
 
 describe("Companion transcription contracts", () => {
-  it("accepts only the empty session request and the constrained session response", () => {
+  it("fixes the model and compressed-audio envelope server-side", () => {
+    expect(COMPANION_TRANSCRIPTION_MODEL).toBe("gemini-3.7-flash");
+    expect(COMPANION_TRANSCRIPTION_AUDIO_CONTENT_TYPE).toBe("audio/mp4");
+    expect(COMPANION_TRANSCRIPTION_AUDIO_MAX_BYTES).toBe(8 * 1024 * 1024);
+  });
+
+  it("returns only a bounded final transcript", () => {
+    expect(companionTranscriptionSchema.parse({ transcript: "Bonjour Luna" })).toEqual({
+      transcript: "Bonjour Luna",
+    });
+    expect(() => companionTranscriptionSchema.parse({
+      transcript: "Bonjour Luna",
+      model: COMPANION_TRANSCRIPTION_MODEL,
+    })).toThrow();
+    expect(() => companionTranscriptionSchema.parse({ transcript: "" })).toThrow();
+  });
+
+  it("keeps the deprecated live-session contract for installed clients", () => {
     expect(createCompanionTranscriptionSessionInputSchema.parse({})).toEqual({});
     expect(() => createCompanionTranscriptionSessionInputSchema.parse({ model: "caller-choice" }))
       .toThrow();
     expect(companionTranscriptionSessionSchema.parse({
       token: "ephemeral-token",
       expires_at: "2026-08-27T10:10:00.000Z",
-      model: COMPANION_TRANSCRIPTION_MODEL,
+      model: COMPANION_LEGACY_TRANSCRIPTION_MODEL,
     })).toEqual({
       token: "ephemeral-token",
       expires_at: "2026-08-27T10:10:00.000Z",
-      model: COMPANION_TRANSCRIPTION_MODEL,
+      model: "gemini-3.5-transcribe-live",
     });
-  });
-
-  it("does not permit a long-lived key, alternate model, or extra response fields", () => {
-    expect(() => companionTranscriptionSessionSchema.parse({
-      token: "deployment-google-key",
-      expires_at: "2026-08-27T10:10:00.000Z",
-      model: "gemini-3.1-pro-preview",
-    })).toThrow();
-    expect(() => companionTranscriptionSessionSchema.parse({
-      token: "ephemeral-token",
-      expires_at: "2026-08-27T10:10:00.000Z",
-      model: COMPANION_TRANSCRIPTION_MODEL,
-      api_key: "deployment-google-key",
-    })).toThrow();
   });
 
   it("keeps transcription availability backward-compatible on thread projections", () => {

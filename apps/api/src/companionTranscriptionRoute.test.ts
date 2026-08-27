@@ -10,12 +10,13 @@ import {
   CompanionProviderError,
   createCompanionTranscriptionSession,
   getCompanion,
+  transcribeCompanionAudio,
 } from "@companion/core";
 import { db } from "@companion/db";
 
 const COMPANION_ID = "11111111-1111-4111-8111-111111111111";
 const ORG_ID = "22222222-2222-4222-8222-222222222222";
-const API_KEY = "google-global-transcription-key";
+const API_KEY = "deployment-transcription-key";
 const actor = { id: "user-1", email: "owner@example.test", name: "Owner" };
 const companion = (access: Companion["access"]): Pick<Companion, "access"> => ({ access });
 
@@ -25,6 +26,7 @@ const orgMock = vi.fn<typeof orgIdFromContext>();
 const jsonErrorMock = vi.fn<typeof jsonError>();
 const getCompanionMock = vi.fn<typeof getCompanion>();
 const createSessionMock = vi.fn<typeof createCompanionTranscriptionSession>();
+const transcribeMock = vi.fn<typeof transcribeCompanionAudio>();
 let tenantContextActive = false;
 
 async function withTenantContext<T>(
@@ -52,11 +54,20 @@ function appWithRoutes() {
     withTenantContext,
     getCompanion: getCompanionMock,
     createCompanionTranscriptionSession: createSessionMock,
+    transcribeCompanionAudio: transcribeMock,
   });
   return app;
 }
 
-describe("Companion transcription session API", () => {
+function audioForm(bytes = new Uint8Array([
+  0, 0, 0, 20, 102, 116, 121, 112, 77, 52, 65, 32,
+])): FormData {
+  const form = new FormData();
+  form.append("audio", new File([bytes], "recording.m4a", { type: "audio/mp4" }));
+  return form;
+}
+
+describe("Companion contextual transcription API", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     tenantContextActive = false;
@@ -76,9 +87,13 @@ describe("Companion transcription session API", () => {
         model: "gemini-3.5-transcribe-live",
       };
     });
+    transcribeMock.mockImplementation(async () => {
+      if (!tenantContextActive) throw new Error("transcription escaped tenant context");
+      return { transcript: "Envoie le devis à Camille." };
+    });
   });
 
-  it("authenticates, requires Owner/Editor access, and returns only ephemeral metadata", async () => {
+  it("keeps the deprecated live-session endpoint working for installed clients", async () => {
     const response = await appWithRoutes().request(new Request(
       `http://localhost/v1/companions/${COMPANION_ID}/transcription-sessions`,
       { method: "POST", body: "{}", headers: { "content-type": "application/json" } },
@@ -91,7 +106,6 @@ describe("Companion transcription session API", () => {
       model: "gemini-3.5-transcribe-live",
     });
     expect(response.headers.get("cache-control")).toBe("private, no-store");
-    expect(response.headers.get("pragma")).toBe("no-cache");
     expect(createSessionMock).toHaveBeenCalledWith(expect.objectContaining({
       actor,
       orgId: ORG_ID,
@@ -100,90 +114,106 @@ describe("Companion transcription session API", () => {
     }));
   });
 
-  it("allows an Editor to obtain the same shared transcription capability", async () => {
-    // SAFETY: this focused route fixture supplies the only field the route reads (`access`).
-    getCompanionMock.mockResolvedValue(companion("editor") as Companion);
-
+  it("authorizes, accepts one compressed recording, and returns only the transcript", async () => {
     const response = await appWithRoutes().request(new Request(
-      `http://localhost/v1/companions/${COMPANION_ID}/transcription-sessions`,
-      { method: "POST", body: "{}" },
+      `http://localhost/v1/companions/${COMPANION_ID}/transcriptions`,
+      { method: "POST", body: audioForm() },
     ));
 
     expect(response.status).toBe(200);
-    expect(createSessionMock).toHaveBeenCalledOnce();
+    await expect(response.json()).resolves.toEqual({ transcript: "Envoie le devis à Camille." });
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(response.headers.get("pragma")).toBe("no-cache");
+    expect(transcribeMock).toHaveBeenCalledWith(expect.objectContaining({
+      actor,
+      orgId: ORG_ID,
+      companionId: COMPANION_ID,
+      apiKey: API_KEY,
+      contentType: "audio/mp4",
+      audio: expect.any(Buffer),
+    }));
   });
 
-  it("denies Viewer access before the credential exchange", async () => {
+  it("allows an Editor and denies a Viewer before reading the body", async () => {
+    // SAFETY: this focused route fixture supplies the only field the route reads (`access`).
+    getCompanionMock.mockResolvedValue(companion("editor") as Companion);
+    const editorResponse = await appWithRoutes().request(new Request(
+      `http://localhost/v1/companions/${COMPANION_ID}/transcriptions`,
+      { method: "POST", body: audioForm() },
+    ));
+    expect(editorResponse.status).toBe(200);
+
+    vi.clearAllMocks();
+    actorMock.mockReturnValue(actor);
+    orgMock.mockResolvedValue(ORG_ID);
+    jsonErrorMock.mockImplementation((_context, error, status = 400) => Response.json({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    }, { status }));
     // SAFETY: this focused route fixture supplies the only field the route reads (`access`).
     getCompanionMock.mockResolvedValue(companion("viewer") as Companion);
-
-    const response = await appWithRoutes().request(new Request(
-      `http://localhost/v1/companions/${COMPANION_ID}/transcription-sessions`,
-      { method: "POST", body: "{}" },
+    const viewerResponse = await appWithRoutes().request(new Request(
+      `http://localhost/v1/companions/${COMPANION_ID}/transcriptions`,
+      { method: "POST", body: audioForm(new Uint8Array(1024 * 1024)) },
     ));
-
-    expect(response.status).toBe(403);
-    expect(createSessionMock).not.toHaveBeenCalled();
+    expect(viewerResponse.status).toBe(403);
+    expect(transcribeMock).not.toHaveBeenCalled();
   });
 
-  it("hides an inaccessible Companion, including a cross-tenant lookup", async () => {
+  it("hides inaccessible Companions before accepting audio", async () => {
     getCompanionMock.mockRejectedValueOnce(new CompanionNotFoundError());
-
     const response = await appWithRoutes().request(new Request(
-      `http://localhost/v1/companions/${COMPANION_ID}/transcription-sessions`,
-      { method: "POST", body: "{}" },
+      `http://localhost/v1/companions/${COMPANION_ID}/transcriptions`,
+      { method: "POST", body: audioForm() },
     ));
-
     expect(response.status).toBe(404);
-    expect(createSessionMock).not.toHaveBeenCalled();
+    expect(transcribeMock).not.toHaveBeenCalled();
   });
 
-  it("rejects caller audio or configuration instead of forwarding it", async () => {
-    const response = await appWithRoutes().request(new Request(
-      `http://localhost/v1/companions/${COMPANION_ID}/transcription-sessions`,
-      {
-        method: "POST",
-        body: JSON.stringify({ audio: "raw-audio", model: "caller-model" }),
-        headers: { "content-type": "application/json" },
-      },
+  it("rejects extra fields, wrong media, malformed media, and oversized audio", async () => {
+    const extra = audioForm();
+    extra.append("model", "caller-choice");
+    const extraResponse = await appWithRoutes().request(new Request(
+      `http://localhost/v1/companions/${COMPANION_ID}/transcriptions`,
+      { method: "POST", body: extra },
     ));
+    expect(extraResponse.status).toBe(400);
 
-    expect(response.status).toBe(400);
-    expect(createSessionMock).not.toHaveBeenCalled();
-  });
-
-  it("authenticates before rejecting an oversized request body", async () => {
-    const response = await appWithRoutes().request(new Request(
-      `http://localhost/v1/companions/${COMPANION_ID}/transcription-sessions`,
-      {
-        method: "POST",
-        body: JSON.stringify({ padding: "x".repeat(2048) }),
-        headers: { "content-type": "application/json" },
-      },
+    const wrong = new FormData();
+    wrong.append("audio", new File(["not audio"], "recording.txt", { type: "text/plain" }));
+    const wrongResponse = await appWithRoutes().request(new Request(
+      `http://localhost/v1/companions/${COMPANION_ID}/transcriptions`,
+      { method: "POST", body: wrong },
     ));
+    expect(wrongResponse.status).toBe(400);
 
-    expect(response.status).toBe(413);
-    expect(actorMock).toHaveBeenCalledOnce();
-    expect(getCompanionMock).not.toHaveBeenCalled();
-    expect(createSessionMock).not.toHaveBeenCalled();
+    const malformedResponse = await appWithRoutes().request(new Request(
+      `http://localhost/v1/companions/${COMPANION_ID}/transcriptions`,
+      { method: "POST", body: audioForm(new Uint8Array(12)) },
+    ));
+    expect(malformedResponse.status).toBe(400);
+
+    const oversizedResponse = await appWithRoutes().request(new Request(
+      `http://localhost/v1/companions/${COMPANION_ID}/transcriptions`,
+      { method: "POST", body: audioForm(new Uint8Array(8 * 1024 * 1024 + 1)) },
+    ));
+    expect(oversizedResponse.status).toBe(400);
+    expect(actorMock).toHaveBeenCalled();
   });
 
-  it("does not expose provider credential or Google error payloads", async () => {
-    const providerKey = "google-long-lived-key";
-    createSessionMock.mockRejectedValueOnce(new CompanionProviderError(
+  it("does not expose credentials or provider payloads", async () => {
+    transcribeMock.mockRejectedValueOnce(new CompanionProviderError(
       "provider_unavailable",
-      "Google Gemini transcription is temporarily unavailable. Try again.",
+      "Voice transcription is temporarily unavailable. Try again.",
       "google",
     ));
-
     const response = await appWithRoutes().request(new Request(
-      `http://localhost/v1/companions/${COMPANION_ID}/transcription-sessions`,
-      { method: "POST", body: "{}" },
+      `http://localhost/v1/companions/${COMPANION_ID}/transcriptions`,
+      { method: "POST", body: audioForm() },
     ));
     const body = await response.text();
-
     expect(response.status).toBe(422);
-    expect(body).not.toContain(providerKey);
+    expect(body).not.toContain(API_KEY);
     expect(body).not.toContain("googleapis");
   });
 });

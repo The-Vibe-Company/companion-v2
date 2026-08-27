@@ -45,7 +45,7 @@
 		<true/>
 	</dict>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Companion uses the microphone to transcribe speech into an editable chat message. Audio is sent to Google while recording.</string>
+	<string>Companion uses the microphone to turn speech into an editable chat message after you finish recording.</string>
 	<key>NSUserActivityTypes</key>
 	<array>
 		<string>INSendMessageIntent</string>

@@ -25,9 +25,9 @@ export interface CompanionTranscriptionDiagnostics {
 }
 
 /**
- * Observe only the safe shape of Google's transcription-token exchange. Provider URLs, response
- * bodies, thrown messages, credentials, member identity, and Companion identity never enter the
- * record, so operators can distinguish transport, HTTP, and response-shape failures safely.
+ * Observe only the safe shape of the transcription request. Provider URLs, response bodies, thrown
+ * messages, credentials, member identity, Companion identity, conversation context, and audio never
+ * enter the record, so operators can distinguish transport, HTTP, and response-shape failures safely.
  */
 export function createCompanionTranscriptionDiagnostics(
   input: CompanionTranscriptionDiagnosticsInput = {},

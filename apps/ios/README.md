@@ -61,30 +61,29 @@ The chat composer also supports iOS-only voice transcription when the API deploy
 `COMPANION_GEMINI_TRANSCRIPTION_API_KEY`. That API-only setting enables the capability globally;
 the thread payload exposes only `transcription_available`, and the app omits the microphone entirely
 when it is false or absent. When an Owner or Editor taps the microphone in an accessible thread,
-`POST /v1/companions/:id/transcription-sessions` reauthorizes that access and asks Google for a
-single-use token with a one-minute new-session window and ten-minute expiry. Because Google currently
-rejects `liveConnectConstraints` on the deployed authorization-key path, CompanionKit selects
-`gemini-3.5-transcribe-live`, text output, automatic language detection, Smart transcription, and
-session resumption in the setup message, then connects directly to Gemini's constrained Live WebSocket
-and streams 16 kHz mono PCM in bounded chunks.
-Interim text stays beside the composer; stopping commits the final transcript into the editable
-message field. The long-lived key never enters the app binary or API response, and audio never
-passes through or persists in Companion's API, PostgreSQL, object storage, Box, Pi, or transcript.
-The recording surface says that audio is sent to Google and requires the standard iOS microphone
-permission.
+the app records 16 kHz mono AAC locally. Stopping uploads that one `.m4a` recording to
+`POST /v1/companions/:id/transcriptions`; the route reauthorizes access before reading it, loads a
+bounded window of recent durable dialogue, and returns the contextualized final transcript. The
+editable message field changes only after processing succeeds. The long-lived key never enters the
+app binary or API response. Audio, the bounded context copy, and the provider response live only for
+that API request and never persist in PostgreSQL, object storage, Box, Pi, or the transcript. The
+provider-neutral recording surface discloses that audio and recent conversation are processed and
+requires the standard iOS microphone permission.
 
 This is client dictation into an ordinary text message, not Companion voice mode: it creates no
 audio message or runtime capability and makes no Box/Pi change. Linux/static quality checks verify
-the privacy wiring, while CompanionKit's mock-WebSocket protocol tests and the native app build run
+the privacy wiring, while CompanionKit's multipart request tests and the native app build run
 in the existing macOS 26 **Apple Quality** job. Rendered UI validation stays local and manual. No
 Google key is required for those deterministic tests. A real end-to-end transcription remains a
 manual provider check with the owner-supplied key stored only in the API deployment environment.
 
-The implementation follows Google's current dedicated transcription wire contract rather than the
-earlier general Live-agent shape in the reference snippet: setup uses `inputAudioTranscription`,
-audio uses `realtimeInput`, and stop sends `audioStreamEnd`. `mediaResolution`, client content, and
-context-window compression are not sent for this audio-only model; recordings stop with margin
-inside its documented ten-minute session limit.
+The API uses one stateless `gemini-3.7-flash` request with low thinking. It sends no tool configuration
+or retained interaction id. Recent user/assistant entries are limited to 12 and 24,000 characters
+and serialized as untrusted reference data in the one audio request, never as provider conversation
+turns. The compressed recording is limited to 8 MB, keeping the complete inline request below the
+provider's 20 MB ceiling. Recordings stop automatically after nine minutes. During the native-client
+rollout, the API also retains the deprecated `POST /transcription-sessions` exchange so an installed
+older build continues to work; the current client neither calls nor exposes that contract.
 
 Push Notifications are requested immediately after the first active session. Debug registers
 `dev.companion.mobile.dev` with the APNs sandbox; Release registers `dev.companion.mobile` with

@@ -1544,28 +1544,43 @@ export const companionClientSurfaceSchema = z.enum(["web", "mobile_web", "native
 export type CompanionClientSurface = z.infer<typeof companionClientSurfaceSchema>;
 
 /**
- * The one model exposed by the first-party dictation capability. This is deliberately separate
- * from the selectable Companion provider catalog: dictation is a constrained Google Live API
- * session and never changes the Companion's model or runtime configuration.
+ * The fixed model behind first-party dictation. It is deliberately separate from the selectable
+ * Companion provider catalog and never changes the Companion's runtime configuration.
  */
-export const COMPANION_TRANSCRIPTION_MODEL = "gemini-3.5-transcribe-live" as const;
+export const COMPANION_TRANSCRIPTION_MODEL = "gemini-3.7-flash" as const;
 
-/** A transcription-session request has no caller-controlled settings or payload. */
+/**
+ * Compatibility model returned only by the deprecated live-session endpoint. Keep this contract
+ * until the last first-party client that depended on live dictation is outside the support window.
+ */
+export const COMPANION_LEGACY_TRANSCRIPTION_MODEL = "gemini-3.5-transcribe-live" as const;
+
+/** The deprecated live-session request never accepts caller-controlled provider settings. */
 export const createCompanionTranscriptionSessionInputSchema = z.object({}).strict();
 export type CreateCompanionTranscriptionSessionInput = z.infer<
   typeof createCompanionTranscriptionSessionInputSchema
 >;
 
-/**
- * A short-lived, single-use Google Live API token. The deployment-owned API key is never part of
- * this response (or any client-controlled request).
- */
+/** Compatibility response for first-party clients released before contextual transcription. */
 export const companionTranscriptionSessionSchema = z.object({
   token: z.string().trim().min(1),
   expires_at: z.string().datetime(),
-  model: z.literal(COMPANION_TRANSCRIPTION_MODEL),
+  model: z.literal(COMPANION_LEGACY_TRANSCRIPTION_MODEL),
 }).strict();
 export type CompanionTranscriptionSession = z.infer<typeof companionTranscriptionSessionSchema>;
+
+/**
+ * Compressed audio ceiling for one contextual transcription. Base64 expansion plus the bounded
+ * conversation context still keeps the provider request comfortably below its 20 MB limit.
+ */
+export const COMPANION_TRANSCRIPTION_AUDIO_MAX_BYTES = 8 * 1024 * 1024;
+export const COMPANION_TRANSCRIPTION_AUDIO_CONTENT_TYPE = "audio/mp4" as const;
+
+/** Only the final transcript crosses back to a first-party client. */
+export const companionTranscriptionSchema = z.object({
+  transcript: z.string().trim().min(1).max(16_384),
+}).strict();
+export type CompanionTranscription = z.infer<typeof companionTranscriptionSchema>;
 
 export const sendCompanionMessageInputSchema = z.object({
   content: z.string().trim().min(1).max(16_384),

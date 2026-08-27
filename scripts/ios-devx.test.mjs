@@ -592,11 +592,11 @@ test("voice transcription keeps the global key server-side and delegates Apple c
   const status = read("apps/ios/Companion/Screens/VoiceTranscriptionStatusView.swift");
   const controller = read("apps/ios/Companion/Support/VoiceTranscriptionController.swift");
   const client = read(
-    "apps/ios/CompanionKit/Sources/CompanionKit/GeminiLiveTranscription.swift",
+    "apps/ios/CompanionKit/Sources/CompanionKit/VoiceTranscription.swift",
   );
   const info = read("apps/ios/Companion/Support/Info.plist");
   const tests = read(
-    "apps/ios/CompanionKit/Tests/CompanionKitTests/GeminiLiveTranscriptionTests.swift",
+    "apps/ios/CompanionKit/Tests/CompanionKitTests/VoiceTranscriptionTests.swift",
   );
   const ci = read(".github/workflows/ci.yml");
 
@@ -607,24 +607,21 @@ test("voice transcription keeps the global key server-side and delegates Apple c
   assert.match(routes, /COMPANION_GEMINI_TRANSCRIPTION_API_KEY\?\.trim\(\)/);
   assert.match(routes, /transcription_available: transcriptionAvailable/);
   assert.match(envExample, /^COMPANION_GEMINI_TRANSCRIPTION_API_KEY=$/m);
-  assert.match(status, /Audio is sent to Google while recording\./);
+  assert.match(status, /Audio and recent conversation are processed for transcription\./);
   assert.match(controller, /AVAudioApplication\.requestRecordPermission/);
-  assert.match(controller, /sampleRate: 16_000/);
-  assert.match(controller, /private var finishTask: Task<Void, Never>\?/);
+  assert.match(controller, /AVSampleRateKey: 16_000/);
+  assert.match(controller, /kAudioFormatMPEG4AAC/);
+  assert.match(controller, /private var transcriptionTask: Task<Void, Never>\?/);
   assert.match(controller, /guard generation == activeGeneration/);
-  assert.match(controller, /finalTranscript = ""/);
+  assert.match(controller, /case processing/);
   assert.doesNotMatch(composer, /Task \{ await transcription\.cancel\(\) \}/);
   assert.match(composer, /transcription\.cancel\(\)/);
   assert.match(composer, /onChange\(of: canSend\)/);
-  assert.match(client, /if isFinishing \{\s*try await sendAudioStreamEnd/);
-  assert.match(client, /BidiGenerateContentConstrained/);
-  assert.match(client, /models\/\\\(Self\.model\)/);
-  assert.match(client, /"SMART"/);
-  assert.match(client, /audio\/pcm;rate=16000/);
+  assert.match(client, /companionTranscriptionAudioMaximumBytes = 8 \* 1024 \* 1024/);
   assert.doesNotMatch(client, /AIza[0-9A-Za-z_-]{20,}/);
   assert.match(info, /<key>NSMicrophoneUsageDescription<\/key>/);
-  assert.match(tests, /connectsStreamsPCMAndPublishesTranscriptDeltas/);
-  assert.match(tests, /resumesOnceAndFlushesBoundedAudioAfterGoAway/);
+  assert.match(tests, /uploadsOneCompressedRecordingAndDecodesOnlyTheTranscript/);
+  assert.match(tests, /rejectsEmptyAndOversizedRecordingsBeforeTheNetwork/);
   assert.match(ci, /swift test --package-path apps\/ios\/CompanionKit/);
   assert.match(ci, /xcodebuild build/);
   assert.doesNotMatch(ci, /xcodebuildmcp/i);
