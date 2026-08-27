@@ -619,6 +619,10 @@ final class CompanionUITests: XCTestCase {
             "Compare these screenshots and call out the visual regressions."
         ]
         XCTAssertTrue(item.waitForExistence(timeout: 5))
+        let visibleRemoval = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Delete queued message:")
+        ).firstMatch
+        XCTAssertTrue(visibleRemoval.waitForExistence(timeout: 2))
         item.press(forDuration: 1.2)
         XCTAssertFalse(app.buttons["Delete"].waitForExistence(timeout: 1))
     }
