@@ -934,15 +934,19 @@ The SwiftUI client in `apps/ios` targets iOS 26 and later, and the SwiftUI clien
 targets macOS 14 and later; Android is not supported. Both are full first-party clients over the
 existing `/v1` API rather than separate or reduced platform APIs. They reuse
 the existing Better Auth cookie session: email login captures `set-cookie`, while Google login uses
-Better Auth's authorization proxy and the system browser before adopting the returned cookie into
+Better Auth's authorization proxy and the member's default browser before adopting the returned cookie into
 Keychain-backed session state. A new Google account completes onboarding by joining a
 domain-matched organization or creating a named workspace. The app resolves the current
 organization through `whoami` and sends the cookie plus `x-companion-org` on each REST request.
 The native roster and chat ship with Companion creation, the full server-owned provider catalog,
 Claude and Codex subscription authorization, encrypted API-key connections, and MCP connection
 management. Its Plugins surface groups the existing accounts by provider, permits multiple labeled
-accounts for each product-owned Linear, GitHub, Notion, Conductor, Slack, and Gmail category through the shared
-brokered OAuth routes, and retains custom HTTP or command MCP connections. Skills, files, routines,
+accounts for each product-owned Linear, GitHub, Notion, Conductor, Slack, and Gmail category through
+the shared brokered OAuth routes, and retains custom HTTP or command MCP connections. Curated plugin
+OAuth also opens in the default browser: the provider keeps the existing HTTPS redirect URI, while
+an exact Universal Link returns `code` and signed `state` to the app for completion through the
+authenticated API client and its memory-only callback cookie. The app rejects every other host/path
+and refuses to follow the callback's final web redirect. Skills, files, routines,
 triggers, sharing, settings, and the remaining control-plane workflows continue migrating to this
 same client without mobile-only APIs.
 

@@ -3,13 +3,13 @@ import CompanionKit
 
 struct LoginView: View {
     @Environment(SessionStore.self) private var sessionStore
+    @Environment(ExternalOAuthCoordinator.self) private var externalOAuth
     @State private var email = ""
     @State private var password = ""
     @State private var passwordVisible = false
     @State private var busy = false
     @State private var googleBusy = false
     @State private var error: String?
-    @State private var googleCoordinator = GoogleSignInCoordinator()
     @FocusState private var focusedField: Field?
 
     private enum Field { case email, password }
@@ -21,6 +21,9 @@ struct LoginView: View {
                     Spacer(minLength: 64)
                     brand
                     form
+                    if googleFlowActive {
+                        googleWaitingSurface
+                    }
                     Text("Use the same account and workspace as every other Companion client.")
                         .font(.footnote)
                         .foregroundStyle(Color.companionMuted)
@@ -32,6 +35,11 @@ struct LoginView: View {
                 .frame(maxWidth: .infinity)
             }
             .scrollDismissesKeyboard(.interactively)
+        }
+        .onChange(of: externalOAuth.callbackGeneration) { _, _ in
+            guard externalOAuth.activeFlow?.isGoogle == true,
+                  let callbackURL = externalOAuth.takeCallback() else { return }
+            Task { await completeGoogleSignIn(callbackURL) }
         }
     }
 
@@ -67,7 +75,9 @@ struct LoginView: View {
                             .frame(width: 19, height: 19)
                             .accessibilityHidden(true)
                     }
-                    Text(googleBusy ? "Opening Google…" : "Continue with Google")
+                    Text(googleBusy
+                        ? (googleFlowActive ? "Google sign-in waiting…" : "Opening Google…")
+                        : "Continue with Google")
                         .frame(maxWidth: .infinity)
                 }
                 .foregroundStyle(Color.companionInk)
@@ -172,18 +182,96 @@ struct LoginView: View {
                 let authorization = try await sessionStore.beginGoogleSignIn(
                     callbackScheme: AppConfig.callbackScheme
                 )
-                let callbackURL = try await googleCoordinator.authenticate(
-                    at: authorization.proxyURL,
-                    callbackScheme: AppConfig.callbackScheme
+                externalOAuth.beginGoogle(
+                    proxyURL: authorization.proxyURL,
+                    callbackScheme: AppConfig.callbackScheme,
+                    nativeState: authorization.nativeState
                 )
-                try await sessionStore.completeGoogleSignIn(callbackURL: callbackURL)
-            } catch GoogleSignInError.cancelled {
-                self.error = nil
             } catch let apiError as APIError where apiError.status == 0 {
                 self.error = "The server could not be reached. Check that the Conductor stack is running."
+                googleBusy = false
             } catch {
                 self.error = "Google sign-in is unavailable. Try again later."
+                googleBusy = false
             }
+        }
+    }
+
+    private var googleFlowActive: Bool {
+        externalOAuth.activeFlow?.isGoogle == true
+    }
+
+    @ViewBuilder
+    private var googleWaitingSurface: some View {
+        if googleFlowActive {
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Google sign-in", systemImage: "arrow.up.right.square")
+                    .font(.headline)
+                    .foregroundStyle(Color.companionInk)
+
+                switch externalOAuth.phase {
+                case .waiting:
+                    Text("Google is open in your default browser. Return here after you finish signing in.")
+                case .timedOut:
+                    Text("No callback arrived. You can reopen Google sign-in or cancel this attempt.")
+                case .failed(let message):
+                    Text(message)
+                case .completing:
+                    Text("Finishing Google sign-in…")
+                case .idle:
+                    EmptyView()
+                }
+
+                if externalOAuth.phase != .completing {
+                    HStack(spacing: 10) {
+                        Button("Reopen", systemImage: "arrow.clockwise") {
+                            externalOAuth.reopen()
+                        }
+                        .buttonStyle(.glass)
+                        .accessibilityIdentifier("login.google.reopen")
+
+                        Button("Cancel", systemImage: "xmark") {
+                            cancelGoogleSignIn()
+                        }
+                        .buttonStyle(.glass)
+                        .accessibilityIdentifier("login.google.cancel")
+                    }
+                }
+            }
+            .font(.subheadline)
+            .foregroundStyle(Color.companionMuted)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(16)
+            .companionGlass(radius: 20)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("login.google.waiting")
+        }
+    }
+
+    private func cancelGoogleSignIn() {
+        let nativeState = externalOAuth.activeFlow?.googleNativeState
+        externalOAuth.cancel()
+        if let nativeState {
+            Task { await sessionStore.cancelGoogleSignIn(expectedNativeState: nativeState) }
+        }
+        googleBusy = false
+        error = nil
+    }
+
+    private func completeGoogleSignIn(_ callbackURL: URL) async {
+        do {
+            try await sessionStore.completeGoogleSignIn(
+                callbackURL: callbackURL,
+                callbackScheme: AppConfig.callbackScheme
+            )
+            externalOAuth.completeSuccessfully()
+        } catch let apiError as APIError where apiError.status == 0 {
+            externalOAuth.fail("The server could not be reached. Try Google sign-in again.")
+            error = "The server could not be reached. Try Google sign-in again."
+            googleBusy = false
+        } catch {
+            externalOAuth.fail("Google sign-in could not be completed. Try again.")
+            self.error = "Google sign-in could not be completed. Try again."
             googleBusy = false
         }
     }
@@ -201,4 +289,5 @@ private extension View {
 #Preview {
     LoginView()
         .environment(SessionStore(apiURL: URL(string: "http://127.0.0.1:3001")!))
+        .environment(ExternalOAuthCoordinator())
 }

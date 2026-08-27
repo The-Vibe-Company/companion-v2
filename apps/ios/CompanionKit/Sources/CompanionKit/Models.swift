@@ -1078,6 +1078,18 @@ public struct CompanionProviderOAuthPoll: Codable, Equatable, Sendable {
     public let connection: CompanionProviderConnection?
 }
 
+public struct CompanionPluginOAuthStart: Codable, Equatable, Sendable {
+    public let authorizationURL: URL
+
+    public init(authorizationURL: URL) {
+        self.authorizationURL = authorizationURL
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case authorizationURL = "authorization_url"
+    }
+}
+
 public enum CompanionPluginTransport: String, Codable, Hashable, Sendable {
     case http
     case stdio
