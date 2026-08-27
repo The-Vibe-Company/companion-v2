@@ -79,6 +79,17 @@ export const COMPANION_PLUGIN_OAUTH_SERVERS = {
     allowedOrigins: ["https://api.conductor.build"],
     dynamicRegistration: true,
   },
+  "com.slack/mcp": {
+    provider: "slack",
+    // Slack does not host an MCP remote for this product. This is the product-owned bridge's
+    // pinned provider operation and is deliberately ignored by the loopback bridge at call time.
+    remoteUrl: "https://slack.com/api/chat.postMessage",
+    resourceMetadataUrl: "",
+    authorizationServer: "https://slack.com",
+    scopes: ["chat:write"],
+    allowedOrigins: ["https://slack.com"],
+    dynamicRegistration: false,
+  },
   "com.google.workspace/gmail": {
     provider: "gmail",
     remoteUrl: "https://gmailmcp.googleapis.com/mcp/v1",
@@ -114,7 +125,8 @@ export interface CompanionPluginOAuthFlow {
   tokenEndpoint: string;
   resource: string;
   scope: string;
-  codeVerifier: string;
+  /** Null for Slack Bot User OAuth, which is a confidential OAuth flow without PKCE. */
+  codeVerifier: string | null;
   client: CompanionPluginOAuthClient;
 }
 
@@ -251,6 +263,22 @@ function githubClient(env: NodeJS.ProcessEnv): CompanionPluginOAuthClient {
   return { clientId, clientSecret, tokenEndpointAuthMethod: "client_secret_post" };
 }
 
+function slackClient(env: NodeJS.ProcessEnv): CompanionPluginOAuthClient {
+  const clientId = env.COMPANION_MCP_SLACK_CLIENT_ID?.trim();
+  const clientSecret = env.COMPANION_MCP_SLACK_CLIENT_SECRET?.trim();
+  if (!clientId || !clientSecret) {
+    throw new CompanionPluginOAuthError(
+      "Slack Bot OAuth is not configured.",
+      "oauth_not_configured",
+    );
+  }
+  return { clientId, clientSecret, tokenEndpointAuthMethod: "client_secret_basic" };
+}
+
+function isSlackServer(serverName: string): serverName is "com.slack/mcp" {
+  return serverName === "com.slack/mcp";
+}
+
 function gmailClient(env: NodeJS.ProcessEnv): CompanionPluginOAuthClient {
   const clientId = env.COMPANION_MCP_GMAIL_CLIENT_ID?.trim();
   const clientSecret = env.COMPANION_MCP_GMAIL_CLIENT_SECRET?.trim();
@@ -265,16 +293,17 @@ function gmailClient(env: NodeJS.ProcessEnv): CompanionPluginOAuthClient {
 
 function isEnvironmentClient(serverName: CompanionPluginOAuthServerName): boolean {
   return serverName === "io.github.github/github-mcp-server"
-    || serverName === "com.google.workspace/gmail";
+    || serverName === "com.google.workspace/gmail"
+    || isSlackServer(serverName);
 }
 
 function environmentClient(
   serverName: CompanionPluginOAuthServerName,
   env: NodeJS.ProcessEnv,
 ): CompanionPluginOAuthClient {
-  return serverName === "io.github.github/github-mcp-server"
-    ? githubClient(env)
-    : gmailClient(env);
+  if (serverName === "io.github.github/github-mcp-server") return githubClient(env);
+  if (serverName === "com.google.workspace/gmail") return gmailClient(env);
+  return slackClient(env);
 }
 
 function usesResourceIndicator(serverName: CompanionPluginOAuthServerName): boolean {
@@ -306,92 +335,103 @@ export async function beginCompanionPluginOAuth(input: {
     "The MCP server's OAuth metadata could not be verified.",
     "oauth_discovery_failed",
   );
-  const resourceMetadata = await oauthJson(
-    server.resourceMetadataUrl,
-    { method: "GET" },
-    fetchImpl,
-    discoveryFailure,
-  );
-  const resource = allowedUrl(resourceMetadata.resource, server.allowedOrigins, discoveryFailure);
-  if (resource !== new URL(server.remoteUrl).toString()) throw discoveryFailure;
-  const authorizationServers = resourceMetadata.authorization_servers;
-  if (
-    !Array.isArray(authorizationServers)
-    || !authorizationServers.some((value) => value === server.authorizationServer)
-  ) {
-    throw discoveryFailure;
-  }
-
   let authorizationEndpoint: string;
   let tokenEndpoint: string;
   let client: CompanionPluginOAuthClient;
-  if (serverName === "io.github.github/github-mcp-server") {
-    authorizationEndpoint = "https://github.com/login/oauth/authorize";
-    tokenEndpoint = "https://github.com/login/oauth/access_token";
-    client = githubClient(input.env ?? process.env);
+  let resource: string = server.remoteUrl;
+  if (isSlackServer(serverName)) {
+    // Slack Bot User OAuth is a fixed confidential flow. There is no MCP resource metadata,
+    // dynamic registration, PKCE, or resource parameter in this path.
+    authorizationEndpoint = "https://slack.com/oauth/v2/authorize";
+    tokenEndpoint = "https://slack.com/api/oauth.v2.access";
+    client = slackClient(input.env ?? process.env);
   } else {
-    const authorizationMetadata = await oauthJson(
-      "authorizationMetadataUrl" in server
-        ? server.authorizationMetadataUrl
-        : `${server.authorizationServer}/.well-known/oauth-authorization-server`,
+    const resourceMetadata = await oauthJson(
+      server.resourceMetadataUrl,
       { method: "GET" },
       fetchImpl,
       discoveryFailure,
     );
-    authorizationEndpoint = allowedUrl(
-      authorizationMetadata.authorization_endpoint,
-      server.allowedOrigins,
-      discoveryFailure,
-    );
-    tokenEndpoint = allowedUrl(
-      authorizationMetadata.token_endpoint,
-      server.allowedOrigins,
-      discoveryFailure,
-    );
-    if (server.dynamicRegistration) {
-      const registrationEndpoint = allowedUrl(
-        authorizationMetadata.registration_endpoint,
+    resource = allowedUrl(resourceMetadata.resource, server.allowedOrigins, discoveryFailure);
+    if (resource !== new URL(server.remoteUrl).toString()) throw discoveryFailure;
+    const authorizationServers = resourceMetadata.authorization_servers;
+    if (
+      !Array.isArray(authorizationServers)
+      || !authorizationServers.some((value) => value === server.authorizationServer)
+    ) {
+      throw discoveryFailure;
+    }
+
+    if (serverName === "io.github.github/github-mcp-server") {
+      authorizationEndpoint = "https://github.com/login/oauth/authorize";
+      tokenEndpoint = "https://github.com/login/oauth/access_token";
+      client = githubClient(input.env ?? process.env);
+    } else {
+      const authorizationMetadata = await oauthJson(
+        "authorizationMetadataUrl" in server
+          ? server.authorizationMetadataUrl
+          : `${server.authorizationServer}/.well-known/oauth-authorization-server`,
+        { method: "GET" },
+        fetchImpl,
+        discoveryFailure,
+      );
+      authorizationEndpoint = allowedUrl(
+        authorizationMetadata.authorization_endpoint,
         server.allowedOrigins,
         discoveryFailure,
       );
-      const registrationFailure = new CompanionPluginOAuthError(
-        "The MCP server could not register this Companion deployment.",
-        "oauth_registration_failed",
+      tokenEndpoint = allowedUrl(
+        authorizationMetadata.token_endpoint,
+        server.allowedOrigins,
+        discoveryFailure,
       );
-      const registered = await oauthJson(
-        registrationEndpoint,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            client_name: "Companion",
-            redirect_uris: [input.redirectUri],
-            grant_types: ["authorization_code", "refresh_token"],
-            response_types: ["code"],
-            token_endpoint_auth_method: "none",
-          }),
-        },
-        fetchImpl,
-        registrationFailure,
-      );
-      const clientId = requiredString(registered.client_id, registrationFailure);
-      const clientSecretParsed = jsonStringSchema.safeParse(registered.client_secret);
-      const clientSecret = clientSecretParsed.success && clientSecretParsed.data
-        ? clientSecretParsed.data
-        : null;
-      const reportedMethod = registered.token_endpoint_auth_method;
-      const tokenEndpointAuthMethod =
-        reportedMethod === "client_secret_basic" || reportedMethod === "client_secret_post"
-          ? reportedMethod
-          : clientSecret ? "client_secret_post" : "none";
-      client = { clientId, clientSecret, tokenEndpointAuthMethod };
-    } else {
-      client = environmentClient(serverName, input.env ?? process.env);
+      if (server.dynamicRegistration) {
+        const registrationEndpoint = allowedUrl(
+          authorizationMetadata.registration_endpoint,
+          server.allowedOrigins,
+          discoveryFailure,
+        );
+        const registrationFailure = new CompanionPluginOAuthError(
+          "The MCP server could not register this Companion deployment.",
+          "oauth_registration_failed",
+        );
+        const registered = await oauthJson(
+          registrationEndpoint,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              client_name: "Companion",
+              redirect_uris: [input.redirectUri],
+              grant_types: ["authorization_code", "refresh_token"],
+              response_types: ["code"],
+              token_endpoint_auth_method: "none",
+            }),
+          },
+          fetchImpl,
+          registrationFailure,
+        );
+        const clientId = requiredString(registered.client_id, registrationFailure);
+        const clientSecretParsed = jsonStringSchema.safeParse(registered.client_secret);
+        const clientSecret = clientSecretParsed.success && clientSecretParsed.data
+          ? clientSecretParsed.data
+          : null;
+        const reportedMethod = registered.token_endpoint_auth_method;
+        const tokenEndpointAuthMethod =
+          reportedMethod === "client_secret_basic" || reportedMethod === "client_secret_post"
+            ? reportedMethod
+            : clientSecret ? "client_secret_post" : "none";
+        client = { clientId, clientSecret, tokenEndpointAuthMethod };
+      } else {
+        client = environmentClient(serverName, input.env ?? process.env);
+      }
     }
   }
 
-  const verifier = codeVerifier();
-  const scope = server.scopes.join(" ");
+  const verifier = isSlackServer(serverName) ? null : codeVerifier();
+  // Slack's v2 authorize endpoint expects a comma-separated Bot User scope list. All other
+  // curated MCP servers use the OAuth space-delimited scope convention.
+  const scope = server.scopes.join(isSlackServer(serverName) ? "," : " ");
   const flow: CompanionPluginOAuthFlow = {
     serverName,
     provider: server.provider,
@@ -408,8 +448,10 @@ export async function beginCompanionPluginOAuth(input: {
   authorizationUrl.searchParams.set("client_id", client.clientId);
   authorizationUrl.searchParams.set("redirect_uri", input.redirectUri);
   authorizationUrl.searchParams.set("state", input.state);
-  authorizationUrl.searchParams.set("code_challenge", companionPluginOAuthCodeChallenge(verifier));
-  authorizationUrl.searchParams.set("code_challenge_method", "S256");
+  if (verifier !== null) {
+    authorizationUrl.searchParams.set("code_challenge", companionPluginOAuthCodeChallenge(verifier));
+    authorizationUrl.searchParams.set("code_challenge_method", "S256");
+  }
   authorizationUrl.searchParams.set("scope", scope);
   if (usesResourceIndicator(serverName)) {
     authorizationUrl.searchParams.set("resource", resource);
@@ -430,13 +472,13 @@ function clientAuthentication(
   client: CompanionPluginOAuthClient,
   body: URLSearchParams,
 ): ClientAuthenticationHeaders {
-  body.set("client_id", client.clientId);
-  if (!client.clientSecret || client.tokenEndpointAuthMethod === "none") return {};
   if (client.tokenEndpointAuthMethod === "client_secret_basic") {
     return {
       authorization: `Basic ${Buffer.from(`${client.clientId}:${client.clientSecret}`).toString("base64")}`,
     };
   }
+  body.set("client_id", client.clientId);
+  if (!client.clientSecret || client.tokenEndpointAuthMethod === "none") return {};
   body.set("client_secret", client.clientSecret);
   return {};
 }
@@ -446,12 +488,13 @@ function parseTokens(
   failure: CompanionPluginOAuthError,
   previousRefreshToken: string | null = null,
   previousScope: string | null = null,
+  acceptedTokenTypes: readonly string[] = ["bearer"],
 ): CompanionPluginOAuthTokens {
   const accessToken = requiredString(raw.access_token, failure);
   if (/[\r\n\0]/.test(accessToken)) throw failure;
   const tokenTypeParsed = jsonStringSchema.safeParse(raw.token_type);
   const tokenType = tokenTypeParsed.success ? tokenTypeParsed.data : "Bearer";
-  if (tokenType.toLocaleLowerCase("en-US") !== "bearer") throw failure;
+  if (!acceptedTokenTypes.includes(tokenType.toLocaleLowerCase("en-US"))) throw failure;
   const refreshTokenParsed = jsonStringSchema.safeParse(raw.refresh_token);
   const refreshToken = refreshTokenParsed.success && refreshTokenParsed.data
     ? refreshTokenParsed.data
@@ -494,8 +537,8 @@ export async function completeCompanionPluginOAuth(input: {
     grant_type: "authorization_code",
     code: input.code,
     redirect_uri: input.redirectUri,
-    code_verifier: input.flow.codeVerifier,
   });
+  if (input.flow.codeVerifier !== null) body.set("code_verifier", input.flow.codeVerifier);
   if (usesResourceIndicator(input.flow.serverName)) {
     body.set("resource", input.flow.resource);
   }
@@ -510,10 +553,16 @@ export async function completeCompanionPluginOAuth(input: {
     input.fetchImpl ?? fetch,
     failure,
   );
-  const tokens = parseTokens(raw, new CompanionPluginOAuthError(
-    "The MCP server did not return a usable OAuth credential.",
-    "oauth_exchange_failed",
-  ));
+  const tokens = parseTokens(
+    raw,
+    new CompanionPluginOAuthError(
+      "The MCP server did not return a usable OAuth credential.",
+      "oauth_exchange_failed",
+    ),
+    null,
+    null,
+    isSlackServer(input.flow.serverName) ? ["bearer", "bot"] : ["bearer"],
+  );
   if (input.flow.serverName === "com.google.workspace/gmail" && !hasGmailScopes(tokens.scope)) {
     throw new CompanionPluginOAuthError(
       "Gmail did not grant both read and draft access.",
@@ -565,6 +614,7 @@ export async function refreshCompanionPluginOAuth(input: {
     refresh_token: input.credential.refreshToken,
   });
   const github = input.credential.serverName === "io.github.github/github-mcp-server";
+  const slack = isSlackServer(input.credential.serverName);
   if (usesResourceIndicator(input.credential.serverName)) {
     body.set("resource", input.credential.resource);
   }
@@ -594,6 +644,7 @@ export async function refreshCompanionPluginOAuth(input: {
     failure,
     input.credential.refreshToken,
     input.credential.scope,
+    slack ? ["bearer", "bot"] : ["bearer"],
   );
   if (input.credential.serverName === "com.google.workspace/gmail" && !hasGmailScopes(tokens.scope)) {
     throw failure;

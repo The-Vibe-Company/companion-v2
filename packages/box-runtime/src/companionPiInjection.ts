@@ -51,6 +51,7 @@ export interface CompanionStagedMcpAccount {
   oauthBroker?: {
     credentialGeneration: string;
     github: boolean;
+    slack?: true;
     allowedTools?: readonly string[];
   };
 }
@@ -60,6 +61,7 @@ export interface CompanionMcpGatewayAccount {
   credentialGeneration: string;
   upstreamUrl: string;
   github: boolean;
+  slack?: true;
   allowedTools?: string[];
 }
 
@@ -123,7 +125,7 @@ export function buildMcpAdapterInjection(
             : Object.fromEntries(
               Object.entries(account.headers).map(([key, envKey]) => [key, environmentReference(envKey)]),
             ),
-        };
+    };
     if (staged.oauthBroker && account.transport === "http") {
       const gatewayAccount: CompanionMcpGatewayAccount = {
         accountId: account.id,
@@ -131,6 +133,7 @@ export function buildMcpAdapterInjection(
         upstreamUrl: account.url,
         github: staged.oauthBroker.github,
       };
+      if (staged.oauthBroker.slack) gatewayAccount.slack = true;
       if (staged.oauthBroker.allowedTools) {
         gatewayAccount.allowedTools = [...staged.oauthBroker.allowedTools];
       }

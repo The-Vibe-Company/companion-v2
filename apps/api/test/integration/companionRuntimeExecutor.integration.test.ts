@@ -4373,6 +4373,32 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         `,
       });
       expect(connected).toEqual({ deliveryId: connectId, decisionStatus: "allowed" });
+      for (const provider of ["slack", "gmail"] as const) {
+        const providerKey = `config-connect-${provider}`;
+        const providerId = await insertPending(providerKey, {
+          kind: "config",
+          connect_plugin: {
+            server_name: provider,
+            reason: `Need ${provider} access`,
+          },
+        });
+        const [providerConnected] = await asApi({
+          orgId: ids.orgA,
+          actorId: ids.ownerA,
+          action: (tx) => tx<Array<{ deliveryId: string; decisionStatus: string }>>`
+            select delivery_id::text as "deliveryId",
+              decision_status::text as "decisionStatus"
+            from public.companion_api_answer_config_decision(
+              ${ids.orgA}::uuid, ${fixture.companionId}::uuid,
+              ${providerKey}, 'allow'
+            )
+          `,
+        });
+        expect(providerConnected).toEqual({
+          deliveryId: providerId,
+          decisionStatus: "allowed",
+        });
+      }
       const [afterConnect] = await sql<Array<{
         selectedSkillIds: unknown;
         desiredSettingsRevision: number;

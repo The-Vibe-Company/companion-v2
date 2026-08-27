@@ -238,6 +238,7 @@ export async function resolveRuntimeResources(input: {
         credentialGeneration: row.credentialGeneration,
         github: oauth.serverName === "io.github.github/github-mcp-server",
       };
+      if (oauth.serverName === "com.slack/mcp") oauthBroker.slack = true;
       if (oauth.serverName === "com.google.workspace/gmail") {
         oauthBroker.allowedTools = COMPANION_GMAIL_MCP_ALLOWED_TOOLS;
       }

@@ -629,6 +629,10 @@ describe("Companion chat contracts", () => {
     }).connect_plugin).toEqual({ server_name: "linear", reason: "Need issue search" });
     expect(companionConfigProposalSchema.parse({
       kind: "config",
+      connect_plugin: { server_name: "slack", reason: "Send the release update" },
+    }).connect_plugin).toEqual({ server_name: "slack", reason: "Send the release update" });
+    expect(companionConfigProposalSchema.parse({
+      kind: "config",
       connect_plugin: { server_name: "gmail", reason: "Need an email draft" },
     }).connect_plugin).toEqual({ server_name: "gmail", reason: "Need an email draft" });
     expect(companionConfigProposalMessageSchema.parse({
