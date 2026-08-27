@@ -280,6 +280,9 @@ test("native transcript taps dismiss the keyboard without consuming message cont
     /struct TranscriptKeyboardDismissGesture: UIGestureRecognizerRepresentable/,
   );
   assert.match(chat, /recognizer\.cancelsTouchesInView = false/);
+  assert.match(chat, /shouldRecognizeSimultaneouslyWith/);
+  assert.match(chat, /recognizer\.delegate = context\.coordinator/);
+  assert.match(chat, /\) -> Bool \{\s*true\s*\}/);
   assert.match(
     transcript,
     /\.gesture\(\s*TranscriptKeyboardDismissGesture \{\s*composerKeyboardDismissalRequest \+= 1\s*\}\s*\)/,
@@ -289,6 +292,7 @@ test("native transcript taps dismiss the keyboard without consuming message cont
   assert.match(uiTests, /testTranscriptTapDismissesKeyboardWithoutBlockingMessageControls/);
   assert.match(uiTests, /transcriptMessage\.tap\(\)/);
   assert.match(uiTests, /predicate: NSPredicate\(format: "exists == false"\)/);
+  assert.match(uiTests, /for _ in 0\.\.<3 where !toolCard\.exists \{\s*app\.swipeDown\(\)/);
   assert.match(uiTests, /toolCard\.tap\(\)/);
   assert.match(uiTests, /\["tool-run\.detail"\]\.waitForExistence/);
   assert.match(

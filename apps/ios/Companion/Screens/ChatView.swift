@@ -55,9 +55,23 @@ private final class ChatRefreshGate {
 private struct TranscriptKeyboardDismissGesture: UIGestureRecognizerRepresentable {
     let onTap: () -> Void
 
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            true
+        }
+    }
+
+    func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator {
+        Coordinator()
+    }
+
     func makeUIGestureRecognizer(context: Context) -> UITapGestureRecognizer {
         let recognizer = UITapGestureRecognizer()
         recognizer.cancelsTouchesInView = false
+        recognizer.delegate = context.coordinator
         return recognizer
     }
 
