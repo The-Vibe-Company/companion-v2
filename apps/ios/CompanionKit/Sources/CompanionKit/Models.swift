@@ -225,6 +225,36 @@ public enum CompanionRuntimeRestartTarget: String, Codable, Equatable, Hashable,
     case box
 }
 
+/// The transport used by a freshly minted Box desktop stream.
+public enum CompanionDesktopTransport: String, Codable, Equatable, Hashable, Sendable {
+    case vnc
+    case webrtc
+    case unknown
+
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = Self(rawValue: value) ?? .unknown
+    }
+}
+
+/// One short-lived, authorized handoff to the Companion's existing Box desktop.
+///
+/// The URL is secret-bearing and must stay in memory only. Each request mints a new stream; clients
+/// must never persist or log it, and opening desktop access never wakes a stopped Box.
+public struct CompanionDesktop: Codable, Equatable, Sendable {
+    public let desktopURL: URL?
+    public let provisioning: Bool
+    public let automation: String
+    public let transport: CompanionDesktopTransport?
+
+    enum CodingKeys: String, CodingKey {
+        case desktopURL = "desktop_url"
+        case provisioning
+        case automation
+        case transport
+    }
+}
+
 public enum CompanionAccess: String, Codable, Hashable, Sendable {
     case owner
     case editor

@@ -487,6 +487,18 @@ public actor APIClient {
         ).companion
     }
 
+    /// Mints a fresh, short-lived URL for the existing Box desktop. This route authorizes
+    /// Owner/Editor access but cannot start or wake the Box.
+    public func openCompanionDesktop(companionID: String) async throws -> CompanionDesktop {
+        let id = Self.encodedPathComponent(companionID)
+        return try await decode(
+            CompanionDesktop.self,
+            path: "/v1/companions/\(id)/runtime/desktop",
+            method: "POST",
+            body: nil
+        )
+    }
+
     public func restartCompanion(
         companionID: String,
         target: CompanionRuntimeRestartTarget,

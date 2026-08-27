@@ -12,7 +12,7 @@ Auth to consume the same skill APIs. Hosted Companions use a separate authentica
 boundary; Agent Auth never grants Box lifecycle access.
 
 Each member may store one IANA timezone in their personal profile. It is shared across their
-workspaces and first-party web and iOS clients, not inferred from a per-message client header. The
+workspaces and first-party web, iOS, and macOS clients, not inferred from a per-message client header. The
 clients offer their browser or device timezone as the initial choice. When it is unset, runtime uses
 UTC until the member saves an override.
 
@@ -64,7 +64,7 @@ slash-separated, multi-assigned, and may exist without skills.
 9. Return to a durable thread that truthfully shows queued, active, input-needed, completed, failed,
    interrupted, or cancelled work, and explicitly Retry or Cancel an ambiguous attempt.
 10. See and create routine schedules, trigger activity, and Companion time references in the
-    member's stored timezone on both web and native iOS.
+    member's stored timezone on web and native Apple clients.
 
 ## Hosted Companion boundary
 
@@ -94,6 +94,6 @@ deployment management, or generic AI application builder. Scheduled Companion ro
 scope: Owner/Editor-gated cron prompts that enqueue ordinary turns. Webhook-fired Companion
 triggers are in scope: Owner/Editor-gated named prompts that an external webhook URL fires as
 ordinary turns. Chat files are in scope and bounded: images and documents sent with a message, and
-images Pi hands back from a turn. The iOS app is planned as a complete Companion client over the
-same API, not a reduced product surface: Skills, Plugins, MCP connections, files, routines,
+images Pi hands back from a turn. The iOS and macOS apps are complete Companion clients over the
+same API, not reduced product surfaces: Skills, Plugins, MCP connections, files, routines,
 triggers, sharing, settings, and the remaining browser workflows migrate milestone by milestone.
