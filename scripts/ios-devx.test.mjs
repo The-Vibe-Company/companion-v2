@@ -289,7 +289,7 @@ test("native chat reading restoration stays deterministic and delegated to Apple
   assert.notEqual(acceptedThread, -1);
   assert.ok(observedTail > acceptedThread);
   assert.match(chat, /let renderedScrollRevision = scrollContentRevision/);
-  const scrollRevisionObserver = chat.indexOf(".task(id: renderedScrollRevision)");
+  const scrollRevisionObserver = chat.indexOf(".task(id: renderedScrollDeliveryRevision)");
   const deferredScrollDelivery = chat.indexOf("await Task.yield()", scrollRevisionObserver);
   const consumedScrollRequest = chat.indexOf(
     "scrollCoordinator.takePendingRequest()",
@@ -300,15 +300,26 @@ test("native chat reading restoration stays deterministic and delegated to Apple
   assert.ok(consumedScrollRequest > deferredScrollDelivery);
   assert.match(
     chat.slice(deferredScrollDelivery, consumedScrollRequest),
-    /renderedScrollRevision == scrollContentRevision/,
+    /renderedScrollDeliveryRevision\.contentRevision\s*== scrollContentRevision/,
   );
   const lazyTranscriptTargets = chat.indexOf(".scrollTargetLayout()");
-  const eagerBottomTarget = chat.indexOf(
-    'Color.clear.frame(height: 1).id("bottom")',
-    lazyTranscriptTargets,
-  );
+  const eagerBottomTarget = chat.indexOf('.id("bottom")', lazyTranscriptTargets);
   assert.notEqual(lazyTranscriptTargets, -1);
   assert.ok(eagerBottomTarget > lazyTranscriptTargets);
+  const initialLayoutHandshake = chat.indexOf(
+    ".onGeometryChange(for: BottomDestinationLayoutSignal.self)",
+    lazyTranscriptTargets,
+  );
+  assert.ok(initialLayoutHandshake > eagerBottomTarget);
+  assert.match(
+    chat.slice(initialLayoutHandshake, chat.indexOf("bottomControls(", initialLayoutHandshake)),
+    /markInitialBottomReady/,
+  );
+  assert.match(
+    chat.slice(deferredScrollDelivery, consumedScrollRequest),
+    /pendingRequest\.source == \.initial[\s\S]*initialBottomReadyRevision/,
+  );
+  assert.equal(chat.match(/scrollCoordinator\.takePendingRequest\(\)/g)?.length, 1);
   const scrollOwner = chat.indexOf("private func performScroll");
   assert.notEqual(scrollOwner, -1);
   assert.doesNotMatch(chat.slice(0, scrollOwner), /proxy\.scrollTo\(/);

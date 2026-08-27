@@ -28,6 +28,16 @@ private struct AssistantTailChange: Equatable, Sendable {
     let nextContent: String
 }
 
+private struct ScrollDeliveryRevision: Equatable {
+    let contentRevision: Int
+    let initialBottomReadyRevision: Int?
+}
+
+private struct BottomDestinationLayoutSignal: Equatable {
+    let contentRevision: Int
+    let minY: CGFloat
+}
+
 /// Fences overlapping refresh tasks without making each poll a SwiftUI-observed state mutation.
 private final class ChatRefreshGate {
     private var revision = 0
@@ -73,6 +83,7 @@ struct ChatView: View {
     @State private var unseenCount = 0
     @State private var loadingEarlier = false
     @State private var scrollContentRevision = 0
+    @State private var initialBottomReadyRevision: Int?
     @State private var pendingReadingPosition: CompanionChatReadingPosition?
     @State private var lastReportedReadingPosition: CompanionChatReadingPosition?
     @State private var visibleEntryIDs: [String] = []
@@ -115,6 +126,10 @@ struct ChatView: View {
         let renderedEntries = visibleEntries
         let queuedEntries = queuedEntries(in: thread)
         let renderedScrollRevision = scrollContentRevision
+        let renderedScrollDeliveryRevision = ScrollDeliveryRevision(
+            contentRevision: renderedScrollRevision,
+            initialBottomReadyRevision: initialBottomReadyRevision
+        )
         CompanionBackdrop {
             ScrollViewReader { proxy in
                 VStack(spacing: 0) {
@@ -194,7 +209,24 @@ struct ChatView: View {
 
                             // Keep the coordinator's bottom destination outside the lazy stack.
                             // Its identity then exists before any programmatic scroll is consumed.
-                            Color.clear.frame(height: 1).id("bottom")
+                            Color.clear
+                                .frame(height: 1)
+                                .id("bottom")
+                                .onGeometryChange(for: BottomDestinationLayoutSignal.self) { geometry in
+                                    BottomDestinationLayoutSignal(
+                                        contentRevision: renderedScrollRevision,
+                                        minY: geometry.frame(
+                                            in: .scrollView(axis: .vertical)
+                                        ).minY
+                                    )
+                                } action: { _, signal in
+                                    // An initial request is not safe to consume merely because a
+                                    // render task yielded: the lazy transcript may not have placed
+                                    // this destination yet. A revision-tagged geometry evaluation
+                                    // is the deterministic layout-readiness handshake. It only
+                                    // wakes the sole delivery task; it never performs a scroll.
+                                    markInitialBottomReady(for: signal.contentRevision)
+                                }
                         }
                         .padding(.horizontal, 16)
                         .padding(.top, 16)
@@ -288,14 +320,20 @@ struct ChatView: View {
                     reduceMotion ? nil : .easeOut(duration: 0.18),
                     value: isNearBottom
                 )
-                .task(id: renderedScrollRevision) {
+                .task(id: renderedScrollDeliveryRevision) {
                     // Unlike onChange, an id-scoped task also runs for the value installed with a
                     // newly rendered transcript. A newer revision cancels this task before the
                     // coordinator is consumed, coalescing same-turn producers at one boundary.
                     await Task.yield()
                     guard !Task.isCancelled,
-                          renderedScrollRevision == scrollContentRevision,
-                          let request = scrollCoordinator.takePendingRequest() else { return }
+                          renderedScrollDeliveryRevision.contentRevision
+                            == scrollContentRevision,
+                          let pendingRequest = scrollCoordinator.pendingRequest else { return }
+                    if pendingRequest.source == .initial {
+                        guard renderedScrollDeliveryRevision.initialBottomReadyRevision
+                            == renderedScrollRevision else { return }
+                    }
+                    guard let request = scrollCoordinator.takePendingRequest() else { return }
                     performScroll(to: request, with: proxy)
                 }
             }
@@ -1135,6 +1173,13 @@ struct ChatView: View {
         }
     }
 
+    private func markInitialBottomReady(for renderedRevision: Int) {
+        guard renderedRevision == scrollContentRevision,
+              scrollCoordinator.pendingRequest?.source == .initial,
+              initialBottomReadyRevision != renderedRevision else { return }
+        initialBottomReadyRevision = renderedRevision
+    }
+
     private func finishReadingPositionRestoration() {
         restorationTargetEventID = nil
         restorationScrollPerformed = false
@@ -1166,6 +1211,7 @@ struct ChatView: View {
         restorationTargetEventID = nil
         restorationScrollPerformed = false
         lastReportedReadingPosition = nil
+        initialBottomReadyRevision = nil
         scrollContentRevision &+= 1
     }
 

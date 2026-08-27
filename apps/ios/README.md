@@ -129,7 +129,9 @@ lane performs the actual Swift build and simulator geometry checks. This keeps c
 deterministic without installing or invoking XcodeBuildMCP in CI.
 The poll-stability assertion launches that fixture, observes the latest entry across one real
 four-second poll, and verifies that the latest entry remains hittable without a scroll-to-bottom
-overlay. Its scroll decision is delegated to the shared `CompanionScrollCoordinator`, so repeated
+overlay. Initial delivery waits for the eager bottom destination's post-transcript geometry instead
+of guessing that a yielded render task has completed layout. Its scroll decision is delegated to
+the shared `CompanionScrollCoordinator`, so repeated
 unchanged snapshots do not compete with the rendered viewport.
 The same fixture can switch between Luna and Orbit to verify that the roster-scoped, in-memory
 reading-position store restores the first visible message without animated hydration. CompanionKit
