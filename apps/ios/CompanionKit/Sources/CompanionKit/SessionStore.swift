@@ -506,15 +506,17 @@ public final class SessionStore {
         }
     }
 
-    public func createCompanionTranscriptionSession(
-        companionID: String
-    ) async throws -> CompanionTranscriptionSession {
+    public func transcribeCompanionAudio(
+        companionID: String,
+        audio: Data
+    ) async throws -> CompanionTranscription {
         do {
-            let session = try await client.createCompanionTranscriptionSession(
-                companionID: companionID
+            let transcription = try await client.transcribeCompanionAudio(
+                companionID: companionID,
+                audio: audio
             )
             await persistRollingAuthority()
-            return session
+            return transcription
         } catch let error as APIError where error.status == 401 {
             await clearLocalSession()
             throw error

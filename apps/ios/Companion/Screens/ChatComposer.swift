@@ -84,9 +84,7 @@ struct ChatComposer: View {
                         .accessibilityLabel("Attachment error: \(attachmentError)")
                 }
 
-                if transcriptionAvailable && (transcription.isBusy
-                    || !transcription.liveTranscript.isEmpty
-                    || transcriptionFailed) {
+                if transcriptionAvailable && (transcription.isBusy || transcriptionFailed) {
                     VoiceTranscriptionStatusView(controller: transcription)
                         .padding(.horizontal, 2)
                 }
@@ -145,8 +143,7 @@ struct ChatComposer: View {
                             Button(action: toggleTranscription) {
                                 Group {
                                     if transcription.phase == .requestingPermission
-                                        || transcription.phase == .connecting
-                                        || transcription.phase == .finishing {
+                                        || transcription.phase == .processing {
                                         ProgressView().controlSize(.small)
                                     } else {
                                         Image(systemName: transcription.isRecording ? "stop.fill" : "mic.fill")
@@ -164,7 +161,7 @@ struct ChatComposer: View {
                             .accessibilityHint(
                                 transcription.isBusy
                                     ? "Stops recording and adds the transcript to the message field."
-                                    : "Records speech and sends audio to Google for live transcription."
+                                    : "Records speech, then uses recent conversation to improve the transcript."
                             )
                             .accessibilityIdentifier("chat.transcription.toggle")
                         }
@@ -252,7 +249,7 @@ struct ChatComposer: View {
     }
 
     private var transcriptionButtonDisabled: Bool {
-        if case .finishing = transcription.phase { return true }
+        if case .processing = transcription.phase { return true }
         return !transcription.isBusy && (sending || selectingAttachments || canSend != true)
     }
 
@@ -263,12 +260,12 @@ struct ChatComposer: View {
 
     private var transcriptionButtonLabel: String {
         switch transcription.phase {
-        case .requestingPermission, .connecting:
+        case .requestingPermission:
             "Cancel voice transcription"
         case .recording:
             "Stop recording"
-        case .finishing:
-            "Finishing voice transcription"
+        case .processing:
+            "Processing voice transcription"
         case .idle, .failed:
             "Start voice transcription"
         }
@@ -277,13 +274,11 @@ struct ChatComposer: View {
     private var transcriptionAccessibilityValue: String {
         switch transcription.phase {
         case .recording:
-            transcription.reconnecting ? "Recording, reconnecting" : "Recording"
+            "Recording"
         case .requestingPermission:
             "Waiting for microphone permission"
-        case .connecting:
-            "Connecting"
-        case .finishing:
-            "Finishing"
+        case .processing:
+            "Processing"
         case .failed(let message):
             message
         case .idle:
@@ -299,9 +294,10 @@ struct ChatComposer: View {
         }
         guard canSend == true, transcriptionAvailable else { return }
         let targetCompanionID = companionID
-        transcription.start {
-            try await sessionStore.createCompanionTranscriptionSession(
-                companionID: targetCompanionID
+        transcription.start { audio in
+            try await sessionStore.transcribeCompanionAudio(
+                companionID: targetCompanionID,
+                audio: audio
             )
         }
     }

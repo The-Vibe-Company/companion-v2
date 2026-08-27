@@ -385,21 +385,32 @@ New explicit recovery actions are:
   release an interrupted turn.
 
 Native iOS composer dictation uses
-`POST /v1/companions/:id/transcription-sessions`. The route requires current Owner/Editor access,
-uses the API-only `COMPANION_GEMINI_TRANSCRIPTION_API_KEY`, and vends a single-use, short-lived
-Gemini Live token with a one-minute new-session window and ten-minute expiry. Google currently
-rejects `liveConnectConstraints` on the deployed authorization-key path, so the token request does
-not lock model/config; the first-party client selects `gemini-3.5-transcribe-live`, text output,
-Smart transcription, and automatic language detection in its setup message. This deployment-owned
-key enables the capability for every workspace. Thread reads expose only a boolean availability bit
-so clients omit the control when the key is absent. The client then sends microphone audio directly
-to Google's constrained Live WebSocket. The API returns no long-lived key and never proxies, stores,
-logs, or projects audio. Failed token exchanges emit only the structured process event
+`POST /v1/companions/:id/transcriptions`. The route requires current Owner/Editor access before
+reading the body, accepts exactly one sniffed `audio/mp4` file up to 8 MB, and uses the API-only
+`COMPANION_GEMINI_TRANSCRIPTION_API_KEY`. The API reads at most 12 recent durable user/assistant
+entries within a 24,000-character budget, serializes them as explicitly untrusted reference data,
+and sends that reference plus the audio in one user request to the fixed `gemini-3.7-flash` model.
+Transcript entries are never projected as provider dialogue roles, so instruction-shaped text in
+history cannot acquire instruction authority. The prompt requires verbatim original-language transcription and
+allows history only to resolve names, references, terminology, punctuation, and language; it must
+not answer, continue, summarize, or implicitly translate the conversation. Low thinking and a
+bounded text output keep the request focused.
+
+The iOS client records 16 kHz mono AAC locally and uploads only after Stop. The deployment-owned key
+enables the capability for every workspace; thread reads expose only a boolean availability bit so
+clients omit the control when the key is absent. The API returns only the final transcript and never
+stores, logs, or projects the audio, bounded context copy, provider request, or raw response. Failed
+provider calls emit only the structured process event
 `api.companion_transcription.provider_failure`, a safe category (`transport`, `4xx`, `5xx`, or
 `invalid_response`), and the numeric HTTP status when Google returned one. The event never carries
-the key, request URL, response body, thrown provider diagnostic, member identity, or audio. This
-shared, capability-named endpoint is not a client-surface
+the key, request URL, response body, thrown provider diagnostic, member identity, Companion identity,
+conversation text, or audio. This shared, capability-named endpoint is not a client-surface
 discriminator; another first-party client could adopt the same contract later.
+
+The API temporarily retains `POST /v1/companions/:id/transcription-sessions` with its constrained
+legacy response so already-installed native builds remain functional while the new API is deployed
+before the new client. The current client does not call that endpoint and receives no provider token.
+Remove the compatibility route only after the legacy native build is outside the support window.
 
 `POST /v1/hooks/triggers/:triggerId/:secret` fires a webhook-fired Companion trigger — the
 event-driven sibling of a routine. Like the Stripe webhook it is registered before session

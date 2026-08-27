@@ -533,15 +533,24 @@ public actor APIClient {
         try await decode(CompanionProvidersResponse.self, path: "/v1/companion-providers")
     }
 
-    public func createCompanionTranscriptionSession(
-        companionID: String
-    ) async throws -> CompanionTranscriptionSession {
+    public func transcribeCompanionAudio(
+        companionID: String,
+        audio: Data
+    ) async throws -> CompanionTranscription {
+        guard !audio.isEmpty else { throw CompanionTranscriptionError.emptyAudio }
+        guard audio.count <= companionTranscriptionAudioMaximumBytes else {
+            throw CompanionTranscriptionError.audioTooLarge
+        }
         let companion = Self.encodedPathComponent(companionID)
+        let boundary = "CompanionTranscriptionBoundary-\(UUID().uuidString)"
+        let body = Self.transcriptionMultipartBody(boundary: boundary, audio: audio)
         return try await decode(
-            CompanionTranscriptionSession.self,
-            path: "/v1/companions/\(companion)/transcription-sessions",
+            CompanionTranscription.self,
+            path: "/v1/companions/\(companion)/transcriptions",
             method: "POST",
-            body: Data("{}".utf8)
+            body: body,
+            additionalHeaders: ["Content-Type": "multipart/form-data; boundary=\(boundary)"],
+            timeout: 90
         )
     }
 
@@ -982,6 +991,18 @@ public actor APIClient {
             try? FileManager.default.removeItem(at: url)
             throw error
         }
+    }
+
+    private static func transcriptionMultipartBody(boundary: String, audio: Data) -> Data {
+        var body = Data()
+        body.append(Data("--\(boundary)\r\n".utf8))
+        body.append(Data(
+            "Content-Disposition: form-data; name=\"audio\"; filename=\"recording.m4a\"\r\n".utf8
+        ))
+        body.append(Data("Content-Type: audio/mp4\r\n\r\n".utf8))
+        body.append(audio)
+        body.append(Data("\r\n--\(boundary)--\r\n".utf8))
+        return body
     }
 
     static func sessionCookie(from response: HTTPURLResponse) -> String? {

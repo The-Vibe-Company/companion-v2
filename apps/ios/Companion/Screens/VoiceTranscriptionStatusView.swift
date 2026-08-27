@@ -23,15 +23,8 @@ struct VoiceTranscriptionStatusView: View {
                 }
             }
 
-            if !controller.liveTranscript.isEmpty {
-                Text(controller.liveTranscript)
-                    .font(.subheadline)
-                    .foregroundStyle(Color.companionInk)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .lineLimit(4)
-                    .accessibilityLabel("Live transcript: \(controller.liveTranscript)")
-            } else if controller.isBusy {
-                Text(controller.phase == .finishing ? "Finishing transcript…" : "Start speaking when recording begins.")
+            if controller.isBusy {
+                Text(statusDetail)
                     .font(.subheadline)
                     .foregroundStyle(Color.companionMuted)
             }
@@ -42,7 +35,7 @@ struct VoiceTranscriptionStatusView: View {
                     .foregroundStyle(Color.companionDanger)
                     .accessibilityLabel("Transcription error: \(message)")
             } else {
-                Label("Audio is sent to Google while recording.", systemImage: "lock.shield")
+                Label("Audio and recent conversation are processed for transcription.", systemImage: "lock.shield")
                     .font(.caption)
                     .foregroundStyle(Color.companionMuted)
             }
@@ -65,7 +58,7 @@ struct VoiceTranscriptionStatusView: View {
     @ViewBuilder
     private var statusSymbol: some View {
         switch controller.phase {
-        case .requestingPermission, .connecting, .finishing:
+        case .requestingPermission, .processing:
             ProgressView()
                 .controlSize(.small)
                 .tint(Color.companionDanger)
@@ -98,14 +91,25 @@ struct VoiceTranscriptionStatusView: View {
             "Transcription"
         case .requestingPermission:
             "Requesting microphone access"
-        case .connecting:
-            "Connecting to Google"
         case .recording:
-            controller.reconnecting ? "Recording · Reconnecting" : "Recording"
-        case .finishing:
-            "Finishing transcription"
+            "Recording"
+        case .processing:
+            "Processing transcription"
         case .failed:
             "Transcription stopped"
+        }
+    }
+
+    private var statusDetail: String {
+        switch controller.phase {
+        case .requestingPermission:
+            "Recording will start after microphone access is granted."
+        case .recording:
+            "Your transcript will appear after you stop recording."
+        case .processing:
+            "Using recent conversation to improve names and references."
+        case .idle, .failed:
+            ""
         }
     }
 

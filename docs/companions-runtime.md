@@ -969,26 +969,34 @@ dedicated `WKWebView` window. The URL is held in memory only and reminted for re
 window cannot wake Box, while Viewer access remains PostgreSQL-only.
 
 The native composer may transcribe microphone input into editable text before send. This remains
-outside Runtime v2: an authenticated Owner/Editor requests a single-use, timing-bounded Gemini Live
-token through `POST /v1/companions/:id/transcription-sessions`, then the device streams PCM directly
-to Google. The token is limited to one use, a one-minute new-session window, and a ten-minute expiry;
-its provisioning request omits `liveConnectConstraints` because Google currently rejects that field
-on the deployed authorization-key path. The iOS setup still selects
-`gemini-3.5-transcribe-live` and transcription-only configuration on Google's constrained WebSocket.
+outside Runtime v2: the device records compressed 16 kHz mono AAC locally, then an authenticated
+Owner/Editor posts one recording of at most 8 MB to
+`POST /v1/companions/:id/transcriptions`. The API reauthorizes before reading the body, loads at most
+12 recent durable user/assistant entries within 24,000 characters, and makes one stateless
+`gemini-3.7-flash` request containing the audio and history serialized as untrusted reference data,
+not provider dialogue turns. History is reference-only context for names, references, terminology,
+punctuation, and language; instruction-shaped history remains quoted data and the result must remain a verbatim
+original-language transcript rather than an answer, continuation, summary, or implicit translation.
 The API-only
 `COMPANION_GEMINI_TRANSCRIPTION_API_KEY` enables this input method for every workspace and is never
 returned to iOS; when it is absent, thread projections mark transcription unavailable and clients
-omit the microphone. The API never relays or stores audio. Stopping
-dictation leaves ordinary text in the composer, and only the later message send creates a durable
-turn. Viewer has no composer or transcription control, and no transcription action contacts or
-wakes Box/Pi.
+omit the microphone. The API holds audio, its bounded history copy, and the raw provider response
+only for the request lifetime and never stores or logs them. Stopping dictation processes the audio
+and leaves ordinary text in the composer; only the later message send creates a durable turn. Viewer
+has no composer or transcription control, and no transcription action contacts or wakes Box/Pi.
 
-An unsuccessful Google token exchange emits
+For an API-first native rollout, the deprecated
+`POST /v1/companions/:id/transcription-sessions` endpoint remains available to installed older
+clients. It preserves the prior constrained ephemeral-token contract only; current clients use the
+finished-recording endpoint and never receive a provider token. Retire this compatibility endpoint
+only after the legacy client support window ends.
+
+An unsuccessful transcription request emits
 `api.companion_transcription.provider_failure` with only `providerId=google`, the category
 `transport`, `4xx`, `5xx`, or `invalid_response`, and the numeric HTTP status when one exists. It
 must not include the API key, Google URL or response body, thrown provider diagnostic, member or
-Companion identifiers, or audio. This API process event is diagnostic only and never changes the
-client's expurgated provider error.
+Companion identifiers, conversation context, or audio. This API process event is diagnostic only and
+never changes the client's expurgated provider error.
 
 After an active session is restored, the app requests alert/sound permission and registers its
 current APNs token through the shared cookie-authenticated API. The installation UUID is stable per

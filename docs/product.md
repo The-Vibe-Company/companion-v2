@@ -107,8 +107,9 @@ ordinary turns. Chat files are in scope and bounded: images and documents sent w
 images Pi hands back from a turn. The iOS and macOS apps are complete Companion clients over the
 same API, not reduced product surfaces: Skills, Plugins, MCP connections, files, routines,
 triggers, sharing, settings, and the remaining browser workflows migrate milestone by milestone.
-Native iOS dictation is an input method exception: microphone audio is transiently sent directly to
-Google for transcription and becomes editable composer text before an ordinary message is sent. It
-does not create an audio turn or change Runtime v2. A deployment-owned API key enables it for every
-workspace; without that key, the API reports the capability unavailable and native clients hide the
-microphone.
+Native iOS dictation is an input method exception: compressed microphone audio is transiently sent
+through the API and transcribed with a bounded window of recent user/assistant messages as context.
+It becomes editable composer text before an ordinary message is sent, creates no audio turn, and
+does not change Runtime v2. Neither audio nor the provider response is persisted. A deployment-owned
+API key enables it for every workspace; without that key, the API reports the capability unavailable
+and native clients hide the microphone.

@@ -57,6 +57,7 @@ import {
   createCompanionRoutineV2,
   createCompanionTriggerV2,
   createCompanionTranscriptionSession,
+  transcribeCompanionAudio,
   deleteCompanionRoutineV2,
   deleteCompanionTriggerV2,
   duplicateCompanionV2,
@@ -107,14 +108,17 @@ import {
 import {
   COMPANION_ATTACHMENT_MAX_BYTES,
   COMPANION_MESSAGE_ATTACHMENT_MAX_COUNT,
+  COMPANION_TRANSCRIPTION_AUDIO_CONTENT_TYPE,
+  COMPANION_TRANSCRIPTION_AUDIO_MAX_BYTES,
   type CompanionAttachmentUpload,
   type CompanionRuntimeSafeError,
   type CompanionThread,
   type CompanionTurn,
   type SendCompanionMessageInput,
+  companionTranscriptionSchema,
   companionTranscriptionSessionSchema,
-  createCompanionInputSchema,
   createCompanionTranscriptionSessionInputSchema,
+  createCompanionInputSchema,
   createCompanionRoutineInputSchema,
   createCompanionTriggerInputSchema,
   declaredCompanionAttachmentContentType,
@@ -213,6 +217,7 @@ function defaultCompanionRouteDependencies() {
     updateCompanionRoutineV2,
     deleteCompanionRoutineV2,
     createCompanionTranscriptionSession,
+    transcribeCompanionAudio,
     answerCompanionRoutineDecisionV2,
     listCompanionTriggersV2,
     createCompanionTriggerV2,
@@ -587,6 +592,7 @@ export function registerCompanionRoutes(
     updateCompanionRoutineV2,
     deleteCompanionRoutineV2,
     createCompanionTranscriptionSession,
+    transcribeCompanionAudio,
     answerCompanionRoutineDecisionV2,
     listCompanionTriggersV2,
     createCompanionTriggerV2,
@@ -745,8 +751,6 @@ export function registerCompanionRoutes(
       const transcriptionDiagnostics = createCompanionTranscriptionDiagnostics();
       try {
         const companionId = companionIdSchema.parse(c.req.param("id"));
-        // The body exists only for a uniform POST shape. No audio, language, model, or other
-        // provider setting is accepted from a client; the core exchange below owns the fixed config.
         const rawBody = await c.req.text();
         createCompanionTranscriptionSessionInputSchema.parse(
           rawBody.trim().length === 0 ? {} : JSON.parse(rawBody),
@@ -765,6 +769,74 @@ export function registerCompanionRoutes(
           });
         });
         return c.json(companionTranscriptionSessionSchema.parse(session));
+      } catch (error) {
+        transcriptionDiagnostics.reportInvalidResponse();
+        return routeError(c, error);
+      }
+    },
+  );
+
+  app.post(
+    "/v1/companions/:id/transcriptions",
+    async (c, next) => {
+      try {
+        actorFromContext(c);
+        const companionId = companionIdSchema.parse(c.req.param("id"));
+        await tenant(c, async ({ actor, orgId, database }) => {
+          const companion = await getCompanion({ actor, orgId, companionId, database });
+          if (companion.access === "viewer") throw new CompanionRuntimeForbiddenError();
+        });
+      } catch (error) {
+        return routeError(c, error);
+      }
+      await next();
+    },
+    bodyLimit({
+      maxSize: COMPANION_TRANSCRIPTION_AUDIO_MAX_BYTES + 128 * 1024,
+      onError: (c) => jsonError(c, "voice recording exceeds the 8 MB limit", 413),
+    }),
+    async (c) => {
+      c.header("Cache-Control", "private, no-store");
+      c.header("Pragma", "no-cache");
+      const transcriptionDiagnostics = createCompanionTranscriptionDiagnostics();
+      try {
+        const companionId = companionIdSchema.parse(c.req.param("id"));
+        if (!(c.req.header("content-type") ?? "").includes("multipart/form-data")) {
+          return jsonError(c, "voice transcription requires multipart audio", 400);
+        }
+        const form = await c.req.formData();
+        const audioParts = form.getAll("audio");
+        if ([...form.keys()].some((key) => key !== "audio")
+          || audioParts.length !== 1
+          || !(audioParts[0] instanceof File)) {
+          return jsonError(c, "voice transcription requires exactly one audio file", 400);
+        }
+        const file = audioParts[0];
+        if (file.type !== COMPANION_TRANSCRIPTION_AUDIO_CONTENT_TYPE
+          || file.size === 0
+          || file.size > COMPANION_TRANSCRIPTION_AUDIO_MAX_BYTES) {
+          return jsonError(c, "voice recording is missing or unsupported", 400);
+        }
+        const audio = Buffer.from(await file.arrayBuffer());
+        if (audio.length < 12 || audio.subarray(4, 8).toString("ascii") !== "ftyp") {
+          return jsonError(c, "voice recording is missing or unsupported", 400);
+        }
+        const transcription = await tenant(c, async ({ actor, orgId, database }) => {
+          const companion = await getCompanion({ actor, orgId, companionId, database });
+          if (companion.access === "viewer") throw new CompanionRuntimeForbiddenError();
+          return await transcribeCompanionAudio({
+            actor,
+            orgId,
+            companionId,
+            companion,
+            audio,
+            contentType: COMPANION_TRANSCRIPTION_AUDIO_CONTENT_TYPE,
+            apiKey: transcriptionApiKey,
+            database,
+            fetchImpl: transcriptionDiagnostics.fetchImpl,
+          });
+        });
+        return c.json(companionTranscriptionSchema.parse(transcription));
       } catch (error) {
         transcriptionDiagnostics.reportInvalidResponse();
         return routeError(c, error);

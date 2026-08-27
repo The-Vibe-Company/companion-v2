@@ -279,11 +279,11 @@ client's id and secret as `COMPANION_MCP_GMAIL_CLIENT_ID` and
 restricted mailbox consent. External Google apps must complete the applicable OAuth verification
 and restricted-scope security assessment before production use.
 
-### Gemini transcription is temporarily unavailable
+### Contextual transcription is temporarily unavailable
 
-Native dictation requests a single-use, timing-bounded token from Google before the device opens its
-Live API socket. Search only the expurgated API event; never capture the request, response, key, or
-audio:
+Native dictation uploads one bounded recording after Stop; the API adds bounded recent dialogue and
+makes one stateless provider request. Search only the expurgated API event; never capture the request,
+response, key, conversation context, or audio:
 
 ```bash
 python3 .claude/skills/debug-companions-prod/scripts/railway_logs.py \
@@ -291,20 +291,20 @@ python3 .claude/skills/debug-companions-prod/scripts/railway_logs.py \
   --grep 'api.companion_transcription.provider_failure' --raw
 ```
 
-- `transport`: Railway could not complete the Google request within the bounded exchange; retry once
+- `transport`: Railway could not complete the provider request within its deadline; retry once
   after checking provider status and network reachability.
 - `4xx`: inspect only the numeric status. Rotate or correct the API-only
   `COMPANION_GEMINI_TRANSCRIPTION_API_KEY`, its Gemini API restriction, project access, billing, and
-  model availability. A repeated `400` after a key rotation can also indicate that Google has
-  rejected an auth-token request field; compare the request shape with the current official
-  ephemeral-token documentation without recording Google's response. Never move the key to web,
+  `gemini-3.7-flash` availability. A repeated `400` after a key rotation can also indicate that the
+  provider rejected the multimodal request shape; compare it with current audio-input documentation
+  without recording the response. Never move the key to web,
   runtime, worker, or a client.
 - `5xx`: treat repeated failures as a Google incident; record timestamps and counts, never payloads.
-- `invalid_response`: Google returned success without the expected token identifier; preserve the
+- `invalid_response`: Google returned success without one bounded final transcript; preserve the
   safe event and escalate without copying the response body.
 
-After changing the key, redeploy API and request a new transcription session. An already issued
-ephemeral token is single-use and must not be replayed.
+After changing the key, redeploy API and submit a new recording. Never replay an audio request
+automatically because the earlier provider call may have completed.
 
 ### A turn's attachments failed
 
