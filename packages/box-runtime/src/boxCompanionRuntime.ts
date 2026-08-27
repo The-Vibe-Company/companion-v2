@@ -613,7 +613,7 @@ function companionCapabilityInstructions(includeHub: boolean): string {
       "- Skills: the skill packages selected for you are already installed and loaded. You do not install",
       "  them to use them.",
       "- Plugins: connected MCP servers appear as tools prefixed `mcp`. What is connected is what you have.",
-      "  An attached plugin also stages its own skill (for example `plugin-github` or `plugin-linear`)",
+      "  An attached plugin also stages its own skill (for example `plugin-github`, `plugin-linear`, or `plugin-gmail`)",
       "  documenting that provider's tools, commits, and trigger wiring — read it before using the plugin.",
       "- The Skills Hub: your workspace's skill library, its secrets, and its hosted skill databases are",
       "  reachable over an authenticated API. You can publish and update skills, read secrets, and read and",

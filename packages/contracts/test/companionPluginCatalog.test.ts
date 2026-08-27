@@ -6,7 +6,7 @@ import {
 } from "../src/companionPluginCatalog";
 
 describe("Companion plugin catalog contracts", () => {
-  it("ships exactly the product-owned Linear, GitHub, Notion, and Conductor catalog", () => {
+  it("ships exactly the product-owned Linear, GitHub, Notion, Conductor, and Gmail catalog", () => {
     expect(COMPANION_PLUGIN_CATALOG.map((entry) => ({
       server_name: entry.server_name,
       provider: entry.provider,
@@ -23,6 +23,11 @@ describe("Companion plugin catalog contracts", () => {
         server_name: "build.conductor/mcp",
         provider: "conductor",
         title: "Conductor",
+      },
+      {
+        server_name: "com.google.workspace/gmail",
+        provider: "gmail",
+        title: "Gmail",
       },
     ]);
   });

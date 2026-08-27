@@ -3,6 +3,7 @@ import { companionMcpAccountSchema } from "@companion/contracts";
 import {
   decryptCompanionMcpRuntimeCredential,
   decryptCompanionProviderRuntimeCredential,
+  COMPANION_GMAIL_MCP_ALLOWED_TOOLS,
   type CompanionRuntimeMcpCredential,
   type CompanionRuntimeProviderCredential,
 } from "@companion/core";
@@ -233,12 +234,16 @@ export async function resolveRuntimeResources(input: {
         continue;
       }
       const oauth = decrypted.credential;
+      const oauthBroker: NonNullable<CompanionStagedMcpAccount["oauthBroker"]> = {
+        credentialGeneration: row.credentialGeneration,
+        github: oauth.serverName === "io.github.github/github-mcp-server",
+      };
+      if (oauth.serverName === "com.google.workspace/gmail") {
+        oauthBroker.allowedTools = COMPANION_GMAIL_MCP_ALLOWED_TOOLS;
+      }
       mcpAccounts.push({
         account,
-        oauthBroker: {
-          credentialGeneration: row.credentialGeneration,
-          github: oauth.serverName === "io.github.github/github-mcp-server",
-        },
+        oauthBroker,
       });
       if (uniqueGithubGit && oauth.serverName === "io.github.github/github-mcp-server") {
         extraEnv.COMPANION_GITHUB_MCP_ACCOUNT_ID = row.accountId;

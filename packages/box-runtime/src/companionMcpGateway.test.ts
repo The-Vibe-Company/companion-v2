@@ -18,6 +18,13 @@ const brokerRequestSchema = z.object({
   credential_generation: z.string().uuid(),
   force_refresh: z.boolean(),
 }).strict();
+const mcpMethodSchema = z.object({ method: z.string().optional() }).passthrough();
+const toolsListResponseSchema = z.object({
+  result: z.object({ tools: z.array(z.object({ name: z.string() }).passthrough()) }).passthrough(),
+}).passthrough();
+const jsonRpcErrorSchema = z.object({
+  error: z.object({ code: z.number() }).passthrough(),
+}).passthrough();
 
 const temporaryDirectories: string[] = [];
 const gateways: CompanionMcpGateway[] = [];
@@ -289,6 +296,129 @@ describe("Companion MCP loopback gateway", () => {
     ]);
     expect(upstreamAuthorizations).toEqual([`Bearer access-${conductorAccountId}`]);
   });
+
+  it("filters a curated tool catalog and refuses calls outside it before upstream access", async () => {
+    let upstreamRequests = 0;
+    const gateway = await startGatewayWithAccounts(async (rawUrl, init) => {
+      if (String(rawUrl).startsWith(apiUrl)) return tokenResponse("gmail-access", null);
+      upstreamRequests += 1;
+      const request = mcpMethodSchema.parse(JSON.parse(String(init?.body)));
+      if (request.method === "tools/list") {
+        return Response.json({
+          jsonrpc: "2.0",
+          id: 1,
+          result: {
+            tools: [
+              { name: "search_threads" },
+              { name: "create_draft" },
+              { name: "label_message" },
+              { name: "send_message" },
+            ],
+          },
+        });
+      }
+      return Response.json({ jsonrpc: "2.0", id: 3, result: { ok: true } });
+    }, [{
+      accountId,
+      credentialGeneration,
+      upstreamUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+      github: false,
+      allowedTools: ["search_threads", "create_draft"],
+    }]);
+
+    const listed = await fetch(`${gateway.origin}/mcp/${accountId}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    }).then(async (response) => toolsListResponseSchema.parse(await response.json()));
+    expect(listed.result.tools.map((tool) => tool.name)).toEqual([
+      "search_threads",
+      "create_draft",
+    ]);
+
+    const denied = await fetch(`${gateway.origin}/mcp/${accountId}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "send_message", arguments: {} },
+      }),
+    }).then(async (response) => jsonRpcErrorSchema.parse(await response.json()));
+    expect(denied.error.code).toBe(-32601);
+    expect(upstreamRequests).toBe(1);
+
+    await expect(fetch(`${gateway.origin}/mcp/${accountId}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "create_draft", arguments: {} },
+      }),
+    }).then(async (response) => await response.json())).resolves.toMatchObject({ result: { ok: true } });
+    expect(upstreamRequests).toBe(2);
+  });
+
+  it("preserves a valid tools/list JSON-RPC error", async () => {
+    const gateway = await startGatewayWithAccounts(async (rawUrl) => {
+      if (String(rawUrl).startsWith(apiUrl)) return tokenResponse("gmail-access", null);
+      return Response.json({
+        jsonrpc: "2.0",
+        id: 1,
+        error: { code: -32001, message: "authorization expired" },
+      });
+    }, [{
+      accountId,
+      credentialGeneration,
+      upstreamUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+      github: false,
+      allowedTools: ["search_threads", "create_draft"],
+    }]);
+
+    const error = await fetch(`${gateway.origin}/mcp/${accountId}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    }).then(async (response) => jsonRpcErrorSchema.parse(await response.json()));
+
+    expect(error.error).toEqual({ code: -32001, message: "authorization expired" });
+  });
+
+  it("preserves non-result SSE events while filtering a later tools/list result", async () => {
+    const gateway = await startGatewayWithAccounts(async (rawUrl) => {
+      if (String(rawUrl).startsWith(apiUrl)) return tokenResponse("gmail-access", null);
+      return new Response([
+        "event: message",
+        'data: {"jsonrpc":"2.0","method":"notifications/tools/list_changed"}',
+        "",
+        "event: message",
+        'data: {"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search_threads"},{"name":"send_message"}]}}',
+        "",
+      ].join("\n"), {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    }, [{
+      accountId,
+      credentialGeneration,
+      upstreamUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+      github: false,
+      allowedTools: ["search_threads", "create_draft"],
+    }]);
+
+    const body = await fetch(`${gateway.origin}/mcp/${accountId}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    }).then(async (response) => await response.text());
+
+    expect(body).toContain('data: {"jsonrpc":"2.0","method":"notifications/tools/list_changed"}');
+    expect(body).toContain('"tools":[{"name":"search_threads"}]');
+    expect(body).not.toContain("send_message");
+  });
 });
 
 async function startGateway(
@@ -308,6 +438,7 @@ async function startGatewayWithAccounts(
     credentialGeneration: string;
     upstreamUrl: string;
     github: boolean;
+    allowedTools?: string[];
   }>,
   now: () => number = Date.now,
 ): Promise<CompanionMcpGateway> {

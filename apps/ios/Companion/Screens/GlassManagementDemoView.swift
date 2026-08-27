@@ -224,6 +224,13 @@ struct GlassManagementDemoView: View {
                 demoCatalogPluginRow(provider: "notion", title: "Notion", count: 0)
                 Divider().overlay(Color.companionDivider)
                 demoCatalogPluginRow(provider: "conductor", title: "Conductor", count: 0)
+                Divider().overlay(Color.companionDivider)
+                demoCatalogPluginRow(
+                    provider: "gmail",
+                    title: "Gmail",
+                    count: 0,
+                    detail: "Search and read email, and create drafts for review in Gmail. It never sends mail."
+                )
             }
 
             if !secondLinearAccountAdded {
@@ -339,18 +346,32 @@ struct GlassManagementDemoView: View {
         .padding(.vertical, 4)
     }
 
-    private func demoCatalogPluginRow(provider: String, title: String, count: Int) -> some View {
+    private func demoCatalogPluginRow(
+        provider: String,
+        title: String,
+        count: Int,
+        detail: String? = nil
+    ) -> some View {
         HStack(spacing: 12) {
             PluginMark(provider: provider, size: 38)
-            Text(title)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Color.companionInk)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color.companionInk)
+                if let detail {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(Color.companionMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
             Spacer()
             Text(count == 0 ? "Connect" : count == 1 ? "1 account" : "\(count) accounts")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(count == 0 ? Color.companionMuted : Color.companionAccent)
         }
         .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
         .accessibilityIdentifier("demo.management.plugin.\(provider)")
     }
 
