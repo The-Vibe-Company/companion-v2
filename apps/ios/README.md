@@ -13,16 +13,24 @@ The app target lives in `Companion/`. Models, networking, authentication, sessio
 belong in the zero-dependency `CompanionKit` Swift package. The committed Xcode project uses
 file-system-synchronized groups, so adding a Swift file does not require a project-file edit.
 
-The native roster can create Companions, open their essential settings from chat or a long-press
-menu, and request Owner-only durable deletion. A confirmed deletion removes the Companion from the
+The approved iOS visual language and journeys live in `docs/ios-design.md`. The native roster uses
+one vector `CharacterMark` everywhere: one of eight shapes, one of eleven system colors, and two
+white eyes. Mouth and accessory indexes remain transport-compatible but are not rendered or
+selectable. Creation asks only for a name, optional title, shape, and color, then opens the chat.
+
+The native roster groups Companions into collapsible, owner-scoped sections and keeps Unassigned at
+the bottom. Groups with at most three Companions render as a large-mark pinned grid; larger groups
+use flat 36pt-mark rows with one-line previews, hierarchical timestamps, and unread dots. Native
+Move to/New Section flows use the shared section API. Deleting a section only unassigns its members.
+Long press exposes Duplicate, Edit character, Move to, and Delete; trailing swipe exposes Move,
+member-private notification mute, and owner-only delete.
+
+The native roster can request Owner-only durable deletion. A confirmed deletion removes the Companion from the
 local roster immediately while the durable request runs; request failure restores the row, and a
 later roster poll may honestly reintroduce a Companion the control plane still returns. Essential
 settings cover the Companion icon, name, instructions, provider, and model. Identity opens as a
-dedicated pushed editor for Owner and Editor, and both creation and editing show the complete visual
-icon catalog; Viewer access remains read-only.
-The roster keeps the server's member-private order, shows pinned and hidden sections, and exposes
-Settings plus safe pin, hide, duplicate, and confirmed delete actions through native swipe,
-long-press, and accessibility actions. Opening a thread advances that member's unread watermark, so
+dedicated pushed editor for Owner and Editor, and both creation and editing show the same shape and
+color character picker; Viewer access remains read-only. Opening a thread advances that member's unread watermark, so
 there is no separate Mark as read command; Mark as unread remains available through the existing
 member-state endpoint. The current list contract projects unread as a Boolean, so native iOS shows
 one accessible unread indicator rather than inventing an exact message count.

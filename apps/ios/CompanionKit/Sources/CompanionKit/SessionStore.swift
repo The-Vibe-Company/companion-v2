@@ -428,6 +428,41 @@ public final class SessionStore {
         }
     }
 
+    public func listCompanionSections() async throws -> [CompanionSection] {
+        try await authenticated { try await client.listCompanionSections() }
+    }
+
+    public func userAvatarData(at pathOrURL: String) async throws -> Data {
+        try await authenticated { try await client.userAvatarData(at: pathOrURL) }
+    }
+
+    public func createCompanionSection(name: String) async throws -> CompanionSection {
+        try await authenticated { try await client.createCompanionSection(name: name) }
+    }
+
+    public func updateCompanionSection(sectionID: String, name: String) async throws -> CompanionSection {
+        try await authenticated {
+            try await client.updateCompanionSection(sectionID: sectionID, name: name)
+        }
+    }
+
+    public func deleteCompanionSection(sectionID: String) async throws {
+        try await authenticated { try await client.deleteCompanionSection(sectionID: sectionID) }
+    }
+
+    public func reorderCompanionSections(sectionIDs: [String]) async throws -> [CompanionSection] {
+        try await authenticated { try await client.reorderCompanionSections(sectionIDs: sectionIDs) }
+    }
+
+    public func assignCompanionSection(
+        companionID: String,
+        sectionID: String?
+    ) async throws -> CompanionSummary {
+        try await authenticated {
+            try await client.assignCompanionSection(companionID: companionID, sectionID: sectionID)
+        }
+    }
+
     public func updateCompanion(
         companionID: String,
         input: UpdateCompanionInput
@@ -836,6 +871,17 @@ public final class SessionStore {
         let nextPhase = session.needsOnboarding ? Phase.onboarding(session) : .active(session)
         guard phase != nextPhase else { return }
         phase = nextPhase
+    }
+
+    private func authenticated<Value>(_ operation: () async throws -> Value) async throws -> Value {
+        do {
+            let value = try await operation()
+            await persistRollingAuthority()
+            return value
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
     }
 
     private func persist(_ session: Session) throws {

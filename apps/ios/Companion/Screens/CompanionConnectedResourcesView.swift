@@ -374,7 +374,7 @@ struct CompanionConnectedResourcesView: View {
 
     private var header: some View {
         HStack(alignment: .center, spacing: 13) {
-            CompanionAvatar(name: currentCompanion.name, icon: currentCompanion.icon, size: 48, state: .still)
+            CompanionAvatar(name: currentCompanion.name, icon: currentCompanion.icon, size: 64, state: .still)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
                 Text(currentCompanion.name)

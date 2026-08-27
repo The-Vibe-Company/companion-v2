@@ -1,168 +1,120 @@
 import SwiftUI
 import CompanionKit
 
-/// The complete, closed Companion icon catalog rendered as four visual radio groups.
-struct CompanionIconGallery: View {
+/// Wave A character picker: shape and palette only. Mouth/accessory indexes stay in transport
+/// models for compatibility but are intentionally never exposed or rendered.
+struct CharacterPicker: View {
     @Binding var selection: CompanionSummary.Icon
-    var accessibilityIdentifierPrefix = "companion.icon"
-    var reduceMotionOverride: Bool? = nil
+    var defaultSelection: CompanionSummary.Icon?
+    var accessibilityIdentifierPrefix = "companion.character"
+    var reduceMotionOverride: Bool?
 
-    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
-
-    private let columns = [
-        GridItem(.adaptive(minimum: 68, maximum: 88), spacing: 10, alignment: .top),
-    ]
-
-    private var reduceMotion: Bool {
-        reduceMotionOverride ?? systemReduceMotion
-    }
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            ForEach(IconPart.allCases) { part in
-                iconSection(part)
+        VStack(alignment: .leading, spacing: 20) {
+            optionRow(title: "Shape", count: CharacterMarkShape.allCases.count) { index in
+                shapeOption(index)
+            }
+            optionRow(title: "Color", count: CharacterMark.palette.count) { index in
+                colorOption(index)
+            }
+
+            if let defaultSelection, selection != defaultSelection {
+                Button("Reset to default") {
+                    update(defaultSelection)
+                }
+                .font(.system(size: 15, weight: .semibold))
+                .accessibilityIdentifier("\(accessibilityIdentifierPrefix).reset")
             }
         }
     }
 
-    private func iconSection(_ part: IconPart) -> some View {
+    private func optionRow<Content: View>(
+        title: String,
+        count: Int,
+        @ViewBuilder content: @escaping (Int) -> Content
+    ) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(part.title)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Color.companionInk)
-
-            LazyVGrid(columns: columns, alignment: .leading, spacing: 10) {
-                ForEach(0..<part.count, id: \.self) { index in
-                    option(part: part, index: index)
+            Text(title)
+                .font(.system(size: 13))
+                .foregroundStyle(Color.secondary)
+            ScrollView(.horizontal) {
+                LazyHStack(spacing: 12) {
+                    ForEach(0..<count, id: \.self, content: content)
                 }
+                .padding(.horizontal, 2)
+                .padding(.vertical, 3)
             }
+            .scrollIndicators(.hidden)
             .accessibilityElement(children: .contain)
-            .accessibilityLabel("\(part.title) icon options")
-            .accessibilityIdentifier("\(accessibilityIdentifierPrefix).\(part.identifier).grid")
+            .accessibilityLabel("\(title) options")
         }
     }
 
-    private func option(part: IconPart, index: Int) -> some View {
-        let selected = part.value(in: selection) == index
-        let label = "\(part.optionName) \(index + 1)"
-
+    private func shapeOption(_ index: Int) -> some View {
+        let selected = selection.shape == index
         return Button {
-            let updated = part.replacingValue(in: selection, with: index)
-            if reduceMotion {
-                selection = updated
-            } else {
-                withAnimation(.easeOut(duration: 0.18)) {
-                    selection = updated
-                }
-            }
+            update(.init(
+                shape: index,
+                mouth: selection.mouth,
+                accessory: selection.accessory,
+                color: selection.color
+            ))
         } label: {
-            ZStack(alignment: .topTrailing) {
-                VStack(spacing: 4) {
-                    CompanionAvatar(
-                        name: label,
-                        icon: part.previewIcon(index: index, selection: selection),
-                        size: 52,
-                        state: .still
-                    )
-                    .accessibilityHidden(true)
-
-                    Text("\(index + 1)")
-                        .font(.caption.monospacedDigit().weight(.semibold))
-                        .foregroundStyle(selected ? Color.companionAccent : Color.companionMuted)
-                }
-                .frame(maxWidth: .infinity, minHeight: 78)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 7)
-
-                if selected {
-                    Image(systemName: "checkmark")
-                        .font(.caption2.weight(.bold))
-                        .foregroundStyle(Color.companionAccentForeground)
-                        .frame(width: 22, height: 22)
-                        .background(Color.companionAccent, in: Circle())
-                        .padding(5)
-                        .accessibilityHidden(true)
-                }
-            }
-            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            CharacterMark(name: "Shape \(index + 1)", shapeIndex: index, colorIndex: selection.color, size: 48)
+                .padding(5)
+                .overlay(selectionRing(selected, diameter: 58))
         }
         .buttonStyle(.plain)
-        .companionMaterial(radius: 16)
-        .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(
-                    selected ? Color.companionAccent : Color.clear,
-                    lineWidth: selected ? 3 : 0
-                )
-                .padding(1.5)
-                .allowsHitTesting(false)
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(label), Companion icon")
+        .accessibilityLabel("Shape \(index + 1)")
         .accessibilityValue(selected ? "Selected" : "Not selected")
         .accessibilityAddTraits(selected ? .isSelected : [])
-        .accessibilityIdentifier("\(accessibilityIdentifierPrefix).\(part.identifier).\(index)")
+        .accessibilityIdentifier("\(accessibilityIdentifierPrefix).shape.\(index)")
+    }
+
+    private func colorOption(_ index: Int) -> some View {
+        let selected = selection.color == index
+        return Button {
+            update(.init(
+                shape: selection.shape,
+                mouth: selection.mouth,
+                accessory: selection.accessory,
+                color: index
+            ))
+        } label: {
+            Circle()
+                .fill(CharacterMark.palette[index])
+                .frame(width: 34, height: 34)
+                .padding(6)
+                .overlay(selectionRing(selected, diameter: 46))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(colorName(index))
+        .accessibilityValue(selected ? "Selected" : "Not selected")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityIdentifier("\(accessibilityIdentifierPrefix).color.\(index)")
+    }
+
+    private func selectionRing(_ selected: Bool, diameter: CGFloat) -> some View {
+        Circle()
+            .stroke(selected ? Color.primary : Color.clear, lineWidth: 2)
+            .frame(width: diameter, height: diameter)
+            .accessibilityHidden(true)
+    }
+
+    private func update(_ icon: CompanionSummary.Icon) {
+        if reduceMotionOverride ?? reduceMotion {
+            selection = icon
+        } else {
+            withAnimation(.easeOut(duration: 0.2)) { selection = icon }
+        }
+    }
+
+    private func colorName(_ index: Int) -> String {
+        ["Black", "Brown", "Red", "Orange", "Yellow", "Green", "Teal", "Blue", "Purple", "Pink", "Gray"][index]
     }
 }
 
-private enum IconPart: String, CaseIterable, Identifiable {
-    case shape
-    case mouth
-    case accessory
-    case color
-
-    var id: String { rawValue }
-    var identifier: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .shape: "Shape"
-        case .mouth: "Face"
-        case .accessory: "Style"
-        case .color: "Color"
-        }
-    }
-
-    var optionName: String { title }
-
-    var count: Int {
-        switch self {
-        case .shape: 8
-        case .mouth: 5
-        case .accessory: 7
-        case .color: 11
-        }
-    }
-
-    func value(in icon: CompanionSummary.Icon) -> Int {
-        switch self {
-        case .shape: icon.shape
-        case .mouth: icon.mouth
-        case .accessory: icon.accessory
-        case .color: icon.color
-        }
-    }
-
-    func replacingValue(
-        in icon: CompanionSummary.Icon,
-        with value: Int
-    ) -> CompanionSummary.Icon {
-        switch self {
-        case .shape:
-            .init(shape: value, mouth: icon.mouth, accessory: icon.accessory, color: icon.color)
-        case .mouth:
-            .init(shape: icon.shape, mouth: value, accessory: icon.accessory, color: icon.color)
-        case .accessory:
-            .init(shape: icon.shape, mouth: icon.mouth, accessory: value, color: icon.color)
-        case .color:
-            .init(shape: icon.shape, mouth: icon.mouth, accessory: icon.accessory, color: value)
-        }
-    }
-
-    func previewIcon(
-        index: Int,
-        selection: CompanionSummary.Icon
-    ) -> CompanionSummary.Icon {
-        replacingValue(in: selection, with: index)
-    }
-}
+/// Temporary source-compatible name while downstream waves migrate their call sites.
+typealias CompanionIconGallery = CharacterPicker

@@ -91,6 +91,14 @@ public actor APIClient {
         let companion: CompanionSummary
     }
 
+    private struct SectionListEnvelope: Decodable {
+        let sections: [CompanionSection]
+    }
+
+    private struct SectionEnvelope: Decodable {
+        let section: CompanionSection
+    }
+
     private struct OperationEnvelope: Decodable {
         let operation: CompanionOperationSummary
     }
@@ -328,6 +336,35 @@ public actor APIClient {
         try await decode(WhoAmI.self, path: "/v1/auth/whoami")
     }
 
+    public func userAvatarData(at pathOrURL: String) async throws -> Data {
+        guard let avatarURL = URL(string: pathOrURL, relativeTo: baseURL)?.absoluteURL else {
+            throw APIError(status: 0, code: "invalid_avatar_url", message: "The account photo URL is invalid.")
+        }
+        let request: URLRequest
+        if avatarURL.scheme == baseURL.scheme && avatarURL.host == baseURL.host
+            && avatarURL.port == baseURL.port {
+            request = try makeRequest(
+                path: pathOrURL,
+                method: "GET",
+                body: nil,
+                timeout: 15,
+                additionalHeaders: ["Accept": "image/*"]
+            )
+        } else {
+            var publicRequest = URLRequest(url: avatarURL)
+            publicRequest.timeoutInterval = 15
+            publicRequest.setValue("image/*", forHTTPHeaderField: "Accept")
+            request = publicRequest
+        }
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw APIError(status: (response as? HTTPURLResponse)?.statusCode ?? 0,
+                           code: "avatar_unavailable",
+                           message: "The account photo is unavailable.")
+        }
+        return data
+    }
+
     public func updateUserProfile(
         name: String? = nil,
         timezone: String? = nil
@@ -343,6 +380,60 @@ public actor APIClient {
 
     public func listCompanions() async throws -> [CompanionSummary] {
         try await decode(CompanionListEnvelope.self, path: "/v1/companions").companions
+    }
+
+    public func listCompanionSections() async throws -> [CompanionSection] {
+        try await decode(SectionListEnvelope.self, path: "/v1/companion-sections").sections
+    }
+
+    public func createCompanionSection(name: String) async throws -> CompanionSection {
+        let body = try encoder.encode(CompanionSectionNameInput(name: name))
+        return try await decode(
+            SectionEnvelope.self,
+            path: "/v1/companion-sections",
+            method: "POST",
+            body: body
+        ).section
+    }
+
+    public func updateCompanionSection(sectionID: String, name: String) async throws -> CompanionSection {
+        let id = Self.encodedPathComponent(sectionID)
+        let body = try encoder.encode(CompanionSectionNameInput(name: name))
+        return try await decode(
+            SectionEnvelope.self,
+            path: "/v1/companion-sections/\(id)",
+            method: "PATCH",
+            body: body
+        ).section
+    }
+
+    public func deleteCompanionSection(sectionID: String) async throws {
+        let id = Self.encodedPathComponent(sectionID)
+        _ = try await perform(path: "/v1/companion-sections/\(id)", method: "DELETE", body: nil)
+    }
+
+    public func reorderCompanionSections(sectionIDs: [String]) async throws -> [CompanionSection] {
+        let body = try encoder.encode(CompanionSectionReorderInput(sectionIDs: sectionIDs))
+        return try await decode(
+            SectionListEnvelope.self,
+            path: "/v1/companion-sections/reorder",
+            method: "PUT",
+            body: body
+        ).sections
+    }
+
+    public func assignCompanionSection(
+        companionID: String,
+        sectionID: String?
+    ) async throws -> CompanionSummary {
+        let id = Self.encodedPathComponent(companionID)
+        let body = try encoder.encode(CompanionSectionAssignmentInput(sectionID: sectionID))
+        return try await decode(
+            CompanionEnvelope.self,
+            path: "/v1/companions/\(id)/section",
+            method: "PUT",
+            body: body
+        ).companion
     }
 
     public func connectedResources(
