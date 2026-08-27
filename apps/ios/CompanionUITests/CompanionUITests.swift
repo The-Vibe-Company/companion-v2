@@ -673,10 +673,10 @@ final class CompanionUITests: XCTestCase {
         wait(for: [keyboardDismissed], timeout: 2)
 
         let toolCard = app.buttons["tool-run.open-details.long-8"]
-        for _ in 0..<3 where !toolCard.exists {
-            app.swipeDown()
+        for _ in 0..<3 where !toolCard.isHittable {
+            app.swipeUp()
         }
-        XCTAssertTrue(toolCard.waitForExistence(timeout: 3))
+        XCTAssertTrue(toolCard.isHittable)
         toolCard.tap()
         XCTAssertTrue(
             app.descendants(matching: .any)["tool-run.detail"].waitForExistence(timeout: 3)

@@ -119,7 +119,6 @@ struct ChatView: View {
     @State private var assistantTailReveal: AssistantTailReveal?
     @State private var assistantTailRevealTask: Task<Void, Never>?
     @State private var selectedToolDetail: ToolRunDetailRoute?
-    @State private var composerKeyboardDismissalRequest = 0
 
     private let bottomProximityThreshold: CGFloat = 80
 
@@ -234,7 +233,12 @@ struct ChatView: View {
                     .accessibilityIdentifier("chat.transcript")
                     .gesture(
                         TranscriptKeyboardDismissGesture {
-                            composerKeyboardDismissalRequest += 1
+                            UIApplication.shared.sendAction(
+                                #selector(UIResponder.resignFirstResponder),
+                                to: nil,
+                                from: nil,
+                                for: nil
+                            )
                         }
                     )
                     .simultaneousGesture(
@@ -507,7 +511,6 @@ struct ChatView: View {
                 sending: sending,
                 accent: visualTheme.accent,
                 accentForeground: visualTheme.accentForeground,
-                keyboardDismissalRequest: composerKeyboardDismissalRequest,
                 onThinkingTap: onThinkingTap,
                 onSend: send(content:attachments:)
             )
