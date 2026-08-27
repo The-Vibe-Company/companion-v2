@@ -5,6 +5,7 @@ import {
   CompanionPluginConflictError,
   deleteCompanionPlugin,
   listCompanionPlugins,
+  saveCompanionOAuthPlugin,
   saveCompanionPlugin,
 } from "@companion/core";
 import { schema } from "@companion/db";
@@ -76,6 +77,55 @@ describe("member-private Companion MCP connections", () => {
     });
     expect(listed).toEqual([expect.objectContaining({ id: account.id, label: "work" })]);
     expect(JSON.stringify(listed)).not.toContain(plaintext);
+  });
+
+  it("stores a labeled Gmail OAuth account without exposing either token", async () => {
+    const account = await saveCompanionOAuthPlugin({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      provider: "gmail",
+      label: "work",
+      remoteUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+      credential: {
+        kind: "oauth",
+        version: 1,
+        serverName: "com.google.workspace/gmail",
+        accessToken: "gmail-access-secret",
+        refreshToken: "gmail-refresh-secret",
+        accessExpiresAt: "2030-01-01T00:00:00.000Z",
+        scope: "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose",
+        tokenType: "Bearer",
+        tokenEndpoint: "https://oauth2.googleapis.com/token",
+        resource: "https://gmailmcp.googleapis.com/mcp/v1",
+        client: {
+          clientId: "gmail-client",
+          clientSecret: null,
+          tokenEndpointAuthMethod: "client_secret_post",
+        },
+      },
+      masterKey,
+      database: integrationDb,
+    });
+
+    expect(account).toMatchObject({ provider: "gmail", label: "work", connected: true });
+    const listed = await listCompanionPlugins({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      database: integrationDb,
+    });
+    expect(listed).toEqual([expect.objectContaining({ id: account.id, provider: "gmail" })]);
+    expect(JSON.stringify([account, listed])).not.toContain("gmail-access-secret");
+    expect(JSON.stringify([account, listed])).not.toContain("gmail-refresh-secret");
+
+    const stored = await integrationDb.query.companionMcpAccounts.findFirst({
+      where: eq(schema.companionMcpAccounts.id, account.id),
+    });
+    expect(stored?.accountConfig).toMatchObject({
+      transport: "http",
+      url: "https://gmailmcp.googleapis.com/mcp/v1",
+    });
+    expect(JSON.stringify(stored)).not.toContain("gmail-access-secret");
+    expect(JSON.stringify(stored)).not.toContain("gmail-refresh-secret");
   });
 
   it("keeps connections private from admins and cross-tenant actors", async () => {

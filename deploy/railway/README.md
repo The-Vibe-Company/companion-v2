@@ -82,6 +82,20 @@ Follow [`docs/integrations/slack.md`](../../docs/integrations/slack.md) to creat
 Slack app. The Events API signing secret and request URL are intentionally deferred to the receive
 and trigger follow-up; this release connects Bot User accounts and sends messages only.
 
+Gmail follows the same API/runtime sharing boundary with its own Google Web application OAuth
+client. Do not reuse the Better Auth login client: Gmail requests restricted mailbox scopes. Enable
+the Gmail API and Gmail MCP API, register
+`${COMPANION_WEB_URL}/v1/companion-plugins/oauth/callback`, and share these values with API and
+runtime:
+
+```dotenv
+COMPANION_MCP_GMAIL_CLIENT_ID=${{shared.COMPANION_MCP_GMAIL_CLIENT_ID}}
+COMPANION_MCP_GMAIL_CLIENT_SECRET=${{shared.COMPANION_MCP_GMAIL_CLIENT_SECRET}}
+```
+
+The consent screen must include `gmail.readonly` and `gmail.compose`; public deployments must finish
+Google's applicable verification and restricted-scope security assessment before enabling access.
+
 ### Runtime private address
 
 Set these service variables:

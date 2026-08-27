@@ -336,8 +336,10 @@ describe("Companions mobile viewport", () => {
     // One-class modifiers lose to a later `.companions-plugin-icon` reset of background/color/border.
     const base = source.indexOf("\n.companions-plugin-icon {");
     const linear = source.lastIndexOf(".companions-plugin-icon--linear");
+    const gmail = source.lastIndexOf(".companions-plugin-icon--gmail");
     expect(base).toBeGreaterThan(0);
     expect(linear).toBeGreaterThan(base);
+    expect(gmail).toBeGreaterThan(base);
   });
 
   it("puts the catalog card's action under its text on a phone", () => {

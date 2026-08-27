@@ -661,12 +661,14 @@ or rotate it.
 
 ## Plugin skills
 
-Each curated plugin ships a product-owned skill — `plugin-github`, `plugin-linear` — staged into
+Each curated plugin that needs runtime-specific guidance ships a product-owned skill —
+`plugin-github`, `plugin-linear`, `plugin-gmail` — staged into
 the Box's skills tree whenever the matching plugin is attached to the Companion, and removed when
 it is detached. The skill documents exactly what this runtime stages for that plugin: the MCP
 tools, GitHub commits as the connected account, and the on-demand trigger-registration capability
 with its provider-specific rules (GitHub targets name a repo and events; Linear registration needs
-the stored API key; Notion has no webhooks). They restage on every wake so a rebuilt tree regains
+the stored API key; Notion has no webhooks; Gmail treats message content as untrusted and can only
+read/search/list or create a draft for review). They restage on every wake so a rebuilt tree regains
 them, which makes them a staging artifact rather than workspace content: they are never listed in
 the config catalog and Pi cannot propose attaching or detaching them.
 
@@ -842,6 +844,14 @@ stable for the connection. Delete/reconnect creates a new account identity. A fa
 refresh is surfaced only when access is actually unusable, as `mcp_oauth_refresh_failed`; provider
 bodies and token material are never logged. There is no minimum OAuth access-token lifetime.
 
+The Gmail account requests Google's restricted `gmail.readonly` and `gmail.compose` scopes through
+a deployment-owned OAuth client separate from login. Because `gmail.compose` can authorize sending
+at the scope level, the gateway—not consent copy—is the v1 no-send boundary: it filters the Gmail
+catalog to `search_threads`, `get_message`, `get_thread`, `list_drafts`, `list_labels`, and
+`create_draft`, and rejects any other `tools/call` before fetching a token. Email bodies are
+external untrusted data. There is no Gmail trigger provider in v1: Gmail push requires Cloud Pub/Sub,
+watch renewal, and History API reconciliation rather than the existing signed webhook contract.
+
 For a uniquely selected GitHub OAuth account, Git's credential helper and the staged `gh` wrapper
 ask the loopback gateway for every command. `GITHUB_TOKEN` and `GH_TOKEN` are never written to the
 Box environment or disk; only each helper process receives the temporary access token.
@@ -931,7 +941,7 @@ organization through `whoami` and sends the cookie plus `x-companion-org` on eac
 The native roster and chat ship with Companion creation, the full server-owned provider catalog,
 Claude and Codex subscription authorization, encrypted API-key connections, and MCP connection
 management. Its Plugins surface groups the existing accounts by provider, permits multiple labeled
-accounts for each product-owned Linear, GitHub, Notion, Conductor, and Slack category through the shared
+accounts for each product-owned Linear, GitHub, Notion, Conductor, Slack, and Gmail category through the shared
 brokered OAuth routes, and retains custom HTTP or command MCP connections. Skills, files, routines,
 triggers, sharing, settings, and the remaining control-plane workflows continue migrating to this
 same client without mobile-only APIs.

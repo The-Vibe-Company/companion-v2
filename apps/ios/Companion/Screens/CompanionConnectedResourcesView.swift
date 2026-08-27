@@ -986,6 +986,7 @@ struct CompanionConnectedResourcesView: View {
         case "notion": "Notion"
         case "conductor": "Conductor"
         case "slack": "Slack"
+        case "gmail": "Gmail"
         default: provider.split(separator: "-").map { $0.capitalized }.joined(separator: " ")
         }
     }

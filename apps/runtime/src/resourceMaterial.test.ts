@@ -308,6 +308,74 @@ describe("runtime material resolution", () => {
     expect(resources.mcpCredentials).toEqual([]);
   });
 
+  it("stages Gmail OAuth with the read-and-draft tool allow-list", async () => {
+    const stored = {
+      kind: "oauth" as const,
+      version: 1 as const,
+      serverName: "com.google.workspace/gmail" as const,
+      accessToken: "gmail-access",
+      refreshToken: "gmail-refresh",
+      accessExpiresAt: "2030-01-01T00:00:00.000Z",
+      scope: "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose",
+      tokenType: "Bearer" as const,
+      tokenEndpoint: "https://oauth2.googleapis.com/token",
+      resource: "https://gmailmcp.googleapis.com/mcp/v1",
+      client: {
+        clientId: "gmail-client",
+        clientSecret: null,
+        tokenEndpointAuthMethod: "client_secret_post" as const,
+      },
+    };
+    const envelope = encryptCompanionMcpRuntimeCredential({
+      orgId,
+      accountId,
+      credentialGeneration: generation,
+      credential: stored,
+    }, masterKey);
+    const resources = await resolveRuntimeResources({
+      orgId,
+      masterKey,
+      material: {
+        providerMaterial: [],
+        skillMaterial: [],
+        mcpMaterial: [{
+          account_id: accountId,
+          credential_generation: generation,
+          account_config: {
+            id: accountId,
+            label: "Gmail work",
+            lifecycle: "lazy",
+            direct_tools: false,
+            transport: "http",
+            url: "https://gmailmcp.googleapis.com/mcp/v1",
+            headers: { Authorization: "GMAIL_MCP_AUTH" },
+          },
+          ...snakeEnvelope(envelope),
+        }],
+      },
+      loadSkillArchive: vi.fn(),
+      signal: new AbortController().signal,
+    });
+
+    expect(resources.mcpAccounts).toEqual([{
+      account: expect.objectContaining({ id: accountId }),
+      oauthBroker: {
+        credentialGeneration: generation,
+        github: false,
+        allowedTools: [
+          "create_draft",
+          "get_message",
+          "get_thread",
+          "list_drafts",
+          "list_labels",
+          "search_threads",
+        ],
+      },
+    }]);
+    expect(JSON.stringify(resources)).not.toContain("gmail-access");
+    expect(JSON.stringify(resources)).not.toContain("gmail-refresh");
+  });
+
   it("stages GitHub OAuth as a broker account plus token-free Git and gh metadata", async () => {
     const stored = {
       kind: "oauth" as const,

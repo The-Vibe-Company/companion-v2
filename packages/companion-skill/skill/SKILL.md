@@ -21,7 +21,7 @@ from this delegated skill. Agent Auth authorizes external clients to use Skills 
 does not authorize Companion chat, turns, decisions, desktop, provider settings, or Box/Pi lifecycle.
 
 A hosted Pi teammate may propose settings with `propose_config` (skills, plugins, model, persona)
-and `request_plugin_connection` (Linear, GitHub, Notion, Conductor, or Slack), may propose a scheduled routine with
+and `request_plugin_connection` (Linear, GitHub, Notion, Conductor, Slack, or Gmail), may propose a scheduled routine with
 `propose_routine` (name, prompt, cron, timezone), and may propose a webhook trigger with
 `propose_trigger` (name, prompt, provider — `linear`, `github`, or `custom`, a display label rather
 than an auth scheme; `linear` and `github` triggers require the matching plugin attached to the

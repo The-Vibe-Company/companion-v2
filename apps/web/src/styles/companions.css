@@ -280,6 +280,13 @@
   color: #fff;
 }
 
+.companions-plugin-icon--gmail,
+.companions-plugin-dialog--gmail .og-dialog__ic {
+  background: oklch(0.63 0.21 29);
+  border-color: oklch(0.63 0.21 29);
+  color: oklch(1 0 0);
+}
+
 :root[data-theme="dark"] .companions-plugin-icon--conductor,
 :root[data-theme="dark"] .companions-plugin-dialog--conductor .og-dialog__ic {
   background: var(--color-fg);
@@ -317,7 +324,7 @@
 
 .companions-plugin-empty p + p {
   margin-top: 4px;
-  color: var(--color-faint);
+  color: var(--color-muted);
   font-size: var(--text-xs);
 }
 

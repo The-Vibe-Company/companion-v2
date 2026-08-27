@@ -22,6 +22,7 @@ const gatewayConfigSchema = z.object({
     upstreamUrl: z.string().url(),
     github: z.boolean(),
     slack: z.literal(true).optional(),
+    allowedTools: z.array(z.string().trim().min(1).max(128)).max(50).optional(),
   }).strict()).max(50),
 }).strict();
 const gatewayAddressSchema = z.object({ port: z.number().int().min(1).max(65_535) }).passthrough();
@@ -32,6 +33,29 @@ const accessTokenResponseSchema = z.object({
   credential_version: z.number().int().positive(),
 }).strict();
 const forwardedHeaderSchema = z.string();
+const mcpRequestSchema = z.object({
+  method: z.string().optional(),
+  id: z.union([z.string(), z.number(), z.null()]).optional(),
+  params: z.object({ name: z.string().optional() }).passthrough().optional(),
+}).passthrough();
+const mcpRequestEnvelopeSchema = z.union([
+  mcpRequestSchema,
+  z.array(mcpRequestSchema).min(1),
+]);
+type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() => z.union([
+  z.string(),
+  z.number(),
+  z.boolean(),
+  z.null(),
+  z.array(jsonValueSchema),
+  z.record(z.string(), jsonValueSchema),
+]));
+const mcpToolSchema = z.object({ name: z.string() }).passthrough();
+const mcpToolsListResponseSchema = z.object({
+  result: z.object({ tools: z.array(mcpToolSchema) }).passthrough(),
+}).passthrough();
+type McpToolsListResponse = z.infer<typeof mcpToolsListResponseSchema>;
 
 interface GatewayAccount {
   accountId: string;
@@ -39,6 +63,7 @@ interface GatewayAccount {
   upstreamUrl: string;
   github: boolean;
   slack: boolean;
+  allowedTools: readonly string[] | null;
 }
 
 interface CachedAccess {
@@ -143,6 +168,7 @@ function readGatewayAccounts(path: string): GatewayAccount[] {
       upstreamUrl: upstream.toString(),
       github: value.github,
       slack: value.slack === true,
+      allowedTools: value.allowedTools ? [...new Set(value.allowedTools)] : null,
     };
   });
 }
@@ -229,6 +255,8 @@ async function handleGatewayRequest(input: {
   const body = input.request.method === "GET" || input.request.method === "DELETE"
     ? undefined
     : await readBoundedBody(input.request, MAX_REQUEST_BYTES);
+  const toolRequest = inspectMcpToolRequest(body, account.allowedTools);
+  if (toolRequest.blocked) return jsonRpcToolDenied(input.response, toolRequest.id);
   const endpointTarget = route[3] ? decodeEndpoint(route[3], account.upstreamUrl) : null;
   const target = endpointTarget ?? new URL(account.upstreamUrl);
   const firstAccess = await input.accessFor(account, false);
@@ -252,12 +280,48 @@ async function handleGatewayRequest(input: {
       fetchImpl: input.fetchImpl,
     });
   }
-  proxyResponse({
+  await proxyResponse({
     response: input.response,
     upstream,
     account,
     gatewayOrigin: input.gatewayOrigin(),
+    filterToolsList: toolRequest.filterToolsList,
   });
+}
+
+interface McpToolRequestInspection {
+  blocked: boolean;
+  filterToolsList: boolean;
+  id: string | number | null;
+}
+
+function inspectMcpToolRequest(
+  body: Buffer | undefined,
+  allowedTools: readonly string[] | null,
+): McpToolRequestInspection {
+  const fallback = { blocked: false, filterToolsList: false, id: null };
+  if (!body || !allowedTools) return fallback;
+  let raw: object;
+  try {
+    raw = JSON.parse(body.toString("utf8"));
+  } catch {
+    return fallback;
+  }
+  const parsed = mcpRequestEnvelopeSchema.safeParse(raw);
+  if (!parsed.success) return { blocked: true, filterToolsList: false, id: null };
+  const requests = Array.isArray(parsed.data) ? parsed.data : [parsed.data];
+  const allowed = new Set(allowedTools);
+  let filterToolsList = false;
+  for (const request of requests) {
+    if (request.method === "tools/list") filterToolsList = true;
+    if (request.method !== "tools/call") continue;
+    const name = request.params?.name;
+    if (!name || !allowed.has(name)) {
+      const id = request.id ?? null;
+      return { blocked: true, filterToolsList, id };
+    }
+  }
+  return { blocked: false, filterToolsList, id: null };
 }
 
 async function forward(input: {
@@ -281,12 +345,13 @@ async function forward(input: {
   });
 }
 
-function proxyResponse(input: {
+async function proxyResponse(input: {
   response: ServerResponse;
   upstream: Response;
   account: GatewayAccount;
   gatewayOrigin: string;
-}): void {
+  filterToolsList: boolean;
+}): Promise<void> {
   const headers: OutgoingHttpHeaders = { "cache-control": "no-store" };
   for (const name of ["content-type", "mcp-protocol-version", "mcp-session-id", "retry-after"]) {
     const value = input.upstream.headers.get(name);
@@ -297,11 +362,25 @@ function proxyResponse(input: {
     input.response.end();
     return;
   }
+  const contentType = input.upstream.headers.get("content-type")?.toLowerCase() ?? "";
+  if (
+    input.filterToolsList
+    && input.account.allowedTools
+    && contentType.includes("application/json")
+  ) {
+    const bytes = await readBoundedWebBody(input.upstream.body);
+    input.response.end(filterMcpToolsListJson(bytes, input.account.allowedTools));
+    return;
+  }
   // SAFETY: Node's fetch body is a Web ReadableStream, while this Node release's overload keeps a
   // narrower generic declaration. The runtime value is exactly the stream accepted by fromWeb.
   const body = Readable.fromWeb(input.upstream.body as never);
-  if (input.upstream.headers.get("content-type")?.toLowerCase().startsWith("text/event-stream")) {
-    pipeline(body, endpointRewriteTransform(input.account, input.gatewayOrigin), input.response, (error) => {
+  if (contentType.startsWith("text/event-stream")) {
+    pipeline(body, endpointRewriteTransform(
+      input.account,
+      input.gatewayOrigin,
+      input.filterToolsList,
+    ), input.response, (error) => {
       if (error && !input.response.destroyed) input.response.destroy(error);
     });
   } else {
@@ -311,7 +390,11 @@ function proxyResponse(input: {
   }
 }
 
-function endpointRewriteTransform(account: GatewayAccount, gatewayOrigin: string): Transform {
+function endpointRewriteTransform(
+  account: GatewayAccount,
+  gatewayOrigin: string,
+  filterToolsList: boolean,
+): Transform {
   let pending = "";
   let endpointEvent = false;
   return new Transform({
@@ -332,6 +415,12 @@ function endpointRewriteTransform(account: GatewayAccount, gatewayOrigin: string
             const encoded = Buffer.from(target.toString(), "utf8").toString("base64url");
             return `data: ${gatewayOrigin}/mcp/${account.accountId}/endpoint/${encoded}`;
           }
+          if (filterToolsList && account.allowedTools && line.startsWith("data:")) {
+            const raw = line.slice(5).trim();
+            if (raw && raw !== "[DONE]") {
+              return `data: ${filterMcpToolsListPayload(raw, account.allowedTools)}`;
+            }
+          }
           if (line === "\r" || line === "") endpointEvent = false;
           return line;
         }).join("\n") + "\n");
@@ -345,6 +434,77 @@ function endpointRewriteTransform(account: GatewayAccount, gatewayOrigin: string
       callback();
     },
   });
+}
+
+function filterMcpToolsListJson(bytes: Buffer, allowedTools: readonly string[]): Buffer {
+  return Buffer.from(filterMcpToolsListPayload(bytes.toString("utf8"), allowedTools), "utf8");
+}
+
+function filterMcpToolsListPayload(raw: string, allowedTools: readonly string[]): string {
+  try {
+    const parsed = jsonValueSchema.parse(JSON.parse(raw));
+    return JSON.stringify(filterMcpToolsListValue(parsed, allowedTools));
+  } catch {
+    // Non-result events and provider errors must remain provider responses, not gateway failures.
+    return raw;
+  }
+}
+
+function filterMcpToolsListValue(
+  value: JsonValue,
+  allowedTools: readonly string[],
+): JsonValue {
+  if (Array.isArray(value)) {
+    return value.map((item) => filterMcpToolsListValue(item, allowedTools));
+  }
+  const response = mcpToolsListResponseSchema.safeParse(value);
+  if (!response.success) return value;
+  return jsonValueSchema.parse(filterMcpToolsListResponse(response.data, allowedTools));
+}
+
+function filterMcpToolsListResponse(
+  value: McpToolsListResponse,
+  allowedTools: readonly string[],
+): McpToolsListResponse {
+  const allowed = new Set(allowedTools);
+  return {
+    ...value,
+    result: {
+      ...value.result,
+      tools: value.result.tools.filter((tool) => allowed.has(tool.name)),
+    },
+  };
+}
+
+async function readBoundedWebBody(body: ReadableStream<Uint8Array>): Promise<Buffer> {
+  const reader = body.getReader();
+  const chunks: Buffer[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const bytes = Buffer.from(value);
+      size += bytes.byteLength;
+      if (size > MAX_REQUEST_BYTES) throw new Error("MCP response body is too large");
+      chunks.push(bytes);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, size);
+}
+
+function jsonRpcToolDenied(response: ServerResponse, id: string | number | null): void {
+  response.writeHead(200, {
+    "cache-control": "no-store",
+    "content-type": "application/json; charset=utf-8",
+  });
+  response.end(JSON.stringify({
+    jsonrpc: "2.0",
+    id,
+    error: { code: -32601, message: "This MCP tool is not enabled for this plugin." },
+  }));
 }
 
 function decodeEndpoint(encoded: string, upstreamUrl: string): URL {

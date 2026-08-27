@@ -251,7 +251,10 @@ the safe OAuth code; never capture the provider response. Diagnose by cause:
 - if the GitHub client id changed, restore the OAuth App that issued the stored grant or reconnect
   the GitHub account in Plugins — a different client id cannot refresh that grant;
 - if GitHub configuration is absent, restore both shared variables before retrying;
-- for GitHub, Linear, Notion, or another revoked/expired user grant, reconnect that account in
+- for Gmail deployment-secret drift, verify `api` and `runtime` both reference the same shared
+  `COMPANION_MCP_GMAIL_CLIENT_ID` and `COMPANION_MCP_GMAIL_CLIENT_SECRET`; a changed client id cannot
+  refresh an existing grant, so restore the issuing client or reconnect the labeled Gmail account;
+- for GitHub, Gmail, Linear, Notion, or another revoked/expired user grant, reconnect that account in
   Plugins; repeated messages cannot repair a revoked grant;
 - for Slack app-secret drift, verify API has the original
   `COMPANION_MCP_SLACK_CLIENT_ID` and `COMPANION_MCP_SLACK_CLIENT_SECRET`; runtime must not receive
@@ -262,6 +265,19 @@ the safe OAuth code; never capture the provider response. Diagnose by cause:
 
 After repair, send a new message. Do not inject a refresh token, `GITHUB_TOKEN`, or `GH_TOKEN` into
 Box, restart the Box, or replay an ambiguously failed MCP/Git operation.
+
+### Gmail OAuth setup
+
+Gmail's hosted MCP server is a Google Developer Preview service. In a Google Cloud project, enable
+`gmail.googleapis.com` and `gmailmcp.googleapis.com`, configure the consent screen with
+`https://www.googleapis.com/auth/gmail.readonly` and
+`https://www.googleapis.com/auth/gmail.compose`, and create a Web application OAuth client with
+`${COMPANION_WEB_URL}/v1/companion-plugins/oauth/callback` as an exact redirect URI. Set that
+client's id and secret as `COMPANION_MCP_GMAIL_CLIENT_ID` and
+`COMPANION_MCP_GMAIL_CLIENT_SECRET` for both API and runtime. Keep these values separate from
+`GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`, which are login credentials and must not inherit
+restricted mailbox consent. External Google apps must complete the applicable OAuth verification
+and restricted-scope security assessment before production use.
 
 ### A turn's attachments failed
 

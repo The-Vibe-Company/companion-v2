@@ -249,7 +249,7 @@ fi
 # The repo-root .env is intentionally shared only with the launcher. Child
 # wrappers enforce the API/worker/runtime/web trust boundaries.
 # shellcheck disable=SC2016
-process_env_probe='for name in COMPANION_BOX_API_KEY COMPANION_PI_INSTALL_COMMAND DATABASE_URL DATABASE_WORKER_URL DATABASE_COMPANION_RUNTIME_URL DATABASE_MIGRATION_URL COMPANION_RUNTIME_PRIVATE_URL COMPANION_RUNTIME_DESKTOP_HMAC_SECRET COMPANION_SECRETS_MASTER_KEY COMPANION_MCP_GITHUB_CLIENT_ID COMPANION_MCP_GITHUB_CLIENT_SECRET COMPANION_MCP_SLACK_CLIENT_ID COMPANION_MCP_SLACK_CLIENT_SECRET BETTER_AUTH_SECRET STRIPE_SECRET_KEY GITHUB_APP_PRIVATE_KEY RESEND_API_KEY S3_SECRET_ACCESS_KEY UNKNOWN_PROVIDER_API_KEY COMPANION_SEED_PASSWORD BOX_SIM_CONTROL_TOKEN; do if [ -n "${!name+x}" ]; then printf "%s=%s\n" "$name" "${!name}"; else printf "%s=unset\n" "$name"; fi; done'
+process_env_probe='for name in COMPANION_BOX_API_KEY COMPANION_PI_INSTALL_COMMAND DATABASE_URL DATABASE_WORKER_URL DATABASE_COMPANION_RUNTIME_URL DATABASE_MIGRATION_URL COMPANION_RUNTIME_PRIVATE_URL COMPANION_RUNTIME_DESKTOP_HMAC_SECRET COMPANION_SECRETS_MASTER_KEY COMPANION_MCP_GITHUB_CLIENT_ID COMPANION_MCP_GITHUB_CLIENT_SECRET COMPANION_MCP_SLACK_CLIENT_ID COMPANION_MCP_SLACK_CLIENT_SECRET COMPANION_MCP_GMAIL_CLIENT_ID COMPANION_MCP_GMAIL_CLIENT_SECRET BETTER_AUTH_SECRET STRIPE_SECRET_KEY GITHUB_APP_PRIVATE_KEY RESEND_API_KEY S3_SECRET_ACCESS_KEY UNKNOWN_PROVIDER_API_KEY COMPANION_SEED_PASSWORD BOX_SIM_CONTROL_TOKEN; do if [ -n "${!name+x}" ]; then printf "%s=%s\n" "$name" "${!name}"; else printf "%s=unset\n" "$name"; fi; done'
 common_probe_env=(
   COMPANION_BOX_API_KEY=box-secret
   COMPANION_PI_INSTALL_COMMAND=pi-secret
@@ -264,6 +264,8 @@ common_probe_env=(
   COMPANION_MCP_GITHUB_CLIENT_SECRET=mcp-github-secret
   COMPANION_MCP_SLACK_CLIENT_ID=mcp-slack-client
   COMPANION_MCP_SLACK_CLIENT_SECRET=mcp-slack-secret
+  COMPANION_MCP_GMAIL_CLIENT_ID=mcp-gmail-client
+  COMPANION_MCP_GMAIL_CLIENT_SECRET=mcp-gmail-secret
   BETTER_AUTH_SECRET=auth-secret
   STRIPE_SECRET_KEY=stripe-secret
   GITHUB_APP_PRIVATE_KEY=github-secret
@@ -284,6 +286,8 @@ printf '%s\n' "$api_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_ID=mcp
 printf '%s\n' "$api_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_SECRET=mcp-github-secret'
 printf '%s\n' "$api_process_env" | grep -Fxq 'COMPANION_MCP_SLACK_CLIENT_ID=mcp-slack-client'
 printf '%s\n' "$api_process_env" | grep -Fxq 'COMPANION_MCP_SLACK_CLIENT_SECRET=mcp-slack-secret'
+printf '%s\n' "$api_process_env" | grep -Fxq 'COMPANION_MCP_GMAIL_CLIENT_ID=mcp-gmail-client'
+printf '%s\n' "$api_process_env" | grep -Fxq 'COMPANION_MCP_GMAIL_CLIENT_SECRET=mcp-gmail-secret'
 printf '%s\n' "$api_process_env" | grep -Fxq 'BETTER_AUTH_SECRET=auth-secret'
 printf '%s\n' "$api_process_env" | grep -Fxq 'STRIPE_SECRET_KEY=stripe-secret'
 printf '%s\n' "$api_process_env" | grep -Fxq 'UNKNOWN_PROVIDER_API_KEY=unset'
@@ -298,6 +302,8 @@ printf '%s\n' "$worker_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_ID=
 printf '%s\n' "$worker_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_SECRET=unset'
 printf '%s\n' "$worker_process_env" | grep -Fxq 'COMPANION_MCP_SLACK_CLIENT_ID=unset'
 printf '%s\n' "$worker_process_env" | grep -Fxq 'COMPANION_MCP_SLACK_CLIENT_SECRET=unset'
+printf '%s\n' "$worker_process_env" | grep -Fxq 'COMPANION_MCP_GMAIL_CLIENT_ID=unset'
+printf '%s\n' "$worker_process_env" | grep -Fxq 'COMPANION_MCP_GMAIL_CLIENT_SECRET=unset'
 printf '%s\n' "$worker_process_env" | grep -Fxq 'BETTER_AUTH_SECRET=unset'
 printf '%s\n' "$worker_process_env" | grep -Fxq 'STRIPE_SECRET_KEY=stripe-secret'
 printf '%s\n' "$worker_process_env" | grep -Fxq 'GITHUB_APP_PRIVATE_KEY=github-secret'
@@ -314,6 +320,8 @@ printf '%s\n' "$runtime_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_ID
 printf '%s\n' "$runtime_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_SECRET=mcp-github-secret'
 printf '%s\n' "$runtime_process_env" | grep -Fxq 'COMPANION_MCP_SLACK_CLIENT_ID=unset'
 printf '%s\n' "$runtime_process_env" | grep -Fxq 'COMPANION_MCP_SLACK_CLIENT_SECRET=unset'
+printf '%s\n' "$runtime_process_env" | grep -Fxq 'COMPANION_MCP_GMAIL_CLIENT_ID=mcp-gmail-client'
+printf '%s\n' "$runtime_process_env" | grep -Fxq 'COMPANION_MCP_GMAIL_CLIENT_SECRET=mcp-gmail-secret'
 printf '%s\n' "$runtime_process_env" | grep -Fxq 'S3_SECRET_ACCESS_KEY=storage-secret'
 printf '%s\n' "$runtime_process_env" | grep -Fxq 'BETTER_AUTH_SECRET=unset'
 printf '%s\n' "$runtime_process_env" | grep -Fxq 'STRIPE_SECRET_KEY=unset'
@@ -330,6 +338,8 @@ printf '%s\n' "$web_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_ID=uns
 printf '%s\n' "$web_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_SECRET=unset'
 printf '%s\n' "$web_process_env" | grep -Fxq 'COMPANION_MCP_SLACK_CLIENT_ID=unset'
 printf '%s\n' "$web_process_env" | grep -Fxq 'COMPANION_MCP_SLACK_CLIENT_SECRET=unset'
+printf '%s\n' "$web_process_env" | grep -Fxq 'COMPANION_MCP_GMAIL_CLIENT_ID=unset'
+printf '%s\n' "$web_process_env" | grep -Fxq 'COMPANION_MCP_GMAIL_CLIENT_SECRET=unset'
 printf '%s\n' "$web_process_env" | grep -Fxq 'BETTER_AUTH_SECRET=unset'
 printf '%s\n' "$web_process_env" | grep -Fxq 'STRIPE_SECRET_KEY=unset'
 printf '%s\n' "$web_process_env" | grep -Fxq 'GITHUB_APP_PRIVATE_KEY=unset'
@@ -345,6 +355,8 @@ printf '%s\n' "$seed_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_ID=un
 printf '%s\n' "$seed_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_SECRET=unset'
 printf '%s\n' "$seed_process_env" | grep -Fxq 'COMPANION_MCP_SLACK_CLIENT_ID=unset'
 printf '%s\n' "$seed_process_env" | grep -Fxq 'COMPANION_MCP_SLACK_CLIENT_SECRET=unset'
+printf '%s\n' "$seed_process_env" | grep -Fxq 'COMPANION_MCP_GMAIL_CLIENT_ID=unset'
+printf '%s\n' "$seed_process_env" | grep -Fxq 'COMPANION_MCP_GMAIL_CLIENT_SECRET=unset'
 printf '%s\n' "$seed_process_env" | grep -Fxq 'BETTER_AUTH_SECRET=unset'
 printf '%s\n' "$seed_process_env" | grep -Fxq 'STRIPE_SECRET_KEY=unset'
 printf '%s\n' "$seed_process_env" | grep -Fxq 'GITHUB_APP_PRIVATE_KEY=unset'
