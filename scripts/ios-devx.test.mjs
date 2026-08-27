@@ -371,6 +371,7 @@ test("CI tests iOS without secrets and keeps the live provider diagnostic manual
 });
 
 test("the staged reply fixture is armed only after the UI reader leaves the tail", () => {
+  const chatView = read("apps/ios/Companion/Screens/ChatView.swift");
   const demo = read("apps/ios/Companion/Screens/CompanionTranscriptWindowDemoView.swift");
   const uiTests = read("apps/ios/CompanionUITests/CompanionUITests.swift");
 
@@ -382,6 +383,9 @@ test("the staged reply fixture is armed only after the UI reader leaves the tail
   assert.match(uiTests, /stageReply\.tap\(\)/);
   assert.match(uiTests, /let plainButtonWidth = unseen\.frame\.width/);
   assert.match(uiTests, /element\.frame\.width > plainButtonWidth \+ 40/);
+  assert.match(demo, /"event_id": "staged-reply"/);
+  assert.match(chatView, /@State private var unseenCount = 0/);
+  assert.match(chatView, /unseenCount = unseenTracker\.observe\(/);
 });
 
 test("GitHub Actions never installs or invokes XcodeBuildMCP", () => {

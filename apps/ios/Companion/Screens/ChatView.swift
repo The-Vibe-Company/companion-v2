@@ -64,6 +64,7 @@ struct ChatView: View {
     @State private var decisionCatalogLoaded = false
     @State private var transcriptWindow = CompanionTranscriptWindow()
     @State private var unseenTracker = CompanionTranscriptUnseenTracker()
+    @State private var unseenCount = 0
     @State private var isNearBottom = true
     @State private var loadingEarlier = false
     @State private var pendingScrollTarget: ChatScrollTarget?
@@ -216,6 +217,7 @@ struct ChatView: View {
                         isNearBottom = nextIsNearBottom
                         if nextIsNearBottom, !wasNearBottom {
                             unseenTracker.markReaderAtBottom()
+                            unseenCount = 0
                         }
                         recordReadingPosition()
                     }
@@ -377,7 +379,6 @@ struct ChatView: View {
 
     @ViewBuilder
     private func scrollToBottomButton(action: @escaping () -> Void) -> some View {
-        let unseenCount = unseenTracker.unseenCount
         if unseenCount > 0 {
             Button(action: action) {
                 HStack(spacing: 8) {
@@ -763,7 +764,10 @@ struct ChatView: View {
 
             transcriptWindow = nextWindow
             markdownByEventID = renderedMarkdown
-            unseenTracker.observe(entries: nextEntries, isNearBottom: isNearBottom)
+            unseenCount = unseenTracker.observe(
+                entries: nextEntries,
+                isNearBottom: isNearBottom
+            )
             threadProjection.accept(next, refresh: generation)
             refreshSelectedToolDetail(from: next.entries)
             error = nil
@@ -1133,6 +1137,7 @@ struct ChatView: View {
         threadProjection.reset()
         transcriptWindow.reset()
         unseenTracker.reset()
+        unseenCount = 0
         pendingMessages = []
         markdownByEventID = [:]
         decisionCatalog = .empty
