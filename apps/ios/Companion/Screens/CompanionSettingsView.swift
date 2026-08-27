@@ -11,9 +11,44 @@ struct CompanionSettingsServices {
     let updatePluginSelection: ([String]) async throws -> CompanionSummary
     let loadCompanion: () async throws -> CompanionSummary
     let restart: (CompanionRuntimeRestartTarget, UUID) async throws -> CompanionOperationSummary
+    let listRoutines: (() async throws -> [CompanionRoutine])?
+    let createRoutine: ((CreateCompanionRoutineInput) async throws -> CompanionRoutine)?
+    let updateRoutine: ((String, UpdateCompanionRoutineInput) async throws -> CompanionRoutine)?
+    let listRoutineRuns: ((String, String?) async throws -> CompanionRoutineRunList)?
+    let routineRun: ((String, Int?) async throws -> CompanionRoutineRunDetail)?
+
+    init(
+        listProviders: @escaping () async throws -> CompanionProvidersResponse,
+        updateCompanion: @escaping (String, UpdateCompanionInput) async throws -> CompanionSummary,
+        deleteCompanion: @escaping (String, UUID) async throws -> CompanionOperationSummary,
+        connectedResources: @escaping () async throws -> CompanionConnectedResources,
+        listPlugins: @escaping () async throws -> [CompanionPluginAccount],
+        updatePluginSelection: @escaping ([String]) async throws -> CompanionSummary,
+        loadCompanion: @escaping () async throws -> CompanionSummary,
+        restart: @escaping (CompanionRuntimeRestartTarget, UUID) async throws -> CompanionOperationSummary,
+        listRoutines: (() async throws -> [CompanionRoutine])? = nil,
+        createRoutine: ((CreateCompanionRoutineInput) async throws -> CompanionRoutine)? = nil,
+        updateRoutine: ((String, UpdateCompanionRoutineInput) async throws -> CompanionRoutine)? = nil,
+        listRoutineRuns: ((String, String?) async throws -> CompanionRoutineRunList)? = nil,
+        routineRun: ((String, Int?) async throws -> CompanionRoutineRunDetail)? = nil
+    ) {
+        self.listProviders = listProviders
+        self.updateCompanion = updateCompanion
+        self.deleteCompanion = deleteCompanion
+        self.connectedResources = connectedResources
+        self.listPlugins = listPlugins
+        self.updatePluginSelection = updatePluginSelection
+        self.loadCompanion = loadCompanion
+        self.restart = restart
+        self.listRoutines = listRoutines
+        self.createRoutine = createRoutine
+        self.updateRoutine = updateRoutine
+        self.listRoutineRuns = listRoutineRuns
+        self.routineRun = routineRun
+    }
 }
 
-struct CompanionSettingsView: View {
+private struct LegacyCompanionSettingsView: View {
     @Environment(SessionStore.self) private var sessionStore
 
     let companion: CompanionSummary
