@@ -661,7 +661,11 @@ final class CompanionUITests: XCTestCase {
         let keyboard = app.keyboards.firstMatch
         XCTAssertTrue(keyboard.waitForExistence(timeout: 2))
 
-        latestMessage.tap()
+        // The keyboard shortens the lazy transcript and moves the tail entry out of
+        // the accessibility tree. Tap stable text in the still-visible message above it.
+        let transcriptMessage = app.staticTexts["iOS chat"]
+        XCTAssertTrue(transcriptMessage.waitForExistence(timeout: 2))
+        transcriptMessage.tap()
         let keyboardDismissed = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "exists == false"),
             object: keyboard

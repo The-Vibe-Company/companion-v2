@@ -279,7 +279,7 @@ test("native transcript taps dismiss the keyboard without consuming message cont
     /\.simultaneousGesture\(\s*TapGesture\(\)\s*\.onEnded \{ composerFocused = false \}\s*\)/,
   );
   assert.match(uiTests, /testTranscriptTapDismissesKeyboardWithoutBlockingMessageControls/);
-  assert.match(uiTests, /latestMessage\.tap\(\)/);
+  assert.match(uiTests, /transcriptMessage\.tap\(\)/);
   assert.match(uiTests, /predicate: NSPredicate\(format: "exists == false"\)/);
   assert.match(uiTests, /toolCard\.tap\(\)/);
   assert.match(uiTests, /\["tool-run\.detail"\]\.waitForExistence/);
