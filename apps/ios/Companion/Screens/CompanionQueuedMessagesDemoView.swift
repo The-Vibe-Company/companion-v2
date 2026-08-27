@@ -4,13 +4,16 @@ import SwiftUI
 
 struct CompanionQueuedMessagesDemoView: View {
     private let canManage: Bool
+    private let viewerID: String
     private let failRemovalOnce: Bool
     @State private var entries = CompanionQueuedMessagesDemoFixtures.entries
     @State private var draft = ""
     @State private var removalAttempts = 0
 
     init() {
-        canManage = ProcessInfo.processInfo.environment["COMPANION_QUEUED_DEMO_ACCESS"] != "viewer"
+        let access = ProcessInfo.processInfo.environment["COMPANION_QUEUED_DEMO_ACCESS"] ?? "owner"
+        canManage = access != "viewer"
+        viewerID = access == "owner" ? "owner-1" : "\(access)-1"
         failRemovalOnce = ProcessInfo.processInfo.environment["COMPANION_QUEUED_DEMO_FAIL_ONCE"] == "1"
     }
 
@@ -39,6 +42,7 @@ struct CompanionQueuedMessagesDemoView: View {
                             CompanionQueuedMessagesView(
                                 entries: entries,
                                 canManage: canManage,
+                                viewerID: viewerID,
                                 accent: .blue,
                                 onRemove: remove
                             )

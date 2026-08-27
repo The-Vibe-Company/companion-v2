@@ -379,6 +379,7 @@ struct ChatView: View {
                 CompanionQueuedMessagesView(
                     entries: queuedEntries,
                     canManage: thread?.canSend == true,
+                    viewerID: thread?.viewerID,
                     accent: visualTheme.accent,
                     onRemove: cancelTurn
                 )
@@ -1227,6 +1228,7 @@ struct ChatMessageBubble: View {
             if kind != .mine { Spacer(minLength: kind == .assistant ? 12 : 36) }
         }
         .frame(maxWidth: .infinity)
+        .companionMessageInteractionMenu(rawContent: content)
     }
 
     @ViewBuilder

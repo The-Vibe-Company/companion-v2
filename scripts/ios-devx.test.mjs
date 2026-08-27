@@ -151,6 +151,56 @@ test("chat content stays neutral while Companion accents remain on actions and i
   );
 });
 
+test("native message interactions stay accessible and CI-verifiable without Xcode", () => {
+  const chat = read("apps/ios/Companion/Screens/ChatView.swift");
+  const interactions = read(
+    "apps/ios/Companion/Support/MessageInteractionSupport.swift",
+  );
+  const markdown = read("apps/ios/Companion/Screens/MarkdownMessageView.swift");
+  const queued = read("apps/ios/Companion/Screens/CompanionQueuedMessagesView.swift");
+  const queuedDemo = read("apps/ios/Companion/Screens/CompanionQueuedMessagesDemoView.swift");
+  const uiTests = read("apps/ios/CompanionUITests/CompanionUITests.swift");
+  const readme = read("apps/ios/README.md");
+  const ci = read(".github/workflows/ci.yml");
+
+  assert.match(chat, /\.companionMessageInteractionMenu\(rawContent: content\)/);
+  for (const action of ["Copy", "Share", "Select Text"]) {
+    assert.match(interactions, new RegExp(`Label\\("${action}"`));
+  }
+  assert.match(interactions, /UIPasteboard\.general\.string = rawContent/);
+  assert.match(interactions, /\.sensoryFeedback\(\.success, trigger: copyFeedbackTrigger\)/);
+  assert.match(
+    interactions,
+    /\.sensoryFeedback\(\.impact\(weight: \.light\), trigger: shareFeedbackTrigger\)/,
+  );
+  assert.match(interactions, /UIAccessibility\.post\(notification: \.announcement/);
+  assert.match(interactions, /\.textSelection\(\.enabled\)/);
+
+  assert.match(markdown, /\.frame\(minWidth: 44, minHeight: 44\)/);
+  assert.match(markdown, /UIPasteboard\.general\.string = code/);
+  assert.match(markdown, /\.sensoryFeedback\(\.success, trigger: copyFeedbackTrigger\)/);
+  assert.match(markdown, /accessibilityReduceMotion/);
+  assert.match(markdown, /accessibilityIdentifier\("markdown\.code-copy\.\\\(identifier\)"\)/);
+
+  assert.match(queued, /entry\.authorID == viewerID/);
+  assert.match(queued, /removingTurnID == nil/);
+  assert.match(queued, /Button\("Delete", systemImage: "trash", role: \.destructive\)/);
+  assert.match(queuedDemo, /viewerID: viewerID/);
+  assert.match(uiTests, /testMessageLongPressOffersCopyShareAndSelectableText/);
+  assert.match(uiTests, /testMarkdownCodeBlockCopyShowsSuccessStateAndNativeHitTarget/);
+  assert.match(uiTests, /testQueuedOwnMessageContextDeleteUsesExistingRemoval/);
+  assert.match(uiTests, /testQueuedTeammateContextDeleteIsUnavailableToEditor/);
+  for (const testName of [
+    "testMessageLongPressOffersCopyShareAndSelectableText",
+    "testMarkdownCodeBlockCopyShowsSuccessStateAndNativeHitTarget",
+    "testQueuedOwnMessageContextDeleteUsesExistingRemoval",
+    "testQueuedTeammateContextDeleteIsUnavailableToEditor",
+  ]) {
+    assert.match(ci, new RegExp(`-only-testing:CompanionUITests/CompanionUITests/${testName}`));
+  }
+  assert.match(readme, /Reply or thread\s+actions and regenerate are deliberately out of scope/);
+});
+
 test("the project is synchronized, shared, and backed by CompanionKit", () => {
   const project = read("apps/ios/Companion.xcodeproj/project.pbxproj");
   const scheme = read("apps/ios/Companion.xcodeproj/xcshareddata/xcschemes/Companion.xcscheme");

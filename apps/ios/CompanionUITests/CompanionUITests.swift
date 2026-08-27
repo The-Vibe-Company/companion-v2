@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import UIKit
 import XCTest
 
 final class CompanionUITests: XCTestCase {
@@ -548,6 +549,106 @@ final class CompanionUITests: XCTestCase {
         composer.typeText("**Message membre littéral**")
         send.tap()
         XCTAssertTrue(app.staticTexts["**Message membre littéral**"].waitForExistence(timeout: 3))
+    }
+
+    @MainActor
+    func testMessageLongPressOffersCopyShareAndSelectableText() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-glass-chat-demo"]
+        app.launch()
+
+        let reply = app.descendants(matching: .any)["demo.markdown.reply"]
+        XCTAssertTrue(reply.waitForExistence(timeout: 5))
+        UIPasteboard.general.string = "unchanged"
+        reply.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 1.2)
+
+        XCTAssertTrue(app.buttons["Copy"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.buttons["Share"].exists)
+        XCTAssertTrue(app.buttons["Select Text"].exists)
+        app.buttons["Copy"].tap()
+        let copiedMessage = try XCTUnwrap(UIPasteboard.general.string)
+        XCTAssertTrue(copiedMessage.hasPrefix("## Rapport d’incident"))
+        XCTAssertTrue(copiedMessage.contains("```swift\nlet status = \"ok\""))
+        XCTAssertTrue(copiedMessage.hasSuffix("[Lien refusé](javascript:alert(1))"))
+
+        reply.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 1.2)
+        XCTAssertTrue(app.buttons["Select Text"].waitForExistence(timeout: 2))
+        app.buttons["Select Text"].tap()
+        XCTAssertTrue(app.navigationBars["Select text"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.descendants(matching: .any)["chat.select-text.surface"].exists)
+        XCTAssertTrue(app.descendants(matching: .any).matching(
+            NSPredicate(format: "label CONTAINS %@", "Rapport d’incident")
+        ).firstMatch.exists)
+        app.buttons["Done"].tap()
+        XCTAssertTrue(app.navigationBars["Select text"].waitForNonExistence(timeout: 2))
+
+        reply.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 1.2)
+        XCTAssertTrue(app.buttons["Share"].waitForExistence(timeout: 2))
+        app.buttons["Share"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["chat.share-sheet"].waitForExistence(timeout: 3))
+    }
+
+    @MainActor
+    func testMarkdownCodeBlockCopyShowsSuccessStateAndNativeHitTarget() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-glass-chat-demo"]
+        app.launch()
+
+        let copy = app.buttons.matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "markdown.code-copy.")
+        ).firstMatch
+        XCTAssertTrue(copy.waitForExistence(timeout: 5))
+        XCTAssertGreaterThanOrEqual(copy.frame.height, 44)
+        XCTAssertGreaterThanOrEqual(copy.frame.width, 44)
+
+        copy.tap()
+        XCTAssertTrue(app.buttons["Code copied"].waitForExistence(timeout: 2))
+        XCTAssertEqual(copy.value as? String, "Copied")
+    }
+
+    @MainActor
+    func testQueuedOwnMessageContextDeleteUsesExistingRemoval() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-queued-demo"]
+        app.launch()
+
+        app.buttons["chat.queue.toggle"].tap()
+        let item = app.descendants(matching: .any)[
+            "chat.queue.item.msg:11111111-1111-4111-8111-111111111111"
+        ]
+        XCTAssertTrue(item.waitForExistence(timeout: 5))
+        item.press(forDuration: 1.2)
+        XCTAssertTrue(app.buttons["Delete"].waitForExistence(timeout: 2))
+        app.buttons["Delete"].tap()
+        XCTAssertTrue(app.buttons["Remove from queue"].waitForExistence(timeout: 2))
+        app.buttons["Remove from queue"].tap()
+        let updatedQueue = app.buttons.matching(
+            NSPredicate(
+                format: "identifier == %@ AND label == %@",
+                "chat.queue.toggle",
+                "2 queued messages"
+            )
+        ).firstMatch
+        XCTAssertTrue(updatedQueue.waitForExistence(timeout: 2))
+    }
+
+    @MainActor
+    func testQueuedTeammateContextDeleteIsUnavailableToEditor() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-queued-demo"]
+        app.launchEnvironment["COMPANION_QUEUED_DEMO_ACCESS"] = "editor"
+        app.launch()
+
+        app.buttons["chat.queue.toggle"].tap()
+        let item = app.descendants(matching: .any)[
+            "chat.queue.item.msg:11111111-1111-4111-8111-111111111111"
+        ]
+        XCTAssertTrue(item.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons[
+            "chat.queue.remove.aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        ].exists)
+        item.press(forDuration: 1.2)
+        XCTAssertFalse(app.buttons["Delete"].waitForExistence(timeout: 1))
     }
 
     @MainActor

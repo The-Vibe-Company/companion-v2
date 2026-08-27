@@ -1,5 +1,6 @@
 import SwiftUI
 import CompanionKit
+import UIKit
 
 struct MarkdownDocument: Equatable, Sendable {
     let blocks: [MarkdownNode]
@@ -506,17 +507,40 @@ private struct MarkdownCodeBlock: View {
     let language: String?
     let identifier: Int
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var copyGeneration = 0
+    @State private var copyFeedbackTrigger = 0
+    @State private var isCopied = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(languageLabel)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(Color.companionMuted)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .overlay(alignment: .bottom) {
-                    Divider().overlay(Color.companionDivider)
+            HStack(spacing: 8) {
+                Text(languageLabel)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.companionMuted)
+
+                Spacer(minLength: 8)
+
+                Button(action: copyCode) {
+                    Label(
+                        isCopied ? "Copied" : "Copy",
+                        systemImage: isCopied ? "checkmark" : "doc.on.doc"
+                    )
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(isCopied ? Color.companionSuccess : Color.companionMuted)
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(.rect)
                 }
+                .buttonStyle(.plain)
+                .accessibilityLabel(isCopied ? "Code copied" : "Copy code")
+                .accessibilityValue(isCopied ? "Copied" : "Ready")
+                .accessibilityIdentifier("markdown.code-copy.\(identifier)")
+            }
+            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
+            .overlay(alignment: .bottom) {
+                Divider().overlay(Color.companionDivider)
+            }
 
             ScrollView(.horizontal) {
                 Text(trimmedCode)
@@ -531,6 +555,35 @@ private struct MarkdownCodeBlock: View {
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Code block, \(languageLabel)")
         .accessibilityIdentifier("markdown.code-block.\(identifier)")
+        .sensoryFeedback(.success, trigger: copyFeedbackTrigger)
+        .task(id: copyGeneration) {
+            guard copyGeneration > 0 else { return }
+            try? await Task.sleep(for: .seconds(1.5))
+            guard !Task.isCancelled else { return }
+            if reduceMotion {
+                isCopied = false
+            } else {
+                withAnimation(.easeOut(duration: 0.18)) {
+                    isCopied = false
+                }
+            }
+        }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: isCopied)
+    }
+
+    private func copyCode() {
+        // Keep the parser's raw code, including any meaningful trailing newline, in the pasteboard.
+        UIPasteboard.general.string = code
+        copyFeedbackTrigger &+= 1
+        CompanionMessageInteractionFeedback.announce("Code copied")
+        copyGeneration &+= 1
+        if reduceMotion {
+            isCopied = true
+        } else {
+            withAnimation(.easeOut(duration: 0.18)) {
+                isCopied = true
+            }
+        }
     }
 
     private var languageLabel: String {

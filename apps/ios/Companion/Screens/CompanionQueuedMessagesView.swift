@@ -7,6 +7,7 @@ struct CompanionQueuedMessagesView: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     let entries: [TranscriptEntry]
     let canManage: Bool
+    let viewerID: String? = nil
     let accent: Color
     let onRemove: (String) async throws -> Void
 
@@ -197,10 +198,9 @@ struct CompanionQueuedMessagesView: View {
             .accessibilityElement(children: .combine)
             .accessibilityLabel(accessibleSummary(for: entry))
 
-            if canManage, let turnID = entry.turnID {
+            if canManageRemoval(for: entry), let turnID = entry.turnID {
                 Button(role: .destructive) {
-                    removalError = nil
-                    removalCandidate = entry
+                    requestRemoval(of: entry)
                 } label: {
                     Group {
                         if removingTurnID == turnID {
@@ -223,6 +223,14 @@ struct CompanionQueuedMessagesView: View {
         .padding(.leading, 14)
         .padding(.trailing, 8)
         .padding(.vertical, 8)
+        .contentShape(.rect)
+        .contextMenu {
+            if canDeleteFromContext(entry) {
+                Button("Delete", systemImage: "trash", role: .destructive) {
+                    requestRemoval(of: entry)
+                }
+            }
+        }
         .accessibilityIdentifier("chat.queue.item.\(entry.eventID)")
     }
 
@@ -273,9 +281,29 @@ struct CompanionQueuedMessagesView: View {
     private func removalAccessibilityLabel(for entry: TranscriptEntry) -> String {
         let text = entry.content.trimmingCharacters(in: .whitespacesAndNewlines)
         if !text.isEmpty {
-            return "Remove queued message: \(String(text.prefix(80)))"
+            return "Delete queued message: \(String(text.prefix(80)))"
         }
-        return "Remove queued message with \(attachmentSummary(for: entry) ?? "no attachments")"
+        return "Delete queued message with \(attachmentSummary(for: entry) ?? "no attachments")"
+    }
+
+    private func canManageRemoval(for entry: TranscriptEntry) -> Bool {
+        // Keep the existing Owner/Editor cancel affordance for every contract-valid queued turn.
+        canManage && entry.turnID != nil
+    }
+
+    private func canDeleteFromContext(_ entry: TranscriptEntry) -> Bool {
+        // A long-press Delete is a personal shortcut. The visible cancel control above remains
+        // available to every Owner/Editor as in the shared queue contract.
+        canManageRemoval(for: entry)
+            && removingTurnID == nil
+            && entry.role == "user"
+            && entry.authorID != nil
+            && entry.authorID == viewerID
+    }
+
+    private func requestRemoval(of entry: TranscriptEntry) {
+        removalError = nil
+        removalCandidate = entry
     }
 
     private var removalConfirmationPresented: Binding<Bool> {
