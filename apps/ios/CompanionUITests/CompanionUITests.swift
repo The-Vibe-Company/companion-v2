@@ -742,11 +742,14 @@ final class CompanionUITests: XCTestCase {
         XCTAssertTrue(stageReply.waitForExistence(timeout: 3))
         stageReply.tap()
         let unseenLabel = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "value == %@", "1 new reply"),
+            predicate: NSPredicate(
+                format: "label == %@",
+                "1 new reply. Scroll to latest message"
+            ),
             object: unseen
         )
         wait(for: [unseenLabel], timeout: 15)
-        XCTAssertEqual(unseen.value as? String, "1 new reply")
+        XCTAssertEqual(unseen.label, "1 new reply. Scroll to latest message")
         unseen.tap()
 
         let stagedReply = app.staticTexts["Staged poll content has arrived."]

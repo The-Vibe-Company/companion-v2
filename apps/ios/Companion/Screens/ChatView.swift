@@ -394,7 +394,7 @@ struct ChatView: View {
             .buttonBorderShape(.capsule)
             .tint(visualTheme.accent)
             .shadow(color: visualTheme.shadow.opacity(0.2), radius: 8, y: 3)
-            .accessibilityLabel("Scroll to latest message")
+            .accessibilityLabel("\(unseenMessage(count: unseenCount)). Scroll to latest message")
             .accessibilityValue(unseenMessage(count: unseenCount))
             .accessibilityHint("Double tap to scroll to the latest message.")
             .accessibilityIdentifier("chat.scroll-to-bottom")
