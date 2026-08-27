@@ -179,9 +179,7 @@ private struct MarkdownNodeView: View {
     var body: some View {
         switch node.kind {
         case .paragraph:
-            MarkdownText(content: node.content, accent: accent)
-                .font(.body)
-                .lineSpacing(3)
+            MarkdownParagraphView(content: node.content, accent: accent)
 
         case .heading(let level):
             MarkdownText(content: node.content, accent: accent)
@@ -241,6 +239,85 @@ private struct MarkdownNodeView: View {
         case 4: return .body.weight(.semibold)
         default: return .subheadline.weight(.semibold)
         }
+    }
+}
+
+private struct MarkdownParagraphView: View {
+    let content: AttributedString
+    let accent: Color
+
+    var body: some View {
+        if let link = standaloneLink {
+            Link(destination: link) {
+                HStack(spacing: 12) {
+                    Image(systemName: "link")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(accent)
+                        .frame(width: 36, height: 36)
+                        .background(CompanionIOSTheme.card, in: RoundedRectangle(cornerRadius: 10))
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(linkTitle)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(CompanionIOSTheme.textPrimary)
+                            .lineLimit(2)
+
+                        Text(linkDomain(for: link))
+                            .font(.system(size: 15))
+                            .foregroundStyle(CompanionIOSTheme.textSecondary)
+                            .lineLimit(1)
+                    }
+
+                    Spacer(minLength: 4)
+
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(CompanionIOSTheme.textSecondary)
+                }
+                .padding(12)
+                .background(
+                    CompanionIOSTheme.innerBubble,
+                    in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Open \(linkTitle), \(linkDomain(for: link))")
+        } else {
+            MarkdownText(content: content, accent: accent)
+                .font(.body)
+                .lineSpacing(3)
+        }
+    }
+
+    private var standaloneLink: URL? {
+        let visibleText = String(content.characters)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !visibleText.isEmpty else { return nil }
+
+        var linkedText = ""
+        var links: [URL] = []
+        for run in content.runs {
+            guard let link = run.link else { continue }
+            linkedText += String(content[run.range].characters)
+            links.append(link)
+        }
+
+        guard let firstLink = links.first,
+              links.allSatisfy({ $0 == firstLink }),
+              linkedText.trimmingCharacters(in: .whitespacesAndNewlines) == visibleText
+        else {
+            return nil
+        }
+        return firstLink
+    }
+
+    private var linkTitle: String {
+        String(content.characters).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func linkDomain(for link: URL) -> String {
+        link.host ?? link.scheme?.uppercased() ?? "Link"
     }
 }
 
