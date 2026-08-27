@@ -47,7 +47,7 @@ connections support encrypted API keys plus the shared Claude authorization-code
 flows. The live server catalog includes Claude, Codex, Kimi, Moonshot, z.ai, OpenAI API, and Google
 Gemini; the app renders that catalog rather than maintaining a divergent mobile allowlist. Members
 can connect multiple labeled accounts for each product-owned plugin category — Linear, GitHub,
-Notion, and Conductor — through the existing brokered OAuth flow. Custom MCP plugins remain
+Notion, Conductor, and Slack — through the existing brokered OAuth flow. Custom MCP plugins remain
 available over HTTP or a Box command with an optional encrypted credential, using the same shared
 endpoints and transports as the browser client.
 

@@ -253,6 +253,9 @@ the safe OAuth code; never capture the provider response. Diagnose by cause:
 - if GitHub configuration is absent, restore both shared variables before retrying;
 - for GitHub, Linear, Notion, or another revoked/expired user grant, reconnect that account in
   Plugins; repeated messages cannot repair a revoked grant;
+- for Slack app-secret drift, verify API has the original
+  `COMPANION_MCP_SLACK_CLIENT_ID` and `COMPANION_MCP_SLACK_CLIENT_SECRET`; runtime must not receive
+  either value. Restore the app that issued the grant or reconnect the Slack account;
 - reconnect in Plugins only when the refresh token is absent, expired, revoked, or bound to a client
   configuration that can no longer refresh it. Do not reconnect merely because the access token is
   shorter than two hours and five minutes.

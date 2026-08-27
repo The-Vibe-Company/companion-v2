@@ -3,8 +3,9 @@ import { describe, expect, it } from "vitest";
 import { COMPANION_PLUGIN_SKILLS } from "./companionPluginSkills";
 
 describe("COMPANION_PLUGIN_SKILLS", () => {
-  it("ships exactly the github and linear plugin skills with valid frontmatter", () => {
+  it("ships exactly the Slack, GitHub, and Linear plugin skills with valid frontmatter", () => {
     expect(COMPANION_PLUGIN_SKILLS.map((skill) => skill.slug)).toEqual([
+      "plugin-slack",
       "plugin-github",
       "plugin-linear",
     ]);
@@ -12,11 +13,12 @@ describe("COMPANION_PLUGIN_SKILLS", () => {
       expect(skill.content.startsWith("---\n")).toBe(true);
       expect(skill.content).toContain(`name: ${skill.slug.replace(/^plugin-/, "")}-plugin`);
       expect(skill.content).toContain(`description: "`);
-      // A capability must never be described before this runtime stages it: every plugin skill
-      // documents triggers through the shared on-demand registration rules.
+      expect(skill.content).not.toContain("TODO");
+    }
+    const triggerSkills = COMPANION_PLUGIN_SKILLS.filter((skill) => skill.provider !== "slack");
+    for (const skill of triggerSkills) {
       expect(skill.content).toContain("propose_trigger");
       expect(skill.content).toContain("registration");
-      expect(skill.content).not.toContain("TODO");
     }
   });
 
@@ -27,5 +29,8 @@ describe("COMPANION_PLUGIN_SKILLS", () => {
     expect(github.content).toContain("git push");
     expect(linear.content).not.toContain("git push");
     expect(linear.content).toContain("Linear API key");
+    const slack = COMPANION_PLUGIN_SKILLS.find((skill) => skill.provider === "slack")!;
+    expect(slack.content).toContain("slack_chat_post_message");
+    expect(slack.content).toContain("does not receive Slack messages");
   });
 });

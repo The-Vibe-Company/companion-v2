@@ -10,7 +10,10 @@ import { pipeline, Readable, Transform } from "node:stream";
 import { z } from "zod";
 
 const MAX_REQUEST_BYTES = 8 * 1024 * 1024;
+const MAX_SLACK_MCP_REQUEST_BYTES = 64 * 1024;
+const MAX_SLACK_RESPONSE_BYTES = 64 * 1024;
 const TOKEN_TIMEOUT_MS = 10_000;
+const SLACK_TIMEOUT_MS = 15_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const gatewayConfigSchema = z.object({
   accounts: z.array(z.object({
@@ -18,6 +21,7 @@ const gatewayConfigSchema = z.object({
     credentialGeneration: z.string().regex(UUID),
     upstreamUrl: z.string().url(),
     github: z.boolean(),
+    slack: z.literal(true).optional(),
   }).strict()).max(50),
 }).strict();
 const gatewayAddressSchema = z.object({ port: z.number().int().min(1).max(65_535) }).passthrough();
@@ -34,6 +38,7 @@ interface GatewayAccount {
   credentialGeneration: string;
   upstreamUrl: string;
   github: boolean;
+  slack: boolean;
 }
 
 interface CachedAccess {
@@ -137,6 +142,7 @@ function readGatewayAccounts(path: string): GatewayAccount[] {
       credentialGeneration: value.credentialGeneration,
       upstreamUrl: upstream.toString(),
       github: value.github,
+      slack: value.slack === true,
     };
   });
 }
@@ -208,12 +214,21 @@ async function handleGatewayRequest(input: {
     input.response.end(access.token);
     return;
   }
+  if (account.slack) {
+    return await handleSlackMcpRequest({
+      request: input.request,
+      response: input.response,
+      account,
+      accessFor: input.accessFor,
+      fetchImpl: input.fetchImpl,
+    });
+  }
   if (!input.request.method || !["GET", "POST", "DELETE"].includes(input.request.method)) {
     return safeError(input.response, 405);
   }
   const body = input.request.method === "GET" || input.request.method === "DELETE"
     ? undefined
-    : await readBoundedBody(input.request);
+    : await readBoundedBody(input.request, MAX_REQUEST_BYTES);
   const endpointTarget = route[3] ? decodeEndpoint(route[3], account.upstreamUrl) : null;
   const target = endpointTarget ?? new URL(account.upstreamUrl);
   const firstAccess = await input.accessFor(account, false);
@@ -341,16 +356,227 @@ function decodeEndpoint(encoded: string, upstreamUrl: string): URL {
   return endpoint;
 }
 
-async function readBoundedBody(request: IncomingMessage): Promise<Buffer> {
+async function readBoundedBody(request: IncomingMessage, limit: number): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of request) {
     const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += bytes.byteLength;
-    if (size > MAX_REQUEST_BYTES) throw new Error("MCP request body is too large");
+    if (size > limit) throw new Error("MCP request body is too large");
     chunks.push(bytes);
   }
   return Buffer.concat(chunks, size);
+}
+
+const slackConversationIdSchema = z.string().trim().regex(/^[CGD][A-Z0-9]{1,31}$/);
+const slackThreadTimestampSchema = z.string().trim().regex(/^\d{1,16}\.\d{6}$/);
+const slackPostMessageArgumentsSchema = z.object({
+  channel: slackConversationIdSchema,
+  text: z.string().trim().min(1).max(4_000),
+  thread_ts: slackThreadTimestampSchema.optional(),
+  reply_broadcast: z.boolean().optional(),
+}).strict();
+const slackSuccessSchema = z.object({
+  ok: z.literal(true),
+  channel: slackConversationIdSchema,
+  ts: slackThreadTimestampSchema,
+}).passthrough();
+
+type CompanionMcpJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | CompanionMcpJsonValue[]
+  | { [key: string]: CompanionMcpJsonValue };
+const companionMcpJsonValueSchema: z.ZodType<CompanionMcpJsonValue> = z.lazy(() => z.union([
+  z.string(),
+  z.number(),
+  z.boolean(),
+  z.null(),
+  z.array(companionMcpJsonValueSchema),
+  z.record(companionMcpJsonValueSchema),
+]));
+const jsonRpcRequestSchema = z.object({
+  jsonrpc: z.literal("2.0"),
+  id: z.union([z.string(), z.number().finite(), z.null()]).optional(),
+  method: z.string(),
+  params: companionMcpJsonValueSchema.optional(),
+}).strict();
+type JsonRpcRequest = z.infer<typeof jsonRpcRequestSchema>;
+
+async function handleSlackMcpRequest(input: {
+  request: IncomingMessage;
+  response: ServerResponse;
+  account: GatewayAccount;
+  accessFor(account: GatewayAccount, force: boolean): Promise<CachedAccess>;
+  fetchImpl: typeof fetch;
+}): Promise<void> {
+  if (input.request.method !== "POST") return safeError(input.response, 405);
+  if (input.account.upstreamUrl !== "https://slack.com/api/chat.postMessage") {
+    return safeError(input.response, 502);
+  }
+  const body = await readBoundedBody(input.request, MAX_SLACK_MCP_REQUEST_BYTES);
+  let request: JsonRpcRequest | null = null;
+  try {
+    const parsed = jsonRpcRequestSchema.safeParse(JSON.parse(body.toString("utf8")));
+    if (parsed.success) request = parsed.data;
+  } catch {
+    return jsonRpcResponse(input.response, {
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32700, message: "Invalid JSON" },
+    });
+  }
+  if (!request) {
+    return jsonRpcResponse(input.response, {
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32600, message: "Invalid request" },
+    });
+  }
+  if (request.method === "notifications/initialized") {
+    input.response.writeHead(202, { "cache-control": "no-store" });
+    input.response.end();
+    return;
+  }
+  if (request.method === "initialize") {
+    return jsonRpcResponse(input.response, {
+      jsonrpc: "2.0",
+      id: request.id ?? null,
+      result: {
+        protocolVersion: "2025-03-26",
+        capabilities: { tools: { listChanged: false } },
+        serverInfo: { name: "companion-slack", version: "1.0.0" },
+      },
+    });
+  }
+  if (request.method === "tools/list") {
+    return jsonRpcResponse(input.response, {
+      jsonrpc: "2.0",
+      id: request.id ?? null,
+      result: {
+        tools: [{
+          name: "slack_chat_post_message",
+          description: "Send a message to a Slack channel, direct message, or thread.",
+          inputSchema: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              channel: {
+                type: "string",
+                description: "Slack conversation ID, such as C…, G…, or D….",
+              },
+              text: { type: "string", minLength: 1, maxLength: 4000 },
+              thread_ts: {
+                type: "string",
+                description: "Optional parent message timestamp for a thread reply.",
+              },
+              reply_broadcast: {
+                type: "boolean",
+                description: "Also show a thread reply in the channel.",
+              },
+            },
+            required: ["channel", "text"],
+          },
+        }],
+      },
+    });
+  }
+  if (request.method !== "tools/call") {
+    return jsonRpcResponse(input.response, {
+      jsonrpc: "2.0",
+      id: request.id ?? null,
+      error: { code: -32601, message: "Method not found" },
+    });
+  }
+  const params = z.object({
+    name: z.literal("slack_chat_post_message"),
+    arguments: slackPostMessageArgumentsSchema,
+  }).strict().safeParse(request.params);
+  if (!params.success) {
+    return jsonRpcResponse(input.response, {
+      jsonrpc: "2.0",
+      id: request.id ?? null,
+      error: { code: -32602, message: "Invalid Slack message arguments" },
+    });
+  }
+  const access = await input.accessFor(input.account, false);
+  const providerResponse = await input.fetchImpl(input.account.upstreamUrl, {
+    method: "POST",
+    redirect: "error",
+    signal: AbortSignal.timeout(SLACK_TIMEOUT_MS),
+    headers: {
+      accept: "application/json",
+      authorization: `Bearer ${access.token}`,
+      "content-type": "application/json; charset=utf-8",
+    },
+    body: JSON.stringify({
+      ...params.data.arguments,
+      unfurl_links: false,
+      unfurl_media: false,
+    }),
+  });
+  const providerBody = await readFetchBodyBounded(providerResponse, MAX_SLACK_RESPONSE_BYTES);
+  const posted = parseSlackSuccess(providerBody);
+  if (!providerResponse.ok || !posted) {
+    return jsonRpcResponse(input.response, {
+      jsonrpc: "2.0",
+      id: request.id ?? null,
+      result: {
+        content: [{ type: "text", text: "Slack could not send this message. Reconnect the account or verify the conversation ID and bot membership." }],
+        isError: true,
+      },
+    });
+  }
+  return jsonRpcResponse(input.response, {
+    jsonrpc: "2.0",
+    id: request.id ?? null,
+    result: {
+      content: [{
+        type: "text",
+        text: JSON.stringify({ sent: true, channel: posted.channel, ts: posted.ts }),
+      }],
+      structuredContent: { sent: true, channel: posted.channel, ts: posted.ts },
+    },
+  });
+}
+
+function parseSlackSuccess(body: string): z.infer<typeof slackSuccessSchema> | null {
+  try {
+    const parsed = slackSuccessSchema.safeParse(JSON.parse(body));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    // Provider details never cross the gateway boundary.
+    return null;
+  }
+}
+
+function jsonRpcResponse(response: ServerResponse, value: CompanionMcpJsonValue): void {
+  response.writeHead(200, {
+    "cache-control": "no-store",
+    "content-type": "application/json; charset=utf-8",
+  });
+  response.end(JSON.stringify(value));
+}
+
+async function readFetchBodyBounded(response: Response, limit: number): Promise<string> {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const result = await reader.read();
+      if (result.done) break;
+      size += result.value.byteLength;
+      if (size > limit) throw new Error("Slack response is too large");
+      chunks.push(result.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)), size).toString("utf8");
 }
 
 function safeError(response: ServerResponse, status: number): void {

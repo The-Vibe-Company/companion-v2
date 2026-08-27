@@ -233,12 +233,14 @@ export async function resolveRuntimeResources(input: {
         continue;
       }
       const oauth = decrypted.credential;
+      const oauthBroker: NonNullable<CompanionStagedMcpAccount["oauthBroker"]> = {
+        credentialGeneration: row.credentialGeneration,
+        github: oauth.serverName === "io.github.github/github-mcp-server",
+      };
+      if (oauth.serverName === "com.slack/mcp") oauthBroker.slack = true;
       mcpAccounts.push({
         account,
-        oauthBroker: {
-          credentialGeneration: row.credentialGeneration,
-          github: oauth.serverName === "io.github.github/github-mcp-server",
-        },
+        oauthBroker,
       });
       if (uniqueGithubGit && oauth.serverName === "io.github.github/github-mcp-server") {
         extraEnv.COMPANION_GITHUB_MCP_ACCOUNT_ID = row.accountId;

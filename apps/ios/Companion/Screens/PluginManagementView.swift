@@ -33,6 +33,12 @@ private let curatedCompanionPlugins = [
         title: "Conductor",
         detail: "Cloud workspaces, sessions, and coding agents."
     ),
+    CuratedCompanionPlugin(
+        id: "com.slack/mcp",
+        provider: "slack",
+        title: "Slack",
+        detail: "Send messages to channels, direct messages, and threads."
+    ),
 ]
 
 struct PluginManagementView: View {

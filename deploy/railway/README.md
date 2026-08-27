@@ -38,6 +38,7 @@ deployments, so scope each secret deliberately:
 | Secrets envelope master key | no | yes | no | yes | no |
 | S3 Skill archive access | no | read/write | cleanup as required | read-only | historical cutover only |
 | GitHub MCP OAuth client id/secret | no | yes | no | yes | no |
+| Slack Bot OAuth client id/secret | no | yes | no | no | no |
 | GitHub App private key / billing worker secrets | no | no | yes | no | no |
 | APNs key id, team id, and private key | no | no | yes | no | no |
 
@@ -66,6 +67,20 @@ the exact same OAuth App credential during refresh. After correcting drift, rede
 send a new message; a previously failed turn remains terminal and must not be replayed. If the client
 id itself changed, restore the OAuth App that issued existing grants or reconnect GitHub in Plugins:
 sharing a new id cannot refresh a grant issued to the old client.
+
+The Slack app client id and secret belong only on API. API owns both the browser authorization-code
+exchange and any token refresh; the runtime redeems only the selected account's short-lived access
+through the private MCP broker, and neither Pi nor Box receives the app credential. Define shared
+variables and reference them from API:
+
+```dotenv
+COMPANION_MCP_SLACK_CLIENT_ID=${{shared.COMPANION_MCP_SLACK_CLIENT_ID}}
+COMPANION_MCP_SLACK_CLIENT_SECRET=${{shared.COMPANION_MCP_SLACK_CLIENT_SECRET}}
+```
+
+Follow [`docs/integrations/slack.md`](../../docs/integrations/slack.md) to create and distribute the
+Slack app. The Events API signing secret and request URL are intentionally deferred to the receive
+and trigger follow-up; this release connects Bot User accounts and sends messages only.
 
 ### Runtime private address
 

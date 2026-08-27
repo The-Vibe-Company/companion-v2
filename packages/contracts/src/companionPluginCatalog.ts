@@ -10,6 +10,7 @@ export const COMPANION_PLUGIN_OAUTH_SERVER_NAMES = [
   "io.github.github/github-mcp-server",
   "com.notion/mcp",
   "build.conductor/mcp",
+  "com.slack/mcp",
 ] as const;
 export const companionPluginOAuthServerNameSchema = z.enum(
   COMPANION_PLUGIN_OAUTH_SERVER_NAMES,
@@ -20,7 +21,7 @@ export type CompanionPluginOAuthServerName = z.infer<
 
 export interface CompanionPluginCatalogEntry {
   server_name: CompanionPluginOAuthServerName;
-  provider: "linear" | "github" | "notion" | "conductor";
+  provider: "linear" | "github" | "notion" | "conductor" | "slack";
   title: string;
   description: string;
 }
@@ -50,6 +51,12 @@ export const COMPANION_PLUGIN_CATALOG = [
     provider: "conductor",
     title: "Conductor",
     description: "Conductor cloud workspaces, sessions, and coding agents.",
+  },
+  {
+    server_name: "com.slack/mcp",
+    provider: "slack",
+    title: "Slack",
+    description: "Send bounded messages to Slack conversations through a connected Bot User.",
   },
 ] as const satisfies readonly CompanionPluginCatalogEntry[];
 

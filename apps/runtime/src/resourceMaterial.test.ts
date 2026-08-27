@@ -252,6 +252,62 @@ describe("runtime material resolution", () => {
     expect(resources.extraEnv).toEqual({});
   });
 
+  it("marks Slack OAuth accounts for the product-owned loopback MCP bridge", async () => {
+    const envelope = encryptCompanionMcpRuntimeCredential({
+      orgId,
+      accountId,
+      credentialGeneration: generation,
+      credential: {
+        kind: "oauth",
+        version: 1,
+        serverName: "com.slack/mcp",
+        accessToken: "xoxb-secret",
+        refreshToken: "xoxe-refresh",
+        accessExpiresAt: "2030-01-01T00:00:00.000Z",
+        scope: "chat:write",
+        tokenType: "Bearer",
+        tokenEndpoint: "https://slack.com/api/oauth.v2.access",
+        resource: "https://slack.com/api/chat.postMessage",
+        client: {
+          clientId: "slack-client",
+          clientSecret: null,
+          tokenEndpointAuthMethod: "client_secret_basic",
+        },
+      },
+    }, masterKey);
+    const resources = await resolveRuntimeResources({
+      orgId,
+      masterKey,
+      material: {
+        providerMaterial: [],
+        skillMaterial: [],
+        mcpMaterial: [{
+          account_id: accountId,
+          credential_generation: generation,
+          account_config: {
+            id: accountId,
+            label: "Slack work",
+            lifecycle: "lazy",
+            direct_tools: false,
+            transport: "http",
+            url: "https://slack.com/api/chat.postMessage",
+            headers: { Authorization: "SLACK_AUTH" },
+          },
+          ...snakeEnvelope(envelope),
+        }],
+      },
+      loadSkillArchive: vi.fn(),
+      signal: new AbortController().signal,
+    });
+
+    expect(resources.mcpAccounts).toEqual([{
+      account: expect.objectContaining({ id: accountId, label: "Slack work" }),
+      oauthBroker: { credentialGeneration: generation, github: false, slack: true },
+    }]);
+    expect(JSON.stringify(resources)).not.toContain("xoxb-secret");
+    expect(resources.mcpCredentials).toEqual([]);
+  });
+
   it("stages GitHub OAuth as a broker account plus token-free Git and gh metadata", async () => {
     const stored = {
       kind: "oauth" as const,

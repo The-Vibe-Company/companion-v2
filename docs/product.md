@@ -85,6 +85,11 @@ confirmed Editor/Owner action. Automatic repair may recycle Pi only.
 Provider connections and member MCP accounts are envelope-encrypted and survive the one-time legacy
 Companion purge. Old Companions, Boxes, transcripts, runtime rows, pools, and leases do not migrate.
 
+The product-owned plugin catalog includes Slack as a per-member labeled Bot User OAuth account. A
+Companion may send bounded messages to a known Slack conversation or thread through its selected
+account; the OAuth app secret stays on API and the bot token stays behind the loopback MCP broker.
+Slack Events API receive is delivered separately through the ordinary trigger model.
+
 ## Explicit exclusions
 
 Historical Projects and generic skill runs remain removed. This release adds no multi-Bot

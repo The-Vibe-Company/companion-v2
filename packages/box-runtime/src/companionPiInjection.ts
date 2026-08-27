@@ -51,6 +51,7 @@ export interface CompanionStagedMcpAccount {
   oauthBroker?: {
     credentialGeneration: string;
     github: boolean;
+    slack?: true;
   };
 }
 
@@ -59,6 +60,7 @@ export interface CompanionMcpGatewayAccount {
   credentialGeneration: string;
   upstreamUrl: string;
   github: boolean;
+  slack?: true;
 }
 
 function adapterName(account: Pick<CompanionMcpAccount, "id" | "label">): string {
@@ -121,14 +123,16 @@ export function buildMcpAdapterInjection(
             : Object.fromEntries(
               Object.entries(account.headers).map(([key, envKey]) => [key, environmentReference(envKey)]),
             ),
-        };
+    };
     if (staged.oauthBroker && account.transport === "http") {
-      gatewayAccounts.push({
+      const gatewayAccount: CompanionMcpGatewayAccount = {
         accountId: account.id,
         credentialGeneration: staged.oauthBroker.credentialGeneration,
         upstreamUrl: account.url,
         github: staged.oauthBroker.github,
-      });
+      };
+      if (staged.oauthBroker.slack) gatewayAccount.slack = true;
+      gatewayAccounts.push(gatewayAccount);
     }
     metadata.push({
       id: account.id,

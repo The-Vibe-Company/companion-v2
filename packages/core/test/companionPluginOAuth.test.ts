@@ -217,6 +217,61 @@ describe("Companion plugin OAuth broker", () => {
     })).rejects.toEqual(expect.objectContaining({ code: "oauth_not_configured" }));
   });
 
+  it("uses Slack Bot User OAuth without PKCE, resource, or a persisted app secret", async () => {
+    const started = await beginCompanionPluginOAuth({
+      serverName: "com.slack/mcp",
+      redirectUri: "https://companion.example/v1/companion-plugins/oauth/callback",
+      state: "signed-state",
+      env: {
+        COMPANION_MCP_SLACK_CLIENT_ID: "slack-client",
+        COMPANION_MCP_SLACK_CLIENT_SECRET: "slack-secret",
+      },
+      fetchImpl: vi.fn<typeof fetch>(),
+    });
+    const authorization = new URL(started.authorizationUrl);
+    expect(authorization.origin + authorization.pathname).toBe("https://slack.com/oauth/v2/authorize");
+    expect(authorization.searchParams.get("scope")).toBe("chat:write");
+    expect(authorization.searchParams.has("code_challenge")).toBe(false);
+    expect(authorization.searchParams.has("resource")).toBe(false);
+    expect(started.flow.codeVerifier).toBeNull();
+
+    const exchangeFetch = vi.fn<typeof fetch>(async (url, init) => {
+      expect(String(url)).toBe("https://slack.com/api/oauth.v2.access");
+      const body = formBody(init);
+      expect(body.get("code")).toBe("slack-code");
+      expect(body.has("code_verifier")).toBe(false);
+      expect(body.has("resource")).toBe(false);
+      expect(body.has("client_id")).toBe(false);
+      expect(new Headers(init?.headers).get("authorization")).toBe(
+        `Basic ${Buffer.from("slack-client:slack-secret").toString("base64")}`,
+      );
+      return jsonResponse({
+        ok: true,
+        access_token: "xoxb-bot-token",
+        refresh_token: "xoxe-refresh-token",
+        expires_in: 43_200,
+        token_type: "bot",
+      });
+    });
+    const credential = await completeCompanionPluginOAuth({
+      flow: started.flow,
+      code: "slack-code",
+      redirectUri: "https://companion.example/v1/companion-plugins/oauth/callback",
+      fetchImpl: exchangeFetch,
+    });
+    expect(credential).toMatchObject({
+      serverName: "com.slack/mcp",
+      accessToken: "xoxb-bot-token",
+      refreshToken: "xoxe-refresh-token",
+      client: {
+        clientId: "slack-client",
+        clientSecret: null,
+        tokenEndpointAuthMethod: "client_secret_basic",
+      },
+    });
+    expect(JSON.stringify(credential)).not.toContain("slack-secret");
+  });
+
   it("uses GitHub's configured OAuth App without persisting its shared secret or sending resource", async () => {
     const discoveryFetch = vi.fn<typeof fetch>(async () => jsonResponse({
       resource: "https://api.githubcopilot.com/mcp/",
@@ -240,6 +295,7 @@ describe("Companion plugin OAuth broker", () => {
       }
       const body = formBody(init);
       expect(body.has("resource")).toBe(false);
+      expect(body.get("client_id")).toBe("github-client");
       expect(body.get("client_secret")).toBe("github-client-secret");
       return jsonResponse({
         access_token: "github-access",
@@ -271,6 +327,7 @@ describe("Companion plugin OAuth broker", () => {
       }
       const body = formBody(init);
       expect(body.has("resource")).toBe(false);
+      expect(body.get("client_id")).toBe("github-client");
       expect(body.get("client_secret")).toBe("github-client-secret");
       return jsonResponse({ access_token: "github-access-two" });
     });

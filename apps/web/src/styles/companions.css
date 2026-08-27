@@ -273,6 +273,13 @@
   color: #111110;
 }
 
+.companions-plugin-icon--slack,
+.companions-plugin-dialog--slack .og-dialog__ic {
+  background: #4a154b;
+  border-color: #4a154b;
+  color: #fff;
+}
+
 :root[data-theme="dark"] .companions-plugin-icon--conductor,
 :root[data-theme="dark"] .companions-plugin-dialog--conductor .og-dialog__ic {
   background: var(--color-fg);

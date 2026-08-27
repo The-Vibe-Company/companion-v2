@@ -6,7 +6,7 @@ import {
 } from "../src/companionPluginCatalog";
 
 describe("Companion plugin catalog contracts", () => {
-  it("ships exactly the product-owned Linear, GitHub, Notion, and Conductor catalog", () => {
+  it("ships exactly the product-owned Linear, GitHub, Notion, Conductor, and Slack catalog", () => {
     expect(COMPANION_PLUGIN_CATALOG.map((entry) => ({
       server_name: entry.server_name,
       provider: entry.provider,
@@ -24,6 +24,7 @@ describe("Companion plugin catalog contracts", () => {
         provider: "conductor",
         title: "Conductor",
       },
+      { server_name: "com.slack/mcp", provider: "slack", title: "Slack" },
     ]);
   });
 

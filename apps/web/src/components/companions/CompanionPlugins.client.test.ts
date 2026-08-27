@@ -153,7 +153,7 @@ describe("CompanionPlugins", () => {
     expect(container.textContent).toContain("No plugins connected yet.");
     expect(container.querySelector(".companions-plugin-empty")).not.toBeNull();
     expect(container.textContent).toContain(
-      "Connect Linear, GitHub, Notion, or Conductor below, or add a custom MCP server.",
+      "Connect Linear, GitHub, Notion, Conductor, or Slack below, or add a custom MCP server.",
     );
     expect(container.textContent).toContain("Available plugins");
     expect(container.textContent).toContain("Linear");
@@ -163,11 +163,13 @@ describe("CompanionPlugins", () => {
     expect(container.textContent).not.toContain("Browse the registry");
     expect(container.querySelector('input[type="search"]')).toBeNull();
     expect(container.textContent).toContain("Conductor");
-    expect(container.querySelectorAll(".companions-catalog-card")).toHaveLength(4);
+    expect(container.textContent).toContain("Slack");
+    expect(container.querySelectorAll(".companions-catalog-card")).toHaveLength(5);
     expect(container.querySelector('[data-plugin-mark="linear"]')).not.toBeNull();
     expect(container.querySelector('[data-plugin-mark="github"]')).not.toBeNull();
     expect(container.querySelector('[data-plugin-mark="notion"]')).not.toBeNull();
     expect(container.querySelector('[data-plugin-mark="conductor"]')).not.toBeNull();
+    expect(container.querySelector('[data-plugin-mark="slack"]')).not.toBeNull();
 
     const connectButton = Array.from(
       container.querySelectorAll<HTMLButtonElement>(".companions-catalog-card button"),
@@ -203,7 +205,7 @@ describe("CompanionPlugins", () => {
     expect(container.querySelector(".companions-plugin-row [data-plugin-mark=\"linear\"]")).not.toBeNull();
     expect(container.textContent).toContain("1 account");
     expect(Array.from(container.querySelectorAll(".companions-catalog-card button"), (button) => button.textContent))
-      .toEqual(["Add account", "Connect", "Connect", "Connect"]);
+      .toEqual(["Add account", "Connect", "Connect", "Connect", "Connect"]);
     expect(window.location.search).toBe("?view=plugins");
   });
 
@@ -265,12 +267,12 @@ describe("CompanionPlugins", () => {
     expect(container.querySelector(
       'button[aria-label="Disconnect Linear work"]',
     )).toBeNull();
-    expect(container.querySelectorAll(".companions-catalog-card")).toHaveLength(4);
+    expect(container.querySelectorAll(".companions-catalog-card")).toHaveLength(5);
     expect(container.textContent).not.toContain("1 account");
     expect(Array.from(
       container.querySelectorAll(".companions-catalog-card button"),
       (button) => button.textContent,
-    )).toEqual(["Connect", "Connect", "Connect", "Connect"]);
+    )).toEqual(["Connect", "Connect", "Connect", "Connect", "Connect"]);
   });
 
   it("explains a duplicate-label callback and removes the error parameter", async () => {

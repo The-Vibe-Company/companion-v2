@@ -931,10 +931,17 @@ organization through `whoami` and sends the cookie plus `x-companion-org` on eac
 The native roster and chat ship with Companion creation, the full server-owned provider catalog,
 Claude and Codex subscription authorization, encrypted API-key connections, and MCP connection
 management. Its Plugins surface groups the existing accounts by provider, permits multiple labeled
-accounts for each product-owned Linear, GitHub, Notion, and Conductor category through the shared
+accounts for each product-owned Linear, GitHub, Notion, Conductor, and Slack category through the shared
 brokered OAuth routes, and retains custom HTTP or command MCP connections. Skills, files, routines,
 triggers, sharing, settings, and the remaining control-plane workflows continue migrating to this
 same client without mobile-only APIs.
+
+Slack is a product-owned Bot User OAuth connection, not Slack's user-token hosted MCP server. API
+performs the fixed `oauth.v2.access` exchange with deployment-owned app credentials. Runtime stages
+that selected account through the same private token broker, while the Box-local loopback gateway
+serves a narrow MCP tool that calls `chat.postMessage` for a bounded channel, direct message, or
+thread reply. The app credential remains API-only and the bot token never reaches Pi or Box disk.
+Slack Events API receive and trigger delivery are intentionally outside this release.
 
 Neither native app sends `client_surface: native_mobile`; omitting that optional field selects
 the API's existing full first-party contract. The discriminator remains accepted temporarily for

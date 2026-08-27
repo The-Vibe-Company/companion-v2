@@ -50,6 +50,9 @@ explicitly recoverable interruption even after the browser, API, or one runtime 
   contacts Box.
 - Creation selects one connected Pi provider, one validated model, selected Skills, optional
   write-on-behalf, and selected member MCP accounts. Provider and MCP credentials stay write-only.
+- The product-owned plugin catalog includes Slack Bot User OAuth. A selected labeled Slack account
+  exposes only a bounded `chat.postMessage` MCP tool for channels, direct messages, and threads;
+  receiving Slack events remains a separate trigger increment.
 - A member profile carries one optional IANA timezone shared by every workspace and first-party
   client. Web and native iOS detect their local timezone as the initial picker value and persist an
   override through the same profile endpoint; clients do not send a per-message timezone header.

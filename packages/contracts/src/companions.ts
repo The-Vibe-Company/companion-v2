@@ -573,6 +573,7 @@ export const COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS = [
   "github",
   "notion",
   "conductor",
+  "slack",
 ] as const;
 export const companionConfigProposalConnectProviderSchema = z.enum(
   COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS,
