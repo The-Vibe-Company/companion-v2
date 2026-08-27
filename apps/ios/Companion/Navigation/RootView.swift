@@ -7,12 +7,14 @@ struct RootView: View {
     )
 
     @Environment(NotificationCoordinator.self) private var notifications
+    @AppStorage(CompanionPreferenceKeys.notifications) private var notificationsEnabled = true
     @State private var sessionStore = SessionStore(
         apiURL: AppConfig.apiURL,
         storage: KeychainSessionStorage(service: "\(AppConfig.callbackScheme).session"),
         notificationInstallationID: RootView.notificationInstallationID
     )
     @State private var externalOAuth = ExternalOAuthCoordinator()
+    @State private var notificationTransitions = NotificationTransitionQueue()
 
     var body: some View {
         Group {
@@ -82,11 +84,15 @@ struct RootView: View {
         }
         .task(id: activeNotificationSessionID) {
             guard activeNotificationSessionID != nil else { return }
-            await notifications.requestAuthorizationAndRegister()
-            await synchronizeNotificationToken()
+            enqueueNotificationTransition(enabled: notificationsEnabled, requestAuthorization: true)
+        }
+        .onChange(of: notificationsEnabled) { _, enabled in
+            guard activeNotificationSessionID != nil else { return }
+            enqueueNotificationTransition(enabled: enabled, requestAuthorization: enabled)
         }
         .onChange(of: notifications.deviceToken) { _, _ in
-            Task { await synchronizeNotificationToken() }
+            guard notificationsEnabled else { return }
+            enqueueNotificationTransition(enabled: true, requestAuthorization: false)
         }
         .animation(.easeOut(duration: 0.24), value: sessionStore.phase)
         .tint(.companionAccent)
@@ -107,8 +113,29 @@ struct RootView: View {
         return "\(orgID):\(session.user.id)"
     }
 
+    private func enqueueNotificationTransition(enabled: Bool, requestAuthorization: Bool) {
+        notificationTransitions.enqueue {
+            guard activeNotificationSessionID != nil else { return }
+            if enabled {
+                // A later opt-out may have been queued while this transition was waiting.
+                guard notificationsEnabled else { return }
+                if requestAuthorization {
+                    await notifications.requestAuthorizationAndRegister()
+                }
+                guard notificationsEnabled else { return }
+                await synchronizeNotificationToken()
+            } else {
+                try? await sessionStore.unregisterNotificationDevice(
+                    installationID: Self.notificationInstallationID
+                )
+                notifications.stopRemoteNotifications()
+            }
+        }
+    }
+
     private func synchronizeNotificationToken() async {
-        guard case .active = sessionStore.phase,
+        guard notificationsEnabled,
+              case .active = sessionStore.phase,
               let token = notifications.deviceToken,
               let bundleID = Bundle.main.bundleIdentifier else { return }
         let environment: NotificationDeviceRegistration.Environment
@@ -142,6 +169,19 @@ struct RootView: View {
             case .active(let session):
                 CompanionListView(session: session)
             }
+        }
+    }
+}
+
+@MainActor
+private final class NotificationTransitionQueue {
+    private var tail: Task<Void, Never>?
+
+    func enqueue(_ operation: @escaping @MainActor @Sendable () async -> Void) {
+        let predecessor = tail
+        tail = Task { @MainActor in
+            await predecessor?.value
+            await operation()
         }
     }
 }

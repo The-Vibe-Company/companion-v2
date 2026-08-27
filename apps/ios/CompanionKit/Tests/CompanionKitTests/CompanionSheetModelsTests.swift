@@ -6,6 +6,10 @@ private let sheetTestCompanionID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 private let sheetTestRoutineID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 private let sheetTestTimestamp = "2026-08-27T18:00:00.000Z"
 
+private struct RoutineRunDetailFixtureEnvelope: Decodable {
+    let run: CompanionRoutineRunDetail
+}
+
 private final class RoutineRunsURLProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
 
@@ -168,7 +172,7 @@ func routineRunModelsDecodeThe459ListAndPrivateDetailContract() throws {
     }
     """.utf8)
 
-    let envelope = try JSONDecoder().decode(CompanionRoutineRunDetailEnvelope.self, from: data)
+    let envelope = try JSONDecoder().decode(RoutineRunDetailFixtureEnvelope.self, from: data)
     #expect(envelope.run.outcome == .surfaced)
     #expect(envelope.run.surfaceMode == .notify)
     #expect(envelope.run.internalEntries.map(\.content) == ["Checked the deployment."])
@@ -313,9 +317,11 @@ private func routineRunSummary(id: String) -> CompanionRoutineRunSummary {
         outcome: .surfaced,
         surfaceMode: .notify,
         mainEntryEventID: "routine-return:\(id)",
+        relayTurnID: nil,
         createdAt: sheetTestTimestamp,
         startedAt: sheetTestTimestamp,
-        settledAt: sheetTestTimestamp
+        settledAt: sheetTestTimestamp,
+        error: nil
     )
 }
 
@@ -341,9 +347,11 @@ private func routineRunDetail(
         outcome: .surfaced,
         surfaceMode: .notify,
         mainEntryEventID: "routine-return:notice",
+        relayTurnID: nil,
         createdAt: sheetTestTimestamp,
         startedAt: sheetTestTimestamp,
         settledAt: sheetTestTimestamp,
+        error: nil,
         internalEntries: entries,
         nextEntryCursor: nextCursor
     )
