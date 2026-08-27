@@ -17,10 +17,19 @@ public struct CompanionThreadProjection: Equatable, Sendable {
         revision == self.revision
     }
 
+    /// Installs a newer accepted response without changing the refresh-generation fence.
+    /// Identical responses leave the observed value untouched so SwiftUI can skip the update.
+    @discardableResult
+    public mutating func update(_ thread: CompanionThread) -> Bool {
+        guard self.thread != thread else { return false }
+        self.thread = thread
+        return true
+    }
+
     @discardableResult
     public mutating func accept(_ thread: CompanionThread, refresh revision: Int) -> Bool {
         guard accepts(refresh: revision) else { return false }
-        self.thread = thread
+        _ = update(thread)
         return true
     }
 
@@ -39,6 +48,82 @@ public struct CompanionThreadProjection: Equatable, Sendable {
     public mutating func reset() {
         revision += 1
         thread = nil
+    }
+}
+
+/// Describes the transcript work needed after accepting a complete thread poll.
+///
+/// Poll responses contain the entire transcript, but SwiftUI only needs to revisit rows whose
+/// stable event IDs changed. The diff intentionally reports changed IDs in the next visible
+/// window; an event that falls out of that bounded window is handled by the collection's normal
+/// identity reconciliation. This keeps an append-only poll to the newly visible suffix while
+/// still detecting edits to an existing row.
+public struct CompanionTranscriptPollDiff: Equatable, Sendable {
+    public let previousCount: Int
+    public let nextCount: Int
+    public let appendedEventIDs: [String]
+    public let changedEventIDs: [String]
+    public let changedVisibleEventIDs: [String]
+
+    public var isIdentical: Bool {
+        previousCount == nextCount && changedEventIDs.isEmpty
+    }
+
+    public var hasVisibleChanges: Bool {
+        !changedVisibleEventIDs.isEmpty
+    }
+
+    public init(
+        previous: [TranscriptEntry],
+        next: [TranscriptEntry],
+        nextVisibleRange: Range<Int>
+    ) {
+        previousCount = previous.count
+        nextCount = next.count
+
+        var previousByID: [String: TranscriptEntry] = [:]
+        previousByID.reserveCapacity(previous.count)
+        var previousIndexByID: [String: Int] = [:]
+        previousIndexByID.reserveCapacity(previous.count)
+        for (index, entry) in previous.enumerated() {
+            previousByID[entry.eventID] = entry
+            previousIndexByID[entry.eventID] = index
+        }
+
+        var nextByID: [String: TranscriptEntry] = [:]
+        nextByID.reserveCapacity(next.count)
+        for entry in next {
+            nextByID[entry.eventID] = entry
+        }
+
+        var changedIDs: [String] = []
+        changedIDs.reserveCapacity(previous.count + next.count)
+        for (index, entry) in next.enumerated()
+            where previousByID[entry.eventID] != entry
+                || previousIndexByID[entry.eventID] != index {
+            changedIDs.append(entry.eventID)
+        }
+        for entry in previous where nextByID[entry.eventID] == nil {
+            changedIDs.append(entry.eventID)
+        }
+        changedEventIDs = changedIDs
+        appendedEventIDs = next.compactMap { entry in
+            previousByID[entry.eventID] == nil ? entry.eventID : nil
+        }
+
+        let boundedRange = nextVisibleRange.clamped(to: 0..<next.count)
+        let changedIDSet = Set(changedIDs)
+        changedVisibleEventIDs = next[boundedRange].compactMap { entry in
+            changedIDSet.contains(entry.eventID) ? entry.eventID : nil
+        }
+    }
+}
+
+private extension Range where Bound == Int {
+    func clamped(to limits: Range<Int>) -> Range<Int> {
+        let lower = Swift.max(limits.lowerBound, Swift.min(lowerBound, limits.upperBound))
+        let upper = Swift.max(lower, Swift.min(upperBound, limits.upperBound))
+        return lower..<upper
     }
 }
 

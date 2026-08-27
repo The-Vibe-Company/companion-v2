@@ -1,8 +1,6 @@
+import Foundation
 import CompanionKit
-import PhotosUI
 import SwiftUI
-import UIKit
-import UniformTypeIdentifiers
 
 @MainActor
 struct ChatServices {
@@ -35,6 +33,24 @@ private struct AssistantTailChange: Equatable, Sendable {
     let nextContent: String
 }
 
+/// Fences overlapping refresh tasks without making each poll a SwiftUI-observed state mutation.
+private final class ChatRefreshGate {
+    private var revision = 0
+
+    func begin() -> Int {
+        revision += 1
+        return revision
+    }
+
+    func invalidate() {
+        revision += 1
+    }
+
+    func accepts(_ refresh: Int) -> Bool {
+        refresh == revision
+    }
+}
+
 struct ChatView: View {
     @Environment(SessionStore.self) private var sessionStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -46,13 +62,7 @@ struct ChatView: View {
     private let services: ChatServices?
     @State private var currentCompanion: CompanionSummary
     @State private var threadProjection = CompanionThreadProjection()
-    @State private var draft = ""
-    @State private var draftAttachments: [CompanionMessageAttachment] = []
-    @State private var attachmentError: String?
-    @State private var photoPickerItems: [PhotosPickerItem] = []
-    @State private var showPhotoPicker = false
-    @State private var showDocumentPicker = false
-    @State private var selectingAttachments = false
+    @State private var refreshGate = ChatRefreshGate()
     @State private var loading = true
     @State private var sending = false
     @State private var error: String?
@@ -70,12 +80,12 @@ struct ChatView: View {
     @State private var pendingScrollTarget: ChatScrollTarget?
     @State private var scrollContentRevision = 0
     @State private var pendingReadingPosition: CompanionChatReadingPosition?
+    @State private var lastReportedReadingPosition: CompanionChatReadingPosition?
     @State private var visibleEntryIDs: [String] = []
     @State private var isRestoringReadingPosition = false
     @State private var restorationTargetEventID: String?
     @State private var assistantTailReveal: AssistantTailReveal?
     @State private var assistantTailRevealTask: Task<Void, Never>?
-    @FocusState private var composerFocused: Bool
     @State private var selectedToolDetail: ToolRunDetailRoute?
 
     private let bottomProximityThreshold: CGFloat = 80
@@ -128,37 +138,22 @@ struct ChatView: View {
                                 ) {
                                     dayMarker(for: transcriptDate(entry.createdAt) ?? .now)
                                 }
-                                Group {
-                                    if let decision = entry.decision {
-                                        CompanionDecisionCard(
-                                            decision: decision,
-                                            companionName: currentCompanion.name,
-                                            canAct: thread?.canSend == true,
-                                            catalog: decisionCatalog,
-                                            accent: visualTheme.accent,
-                                            accentForeground: visualTheme.accentForeground,
-                                            onDecide: { action in
-                                                try await decide(
-                                                    requestID: decision.requestID,
-                                                    action: action
-                                                )
-                                            },
-                                            onOpenPlugins: onPlugins
+                                TranscriptRowView(
+                                    input: transcriptRowInput(for: entry),
+                                    onDecide: { action in
+                                        guard let decision = entry.decision else { return }
+                                        try await decide(
+                                            requestID: decision.requestID,
+                                            action: action
                                         )
-                                    } else {
-                                        MessageEntryView(
-                                            entry: entry,
-                                            own: entry.role == "user" && entry.authorID == thread?.viewerID,
-                                            companion: currentCompanion,
-                                            markdown: markdownByEventID[entry.eventID]?.document,
-                                            tailReveal: assistantTailReveal?.eventID == entry.eventID
-                                                ? assistantTailReveal
-                                                : nil,
-                                            reasoningExpansion: reasoningBinding(for: entry.eventID),
-                                            onOpenToolDetails: { selectedToolDetail = $0 }
-                                        )
-                                    }
-                                }
+                                    },
+                                    onOpenPlugins: onPlugins,
+                                    onReasoningExpansionChange: { isExpanded in
+                                        setReasoningExpanded(isExpanded, for: entry.eventID)
+                                    },
+                                    onOpenToolDetails: { selectedToolDetail = $0 }
+                                )
+                                .equatable()
                                 .id(entry.id)
                             }
 
@@ -216,8 +211,10 @@ struct ChatView: View {
                         guard nextIsNearBottom != wasNearBottom else { return }
                         isNearBottom = nextIsNearBottom
                         if nextIsNearBottom, !wasNearBottom {
-                            unseenTracker.markReaderAtBottom()
-                            unseenCount = 0
+                            if unseenCount > 0 {
+                                unseenTracker.markReaderAtBottom()
+                                unseenCount = 0
+                            }
                         }
                         recordReadingPosition()
                     }
@@ -225,7 +222,9 @@ struct ChatView: View {
                         idType: String.self,
                         threshold: 0.01
                     ) { identifiers in
-                        visibleEntryIDs = identifiers
+                        if visibleEntryIDs != identifiers {
+                            visibleEntryIDs = identifiers
+                        }
                         if let restorationTargetEventID,
                            identifiers.contains(restorationTargetEventID) {
                             finishReadingPositionRestoration()
@@ -283,7 +282,9 @@ struct ChatView: View {
         }
         .onChange(of: companion) {
             guard currentCompanion.id != companion.id else {
-                currentCompanion = companion
+                if currentCompanion != companion {
+                    currentCompanion = companion
+                }
                 return
             }
             recordReadingPosition()
@@ -292,16 +293,6 @@ struct ChatView: View {
             resetTranscriptState()
         }
         .onDisappear { recordReadingPosition() }
-        .onChange(of: photoPickerItems) { _, items in
-            guard !items.isEmpty else { return }
-            loadSelectedPhotos(items)
-        }
-        .fileImporter(
-            isPresented: $showDocumentPicker,
-            allowedContentTypes: Self.allowedDocumentTypes,
-            allowsMultipleSelection: true,
-            onCompletion: importDocuments
-        )
         .onChange(of: liveReasoningEventID) { oldValue, newValue in
             if oldValue != newValue, let oldValue {
                 expandedReasoningEventIDs.remove(oldValue)
@@ -468,162 +459,20 @@ struct ChatView: View {
                 .padding(.horizontal, 12)
             }
 
-            composer(onThinkingTap: onThinkingTap)
+            ChatComposer(
+                companionName: currentCompanion.name,
+                companionIcon: currentCompanion.icon,
+                canSend: thread?.canSend,
+                isReplying: isReplying,
+                hasLiveReasoning: liveReasoningEventID != nil,
+                error: thread == nil ? nil : error,
+                sending: sending,
+                accent: visualTheme.accent,
+                accentForeground: visualTheme.accentForeground,
+                onThinkingTap: onThinkingTap,
+                onSend: send(content:attachments:)
+            )
         }
-    }
-
-    @ViewBuilder
-    private func composer(onThinkingTap: @escaping () -> Void) -> some View {
-        VStack(spacing: 8) {
-            if isReplying {
-                CompanionThinkingStatus(
-                    companionName: currentCompanion.name,
-                    icon: currentCompanion.icon,
-                    accent: visualTheme.accent,
-                    isInteractive: liveReasoningEventID != nil,
-                    onTap: onThinkingTap
-                )
-                .transition(
-                    reduceMotion
-                        ? .identity
-                        : .move(edge: .bottom).combined(with: .opacity)
-                )
-            }
-
-            if let error, thread != nil {
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(Color.companionDanger)
-                    .padding(.horizontal, 12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            if thread?.canSend == false {
-                Label("This conversation is read-only", systemImage: "eye")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(Color.companionMuted)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .companionGlass(radius: 20)
-            } else {
-                if !draftAttachments.isEmpty {
-                    ComposerAttachmentStrip(
-                        attachments: draftAttachments,
-                        onRemove: removeAttachment
-                    )
-                    .padding(.horizontal, 2)
-                }
-
-                if let attachmentError {
-                    Text(attachmentError)
-                        .font(.caption)
-                        .foregroundStyle(Color.companionDanger)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 4)
-                        .accessibilityLabel("Attachment error: \(attachmentError)")
-                }
-
-                GlassEffectContainer(spacing: 12) {
-                    HStack(alignment: .bottom, spacing: 10) {
-                        Menu {
-                            Button {
-                                presentPhotoLibrary()
-                            } label: {
-                                Label("Photo library", systemImage: "photo.on.rectangle")
-                            }
-                            Button {
-                                presentDocumentPicker()
-                            } label: {
-                                Label("Choose file", systemImage: "document")
-                            }
-                        } label: {
-                            Group {
-                                if selectingAttachments {
-                                    ProgressView().controlSize(.small)
-                                } else {
-                                    Image(systemName: "plus")
-                                }
-                            }
-                            .font(.system(size: 17, weight: .semibold))
-                            .frame(width: 46, height: 46)
-                        }
-                        .buttonStyle(.glass)
-                        .buttonBorderShape(.circle)
-                        .tint(visualTheme.accent)
-                        .disabled(attachDisabled)
-                        .accessibilityLabel(
-                            remainingAttachmentCapacity == 0
-                                ? "Five files attached"
-                                : "Attach a photo or file"
-                        )
-                        .accessibilityIdentifier("chat.attach")
-                        .photosPicker(
-                            isPresented: $showPhotoPicker,
-                            selection: $photoPickerItems,
-                            maxSelectionCount: max(1, remainingAttachmentCapacity),
-                            matching: .images,
-                            preferredItemEncoding: .compatible
-                        )
-
-                        TextField("Message \(currentCompanion.name)", text: $draft, axis: .vertical)
-                            .lineLimit(1...5)
-                            .focused($composerFocused)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 13)
-                            .companionGlass(radius: 23, interactive: true)
-                            .accessibilityIdentifier("chat.composer")
-
-                        Button(action: send) {
-                            Group {
-                                if sending {
-                                    ProgressView().controlSize(.small)
-                                } else {
-                                    Image(systemName: "arrow.up")
-                                }
-                            }
-                            .font(.system(size: 17, weight: .bold))
-                            .foregroundStyle(visualTheme.accentForeground)
-                            .frame(width: 46, height: 46)
-                        }
-                        .buttonStyle(.glassProminent)
-                        .buttonBorderShape(.circle)
-                        .tint(visualTheme.accent)
-                        .disabled(sendDisabled)
-                        .accessibilityLabel("Send message")
-                        .accessibilityIdentifier("chat.send")
-                    }
-                }
-
-                if !draftAttachments.isEmpty,
-                   draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Text("Add a message to send \(draftAttachments.count == 1 ? "this file" : "these files").")
-                        .font(.caption)
-                        .foregroundStyle(Color.companionMuted)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 4)
-                }
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.top, 8)
-        .padding(.bottom, 6)
-        .accessibilityIdentifier("chat.composer-controls")
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: isReplying)
-    }
-
-    private var sendDisabled: Bool {
-        sending
-            || selectingAttachments
-            || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || thread?.canSend == false
-    }
-
-    private var attachDisabled: Bool {
-        sending || selectingAttachments || remainingAttachmentCapacity == 0 || thread?.canSend == false
-    }
-
-    private var remainingAttachmentCapacity: Int {
-        max(0, companionMessageAttachmentMaximumCount - draftAttachments.count)
     }
 
     private var visualTheme: CompanionVisualTheme {
@@ -653,16 +502,28 @@ struct ChatView: View {
         return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    private func reasoningBinding(for eventID: String) -> Binding<Bool> {
-        Binding(
-            get: { expandedReasoningEventIDs.contains(eventID) },
-            set: { isExpanded in
-                if isExpanded {
-                    expandedReasoningEventIDs.insert(eventID)
-                } else {
-                    expandedReasoningEventIDs.remove(eventID)
-                }
-            }
+    private func setReasoningExpanded(_ isExpanded: Bool, for eventID: String) {
+        if isExpanded {
+            expandedReasoningEventIDs.insert(eventID)
+        } else {
+            expandedReasoningEventIDs.remove(eventID)
+        }
+    }
+
+    private func transcriptRowInput(for entry: TranscriptEntry) -> TranscriptRowInput {
+        TranscriptRowInput(
+            entry: entry,
+            own: entry.role == "user" && entry.authorID == thread?.viewerID,
+            companionID: currentCompanion.id,
+            companionName: currentCompanion.name,
+            companionIcon: currentCompanion.icon,
+            markdown: markdownByEventID[entry.eventID]?.document,
+            tailReveal: assistantTailReveal?.eventID == entry.eventID
+                ? assistantTailReveal
+                : nil,
+            reasoningExpanded: expandedReasoningEventIDs.contains(entry.eventID),
+            canAct: thread?.canSend == true,
+            decisionCatalog: entry.decision == nil ? .empty : decisionCatalog
         )
     }
 
@@ -694,7 +555,7 @@ struct ChatView: View {
     private func reload(silently: Bool = false, isPolling: Bool = false) async {
         if silently, loadingEarlier { return }
         if !isPolling { cancelAssistantTailReveal() }
-        let generation = threadProjection.beginRefresh()
+        let generation = refreshGate.begin()
         let previousThread = threadProjection.thread
         if !silently { loading = true }
         do {
@@ -704,9 +565,10 @@ struct ChatView: View {
             } else {
                 next = try await sessionStore.thread(companionID: companion.id)
             }
-            guard threadProjection.accepts(refresh: generation) else { return }
+            guard refreshGate.accepts(generation) else { return }
             let readerWasNearBottom = isNearBottom
 
+            let previousEntries = previousThread.map { transcriptEntries(in: $0) } ?? []
             let nextEntries = transcriptEntries(in: next)
             var nextWindow = transcriptWindow
             let restoration = previousThread == nil ? pendingReadingPosition : nil
@@ -727,10 +589,19 @@ struct ChatView: View {
                 )
             }
             let visibleRange = nextWindow.visibleRange(for: nextEntries.count)
-            let renderedMarkdown = await renderedMarkdown(
-                for: Array(nextEntries[visibleRange])
+            let pollDiff = CompanionTranscriptPollDiff(
+                previous: previousEntries,
+                next: nextEntries,
+                nextVisibleRange: visibleRange
             )
-            guard threadProjection.accepts(refresh: generation) else { return }
+            let transcriptChanged = previousThread == nil || !pollDiff.isIdentical
+            let visibleTranscriptChanged = previousThread == nil
+                || pollDiff.hasVisibleChanges
+                || transcriptWindow != nextWindow
+            let renderedMarkdown = visibleTranscriptChanged
+                ? await renderedMarkdown(for: Array(nextEntries[visibleRange]))
+                : markdownByEventID
+            guard refreshGate.accepts(generation) else { return }
 
             let tailChange = isPolling
                 ? assistantTailChange(from: previousThread, to: next)
@@ -740,11 +611,13 @@ struct ChatView: View {
             }
 
             let persistedEventIDs = Set(next.entries.map(\.eventID))
-            let pendingCount = pendingMessages.count
-            pendingMessages.removeAll { pending in
-                persistedEventIDs.contains("msg:\(pending.id.uuidString.lowercased())")
+            let reconciledPendingMessages = pendingMessages.filter { pending in
+                !persistedEventIDs.contains("msg:\(pending.id.uuidString.lowercased())")
             }
-            let pendingChanged = pendingMessages.count != pendingCount
+            let pendingChanged = reconciledPendingMessages.count != pendingMessages.count
+            if pendingChanged {
+                pendingMessages = reconciledPendingMessages
+            }
             let restorationTarget = restoration.flatMap { position -> String? in
                 guard !position.isFollowingTail, restorationAnchorIndex != nil else { return nil }
                 return position.anchorEventID
@@ -754,27 +627,51 @@ struct ChatView: View {
                 && (transcriptTailChanged(from: previousThread, to: next) || pendingChanged)
                 && readerWasNearBottom
 
-            transcriptWindow = nextWindow
-            markdownByEventID = renderedMarkdown
-            var nextUnseenTracker = unseenTracker
-            let nextUnseenCount = nextUnseenTracker.observe(
-                entries: nextEntries,
-                isNearBottom: readerWasNearBottom
-            )
-            unseenTracker = nextUnseenTracker
-            unseenCount = nextUnseenCount
-            threadProjection.accept(next, refresh: generation)
+            if transcriptWindow != nextWindow {
+                transcriptWindow = nextWindow
+            }
+            if !markdownCachesEqual(markdownByEventID, renderedMarkdown) {
+                markdownByEventID = renderedMarkdown
+            }
+            if transcriptChanged {
+                var nextUnseenTracker = unseenTracker
+                let nextUnseenCount = nextUnseenTracker.observe(
+                    entries: nextEntries,
+                    isNearBottom: readerWasNearBottom
+                )
+                if nextUnseenTracker != unseenTracker {
+                    unseenTracker = nextUnseenTracker
+                }
+                if nextUnseenCount != unseenCount {
+                    unseenCount = nextUnseenCount
+                }
+            }
+            if previousThread != next {
+                threadProjection.update(next)
+            }
             refreshSelectedToolDetail(from: next.entries)
-            error = nil
+            if error != nil {
+                error = nil
+            }
             if let restorationTarget {
-                isRestoringReadingPosition = true
-                restorationTargetEventID = restorationTarget
+                if !isRestoringReadingPosition {
+                    isRestoringReadingPosition = true
+                }
+                if restorationTargetEventID != restorationTarget {
+                    restorationTargetEventID = restorationTarget
+                }
                 requestScroll(to: .entry(restorationTarget))
             } else {
-                pendingReadingPosition = nil
-                isRestoringReadingPosition = false
-                restorationTargetEventID = nil
-                if restoration != nil, restorationAnchorIndex == nil {
+                if pendingReadingPosition != nil {
+                    pendingReadingPosition = nil
+                }
+                if isRestoringReadingPosition {
+                    isRestoringReadingPosition = false
+                }
+                if restorationTargetEventID != nil {
+                    restorationTargetEventID = nil
+                }
+                if restoration != nil, restorationAnchorIndex == nil, isNearBottom == false {
                     isNearBottom = true
                 }
                 if previousThread == nil {
@@ -796,7 +693,7 @@ struct ChatView: View {
                 requestScroll(to: .bottom(animated: true))
             }
         } catch {
-            guard threadProjection.accepts(refresh: generation) else { return }
+            guard refreshGate.accepts(generation) else { return }
             self.error = "The conversation could not be refreshed."
         }
 
@@ -807,10 +704,14 @@ struct ChatView: View {
             refreshed = try? await sessionStore.listCompanions().first(where: { $0.id == companion.id })
         }
         if let refreshed {
-            guard threadProjection.accepts(refresh: generation) else { return }
-            currentCompanion = refreshed
+            guard refreshGate.accepts(generation) else { return }
+            if currentCompanion != refreshed {
+                currentCompanion = refreshed
+            }
         }
-        if threadProjection.accepts(refresh: generation) { loading = false }
+        if refreshGate.accepts(generation), loading {
+            loading = false
+        }
     }
 
     private func renderedMarkdown(
@@ -823,6 +724,17 @@ struct ChatView: View {
             sources: Array(sources),
             reusing: markdownByEventID
         )
+    }
+
+    private func markdownCachesEqual(
+        _ lhs: [String: CachedMarkdownDocument],
+        _ rhs: [String: CachedMarkdownDocument]
+    ) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        return lhs.allSatisfy { eventID, cached in
+            guard let other = rhs[eventID] else { return false }
+            return cached.source == other.source && cached.document == other.document
+        }
     }
 
     private func assistantTailChange(
@@ -936,6 +848,7 @@ struct ChatView: View {
     }
 
     private func cancelAssistantTailReveal() {
+        guard assistantTailRevealTask != nil || assistantTailReveal != nil else { return }
         assistantTailRevealTask?.cancel()
         assistantTailRevealTask = nil
         assistantTailReveal = nil
@@ -974,11 +887,17 @@ struct ChatView: View {
             self.selectedToolDetail = nil
             return
         }
-        self.selectedToolDetail = ToolRunDetailRoute(
+        let nextRoute = ToolRunDetailRoute(
             id: entry.eventID,
             tool: tool,
             timestamp: toolTimestamp(for: entry)
         )
+        guard selectedToolDetail.id != nextRoute.id
+                || selectedToolDetail.tool != nextRoute.tool
+                || selectedToolDetail.timestamp != nextRoute.timestamp else {
+            return
+        }
+        self.selectedToolDetail = nextRoute
     }
 
     private func toolTimestamp(for entry: TranscriptEntry) -> String? {
@@ -1045,7 +964,7 @@ struct ChatView: View {
         guard expandedWindow.loadEarlier() else { return }
         cancelAssistantTailReveal()
         loadingEarlier = true
-        threadProjection.invalidateRefreshes()
+        refreshGate.invalidate()
         let snapshotEntries = transcriptEntries(in: snapshot)
         let visibleRange = expandedWindow.visibleRange(for: snapshotEntries.count)
         let renderedMarkdown = await renderedMarkdown(
@@ -1056,8 +975,12 @@ struct ChatView: View {
             return
         }
 
-        markdownByEventID = renderedMarkdown
-        transcriptWindow = expandedWindow
+        if !markdownCachesEqual(markdownByEventID, renderedMarkdown) {
+            markdownByEventID = renderedMarkdown
+        }
+        if transcriptWindow != expandedWindow {
+            transcriptWindow = expandedWindow
+        }
         requestScroll(to: .entry(firstEventID))
     }
 
@@ -1079,14 +1002,15 @@ struct ChatView: View {
         guard let anchor = transcript.first(where: { visibleIDs.contains($0.eventID) }) else {
             return
         }
-        onReadingPositionChange(
-            CompanionChatReadingPosition(
-                anchorEventID: anchor.eventID,
-                isFollowingTail: isNearBottom,
-                exposedEntryCount: transcriptWindow.exposedCount,
-                transcriptEntryCount: transcript.count
-            )
+        let position = CompanionChatReadingPosition(
+            anchorEventID: anchor.eventID,
+            isFollowingTail: isNearBottom,
+            exposedEntryCount: transcriptWindow.exposedCount,
+            transcriptEntryCount: transcript.count
         )
+        guard lastReportedReadingPosition != position else { return }
+        lastReportedReadingPosition = position
+        onReadingPositionChange(position)
     }
 
     private func performScroll(to target: ChatScrollTarget, with proxy: ScrollViewProxy) {
@@ -1129,6 +1053,7 @@ struct ChatView: View {
 
     private func resetTranscriptState() {
         cancelAssistantTailReveal()
+        refreshGate.invalidate()
         threadProjection.reset()
         transcriptWindow.reset()
         unseenTracker.reset()
@@ -1141,6 +1066,7 @@ struct ChatView: View {
         loading = true
         loadingEarlier = false
         isNearBottom = pendingReadingPosition?.isFollowingTail ?? true
+        lastReportedReadingPosition = nil
         visibleEntryIDs = []
         isRestoringReadingPosition = false
         restorationTargetEventID = nil
@@ -1148,23 +1074,19 @@ struct ChatView: View {
         scrollContentRevision &+= 1
     }
 
-    private func send() {
-        let content = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func send(content: String, attachments: [CompanionMessageAttachment]) {
         guard !content.isEmpty, !sending else { return }
         let message = PendingMessage(
             id: UUID(),
             content: content,
-            attachments: draftAttachments,
+            attachments: attachments,
             failed: false,
-            uploadProgress: draftAttachments.isEmpty ? nil : 0
+            uploadProgress: attachments.isEmpty ? nil : 0
         )
         pendingMessages.append(message)
         if isNearBottom {
             requestScroll(to: .bottom(animated: true))
         }
-        draft = ""
-        draftAttachments = []
-        attachmentError = nil
         sending = true
         error = nil
         Task {
@@ -1229,7 +1151,7 @@ struct ChatView: View {
         let mutationID = "decision:\(requestID)"
         guard await threadMutationGate.acquire(mutationID: mutationID) else { return }
         cancelAssistantTailReveal()
-        threadProjection.invalidateRefreshes()
+        refreshGate.invalidate()
 
         do {
             let next: CompanionThread
@@ -1243,17 +1165,24 @@ struct ChatView: View {
                 )
             }
 
+            refreshGate.invalidate()
             threadProjection.replaceAfterMutation(with: next)
             let nextEntries = transcriptEntries(in: next)
-            transcriptWindow.refresh(totalCount: nextEntries.count)
-            let visibleRange = transcriptWindow.visibleRange(for: nextEntries.count)
+            var nextWindow = transcriptWindow
+            nextWindow.refresh(totalCount: nextEntries.count)
+            let visibleRange = nextWindow.visibleRange(for: nextEntries.count)
             let renderedMarkdown = await renderedMarkdown(
                 for: Array(nextEntries[visibleRange])
             )
-            markdownByEventID = renderedMarkdown
+            if transcriptWindow != nextWindow {
+                transcriptWindow = nextWindow
+            }
+            if !markdownCachesEqual(markdownByEventID, renderedMarkdown) {
+                markdownByEventID = renderedMarkdown
+            }
             await threadMutationGate.release(mutationID: mutationID)
         } catch {
-            threadProjection.invalidateRefreshes()
+            refreshGate.invalidate()
             await reload(silently: true)
             await threadMutationGate.release(mutationID: mutationID)
             throw error
@@ -1265,7 +1194,7 @@ struct ChatView: View {
         retryID: UUID
     ) async throws -> CompanionOperationSummary {
         cancelAssistantTailReveal()
-        threadProjection.invalidateRefreshes()
+        refreshGate.invalidate()
         let operation: CompanionOperationSummary
         if let services {
             operation = try await services.retryTurn(companion.id, turnID, retryID)
@@ -1284,7 +1213,7 @@ struct ChatView: View {
         let mutationID = "cancel:\(turnID)"
         guard await threadMutationGate.acquire(mutationID: mutationID) else { return }
         cancelAssistantTailReveal()
-        threadProjection.invalidateRefreshes()
+        refreshGate.invalidate()
         do {
             let next: CompanionThread
             if let services {
@@ -1295,14 +1224,21 @@ struct ChatView: View {
                     turnID: turnID
                 )
             }
+            refreshGate.invalidate()
             threadProjection.replaceAfterMutation(with: next)
             let nextEntries = transcriptEntries(in: next)
-            transcriptWindow.refresh(totalCount: nextEntries.count)
-            let visibleRange = transcriptWindow.visibleRange(for: nextEntries.count)
+            var nextWindow = transcriptWindow
+            nextWindow.refresh(totalCount: nextEntries.count)
+            let visibleRange = nextWindow.visibleRange(for: nextEntries.count)
             let renderedMarkdown = await renderedMarkdown(
                 for: Array(nextEntries[visibleRange])
             )
-            markdownByEventID = renderedMarkdown
+            if transcriptWindow != nextWindow {
+                transcriptWindow = nextWindow
+            }
+            if !markdownCachesEqual(markdownByEventID, renderedMarkdown) {
+                markdownByEventID = renderedMarkdown
+            }
             await refreshCompanionProjection()
             await threadMutationGate.release(mutationID: mutationID)
         } catch {
@@ -1319,7 +1255,9 @@ struct ChatView: View {
         } else {
             refreshed = try? await sessionStore.listCompanions().first(where: { $0.id == companion.id })
         }
-        if let refreshed { currentCompanion = refreshed }
+        if let refreshed, currentCompanion != refreshed {
+            currentCompanion = refreshed
+        }
     }
 
     private func loadDecisionCatalog() async {
@@ -1363,133 +1301,6 @@ struct ChatView: View {
         return response?.catalog ?? []
     }
 
-    private func removeAttachment(_ id: UUID) {
-        draftAttachments.removeAll { $0.id == id }
-        attachmentError = nil
-    }
-
-    private func presentPhotoLibrary() {
-        composerFocused = false
-        Task { @MainActor in
-            // UIKit must finish dismissing the menu and keyboard before another presenter starts.
-            try? await Task.sleep(for: .milliseconds(250))
-            showPhotoPicker = true
-        }
-    }
-
-    private func presentDocumentPicker() {
-        composerFocused = false
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(250))
-            showDocumentPicker = true
-        }
-    }
-
-    private func loadSelectedPhotos(_ items: [PhotosPickerItem]) {
-        selectingAttachments = true
-        attachmentError = nil
-        Task {
-            var imported: [CompanionMessageAttachment] = []
-            var firstError: String?
-            for (offset, item) in items.prefix(remainingAttachmentCapacity).enumerated() {
-                do {
-                    guard let data = try await item.loadTransferable(type: Data.self) else {
-                        firstError = firstError ?? "That photo could not be loaded."
-                        continue
-                    }
-                    imported.append(try CompanionMessageAttachment(
-                        data: data,
-                        filename: "photo-\(draftAttachments.count + offset + 1)",
-                        declaredContentType: item.supportedContentTypes.first?.preferredMIMEType
-                    ))
-                } catch {
-                    firstError = firstError ?? attachmentImportMessage(error)
-                }
-            }
-            appendImportedAttachments(imported, firstError: firstError)
-            photoPickerItems = []
-            selectingAttachments = false
-        }
-    }
-
-    private func importDocuments(_ result: Result<[URL], Error>) {
-        guard case let .success(urls) = result else {
-            if case let .failure(error) = result,
-               (error as NSError).code != NSUserCancelledError {
-                attachmentError = "Files could not be opened."
-            }
-            return
-        }
-        selectingAttachments = true
-        attachmentError = nil
-        let capacity = remainingAttachmentCapacity
-        Task {
-            let imported = await Task.detached(priority: .userInitiated) {
-                Self.readDocuments(Array(urls.prefix(capacity)))
-            }.value
-            appendImportedAttachments(imported.attachments, firstError: imported.firstError)
-            if urls.count > capacity {
-                attachmentError = "You can attach up to five files."
-            }
-            selectingAttachments = false
-        }
-    }
-
-    private func appendImportedAttachments(
-        _ attachments: [CompanionMessageAttachment],
-        firstError: String?
-    ) {
-        let capacity = remainingAttachmentCapacity
-        draftAttachments.append(contentsOf: attachments.prefix(capacity))
-        if attachments.count > capacity {
-            attachmentError = "You can attach up to five files."
-        } else {
-            attachmentError = firstError
-        }
-    }
-
-    private func attachmentImportMessage(_ error: Error) -> String {
-        if let validation = error as? CompanionMessageAttachmentError {
-            return validation.localizedDescription
-        }
-        return "That file could not be opened."
-    }
-
-    private static let allowedDocumentTypes: [UTType] = [
-        .pdf,
-        .commaSeparatedText,
-        .plainText,
-        .json,
-        UTType(filenameExtension: "md") ?? .plainText,
-    ]
-
-    nonisolated private static func readDocuments(_ urls: [URL]) -> AttachmentImportResult {
-        var attachments: [CompanionMessageAttachment] = []
-        var firstError: String?
-        for url in urls {
-            let accessing = url.startAccessingSecurityScopedResource()
-            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
-            do {
-                let values = try url.resourceValues(forKeys: [.fileSizeKey, .contentTypeKey])
-                if let size = values.fileSize, size > companionAttachmentMaximumBytes {
-                    throw CompanionMessageAttachmentError.tooLarge
-                }
-                let data = try Data(contentsOf: url, options: .mappedIfSafe)
-                attachments.append(try CompanionMessageAttachment(
-                    data: data,
-                    filename: url.lastPathComponent,
-                    declaredContentType: values.contentType?.preferredMIMEType
-                ))
-            } catch {
-                if let validation = error as? CompanionMessageAttachmentError {
-                    firstError = firstError ?? validation.localizedDescription
-                } else {
-                    firstError = firstError ?? "That file could not be opened."
-                }
-            }
-        }
-        return AttachmentImportResult(attachments: attachments, firstError: firstError)
-    }
 }
 
 struct ChatMessageBubble: View {
@@ -1615,7 +1426,7 @@ struct ChatMessageBubble: View {
                 .padding(.horizontal, 14)
                 .padding(.vertical, 11)
                 .frame(maxWidth: 340, alignment: .leading)
-                .companionGlass(radius: 18)
+                .companionMaterial(radius: 18)
         } else if kind == .assistant {
             contentView
                 .padding(.vertical, 3)
@@ -1744,53 +1555,89 @@ struct CompanionThinkingStatus: View {
     }
 }
 
-private struct MessageEntryView: View {
+private struct TranscriptRowInput: Equatable {
     let entry: TranscriptEntry
     let own: Bool
-    let companion: CompanionSummary
+    let companionID: String
+    let companionName: String
+    let companionIcon: CompanionSummary.Icon?
     let markdown: MarkdownDocument?
     let tailReveal: AssistantTailReveal?
-    let reasoningExpansion: Binding<Bool>
+    let reasoningExpanded: Bool
+    let canAct: Bool
+    let decisionCatalog: CompanionDecisionCatalog
+}
+
+private struct TranscriptRowView: View, @MainActor Equatable {
+    let input: TranscriptRowInput
+    let onDecide: @MainActor (CompanionDecisionAction) async throws -> Void
+    let onOpenPlugins: () -> Void
+    let onReasoningExpansionChange: (Bool) -> Void
     let onOpenToolDetails: (ToolRunDetailRoute) -> Void
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.input == rhs.input
+    }
 
     @ViewBuilder
     var body: some View {
-        if entry.role == "tool", let tool = entry.tool {
-            CompanionToolRunCard(tool: tool, eventID: entry.eventID) {
+        if let decision = input.entry.decision {
+            CompanionDecisionCard(
+                decision: decision,
+                companionName: input.companionName,
+                canAct: input.canAct,
+                catalog: input.decisionCatalog,
+                accent: visualTheme.accent,
+                accentForeground: visualTheme.accentForeground,
+                onDecide: onDecide,
+                onOpenPlugins: onOpenPlugins
+            )
+        } else if input.entry.role == "tool", let tool = input.entry.tool {
+            CompanionToolRunCard(tool: tool, eventID: input.entry.eventID) {
                 onOpenToolDetails(ToolRunDetailRoute(
-                    id: entry.eventID,
+                    id: input.entry.eventID,
                     tool: tool,
                     timestamp: timeLabel
                 ))
             }
         } else {
             ChatMessageBubble(
-                content: entry.content,
+                content: input.entry.content,
                 kind: kind,
-                authorName: own ? nil : entry.authorName ?? (entry.role == "user" ? "Workspace member" : companion.name),
+                authorName: input.own
+                    ? nil
+                    : input.entry.authorName
+                        ?? (input.entry.role == "user" ? "Workspace member" : input.companionName),
                 timestamp: timeLabel,
-                queued: entry.queued,
-                companionName: companion.name,
-                companionID: companion.id,
-                icon: companion.icon,
-                markdown: entry.role == "assistant" ? markdown : nil,
-                streamingBaseMarkdown: tailReveal?.baseMarkdown,
-                streamingDelta: tailReveal?.visibleDelta,
-                reasoning: entry.role == "assistant" ? entry.reasoning : nil,
-                reasoningExpansion: reasoningExpansion,
-                attachments: entry.attachments
+                queued: input.entry.queued,
+                companionName: input.companionName,
+                companionID: input.companionID,
+                icon: input.companionIcon,
+                markdown: input.entry.role == "assistant" ? input.markdown : nil,
+                streamingBaseMarkdown: input.tailReveal?.baseMarkdown,
+                streamingDelta: input.tailReveal?.visibleDelta,
+                reasoning: input.entry.role == "assistant" ? input.entry.reasoning : nil,
+                reasoningExpansion: Binding(
+                    get: { input.reasoningExpanded },
+                    set: onReasoningExpansionChange
+                ),
+                attachments: input.entry.attachments
             )
-            .accessibilityIdentifier("chat.entry.\(entry.eventID)")
+            .accessibilityIdentifier("chat.entry.\(input.entry.eventID)")
         }
     }
 
+    private var visualTheme: CompanionVisualTheme {
+        CompanionVisualTheme(icon: input.companionIcon)
+    }
+
     private var kind: ChatMessageBubble.Kind {
-        if own { return .mine }
-        return entry.role == "user" ? .member : .assistant
+        if input.own { return .mine }
+        return input.entry.role == "user" ? .member : .assistant
     }
 
     private var timeLabel: String? {
-        guard let date = parseCompanionTimestamp(entry.createdAt) else { return nil }
+        guard let date = parseCompanionTimestamp(input.entry.createdAt) else { return nil }
         return date.formatted(date: .omitted, time: .shortened)
     }
 }
@@ -1858,9 +1705,4 @@ private struct PendingMessageView: View {
         if progress >= 1 { return "Finishing upload…" }
         return "Uploading \(progress.formatted(.percent.precision(.fractionLength(0))))"
     }
-}
-
-private struct AttachmentImportResult: Sendable {
-    let attachments: [CompanionMessageAttachment]
-    let firstError: String?
 }

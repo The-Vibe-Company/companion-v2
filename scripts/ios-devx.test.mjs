@@ -121,6 +121,7 @@ test("full-screen native backdrops stay neutral in every state", () => {
 
 test("chat content stays neutral while Companion accents remain on actions and identity", () => {
   const chat = read("apps/ios/Companion/Screens/ChatView.swift");
+  const composer = read("apps/ios/Companion/Screens/ChatComposer.swift");
   const bubble = chat.slice(
     chat.indexOf("struct ChatMessageBubble"),
     chat.indexOf("struct CompanionThinkingDisclosure"),
@@ -137,14 +138,14 @@ test("chat content stays neutral while Companion accents remain on actions and i
     queuedDemo.indexOf(".padding(16)"),
   );
 
-  assert.match(bubble, /\.companionGlass\(radius: 18\)/);
+  assert.match(bubble, /\.companionMaterial\(radius: 18\)/);
   assert.match(
     bubble,
     /MarkdownMessageView\([\s\S]{0,120}?document: markdown,[\s\S]{0,120}?accent: \.companionInk/,
   );
   assert.doesNotMatch(bubble, /var accent\b|accent\.opacity|visualTheme\.accent|tint:/);
   assert.doesNotMatch(chat, /\.toolbar \{ headerToolbar \}\s*\.tint\(visualTheme\.accent\)/);
-  assert.match(chat, /\.buttonStyle\(\.glassProminent\)\s*\.buttonBorderShape\(\.circle\)\s*\.tint\(visualTheme\.accent\)/);
+  assert.match(composer, /\.buttonStyle\(\.glassProminent\)\s*\.buttonBorderShape\(\.circle\)\s*\.tint\(accent\)/);
   assert.doesNotMatch(decisionCard, /pending \? accent\.opacity/);
   assert.doesNotMatch(glassDemoBubbles, /accent:|tint:/);
   assert.doesNotMatch(queuedDemoBubbles, /accent:|tint:/);
@@ -152,6 +153,33 @@ test("chat content stays neutral while Companion accents remain on actions and i
     glassChatDemo,
     /\.navigationBarTitleDisplayMode\(\.inline\)\s*\.tint\(visualTheme\.accent\)/,
   );
+});
+
+test("long-thread composer and poll work stay behind narrow invalidation boundaries", () => {
+  const chat = read("apps/ios/Companion/Screens/ChatView.swift");
+  const composer = read("apps/ios/Companion/Screens/ChatComposer.swift");
+  const coordination = read(
+    "apps/ios/CompanionKit/Sources/CompanionKit/CompanionThreadCoordination.swift",
+  );
+  const sessionStore = read(
+    "apps/ios/CompanionKit/Sources/CompanionKit/SessionStore.swift",
+  );
+
+  assert.doesNotMatch(chat, /@State private var draft\b/);
+  assert.match(chat, /ChatComposer\(/);
+  assert.match(composer, /@State private var draft = ""/);
+  assert.match(chat, /TranscriptRowView: View, @MainActor Equatable/);
+  assert.match(chat, /TranscriptRowView\([\s\S]*?\.equatable\(\)/);
+  assert.match(chat, /CompanionTranscriptPollDiff\(/);
+  assert.match(chat, /if previousThread != next\s*\{\s*threadProjection\.update\(next\)/);
+  assert.match(coordination, /public struct CompanionTranscriptPollDiff: Equatable, Sendable/);
+  assert.equal(
+    (chat.match(/refreshGate\.invalidate\(\)\s*\n\s*threadProjection\.replaceAfterMutation/g) ?? []).length,
+    2,
+    "authoritative decision and cancellation responses must fence polls started during the mutation",
+  );
+  assert.match(sessionStore, /private var persistedSession: Session\?/);
+  assert.match(sessionStore, /if persistedSession != authority \{/);
 });
 
 test("native message interactions stay accessible and CI-verifiable without Xcode", () => {

@@ -1726,6 +1726,56 @@ func transcriptWindowResetStartsDisclosureOver() {
 }
 
 @Test
+func transcriptPollDiffSkipsIdenticalLongPollsAndKeepsAppendWorkBounded() throws {
+    func entry(_ eventID: String, ordinal: Int, content: String = "Reply") -> TranscriptEntry {
+        let payload: [String: Any] = [
+            "event_id": eventID,
+            "ordinal": ordinal,
+            "role": "assistant",
+            "content": content,
+            "author_id": NSNull(),
+            "author_name": NSNull(),
+            "decision": NSNull(),
+            "tool": NSNull(),
+            "turn_id": NSNull(),
+            "queued": false,
+            "attachments": [Any](),
+            "created_at": "2026-08-26T12:00:00.000Z",
+        ]
+        return try! JSONDecoder().decode(
+            TranscriptEntry.self,
+            from: JSONSerialization.data(withJSONObject: payload)
+        )
+    }
+
+    let previous = (0..<200).map { index in
+        entry("event-\(index)", ordinal: index)
+    }
+    let identical = CompanionTranscriptPollDiff(
+        previous: previous,
+        next: previous,
+        nextVisibleRange: 150..<200
+    )
+
+    #expect(identical.isIdentical)
+    #expect(identical.changedEventIDs.isEmpty)
+    #expect(identical.changedVisibleEventIDs.isEmpty)
+    #expect(!identical.hasVisibleChanges)
+
+    let appendedEntry = entry("event-200", ordinal: 200)
+    let appended = CompanionTranscriptPollDiff(
+        previous: previous,
+        next: previous + [appendedEntry],
+        nextVisibleRange: 151..<201
+    )
+
+    #expect(!appended.isIdentical)
+    #expect(appended.appendedEventIDs == ["event-200"])
+    #expect(appended.changedEventIDs == ["event-200"])
+    #expect(appended.changedVisibleEventIDs == ["event-200"])
+}
+
+@Test
 func transcriptUnseenTrackerCountsOnlyDistinctAwayEvents() {
     func entry(
         _ eventID: String,

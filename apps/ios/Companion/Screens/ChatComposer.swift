@@ -1,0 +1,338 @@
+import Foundation
+import CompanionKit
+import PhotosUI
+import SwiftUI
+import UIKit
+import UniformTypeIdentifiers
+
+/// Owns all transient composer state so typing and attachment preparation do not invalidate the
+/// transcript projection. The parent only receives a submitted, already-trimmed payload.
+struct ChatComposer: View {
+    let companionName: String
+    let companionIcon: CompanionSummary.Icon?
+    let canSend: Bool?
+    let isReplying: Bool
+    let hasLiveReasoning: Bool
+    let error: String?
+    let sending: Bool
+    let accent: Color
+    let accentForeground: Color
+    let onThinkingTap: () -> Void
+    let onSend: (String, [CompanionMessageAttachment]) -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var draft = ""
+    @State private var draftAttachments: [CompanionMessageAttachment] = []
+    @State private var attachmentError: String?
+    @State private var photoPickerItems: [PhotosPickerItem] = []
+    @State private var showPhotoPicker = false
+    @State private var showDocumentPicker = false
+    @State private var selectingAttachments = false
+    @FocusState private var composerFocused: Bool
+
+    var body: some View {
+        VStack(spacing: 8) {
+            if isReplying {
+                CompanionThinkingStatus(
+                    companionName: companionName,
+                    icon: companionIcon,
+                    accent: accent,
+                    isInteractive: hasLiveReasoning,
+                    onTap: onThinkingTap
+                )
+                .transition(
+                    reduceMotion
+                        ? .identity
+                        : .move(edge: .bottom).combined(with: .opacity)
+                )
+            }
+
+            if let error {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(Color.companionDanger)
+                    .padding(.horizontal, 12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            if canSend == false {
+                Label("This conversation is read-only", systemImage: "eye")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Color.companionMuted)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .companionGlass(radius: 20)
+            } else {
+                if !draftAttachments.isEmpty {
+                    ComposerAttachmentStrip(
+                        attachments: draftAttachments,
+                        onRemove: removeAttachment
+                    )
+                    .padding(.horizontal, 2)
+                }
+
+                if let attachmentError {
+                    Text(attachmentError)
+                        .font(.caption)
+                        .foregroundStyle(Color.companionDanger)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 4)
+                        .accessibilityLabel("Attachment error: \(attachmentError)")
+                }
+
+                GlassEffectContainer(spacing: 12) {
+                    HStack(alignment: .bottom, spacing: 10) {
+                        Menu {
+                            Button {
+                                presentPhotoLibrary()
+                            } label: {
+                                Label("Photo library", systemImage: "photo.on.rectangle")
+                            }
+                            Button {
+                                presentDocumentPicker()
+                            } label: {
+                                Label("Choose file", systemImage: "document")
+                            }
+                        } label: {
+                            Group {
+                                if selectingAttachments {
+                                    ProgressView().controlSize(.small)
+                                } else {
+                                    Image(systemName: "plus")
+                                }
+                            }
+                            .font(.system(size: 17, weight: .semibold))
+                            .frame(width: 46, height: 46)
+                        }
+                        .buttonStyle(.glass)
+                        .buttonBorderShape(.circle)
+                        .tint(accent)
+                        .disabled(attachDisabled)
+                        .accessibilityLabel(
+                            remainingAttachmentCapacity == 0
+                                ? "Five files attached"
+                                : "Attach a photo or file"
+                        )
+                        .accessibilityIdentifier("chat.attach")
+                        .photosPicker(
+                            isPresented: $showPhotoPicker,
+                            selection: $photoPickerItems,
+                            maxSelectionCount: max(1, remainingAttachmentCapacity),
+                            matching: .images,
+                            preferredItemEncoding: .compatible
+                        )
+
+                        TextField("Message \(companionName)", text: $draft, axis: .vertical)
+                            .lineLimit(1...5)
+                            .focused($composerFocused)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 13)
+                            .companionGlass(radius: 23, interactive: true)
+                            .accessibilityIdentifier("chat.composer")
+
+                        Button(action: send) {
+                            Group {
+                                if sending {
+                                    ProgressView().controlSize(.small)
+                                } else {
+                                    Image(systemName: "arrow.up")
+                                }
+                            }
+                            .font(.system(size: 17, weight: .bold))
+                            .foregroundStyle(accentForeground)
+                            .frame(width: 46, height: 46)
+                        }
+                        .buttonStyle(.glassProminent)
+                        .buttonBorderShape(.circle)
+                        .tint(accent)
+                        .disabled(sendDisabled)
+                        .accessibilityLabel("Send message")
+                        .accessibilityIdentifier("chat.send")
+                    }
+                }
+
+                if !draftAttachments.isEmpty,
+                   draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text("Add a message to send \(draftAttachments.count == 1 ? "this file" : "these files").")
+                        .font(.caption)
+                        .foregroundStyle(Color.companionMuted)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 4)
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+        .padding(.bottom, 6)
+        .accessibilityIdentifier("chat.composer-controls")
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: isReplying)
+        .onChange(of: photoPickerItems) { _, items in
+            guard !items.isEmpty else { return }
+            loadSelectedPhotos(items)
+        }
+        .fileImporter(
+            isPresented: $showDocumentPicker,
+            allowedContentTypes: Self.allowedDocumentTypes,
+            allowsMultipleSelection: true,
+            onCompletion: importDocuments
+        )
+    }
+
+    private var sendDisabled: Bool {
+        sending
+            || selectingAttachments
+            || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || canSend == false
+    }
+
+    private var attachDisabled: Bool {
+        sending || selectingAttachments || remainingAttachmentCapacity == 0 || canSend == false
+    }
+
+    private var remainingAttachmentCapacity: Int {
+        max(0, companionMessageAttachmentMaximumCount - draftAttachments.count)
+    }
+
+    private func send() {
+        let content = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !content.isEmpty, !sending else { return }
+        let attachments = draftAttachments
+        draft = ""
+        draftAttachments = []
+        attachmentError = nil
+        onSend(content, attachments)
+    }
+
+    private func removeAttachment(_ id: UUID) {
+        draftAttachments.removeAll { $0.id == id }
+        attachmentError = nil
+    }
+
+    private func presentPhotoLibrary() {
+        composerFocused = false
+        Task { @MainActor in
+            // UIKit must finish dismissing the menu and keyboard before another presenter starts.
+            try? await Task.sleep(for: .milliseconds(250))
+            showPhotoPicker = true
+        }
+    }
+
+    private func presentDocumentPicker() {
+        composerFocused = false
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(250))
+            showDocumentPicker = true
+        }
+    }
+
+    private func loadSelectedPhotos(_ items: [PhotosPickerItem]) {
+        selectingAttachments = true
+        attachmentError = nil
+        Task {
+            var imported: [CompanionMessageAttachment] = []
+            var firstError: String?
+            for (offset, item) in items.prefix(remainingAttachmentCapacity).enumerated() {
+                do {
+                    guard let data = try await item.loadTransferable(type: Data.self) else {
+                        firstError = firstError ?? "That photo could not be loaded."
+                        continue
+                    }
+                    imported.append(try CompanionMessageAttachment(
+                        data: data,
+                        filename: "photo-\(draftAttachments.count + offset + 1)",
+                        declaredContentType: item.supportedContentTypes.first?.preferredMIMEType
+                    ))
+                } catch {
+                    firstError = firstError ?? attachmentImportMessage(error)
+                }
+            }
+            appendImportedAttachments(imported, firstError: firstError)
+            photoPickerItems = []
+            selectingAttachments = false
+        }
+    }
+
+    private func importDocuments(_ result: Result<[URL], Error>) {
+        guard case let .success(urls) = result else {
+            if case let .failure(error) = result,
+               (error as NSError).code != NSUserCancelledError {
+                attachmentError = "Files could not be opened."
+            }
+            return
+        }
+        selectingAttachments = true
+        attachmentError = nil
+        let capacity = remainingAttachmentCapacity
+        Task {
+            let imported = await Task.detached(priority: .userInitiated) {
+                Self.readDocuments(Array(urls.prefix(capacity)))
+            }.value
+            appendImportedAttachments(imported.attachments, firstError: imported.firstError)
+            if urls.count > capacity {
+                attachmentError = "You can attach up to five files."
+            }
+            selectingAttachments = false
+        }
+    }
+
+    private func appendImportedAttachments(
+        _ attachments: [CompanionMessageAttachment],
+        firstError: String?
+    ) {
+        let capacity = remainingAttachmentCapacity
+        draftAttachments.append(contentsOf: attachments.prefix(capacity))
+        if attachments.count > capacity {
+            attachmentError = "You can attach up to five files."
+        } else {
+            attachmentError = firstError
+        }
+    }
+
+    private func attachmentImportMessage(_ error: Error) -> String {
+        if let validation = error as? CompanionMessageAttachmentError {
+            return validation.localizedDescription
+        }
+        return "That file could not be opened."
+    }
+
+    private static let allowedDocumentTypes: [UTType] = [
+        .pdf,
+        .commaSeparatedText,
+        .plainText,
+        .json,
+        UTType(filenameExtension: "md") ?? .plainText,
+    ]
+
+    nonisolated private static func readDocuments(_ urls: [URL]) -> AttachmentImportResult {
+        var attachments: [CompanionMessageAttachment] = []
+        var firstError: String?
+        for url in urls {
+            let accessing = url.startAccessingSecurityScopedResource()
+            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+            do {
+                let values = try url.resourceValues(forKeys: [.fileSizeKey, .contentTypeKey])
+                if let size = values.fileSize, size > companionAttachmentMaximumBytes {
+                    throw CompanionMessageAttachmentError.tooLarge
+                }
+                let data = try Data(contentsOf: url, options: .mappedIfSafe)
+                attachments.append(try CompanionMessageAttachment(
+                    data: data,
+                    filename: url.lastPathComponent,
+                    declaredContentType: values.contentType?.preferredMIMEType
+                ))
+            } catch {
+                if let validation = error as? CompanionMessageAttachmentError {
+                    firstError = firstError ?? validation.localizedDescription
+                } else {
+                    firstError = firstError ?? "That file could not be opened."
+                }
+            }
+        }
+        return AttachmentImportResult(attachments: attachments, firstError: firstError)
+    }
+}
+
+private struct AttachmentImportResult: Sendable {
+    let attachments: [CompanionMessageAttachment]
+    let firstError: String?
+}
