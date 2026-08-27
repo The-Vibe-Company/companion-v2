@@ -230,6 +230,8 @@ test("the chat scroll-to-bottom control floats over the transcript", () => {
     chat.indexOf("private func dayMarker"),
   );
   assert.match(button, /\.buttonStyle\(\.glass\)/);
+  assert.equal(button.match(/Button\(action: action\)/g)?.length, 1);
+  assert.match(button, /\.buttonBorderShape\(unseenCount > 0 \? \.capsule : \.circle\)/);
   assert.match(button, /\.shadow\(color: visualTheme\.shadow\.opacity\(0\.2\), radius: 8, y: 3\)/);
 });
 
@@ -249,6 +251,7 @@ test("native chat reading restoration stays deterministic and delegated to Apple
   assert.match(chat, /\.onScrollTargetVisibilityChange\(/);
   assert.match(chat, /isRestoringReadingPosition \? 0 : 1/);
   assert.match(chat, /previousThread != nil/);
+  assert.doesNotMatch(chat, /requestScroll\(to: \.bottom\)/);
   assert.match(coordination, /func position\(for companionID: String\)/);
   assert.match(coordination, /public mutating func restore\(/);
   assert.match(uiTests, /testTranscriptWindowDemoRestoresReadingPositionAfterCompanionSwitch/);
@@ -346,6 +349,7 @@ test("CI tests iOS without secrets and keeps the live provider diagnostic manual
   assert.match(ci, /xcodebuild test/);
   assert.match(ci, /testTranscriptWindowDemoLoadsEarlierMessages/);
   assert.match(ci, /testTranscriptWindowDemoRestoresReadingPositionAfterCompanionSwitch/);
+  assert.match(ci, /testTranscriptWindowDemoShowsStagedUnseenReplyAndScrollsToIt/);
   assert.match(ci, /testTranscriptWindowDemoKeepsLatestEntriesOrderedAndSeparated/);
   assert.match(ci, /testTranscriptWindowDemoBottomControlsNeverCoverChatContent/);
   assert.match(ci, /testMarkdownTableDemoKeepsRowsAndColumnsSeparated/);
@@ -367,6 +371,34 @@ test("CI tests iOS without secrets and keeps the live provider diagnostic manual
   assert.match(e2e, /COMPANION_BOX_API_KEY: \$\{\{ secrets\.COMPANION_BOX_E2E_API_KEY \}\}/);
   assert.match(e2e, /node scripts\/ios-e2e-fixture\.mjs prepare/);
   assert.match(e2e, /node scripts\/ios-e2e-fixture\.mjs cleanup/);
+});
+
+test("the staged reply fixture is armed only after the UI reader leaves the tail", () => {
+  const chatView = read("apps/ios/Companion/Screens/ChatView.swift");
+  const demo = read("apps/ios/Companion/Screens/CompanionTranscriptWindowDemoView.swift");
+  const uiTests = read("apps/ios/CompanionUITests/CompanionUITests.swift");
+
+  assert.match(
+    demo,
+    /@State private var stagedFixture = CompanionTranscriptWindowDemoFixtures\.makeStagedFixture\(\)/,
+  );
+  assert.match(demo, /services\(\s*stagedFixture: stagedFixture\s*\)/);
+  assert.match(demo, /stagedFixture\.deliveredStagedReply \? "Reply delivered" : "Stage reply"/);
+  assert.match(demo, /accessibilityIdentifier\("demo\.stage-reply"\)/);
+  assert.match(demo, /guard stagesNextPoll else \{ return initial \}/);
+  assert.match(uiTests, /let unseen = app\.buttons\["chat\.scroll-to-bottom"\]/);
+  assert.match(uiTests, /let stageReply = app\.buttons\["demo\.stage-reply"\]/);
+  assert.match(uiTests, /stageReply\.tap\(\)/);
+  assert.match(uiTests, /label == %@", "Reply delivered"/);
+  assert.match(uiTests, /let plainButtonWidth = unseen\.frame\.width/);
+  assert.match(uiTests, /element\.frame\.width > plainButtonWidth \+ 40/);
+  assert.match(demo, /"event_id": "staged-reply"/);
+  assert.match(chatView, /@State private var unseenCount = 0/);
+  assert.match(chatView, /var nextUnseenTracker = unseenTracker/);
+  assert.match(chatView, /unseenTracker = nextUnseenTracker/);
+  assert.match(chatView, /unseenCount = nextUnseenCount/);
+  assert.match(chatView, /let readerWasNearBottom = isNearBottom/);
+  assert.match(chatView, /isNearBottom: readerWasNearBottom/);
 });
 
 test("GitHub Actions never installs or invokes XcodeBuildMCP", () => {
