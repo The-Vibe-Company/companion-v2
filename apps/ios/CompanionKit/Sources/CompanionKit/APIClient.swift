@@ -533,6 +533,18 @@ public actor APIClient {
         try await decode(CompanionProvidersResponse.self, path: "/v1/companion-providers")
     }
 
+    public func createCompanionTranscriptionSession(
+        companionID: String
+    ) async throws -> CompanionTranscriptionSession {
+        let companion = Self.encodedPathComponent(companionID)
+        return try await decode(
+            CompanionTranscriptionSession.self,
+            path: "/v1/companions/\(companion)/transcription-sessions",
+            method: "POST",
+            body: Data("{}".utf8)
+        )
+    }
+
     public func saveCompanionProvider(
         providerID: String,
         credential: String

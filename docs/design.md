@@ -375,6 +375,16 @@ New explicit recovery actions are:
 - `POST /v1/companions/:id/turns/:turnId/cancel` to stop an active turn, dequeue a follow-up, or
   release an interrupted turn.
 
+Native iOS composer dictation uses
+`POST /v1/companions/:id/transcription-sessions`. The route requires current Owner/Editor access,
+uses the API-only `COMPANION_GEMINI_TRANSCRIPTION_API_KEY`, and vends a single-use, short-lived
+Gemini token constrained to `gemini-3.5-transcribe-live` transcription. This deployment-owned key
+enables the capability for every workspace. Thread reads expose only a boolean availability bit so
+clients omit the control when the key is absent. The client then sends microphone audio directly to
+Google's constrained Live WebSocket. The API returns no long-lived key and never proxies, stores,
+logs, or projects audio. This shared, capability-named endpoint is not a client-surface
+discriminator; another first-party client could adopt the same contract later.
+
 `POST /v1/hooks/triggers/:triggerId/:secret` fires a webhook-fired Companion trigger — the
 event-driven sibling of a routine. Like the Stripe webhook it is registered before session
 middleware, gated on the feature flag, and capped at 1 MB; the URL secret is compared with
@@ -448,10 +458,11 @@ them.
 ## Explicit exclusions
 
 No generic Projects or skill runs, multi-Bot coordination, group Bot chat, handoffs, proactive jobs,
-voice, file library, file versioning, artifact surface outside a thread, second harness, second Box
+Companion voice conversation or runtime audio, file library, file versioning, artifact surface outside a thread, second harness, second Box
 provider, Box pool, generic provider marketplace, container catalog, deployment manager, or AI app
-builder. Bounded chat files, scheduled Companion routines, and webhook-fired Companion triggers are
-in scope.
+builder. Native client dictation that transiently converts microphone audio into editable composer
+text is not a voice turn and never reaches Box or Pi. Bounded chat files, scheduled Companion
+routines, and webhook-fired Companion triggers are in scope.
 No SSE, Box-to-control-plane push agent, detached API executor, automatic Full Box recovery,
 automatic ambiguous-prompt replay, or global learned model-capability table.
 

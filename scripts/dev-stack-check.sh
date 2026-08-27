@@ -249,7 +249,7 @@ fi
 # The repo-root .env is intentionally shared only with the launcher. Child
 # wrappers enforce the API/worker/runtime/web trust boundaries.
 # shellcheck disable=SC2016
-process_env_probe='for name in COMPANION_BOX_API_KEY COMPANION_PI_INSTALL_COMMAND DATABASE_URL DATABASE_WORKER_URL DATABASE_COMPANION_RUNTIME_URL DATABASE_MIGRATION_URL COMPANION_RUNTIME_PRIVATE_URL COMPANION_RUNTIME_DESKTOP_HMAC_SECRET COMPANION_SECRETS_MASTER_KEY COMPANION_MCP_GITHUB_CLIENT_ID COMPANION_MCP_GITHUB_CLIENT_SECRET COMPANION_MCP_GMAIL_CLIENT_ID COMPANION_MCP_GMAIL_CLIENT_SECRET BETTER_AUTH_SECRET STRIPE_SECRET_KEY GITHUB_APP_PRIVATE_KEY RESEND_API_KEY S3_SECRET_ACCESS_KEY UNKNOWN_PROVIDER_API_KEY COMPANION_SEED_PASSWORD BOX_SIM_CONTROL_TOKEN; do if [ -n "${!name+x}" ]; then printf "%s=%s\n" "$name" "${!name}"; else printf "%s=unset\n" "$name"; fi; done'
+process_env_probe='for name in COMPANION_BOX_API_KEY COMPANION_PI_INSTALL_COMMAND DATABASE_URL DATABASE_WORKER_URL DATABASE_COMPANION_RUNTIME_URL DATABASE_MIGRATION_URL COMPANION_RUNTIME_PRIVATE_URL COMPANION_RUNTIME_DESKTOP_HMAC_SECRET COMPANION_SECRETS_MASTER_KEY COMPANION_GEMINI_TRANSCRIPTION_API_KEY COMPANION_MCP_GITHUB_CLIENT_ID COMPANION_MCP_GITHUB_CLIENT_SECRET COMPANION_MCP_GMAIL_CLIENT_ID COMPANION_MCP_GMAIL_CLIENT_SECRET BETTER_AUTH_SECRET STRIPE_SECRET_KEY GITHUB_APP_PRIVATE_KEY RESEND_API_KEY S3_SECRET_ACCESS_KEY UNKNOWN_PROVIDER_API_KEY COMPANION_SEED_PASSWORD BOX_SIM_CONTROL_TOKEN; do if [ -n "${!name+x}" ]; then printf "%s=%s\n" "$name" "${!name}"; else printf "%s=unset\n" "$name"; fi; done'
 common_probe_env=(
   COMPANION_BOX_API_KEY=box-secret
   COMPANION_PI_INSTALL_COMMAND=pi-secret
@@ -260,6 +260,7 @@ common_probe_env=(
   COMPANION_RUNTIME_PRIVATE_URL=http://runtime.internal
   COMPANION_RUNTIME_DESKTOP_HMAC_SECRET=hmac-secret
   COMPANION_SECRETS_MASTER_KEY=master-secret
+  COMPANION_GEMINI_TRANSCRIPTION_API_KEY=transcription-secret
   COMPANION_MCP_GITHUB_CLIENT_ID=mcp-github-client
   COMPANION_MCP_GITHUB_CLIENT_SECRET=mcp-github-secret
   COMPANION_MCP_GMAIL_CLIENT_ID=mcp-gmail-client
@@ -280,6 +281,7 @@ printf '%s\n' "$api_process_env" | grep -Fxq 'COMPANION_PI_INSTALL_COMMAND=unset
 printf '%s\n' "$api_process_env" | grep -Fxq 'DATABASE_URL=postgres://api'
 printf '%s\n' "$api_process_env" | grep -Fxq 'DATABASE_COMPANION_RUNTIME_URL=unset'
 printf '%s\n' "$api_process_env" | grep -Fxq 'COMPANION_RUNTIME_DESKTOP_HMAC_SECRET=hmac-secret'
+printf '%s\n' "$api_process_env" | grep -Fxq 'COMPANION_GEMINI_TRANSCRIPTION_API_KEY=transcription-secret'
 printf '%s\n' "$api_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_ID=mcp-github-client'
 printf '%s\n' "$api_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_SECRET=mcp-github-secret'
 printf '%s\n' "$api_process_env" | grep -Fxq 'COMPANION_MCP_GMAIL_CLIENT_ID=mcp-gmail-client'
@@ -294,6 +296,7 @@ printf '%s\n' "$worker_process_env" | grep -Fxq 'COMPANION_BOX_API_KEY=unset'
 printf '%s\n' "$worker_process_env" | grep -Fxq 'DATABASE_URL=postgres://worker'
 printf '%s\n' "$worker_process_env" | grep -Fxq 'DATABASE_COMPANION_RUNTIME_URL=unset'
 printf '%s\n' "$worker_process_env" | grep -Fxq 'COMPANION_RUNTIME_DESKTOP_HMAC_SECRET=unset'
+printf '%s\n' "$worker_process_env" | grep -Fxq 'COMPANION_GEMINI_TRANSCRIPTION_API_KEY=unset'
 printf '%s\n' "$worker_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_ID=unset'
 printf '%s\n' "$worker_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_SECRET=unset'
 printf '%s\n' "$worker_process_env" | grep -Fxq 'COMPANION_MCP_GMAIL_CLIENT_ID=unset'
@@ -310,6 +313,7 @@ printf '%s\n' "$runtime_process_env" | grep -Fxq 'DATABASE_URL=unset'
 printf '%s\n' "$runtime_process_env" | grep -Fxq 'DATABASE_COMPANION_RUNTIME_URL=postgres://runtime'
 printf '%s\n' "$runtime_process_env" | grep -Fxq 'COMPANION_RUNTIME_DESKTOP_HMAC_SECRET=hmac-secret'
 printf '%s\n' "$runtime_process_env" | grep -Fxq 'COMPANION_SECRETS_MASTER_KEY=master-secret'
+printf '%s\n' "$runtime_process_env" | grep -Fxq 'COMPANION_GEMINI_TRANSCRIPTION_API_KEY=unset'
 printf '%s\n' "$runtime_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_ID=mcp-github-client'
 printf '%s\n' "$runtime_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_SECRET=mcp-github-secret'
 printf '%s\n' "$runtime_process_env" | grep -Fxq 'COMPANION_MCP_GMAIL_CLIENT_ID=mcp-gmail-client'
@@ -326,6 +330,7 @@ printf '%s\n' "$web_process_env" | grep -Fxq 'COMPANION_BOX_API_KEY=unset'
 printf '%s\n' "$web_process_env" | grep -Fxq 'DATABASE_URL=unset'
 printf '%s\n' "$web_process_env" | grep -Fxq 'COMPANION_RUNTIME_DESKTOP_HMAC_SECRET=unset'
 printf '%s\n' "$web_process_env" | grep -Fxq 'COMPANION_SECRETS_MASTER_KEY=unset'
+printf '%s\n' "$web_process_env" | grep -Fxq 'COMPANION_GEMINI_TRANSCRIPTION_API_KEY=unset'
 printf '%s\n' "$web_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_ID=unset'
 printf '%s\n' "$web_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_SECRET=unset'
 printf '%s\n' "$web_process_env" | grep -Fxq 'COMPANION_MCP_GMAIL_CLIENT_ID=unset'
@@ -341,6 +346,7 @@ seed_process_env="$(env "${common_probe_env[@]}" bash scripts/dev-process.sh api
 printf '%s\n' "$seed_process_env" | grep -Fxq 'COMPANION_SEED_PASSWORD=seed-secret'
 printf '%s\n' "$seed_process_env" | grep -Fxq 'COMPANION_RUNTIME_DESKTOP_HMAC_SECRET=unset'
 printf '%s\n' "$seed_process_env" | grep -Fxq 'COMPANION_SECRETS_MASTER_KEY=unset'
+printf '%s\n' "$seed_process_env" | grep -Fxq 'COMPANION_GEMINI_TRANSCRIPTION_API_KEY=unset'
 printf '%s\n' "$seed_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_ID=unset'
 printf '%s\n' "$seed_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_SECRET=unset'
 printf '%s\n' "$seed_process_env" | grep -Fxq 'COMPANION_MCP_GMAIL_CLIENT_ID=unset'

@@ -1737,6 +1737,7 @@ public struct CompanionThread: Codable, Equatable, Sendable {
     public let viewerID: String
     public let readOnly: Bool
     public let canSend: Bool
+    public let transcriptionAvailable: Bool?
     public let entries: [TranscriptEntry]
     public let activeTurn: CompanionTurn?
     public let queuedCount: Int
@@ -1747,6 +1748,7 @@ public struct CompanionThread: Codable, Equatable, Sendable {
         case viewerID = "viewer_id"
         case readOnly = "read_only"
         case canSend = "can_send"
+        case transcriptionAvailable = "transcription_available"
         case entries
         case activeTurn = "active_turn"
         case queuedCount = "queued_count"

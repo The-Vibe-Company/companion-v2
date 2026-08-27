@@ -506,6 +506,54 @@ test("CI tests iOS without secrets and keeps the live provider diagnostic manual
   assert.match(e2e, /node scripts\/ios-e2e-fixture\.mjs cleanup/);
 });
 
+test("voice transcription keeps the global key server-side and delegates Apple checks", () => {
+  const composer = read("apps/ios/Companion/Screens/ChatComposer.swift");
+  const routes = read("apps/api/src/companionRoutes.ts");
+  const envExample = read(".env.example");
+  const status = read("apps/ios/Companion/Screens/VoiceTranscriptionStatusView.swift");
+  const controller = read("apps/ios/Companion/Support/VoiceTranscriptionController.swift");
+  const client = read(
+    "apps/ios/CompanionKit/Sources/CompanionKit/GeminiLiveTranscription.swift",
+  );
+  const info = read("apps/ios/Companion/Support/Info.plist");
+  const tests = read(
+    "apps/ios/CompanionKit/Tests/CompanionKitTests/GeminiLiveTranscriptionTests.swift",
+  );
+  const uiTests = read("apps/ios/CompanionUITests/CompanionUITests.swift");
+  const ci = read(".github/workflows/ci.yml");
+
+  assert.match(composer, /accessibilityIdentifier\("chat\.transcription\.toggle"\)/);
+  assert.match(composer, /if transcriptionAvailable \{/);
+  assert.match(composer, /onChange\(of: transcriptionAvailable\)/);
+  assert.match(composer, /frame\(width: 46, height: 46\)/);
+  assert.match(routes, /COMPANION_GEMINI_TRANSCRIPTION_API_KEY\?\.trim\(\)/);
+  assert.match(routes, /transcription_available: transcriptionAvailable/);
+  assert.match(envExample, /^COMPANION_GEMINI_TRANSCRIPTION_API_KEY=$/m);
+  assert.match(status, /Audio is sent to Google while recording\./);
+  assert.match(controller, /AVAudioApplication\.requestRecordPermission/);
+  assert.match(controller, /sampleRate: 16_000/);
+  assert.match(controller, /private var finishTask: Task<Void, Never>\?/);
+  assert.match(controller, /guard generation == activeGeneration/);
+  assert.match(controller, /finalTranscript = ""/);
+  assert.doesNotMatch(composer, /Task \{ await transcription\.cancel\(\) \}/);
+  assert.match(composer, /transcription\.cancel\(\)/);
+  assert.match(composer, /onChange\(of: canSend\)/);
+  assert.match(client, /if isFinishing \{\s*try await sendAudioStreamEnd/);
+  assert.match(client, /BidiGenerateContentConstrained/);
+  assert.match(client, /models\/\\\(Self\.model\)/);
+  assert.match(client, /"SMART"/);
+  assert.match(client, /audio\/pcm;rate=16000/);
+  assert.doesNotMatch(client, /AIza[0-9A-Za-z_-]{20,}/);
+  assert.match(info, /<key>NSMicrophoneUsageDescription<\/key>/);
+  assert.match(tests, /connectsStreamsPCMAndPublishesTranscriptDeltas/);
+  assert.match(tests, /resumesOnceAndFlushesBoundedAudioAfterGoAway/);
+  assert.match(uiTests, /testChatComposerExposesAccessibleVoiceTranscriptionControl/);
+  assert.match(uiTests, /testChatComposerHidesVoiceTranscriptionWithoutDeploymentKey/);
+  assert.match(ci, /swift test --package-path apps\/ios\/CompanionKit/);
+  assert.match(ci, /xcodebuild test/);
+  assert.doesNotMatch(ci, /xcodebuildmcp/i);
+});
+
 test("the staged reply fixture is armed only after the UI reader leaves the tail", () => {
   const chatView = read("apps/ios/Companion/Screens/ChatView.swift");
   const demo = read("apps/ios/Companion/Screens/CompanionTranscriptWindowDemoView.swift");
