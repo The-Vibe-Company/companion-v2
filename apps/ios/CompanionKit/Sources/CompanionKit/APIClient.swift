@@ -789,8 +789,8 @@ public actor APIClient {
             method: "GET",
             body: nil,
             acceptedStatuses: 200..<400,
-            additionalHeaders: headers,
             timeout: 35,
+            additionalHeaders: headers,
             followRedirects: false
         )
 
