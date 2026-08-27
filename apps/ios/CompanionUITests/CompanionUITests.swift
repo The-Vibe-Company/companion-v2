@@ -742,6 +742,11 @@ final class CompanionUITests: XCTestCase {
         let stageReply = app.buttons["demo.stage-reply"]
         XCTAssertTrue(stageReply.waitForExistence(timeout: 3))
         stageReply.tap()
+        let stagedPollDelivered = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "Reply delivered"),
+            object: stageReply
+        )
+        wait(for: [stagedPollDelivered], timeout: 15)
         let unseenPill = XCTNSPredicateExpectation(
             predicate: NSPredicate { object, _ in
                 guard let element = object as? XCUIElement, element.exists else { return false }
@@ -749,14 +754,7 @@ final class CompanionUITests: XCTestCase {
             },
             object: unseen
         )
-        let pillResult = XCTWaiter.wait(for: [unseenPill], timeout: 15)
-        XCTAssertEqual(
-            pillResult,
-            .completed,
-            "Expected arrival pill after staged poll; plain width=\(plainButtonWidth), "
-                + "current frame=\(unseen.frame), label=\(unseen.label), value=\(unseen.value)"
-        )
-        guard pillResult == .completed else { return }
+        wait(for: [unseenPill], timeout: 3)
         XCTAssertGreaterThan(unseen.frame.width, plainButtonWidth + 40)
         unseen.tap()
 

@@ -377,17 +377,20 @@ test("the staged reply fixture is armed only after the UI reader leaves the tail
   const demo = read("apps/ios/Companion/Screens/CompanionTranscriptWindowDemoView.swift");
   const uiTests = read("apps/ios/CompanionUITests/CompanionUITests.swift");
 
-  assert.match(demo, /Button\("Stage reply"\)/);
+  assert.match(demo, /stagedFixture\.deliveredStagedReply \? "Reply delivered" : "Stage reply"/);
   assert.match(demo, /accessibilityIdentifier\("demo\.stage-reply"\)/);
   assert.match(demo, /guard stagesNextPoll else \{ return initial \}/);
   assert.match(uiTests, /let unseen = app\.buttons\["chat\.scroll-to-bottom"\]/);
   assert.match(uiTests, /let stageReply = app\.buttons\["demo\.stage-reply"\]/);
   assert.match(uiTests, /stageReply\.tap\(\)/);
+  assert.match(uiTests, /label == %@", "Reply delivered"/);
   assert.match(uiTests, /let plainButtonWidth = unseen\.frame\.width/);
   assert.match(uiTests, /element\.frame\.width > plainButtonWidth \+ 40/);
   assert.match(demo, /"event_id": "staged-reply"/);
   assert.match(chatView, /@State private var unseenCount = 0/);
-  assert.match(chatView, /unseenCount = unseenTracker\.observe\(/);
+  assert.match(chatView, /var nextUnseenTracker = unseenTracker/);
+  assert.match(chatView, /unseenTracker = nextUnseenTracker/);
+  assert.match(chatView, /unseenCount = nextUnseenCount/);
   assert.match(chatView, /let readerWasNearBottom = isNearBottom/);
   assert.match(chatView, /isNearBottom: readerWasNearBottom/);
 });

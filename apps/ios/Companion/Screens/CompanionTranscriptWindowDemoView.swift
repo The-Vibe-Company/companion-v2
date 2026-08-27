@@ -1,6 +1,7 @@
 #if DEBUG
 import CompanionKit
 import Foundation
+import Observation
 import SwiftUI
 
 struct CompanionTranscriptWindowDemoView: View {
@@ -39,7 +40,7 @@ struct CompanionTranscriptWindowDemoView: View {
             if let stagedFixture = CompanionTranscriptWindowDemoFixtures.stagedFixture {
                 HStack {
                     Spacer()
-                    Button("Stage reply") {
+                    Button(stagedFixture.deliveredStagedReply ? "Reply delivered" : "Stage reply") {
                         stagedFixture.stageNextPoll()
                     }
                     .buttonStyle(.bordered)
@@ -268,9 +269,11 @@ private enum CompanionTranscriptWindowDemoFixtures {
 }
 
 @MainActor
+@Observable
 private final class DemoStagedThreadFixture {
     private let initial: CompanionThread
     private var stagesNextPoll = false
+    private(set) var deliveredStagedReply = false
 
     init(initial: CompanionThread) {
         self.initial = initial
@@ -282,6 +285,7 @@ private final class DemoStagedThreadFixture {
 
     func nextThread() -> CompanionThread {
         guard stagesNextPoll else { return initial }
+        deliveredStagedReply = true
 
         let encoded = try! JSONEncoder().encode(initial)
         var payload = try! JSONSerialization.jsonObject(with: encoded) as! [String: Any]

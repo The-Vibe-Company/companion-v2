@@ -756,10 +756,13 @@ struct ChatView: View {
 
             transcriptWindow = nextWindow
             markdownByEventID = renderedMarkdown
-            unseenCount = unseenTracker.observe(
+            var nextUnseenTracker = unseenTracker
+            let nextUnseenCount = nextUnseenTracker.observe(
                 entries: nextEntries,
                 isNearBottom: readerWasNearBottom
             )
+            unseenTracker = nextUnseenTracker
+            unseenCount = nextUnseenCount
             threadProjection.accept(next, refresh: generation)
             refreshSelectedToolDetail(from: next.entries)
             error = nil
