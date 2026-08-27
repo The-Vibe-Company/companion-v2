@@ -74,6 +74,9 @@ private enum CompanionTranscriptWindowDemoFixtures {
     static let usesStagedPoll = ProcessInfo.processInfo.environment[
         "COMPANION_TRANSCRIPT_DEMO_STAGED_POLL"
     ] == "1"
+    static let includesPendingQuestion = ProcessInfo.processInfo.environment[
+        "COMPANION_TRANSCRIPT_DEMO_QUESTION"
+    ] == "1"
 
     static let companion: CompanionSummary = decode(#"""
     {
@@ -179,15 +182,45 @@ private enum CompanionTranscriptWindowDemoFixtures {
             return entry
         }
 
+        if includesPendingQuestion {
+            entries.append([
+                "event_id": "decision:question-1",
+                "ordinal": transcriptCount + 1,
+                "role": "decision",
+                "content": "Which release should I prepare?",
+                "author_id": NSNull(),
+                "author_name": NSNull(),
+                "decision": [
+                    "request_id": "question-1",
+                    "kind": "question",
+                    "name": "ask_user",
+                    "title": "Which release should I prepare?",
+                    "detail": NSNull(),
+                    "status": "pending",
+                    "answer": NSNull(),
+                    "decided_by_id": NSNull(),
+                    "decided_by_name": NSNull(),
+                    "decided_at": NSNull(),
+                    "expires_at": "2026-08-26T12:10:00.000Z",
+                    "proposal": NSNull(),
+                ],
+                "tool": NSNull(),
+                "queued": false,
+                "attachments": [Any](),
+                "created_at": "2026-08-26T12:00:30.000Z",
+            ])
+        }
+
+        let queuedOrdinal = transcriptCount + (includesPendingQuestion ? 2 : 1)
         entries.append(contentsOf: [
             queuedEntry(
-                ordinal: transcriptCount + 1,
+                ordinal: queuedOrdinal,
                 eventID: "queued-one",
                 turnID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
                 content: "Queue the accessibility follow-up."
             ),
             queuedEntry(
-                ordinal: transcriptCount + 2,
+                ordinal: queuedOrdinal + 1,
                 eventID: "queued-two",
                 turnID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
                 content: "Then verify the compact-width layout."
@@ -204,7 +237,7 @@ private enum CompanionTranscriptWindowDemoFixtures {
                 "companion_id": companionID,
                 "client_message_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
                 "status": "running",
-                "queue_sequence": transcriptCount + 3,
+                "queue_sequence": queuedOrdinal + 2,
                 "latest_attempt": NSNull(),
                 "replying": true,
                 "error": NSNull(),
@@ -243,7 +276,9 @@ private enum CompanionTranscriptWindowDemoFixtures {
     }
 
     static func makeStagedFixture() -> DemoStagedThreadFixture? {
-        usesStagedPoll ? DemoStagedThreadFixture(initial: thread) : nil
+        usesStagedPoll || includesPendingQuestion
+            ? DemoStagedThreadFixture(initial: thread)
+            : nil
     }
 
     static func services(stagedFixture: DemoStagedThreadFixture?) -> ChatServices {
@@ -258,7 +293,13 @@ private enum CompanionTranscriptWindowDemoFixtures {
                 return fixtureThread
             },
             listCompanions: { [fixtureCompanion, secondFixtureCompanion] },
-            decide: { _, _, _ in fixtureThread },
+            decide: { _, requestID, action in
+                guard requestID == "question-1" else { return fixtureThread }
+                if let stagedFixture {
+                    return stagedFixture.settleQuestion(action: action)
+                }
+                return settledQuestionThread(from: fixtureThread, action: action)
+            },
             retryTurn: { _, _, _ in throw CompanionTranscriptWindowDemoError.unavailable },
             cancelTurn: { _, _ in fixtureThread },
             listSkills: { [] },
@@ -270,17 +311,40 @@ private enum CompanionTranscriptWindowDemoFixtures {
     private static func decode<Value: Decodable>(_ json: String) -> Value {
         try! JSONDecoder().decode(Value.self, from: Data(json.utf8))
     }
+
+    fileprivate static func settledQuestionThread(
+        from thread: CompanionThread,
+        action: CompanionDecisionAction
+    ) -> CompanionThread {
+        guard case .answer(let answer) = action else { return thread }
+        let encoded = try! JSONEncoder().encode(thread)
+        var payload = try! JSONSerialization.jsonObject(with: encoded) as! [String: Any]
+        var entries = payload["entries"] as! [[String: Any]]
+        guard let index = entries.firstIndex(where: { entry in
+            (entry["decision"] as? [String: Any])?["request_id"] as? String == "question-1"
+        }) else { return thread }
+        var decision = entries[index]["decision"] as! [String: Any]
+        decision["status"] = "answered"
+        decision["answer"] = answer
+        decision["decided_by_id"] = "owner-1"
+        decision["decided_by_name"] = "Stan"
+        decision["decided_at"] = "2026-08-26T12:00:45.000Z"
+        entries[index]["decision"] = decision
+        payload["entries"] = entries
+        let data = try! JSONSerialization.data(withJSONObject: payload)
+        return try! JSONDecoder().decode(CompanionThread.self, from: data)
+    }
 }
 
 @MainActor
 @Observable
 private final class DemoStagedThreadFixture {
-    private let initial: CompanionThread
+    private var current: CompanionThread
     private var stagesNextPoll = false
     private(set) var deliveredStagedReply = false
 
     init(initial: CompanionThread) {
-        self.initial = initial
+        current = initial
     }
 
     func stageNextPoll() {
@@ -288,10 +352,11 @@ private final class DemoStagedThreadFixture {
     }
 
     func nextThread() -> CompanionThread {
-        guard stagesNextPoll else { return initial }
+        guard stagesNextPoll else { return current }
+        stagesNextPoll = false
         deliveredStagedReply = true
 
-        let encoded = try! JSONEncoder().encode(initial)
+        let encoded = try! JSONEncoder().encode(current)
         var payload = try! JSONSerialization.jsonObject(with: encoded) as! [String: Any]
         var entries = payload["entries"] as! [[String: Any]]
         let nextOrdinal = entries.compactMap { $0["ordinal"] as? Int }.max().map { $0 + 1 } ?? 1
@@ -310,7 +375,16 @@ private final class DemoStagedThreadFixture {
         ])
         payload["entries"] = entries
         let data = try! JSONSerialization.data(withJSONObject: payload)
-        return try! JSONDecoder().decode(CompanionThread.self, from: data)
+        current = try! JSONDecoder().decode(CompanionThread.self, from: data)
+        return current
+    }
+
+    func settleQuestion(action: CompanionDecisionAction) -> CompanionThread {
+        current = CompanionTranscriptWindowDemoFixtures.settledQuestionThread(
+            from: current,
+            action: action
+        )
+        return current
     }
 }
 

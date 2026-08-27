@@ -19,6 +19,8 @@ struct ChatComposer: View {
     let sending: Bool
     let accent: Color
     let accentForeground: Color
+    let canAutomaticallyFocus: () -> Bool
+    let onFocusChange: (Bool) -> Void
     let onThinkingTap: () -> Void
     let onSend: (String, [CompanionMessageAttachment]) -> Void
 
@@ -224,8 +226,11 @@ struct ChatComposer: View {
         .onChange(of: transcription.completion) { _, completion in
             guard let completion else { return }
             draft = mergedDraft(draft, completion.text)
-            composerFocused = true
+            if canAutomaticallyFocus() { composerFocused = true }
             transcription.acknowledgeCompletion()
+        }
+        .onChange(of: composerFocused) { _, focused in
+            onFocusChange(focused)
         }
         .onDisappear {
             transcription.cancel()

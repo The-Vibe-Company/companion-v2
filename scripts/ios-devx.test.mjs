@@ -361,6 +361,10 @@ test("the chat scroll-to-bottom control floats over the transcript", () => {
 test("native transcript taps dismiss the keyboard without consuming message controls", () => {
   const chat = read("apps/ios/Companion/Screens/ChatView.swift");
   const readme = read("apps/ios/README.md");
+  const transcriptDemo = read(
+    "apps/ios/Companion/Screens/CompanionTranscriptWindowDemoView.swift",
+  );
+  const uiTests = read("apps/ios/CompanionUITests/CompanionUITests.swift");
   const transcript = chat.slice(
     chat.indexOf(".scrollDismissesKeyboard(.interactively)"),
     chat.indexOf("bottomControls(", chat.indexOf('.accessibilityIdentifier("chat.transcript")')),
@@ -373,16 +377,22 @@ test("native transcript taps dismiss the keyboard without consuming message cont
   );
   assert.match(chat, /recognizer\.cancelsTouchesInView = false/);
   assert.match(chat, /shouldRecognizeSimultaneouslyWith/);
+  assert.match(chat, /shouldReceive touch: UITouch/);
+  assert.match(chat, /current is UITextField \|\| current is UITextView/);
   assert.match(chat, /recognizer\.delegate = context\.coordinator/);
   assert.match(chat, /\) -> Bool \{\s*true\s*\}/);
   assert.match(
     transcript,
-    /\.gesture\(\s*TranscriptKeyboardDismissGesture \{\s*UIApplication\.shared\.sendAction\(/,
+    /\.gesture\(\s*TranscriptKeyboardDismissGesture \{[\s\S]*?UIApplication\.shared\.sendAction\(/,
   );
   assert.match(chat, /#selector\(UIResponder\.resignFirstResponder\)/);
   assert.doesNotMatch(chat, /composerKeyboardDismissalRequest/);
   assert.match(readme, /Linux quality still protects the keyboard-dismissal gesture mechanics/);
   assert.match(readme, /The focus change is intentionally silent/);
+  assert.match(transcriptDemo, /COMPANION_TRANSCRIPT_DEMO_QUESTION/);
+  assert.match(uiTests, /testTranscriptQuestionKeepsCardFocusedAndSubmitsAnswer/);
+  assert.match(uiTests, /answerField\.typeText\("Ship the stable release"\)/);
+  assert.match(uiTests, /XCTAssertEqual\(composer\.value as\? String, "Keep this draft"\)/);
 });
 
 test("native chat reading restoration stays covered at the behavior layer", () => {
@@ -638,7 +648,7 @@ test("the staged reply fixture is armed only after the UI reader leaves the tail
   assert.match(demo, /services\(\s*stagedFixture: stagedFixture\s*\)/);
   assert.match(demo, /stagedFixture\.deliveredStagedReply \? "Reply delivered" : "Stage reply"/);
   assert.match(demo, /accessibilityIdentifier\("demo\.stage-reply"\)/);
-  assert.match(demo, /guard stagesNextPoll else \{ return initial \}/);
+  assert.match(demo, /guard stagesNextPoll else \{ return current \}/);
   assert.match(demo, /"event_id": "staged-reply"/);
   assert.match(chatView, /@State private var unseenCount = 0/);
   assert.match(chatView, /var nextUnseenTracker = unseenTracker/);

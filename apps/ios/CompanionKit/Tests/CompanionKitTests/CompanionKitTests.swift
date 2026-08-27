@@ -2346,6 +2346,28 @@ func threadMutationGateSerializesDecisionAndCancellationSnapshots() async throws
 }
 
 @Test
+func chatInputFocusPreservesExplicitTypingIntent() {
+    var coordinator = CompanionChatInputFocusCoordinator()
+
+    coordinator.userFocused(.composer)
+    coordinator.pendingDecisionAppeared(requestID: "question-1")
+    #expect(coordinator.focusedInput == .composer)
+    #expect(coordinator.allowsAutomaticComposerFocus)
+
+    coordinator.userFocused(.decision(requestID: "question-1"))
+    coordinator.pendingDecisionAppeared(requestID: "question-2")
+    coordinator.userBlurred(.composer)
+    #expect(coordinator.focusedInput == .decision(requestID: "question-1"))
+    #expect(!coordinator.allowsAutomaticComposerFocus)
+
+    coordinator.decisionSettled(requestID: "question-2")
+    #expect(coordinator.focusedInput == .decision(requestID: "question-1"))
+    coordinator.decisionSettled(requestID: "question-1")
+    #expect(coordinator.focusedInput == nil)
+    #expect(coordinator.allowsAutomaticComposerFocus)
+}
+
+@Test
 func decodesStructuredToolRunsIncludingOptionalPayloads() throws {
     let data = Data(#"""
     [
