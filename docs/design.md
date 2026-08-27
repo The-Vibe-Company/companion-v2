@@ -106,9 +106,9 @@ Runtime state is explicit and durable:
   outlive the entry, the Companion, or the tenant.
 - A scheduled routine fire continues to use its routine-origin `companion_turns.id` as the durable
   run id. `companion_routine_run_entries` is the private, no-wake transcript projection for that
-  run, and `companion_routine_returns` is its at-most-one terminal bridge to the main thread. The
-  return row stores only mode and durable references; surfaced content exists once, on its ordinary
-  main-thread entry.
+  run; read APIs page it by ordinal under entry-count and byte ceilings. `companion_routine_returns`
+  is its at-most-one terminal bridge to the main thread. The return row stores only mode and durable
+  references; surfaced content exists once, on its ordinary main-thread entry.
 
 All rows are org-scoped and force-RLS-enabled. API, worker, and runtime use distinct
 `NOSUPERUSER NOBYPASSRLS NOINHERIT` roles. Runtime claims, renewals, checkpoints, and settlements use

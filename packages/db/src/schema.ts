@@ -1765,6 +1765,10 @@ export const companionRoutineRunEntries = pgTable(
       "companion_routine_run_entries_decision_role_check",
       sql`(${t.role}::text = 'decision') = (${t.decision} is not null)`,
     ),
+    boundedDecision: check(
+      "companion_routine_run_entries_decision_size_check",
+      sql`${t.decision} is null or octet_length(${t.decision}::text) <= 262144`,
+    ),
   }),
 );
 

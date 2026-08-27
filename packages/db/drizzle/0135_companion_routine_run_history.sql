@@ -37,6 +37,28 @@ ALTER TABLE public.companion_transcript_entries
   ON DELETE CASCADE;
 --> statement-breakpoint
 
+-- Associate transcript rows that already existed when this additive migration was installed.
+-- User entries match the turn's durable message event directly; runtime projections carry the
+-- attempt UUID in their v2 event prefix. These two updates make legacy successful routine replies
+-- available to the compatibility history projection immediately after deploy.
+UPDATE public.companion_transcript_entries entry
+SET turn_id = turn_row.id
+FROM public.companion_turns turn_row
+WHERE entry.turn_id IS NULL
+  AND entry.org_id = turn_row.org_id
+  AND entry.companion_id = turn_row.companion_id
+  AND entry.event_id = turn_row.message_event_id;
+--> statement-breakpoint
+
+UPDATE public.companion_transcript_entries entry
+SET turn_id = attempt.turn_id
+FROM public.companion_turn_attempts attempt
+WHERE entry.turn_id IS NULL
+  AND entry.org_id = attempt.org_id
+  AND entry.companion_id = attempt.companion_id
+  AND entry.event_id LIKE ('v2:' || attempt.id::text || ':%');
+--> statement-breakpoint
+
 CREATE INDEX companion_transcript_entries_turn_idx
   ON public.companion_transcript_entries (org_id, companion_id, turn_id)
   WHERE turn_id IS NOT NULL;
@@ -162,7 +184,9 @@ CREATE TABLE public.companion_routine_run_entries (
   CONSTRAINT companion_routine_run_entries_tool_size_check
     CHECK (tool IS NULL OR octet_length(tool::text) <= 262144),
   CONSTRAINT companion_routine_run_entries_decision_role_check
-    CHECK ((role = 'decision') = (decision IS NOT NULL))
+    CHECK ((role = 'decision') = (decision IS NOT NULL)),
+  CONSTRAINT companion_routine_run_entries_decision_size_check
+    CHECK (decision IS NULL OR octet_length(decision::text) <= 262144)
 );
 --> statement-breakpoint
 
@@ -239,7 +263,9 @@ CREATE FUNCTION public.companion_api_routine_run_json(
   p_org_id uuid,
   p_companion_id uuid,
   p_run_id uuid,
-  p_viewer boolean DEFAULT false
+  p_viewer boolean DEFAULT false,
+  p_entry_cursor integer DEFAULT NULL,
+  p_entry_limit integer DEFAULT 50
 )
 RETURNS jsonb
 LANGUAGE sql
@@ -292,61 +318,8 @@ AS $$
         turn_row.last_error_code, turn_row.last_error_message, turn_row.last_error_action
       )
     END,
-    'internal_entries', COALESCE((
-      SELECT jsonb_agg(jsonb_build_object(
-        'event_id', entry.event_id,
-        'ordinal', entry.ordinal,
-        'role', entry.role,
-        'content', entry.content,
-        'reasoning', entry.reasoning,
-        'tool', entry.tool,
-        'decision', entry.decision,
-        'created_at', entry.created_at
-      ) ORDER BY entry.ordinal)
-      FROM (
-        SELECT
-          private_entry.event_id,
-          private_entry.ordinal,
-          private_entry.role,
-          private_entry.content,
-          private_entry.reasoning,
-          private_entry.tool,
-          private_entry.decision,
-          private_entry.created_at
-        FROM public.companion_routine_run_entries private_entry
-        WHERE private_entry.org_id = turn_row.org_id
-          AND private_entry.companion_id = turn_row.companion_id
-          AND private_entry.run_id = turn_row.id
-
-        UNION ALL
-
-        -- Compatibility projection for routine fires accepted before isolated execution is cut
-        -- over. Their main-session entries are exposed as history, except for the final assistant
-        -- payload which is referenced exactly once as the virtual notify entry above.
-        SELECT
-          main_entry.event_id,
-          main_entry.ordinal,
-          main_entry.role,
-          main_entry.content,
-          main_entry.reasoning,
-          main_entry.tool,
-          main_entry.decision,
-          main_entry.created_at
-        FROM public.companion_transcript_entries main_entry
-        WHERE main_entry.org_id = turn_row.org_id
-          AND main_entry.companion_id = turn_row.companion_id
-          AND main_entry.turn_id = turn_row.id
-          AND routine_return.run_id IS NULL
-          AND NOT EXISTS (
-            SELECT 1
-            FROM public.companion_routine_run_entries private_entry
-            WHERE private_entry.org_id = turn_row.org_id
-              AND private_entry.companion_id = turn_row.companion_id
-              AND private_entry.run_id = turn_row.id
-          )
-          AND main_entry.event_id IS DISTINCT FROM legacy_surface.event_id
-      ) entry
-    ), '[]'::jsonb)
+    'internal_entries', COALESCE(history_page.entries, '[]'::jsonb),
+    'next_entry_cursor', history_page.next_cursor
   )
   FROM public.companion_turns turn_row
   LEFT JOIN public.companion_routine_returns routine_return
@@ -380,6 +353,88 @@ AS $$
     ORDER BY attempt.attempt_number DESC, attempt.id DESC
     LIMIT 1
   ) latest_attempt ON true
+  LEFT JOIN LATERAL (
+    WITH all_entries AS (
+      SELECT
+        private_entry.event_id,
+        private_entry.ordinal,
+        private_entry.role,
+        private_entry.content,
+        private_entry.reasoning,
+        private_entry.tool,
+        private_entry.decision,
+        private_entry.created_at
+      FROM public.companion_routine_run_entries private_entry
+      WHERE private_entry.org_id = turn_row.org_id
+        AND private_entry.companion_id = turn_row.companion_id
+        AND private_entry.run_id = turn_row.id
+
+      UNION ALL
+
+      -- Compatibility projection for routine fires accepted before isolated execution is cut
+      -- over. Their main-session entries are exposed as history, except for the final assistant
+      -- payload which is referenced exactly once as the virtual notify entry above.
+      SELECT
+        main_entry.event_id,
+        main_entry.ordinal,
+        main_entry.role,
+        main_entry.content,
+        main_entry.reasoning,
+        main_entry.tool,
+        main_entry.decision,
+        main_entry.created_at
+      FROM public.companion_transcript_entries main_entry
+      WHERE main_entry.org_id = turn_row.org_id
+        AND main_entry.companion_id = turn_row.companion_id
+        AND main_entry.turn_id = turn_row.id
+        AND routine_return.run_id IS NULL
+        AND NOT EXISTS (
+          SELECT 1
+          FROM public.companion_routine_run_entries private_entry
+          WHERE private_entry.org_id = turn_row.org_id
+            AND private_entry.companion_id = turn_row.companion_id
+            AND private_entry.run_id = turn_row.id
+        )
+        AND main_entry.event_id IS DISTINCT FROM legacy_surface.event_id
+    ),
+    ranked_entries AS MATERIALIZED (
+      SELECT
+        entry.*,
+        row_number() OVER (ORDER BY entry.ordinal, entry.event_id) AS page_number,
+        sum(
+          octet_length(entry.content)
+          + COALESCE(octet_length(entry.reasoning), 0)
+          + COALESCE(octet_length(entry.tool::text), 0)
+          + COALESCE(octet_length(entry.decision::text), 0)
+          + 256
+        ) OVER (ORDER BY entry.ordinal, entry.event_id) AS cumulative_bytes
+      FROM all_entries entry
+      WHERE p_entry_cursor IS NULL OR entry.ordinal > p_entry_cursor
+    ),
+    page AS MATERIALIZED (
+      SELECT entry.*
+      FROM ranked_entries entry
+      WHERE entry.page_number <= greatest(1, least(COALESCE(p_entry_limit, 50), 100))
+        AND (entry.cumulative_bytes <= 8388608 OR entry.page_number = 1)
+      ORDER BY entry.ordinal, entry.event_id
+    )
+    SELECT
+      COALESCE(jsonb_agg(jsonb_build_object(
+        'event_id', entry.event_id,
+        'ordinal', entry.ordinal,
+        'role', entry.role,
+        'content', entry.content,
+        'reasoning', entry.reasoning,
+        'tool', entry.tool,
+        'decision', entry.decision,
+        'created_at', entry.created_at
+      ) ORDER BY entry.ordinal, entry.event_id), '[]'::jsonb) AS entries,
+      CASE
+        WHEN count(*) < (SELECT count(*) FROM ranked_entries) THEN max(entry.ordinal)
+        ELSE NULL
+      END AS next_cursor
+    FROM page entry
+  ) history_page ON COALESCE(p_entry_limit, 50) > 0
   WHERE turn_row.org_id = p_org_id
     AND turn_row.companion_id = p_companion_id
     AND turn_row.id = p_run_id
@@ -401,9 +456,9 @@ SET search_path = pg_catalog, public
 SET row_security = on
 AS $$
   SELECT public.companion_api_routine_run_json(
-    p_org_id, p_companion_id, p_run_id, p_viewer
+    p_org_id, p_companion_id, p_run_id, p_viewer, NULL, 0
   )
-    - 'internal_entries'
+    - ARRAY['internal_entries', 'next_entry_cursor']
 $$;
 --> statement-breakpoint
 
@@ -453,7 +508,9 @@ $function$;
 CREATE FUNCTION public.companion_api_get_routine_run(
   p_org_id uuid,
   p_companion_id uuid,
-  p_run_id uuid
+  p_run_id uuid,
+  p_entry_cursor integer DEFAULT NULL,
+  p_entry_limit integer DEFAULT 50
 )
 RETURNS TABLE (run jsonb)
 LANGUAGE plpgsql
@@ -463,15 +520,20 @@ SET row_security = on
 AS $function$
 DECLARE
   v_access text;
+  v_run jsonb;
 BEGIN
   v_access := public.companion_api_require_access(p_org_id, p_companion_id, 'read');
-  RETURN QUERY
-  SELECT public.companion_api_routine_run_json(
-    p_org_id, p_companion_id, p_run_id, v_access = 'viewer'
-  )
-  WHERE public.companion_api_routine_run_json(
-    p_org_id, p_companion_id, p_run_id, v_access = 'viewer'
-  ) IS NOT NULL;
+  v_run := public.companion_api_routine_run_json(
+    p_org_id,
+    p_companion_id,
+    p_run_id,
+    v_access = 'viewer',
+    p_entry_cursor,
+    greatest(1, least(COALESCE(p_entry_limit, 50), 100))
+  );
+  IF v_run IS NOT NULL THEN
+    RETURN QUERY SELECT v_run;
+  END IF;
 END
 $function$;
 --> statement-breakpoint
@@ -479,10 +541,10 @@ $function$;
 REVOKE ALL ON FUNCTION public.companion_assign_transcript_turn() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.companion_associate_turn_transcript() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.companion_capture_routine_snapshot() FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.companion_api_routine_run_json(uuid,uuid,uuid,boolean) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.companion_api_routine_run_json(uuid,uuid,uuid,boolean,integer,integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.companion_api_routine_run_summary_json(uuid,uuid,uuid,boolean) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.companion_api_list_routine_runs(uuid,uuid,uuid,uuid,integer) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.companion_api_get_routine_run(uuid,uuid,uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.companion_api_get_routine_run(uuid,uuid,uuid,integer,integer) FROM PUBLIC;
 --> statement-breakpoint
 
 -- Post-cutover installs may run this migration after the grants hook. Copy the API capability from
@@ -514,7 +576,7 @@ BEGIN
         v_role
       );
       EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION public.companion_api_get_routine_run(uuid,uuid,uuid) TO %I',
+        'GRANT EXECUTE ON FUNCTION public.companion_api_get_routine_run(uuid,uuid,uuid,integer,integer) TO %I',
         v_role
       );
     END IF;

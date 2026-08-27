@@ -8,6 +8,7 @@ import type {
   CompanionRoutineRunList,
 } from "@companion/contracts";
 import {
+  COMPANION_ROUTINE_RUN_ENTRY_PAGE_DEFAULT,
   COMPANION_ROUTINE_MIN_INTERVAL_MS,
   companionRoutineDraftSchema,
   companionRoutineProposalSchema,
@@ -139,13 +140,18 @@ export async function getCompanionRoutineRunV2(input: {
   orgId: string;
   companionId: string;
   runId: string;
+  entryLimit?: number;
+  entryCursor?: number;
   database: Db;
 }): Promise<CompanionRoutineRunDetail> {
+  const entryLimit = input.entryLimit ?? COMPANION_ROUTINE_RUN_ENTRY_PAGE_DEFAULT;
   const result = await input.database.execute<{ run: unknown }>(sql`
     select run from public.companion_api_get_routine_run(
       ${input.orgId}::uuid,
       ${input.companionId}::uuid,
-      ${input.runId}::uuid
+      ${input.runId}::uuid,
+      ${input.entryCursor ?? null}::integer,
+      ${entryLimit}::integer
     )
   `);
   const [row] = rows(result);

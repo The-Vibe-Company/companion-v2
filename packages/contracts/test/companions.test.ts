@@ -16,6 +16,7 @@ import {
   companionRoutineProposalSchema,
   companionRoutineSchema,
   companionRoutineRunDetailSchema,
+  companionRoutineRunDetailQuerySchema,
   companionRoutineRunListQuerySchema,
   companionRoutineRunSummarySchema,
   companionTriggerProposalMessageSchema,
@@ -791,10 +792,12 @@ describe("Companion chat contracts", () => {
         reasoning: null,
         created_at: "2026-08-19T12:00:09.000Z",
       }],
+      next_entry_cursor: null,
     }).internal_entries).toHaveLength(1);
     expect(() => companionRoutineRunDetailSchema.parse({
       ...summary,
       internal_entries: [],
+      next_entry_cursor: null,
       surfaced_payload: "This belongs only in the main thread.",
     })).toThrow();
     expect(() => companionRoutineRunSummarySchema.parse({
@@ -809,11 +812,27 @@ describe("Companion chat contracts", () => {
       main_entry_event_id: null,
       status: "failed",
     })).toThrow();
+    expect(() => companionRoutineRunSummarySchema.parse({
+      ...summary,
+      surface_mode: null,
+    })).toThrow();
+    expect(() => companionRoutineRunSummarySchema.parse({
+      ...summary,
+      main_entry_event_id: null,
+    })).toThrow();
     expect(companionRoutineRunListQuerySchema.parse({}).limit).toBe(50);
     expect(companionRoutineRunListQuerySchema.parse({
       cursor: summary.run_id,
     }).cursor).toBe(summary.run_id);
     expect(() => companionRoutineRunListQuerySchema.parse({ limit: 101 })).toThrow();
+    expect(companionRoutineRunDetailQuerySchema.parse({})).toEqual({
+      entry_limit: 50,
+    });
+    expect(companionRoutineRunDetailQuerySchema.parse({
+      entry_limit: "25",
+      entry_cursor: "7",
+    })).toEqual({ entry_limit: 25, entry_cursor: 7 });
+    expect(() => companionRoutineRunDetailQuerySchema.parse({ entry_limit: 101 })).toThrow();
   });
 
   it("accepts a Box frame only as an inline image and never as a URL a browser would fetch", () => {

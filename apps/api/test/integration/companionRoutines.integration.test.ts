@@ -329,15 +329,26 @@ describe("Companion routines over the real database", () => {
     });
     expect(marker).toMatchObject({ routineName: "Deployment check" });
 
-    await integrationDb.insert(schema.companionRoutineRunEntries).values({
-      orgId: fixture.orgA,
-      companionId,
-      runId: run!.id,
-      eventId: "routine:work:1",
-      ordinal: 0,
-      role: "assistant",
-      content: "Inspected the deployment before returning.",
-    });
+    await integrationDb.insert(schema.companionRoutineRunEntries).values([
+      {
+        orgId: fixture.orgA,
+        companionId,
+        runId: run!.id,
+        eventId: "routine:work:1",
+        ordinal: 0,
+        role: "assistant",
+        content: "Inspected the deployment before returning.",
+      },
+      {
+        orgId: fixture.orgA,
+        companionId,
+        runId: run!.id,
+        eventId: "routine:work:2",
+        ordinal: 1,
+        role: "assistant",
+        content: "Prepared the terminal notification.",
+      },
+    ]);
     const mainEntryEventId = `routine-return:${run!.id}`;
     await integrationDb.insert(schema.companionTranscriptEntries).values({
       orgId: fixture.orgA,
@@ -409,12 +420,27 @@ describe("Companion routines over the real database", () => {
       orgId: fixture.orgA,
       companionId,
       runId: run!.id,
+      entryLimit: 1,
       database,
     }));
     expect(detail.internal_entries).toEqual([expect.objectContaining({
       event_id: "routine:work:1",
       content: "Inspected the deployment before returning.",
     })]);
+    expect(detail.next_entry_cursor).toBe(0);
+    const secondPage = await asActor(fixture.developer, (database) => getCompanionRoutineRunV2({
+      orgId: fixture.orgA,
+      companionId,
+      runId: run!.id,
+      entryLimit: 1,
+      entryCursor: detail.next_entry_cursor ?? undefined,
+      database,
+    }));
+    expect(secondPage.internal_entries).toEqual([expect.objectContaining({
+      event_id: "routine:work:2",
+      content: "Prepared the terminal notification.",
+    })]);
+    expect(secondPage.next_entry_cursor).toBeNull();
     expect(detail.error).toEqual({
       code: "runtime_unavailable",
       message: "Companion runtime needs attention.",

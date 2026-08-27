@@ -1258,6 +1258,7 @@ describe("Companions Runtime v2 API", () => {
         decision: null,
         created_at: NOW,
       }],
+      next_entry_cursor: null,
     };
     coreMocks.listCompanionRoutineRunsV2.mockResolvedValue({
       runs: [summary],
@@ -1279,11 +1280,17 @@ describe("Companions Runtime v2 API", () => {
     }));
 
     const read = await app.request(
-      `/v1/companions/${COMPANION_ID}/routine-runs/${runId}`,
+      `/v1/companions/${COMPANION_ID}/routine-runs/${runId}?entry_limit=20&entry_cursor=7`,
     );
     expect(read.status).toBe(200);
     expect(read.headers.get("cache-control")).toBe("private, no-store");
     await expect(read.json()).resolves.toEqual({ run: detail });
+    expect(coreMocks.getCompanionRoutineRunV2).toHaveBeenCalledWith(expect.objectContaining({
+      companionId: COMPANION_ID,
+      runId,
+      entryLimit: 20,
+      entryCursor: 7,
+    }));
   });
 
   it("rejects an unbounded routine-run history request before the database", async () => {
@@ -1292,6 +1299,12 @@ describe("Companions Runtime v2 API", () => {
     );
     expect(response.status).toBe(400);
     expect(coreMocks.listCompanionRoutineRunsV2).not.toHaveBeenCalled();
+
+    const detailResponse = await appWithRoutes().request(
+      `/v1/companions/${COMPANION_ID}/routine-runs/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa?entry_limit=101`,
+    );
+    expect(detailResponse.status).toBe(400);
+    expect(coreMocks.getCompanionRoutineRunV2).not.toHaveBeenCalled();
   });
 
   it("applies trigger proposals through the dedicated answer path", async () => {

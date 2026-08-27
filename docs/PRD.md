@@ -96,7 +96,9 @@ explicitly recoverable interruption even after the browser, API, or one runtime 
   session with the same authorized model, Skills, plugins, tools, and operating brief. The main Pi
   session never receives the routine prompt or private transcript.
 - The thread projects a compact clickable `Routine: <name>` marker. Owner, Editor, and Viewer can
-  open the run's full private transcript from that marker or the routine's connected-resource row.
+  page through the run's private transcript from that marker or the routine's connected-resource
+  row. Viewer receives the full user-visible history but only the generic runtime-error projection;
+  bounded recovery diagnostics remain Owner/Editor-only.
 - A routine may finish silently as `no_output` or call one terminal `surface_to_main` return. Both
   `notify` and `relay` write the payload exactly once as a visible Companion entry in main-thread
   history; only `relay` queues a turn for the main Pi to read and answer. The routine Pi terminates

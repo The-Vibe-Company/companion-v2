@@ -120,6 +120,7 @@ import {
   createCompanionTranscriptionSessionInputSchema,
   createCompanionRoutineInputSchema,
   companionRoutineRunListQuerySchema,
+  companionRoutineRunDetailQuerySchema,
   createCompanionTriggerInputSchema,
   declaredCompanionAttachmentContentType,
   isCompanionAttachmentImage,
@@ -1272,8 +1273,19 @@ export function registerCompanionRoutes(
     try {
       const companionId = companionIdSchema.parse(c.req.param("id"));
       const runId = companionIdSchema.parse(c.req.param("runId"));
+      const query = companionRoutineRunDetailQuerySchema.parse({
+        entry_limit: c.req.query("entry_limit"),
+        entry_cursor: c.req.query("entry_cursor"),
+      });
       const run = await tenant(c, ({ orgId, database }) =>
-        getCompanionRoutineRunV2({ orgId, companionId, runId, database }));
+        getCompanionRoutineRunV2({
+          orgId,
+          companionId,
+          runId,
+          entryLimit: query.entry_limit,
+          entryCursor: query.entry_cursor,
+          database,
+        }));
       c.header("Cache-Control", "private, no-store");
       return c.json({ run });
     } catch (error) {

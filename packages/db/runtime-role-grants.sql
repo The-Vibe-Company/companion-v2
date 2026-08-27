@@ -697,17 +697,17 @@ BEGIN
       ];
     END IF;
 
-    -- 0134 adds read-only routine run history. The run id is the routine-origin turn id, so the
+    -- 0135 adds read-only routine run history. The run id is the routine-origin turn id, so the
     -- detail surface remains addressable after the routine row itself is deleted.
     IF pg_catalog.to_regprocedure(
       'public.companion_api_list_routine_runs(uuid,uuid,uuid,uuid,integer)'
     ) IS NOT NULL THEN
       companion_api_functions := companion_api_functions || ARRAY[
         'public.companion_api_list_routine_runs(uuid,uuid,uuid,uuid,integer)'::regprocedure,
-        'public.companion_api_get_routine_run(uuid,uuid,uuid)'::regprocedure
+        'public.companion_api_get_routine_run(uuid,uuid,uuid,integer,integer)'::regprocedure
       ];
       internal_runtime_functions := internal_runtime_functions || ARRAY[
-        'public.companion_api_routine_run_json(uuid,uuid,uuid,boolean)'::regprocedure,
+        'public.companion_api_routine_run_json(uuid,uuid,uuid,boolean,integer,integer)'::regprocedure,
         'public.companion_api_routine_run_summary_json(uuid,uuid,uuid,boolean)'::regprocedure
       ];
     END IF;

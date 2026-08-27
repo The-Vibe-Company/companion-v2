@@ -608,7 +608,10 @@ During the additive migration, the routine-origin turn id is also its stable run
 `routine_snapshot_id` preserves the routine UUID after definition deletion. Read-only history APIs
 list runs by that snapshot and read one run by id without Box contact. The private
 `companion_routine_run_entries` projection contains only events produced inside the run-scoped Pi
-session. `companion_routine_returns` contains no message payload: it references the one ordinary
+session. Detail reads page forward by durable entry ordinal, cap each page at 100 entries and 8 MiB
+of stored entry material, and return a continuation cursor so the complete transcript remains
+viewable without materializing an unbounded response. `companion_routine_returns` contains no
+message payload: it references the one ordinary
 main-thread entry created by the terminal return and, for `relay`, the ordinary turn queued for the
 main Pi. While the pre-cutover main-session fire path remains active, the history reader uses the
 turn association as a compatibility projection: a succeeded final assistant entry is a virtual
