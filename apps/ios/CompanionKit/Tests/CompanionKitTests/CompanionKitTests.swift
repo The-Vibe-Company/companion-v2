@@ -1784,9 +1784,11 @@ func scrollCoordinatorKeepsLongThreadInitialAndStablePollsBounded() {
         )
     )
 
-    #expect(coordinator.observeTail(initialTail, source: .initial))
+    let initialChanged = coordinator.observeTail(initialTail, source: .initial)
+    #expect(initialChanged)
     #expect(coordinator.pendingRequest?.source == .initial)
-    #expect(coordinator.takePendingRequest()?.animated == false)
+    let initialRequest = coordinator.takePendingRequest()
+    #expect(initialRequest?.animated == false)
     #expect(coordinator.issuedRequestBatchCount == 1)
 
     // Layout can report the old viewport several times before the explicit bottom scroll lands.
@@ -1798,8 +1800,10 @@ func scrollCoordinatorKeepsLongThreadInitialAndStablePollsBounded() {
 
     // Four-second polls with the same visible tail, including status/window refreshes, are no-ops.
     for _ in 0..<4 {
-        #expect(!coordinator.observeTail(initialTail, source: .poll))
-        #expect(coordinator.takePendingRequest() == nil)
+        let stableChanged = coordinator.observeTail(initialTail, source: .poll)
+        let stableRequest = coordinator.takePendingRequest()
+        #expect(!stableChanged)
+        #expect(stableRequest == nil)
     }
     #expect(coordinator.issuedRequestBatchCount == 1)
 }
@@ -1818,13 +1822,16 @@ func scrollCoordinatorScrollsOnceForEachRealTailRevisionAndIgnoresDuplicates() {
     _ = coordinator.takePendingRequest()
     _ = coordinator.observeGeometry(bottomDistance: 0, threshold: 80)
 
-    #expect(coordinator.observeTail(secondTail, source: .poll))
+    let secondChanged = coordinator.observeTail(secondTail, source: .poll)
+    #expect(secondChanged)
     #expect(coordinator.pendingRequest?.source == .poll)
     #expect(coordinator.pendingRequest?.animated == false)
     _ = coordinator.takePendingRequest()
     _ = coordinator.observeGeometry(bottomDistance: 0, threshold: 80)
-    #expect(!coordinator.observeTail(secondTail, source: .poll))
-    #expect(coordinator.takePendingRequest() == nil)
+    let duplicateChanged = coordinator.observeTail(secondTail, source: .poll)
+    let duplicateRequest = coordinator.takePendingRequest()
+    #expect(!duplicateChanged)
+    #expect(duplicateRequest == nil)
     #expect(coordinator.issuedRequestBatchCount == 2)
 }
 
@@ -1844,8 +1851,10 @@ func scrollCoordinatorDoesNotLoseARealTailWhenPriorBottomGeometryIsUnchanged() {
 
     // An already-bottom viewport is allowed to emit no geometry callback for the first request.
     // That guard protects geometry interpretation only; it must not swallow real reply content.
-    #expect(coordinator.observeTail(secondTail, source: .poll))
-    #expect(coordinator.takePendingRequest()?.source == .poll)
+    let secondChanged = coordinator.observeTail(secondTail, source: .poll)
+    let secondRequest = coordinator.takePendingRequest()
+    #expect(secondChanged)
+    #expect(secondRequest?.source == .poll)
     #expect(coordinator.issuedRequestBatchCount == 2)
 }
 
@@ -1862,7 +1871,8 @@ func scrollCoordinatorDoesNotAutoFollowWhenReaderIsAwayFromTail() {
         lastActualTailSnapshot: firstTail
     )
 
-    #expect(coordinator.observeTail(secondTail, source: .poll))
+    let changed = coordinator.observeTail(secondTail, source: .poll)
+    #expect(changed)
     #expect(coordinator.followState == .userReading)
     #expect(coordinator.pendingRequest == nil)
     #expect(coordinator.issuedRequestBatchCount == 0)
@@ -1884,7 +1894,8 @@ func scrollCoordinatorCoalescesRestorationAndLoadEarlierByPriority() {
             animated: false
         )
     )
-    #expect(coordinator.takePendingRequest()?.destination == .entry("saved-anchor"))
+    let coalescedRequest = coordinator.takePendingRequest()
+    #expect(coalescedRequest?.destination == .entry("saved-anchor"))
     #expect(coordinator.issuedRequestBatchCount == 1)
 }
 
@@ -1894,15 +1905,19 @@ func scrollCoordinatorProtectsUserIntentAndReduceMotionSemantics() {
 
     coordinator.requestBottom(source: .userLatest, animated: false)
     #expect(coordinator.followState == .followingTail)
-    #expect(coordinator.takePendingRequest()?.animated == false)
+    let latestRequest = coordinator.takePendingRequest()
+    #expect(latestRequest?.animated == false)
 
     // Intermediate geometry cannot reinterpret the programmatic request as user scrolling.
-    #expect(!coordinator.observeGeometry(bottomDistance: 480, threshold: 80))
+    let intermediateChanged = coordinator.observeGeometry(bottomDistance: 480, threshold: 80)
+    #expect(!intermediateChanged)
     #expect(coordinator.followState == .followingTail)
-    #expect(!coordinator.observeGeometry(bottomDistance: 0, threshold: 80))
+    let settledChanged = coordinator.observeGeometry(bottomDistance: 0, threshold: 80)
+    #expect(!settledChanged)
     #expect(!coordinator.isProgrammaticBottomScrollOutstanding)
 
-    #expect(coordinator.observeGeometry(bottomDistance: 480, threshold: 80))
+    let readerMoved = coordinator.observeGeometry(bottomDistance: 480, threshold: 80)
+    #expect(readerMoved)
     #expect(coordinator.followState == .userReading)
 }
 
@@ -1914,7 +1929,11 @@ func scrollCoordinatorLetsUserInteractionInterruptProgrammaticFollow() {
     _ = coordinator.takePendingRequest()
     #expect(coordinator.isProgrammaticBottomScrollOutstanding)
 
-    #expect(coordinator.beginUserInteraction(bottomDistance: 480, threshold: 80))
+    let interactionChanged = coordinator.beginUserInteraction(
+        bottomDistance: 480,
+        threshold: 80
+    )
+    #expect(interactionChanged)
     #expect(coordinator.followState == .userReading)
     #expect(!coordinator.isProgrammaticBottomScrollOutstanding)
     #expect(coordinator.pendingRequest == nil)
