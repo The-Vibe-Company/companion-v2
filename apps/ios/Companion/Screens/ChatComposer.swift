@@ -17,6 +17,7 @@ struct ChatComposer: View {
     let sending: Bool
     let accent: Color
     let accentForeground: Color
+    let keyboardDismissalRequest: Int
     let onThinkingTap: () -> Void
     let onSend: (String, [CompanionMessageAttachment]) -> Void
 
@@ -166,6 +167,9 @@ struct ChatComposer: View {
         .padding(.bottom, 6)
         .accessibilityIdentifier("chat.composer-controls")
         .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: isReplying)
+        .onChange(of: keyboardDismissalRequest) {
+            composerFocused = false
+        }
         .onChange(of: photoPickerItems) { _, items in
             guard !items.isEmpty else { return }
             loadSelectedPhotos(items)

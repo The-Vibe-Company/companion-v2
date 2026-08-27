@@ -1,6 +1,7 @@
 import Foundation
 import CompanionKit
 import SwiftUI
+import UIKit
 
 @MainActor
 struct ChatServices {
@@ -104,6 +105,7 @@ struct ChatView: View {
     @State private var assistantTailReveal: AssistantTailReveal?
     @State private var assistantTailRevealTask: Task<Void, Never>?
     @State private var selectedToolDetail: ToolRunDetailRoute?
+    @State private var composerKeyboardDismissalRequest = 0
 
     private let bottomProximityThreshold: CGFloat = 80
 
@@ -218,7 +220,7 @@ struct ChatView: View {
                     .accessibilityIdentifier("chat.transcript")
                     .gesture(
                         TranscriptKeyboardDismissGesture {
-                            composerFocused = false
+                            composerKeyboardDismissalRequest += 1
                         }
                     )
                     .simultaneousGesture(
@@ -491,6 +493,7 @@ struct ChatView: View {
                 sending: sending,
                 accent: visualTheme.accent,
                 accentForeground: visualTheme.accentForeground,
+                keyboardDismissalRequest: composerKeyboardDismissalRequest,
                 onThinkingTap: onThinkingTap,
                 onSend: send(content:attachments:)
             )

@@ -265,6 +265,7 @@ test("the chat scroll-to-bottom control floats over the transcript", () => {
 
 test("native transcript taps dismiss the keyboard without consuming message controls", () => {
   const chat = read("apps/ios/Companion/Screens/ChatView.swift");
+  const composer = read("apps/ios/Companion/Screens/ChatComposer.swift");
   const uiTests = read("apps/ios/CompanionUITests/CompanionUITests.swift");
   const ci = read(".github/workflows/ci.yml");
   const readme = read("apps/ios/README.md");
@@ -281,8 +282,10 @@ test("native transcript taps dismiss the keyboard without consuming message cont
   assert.match(chat, /recognizer\.cancelsTouchesInView = false/);
   assert.match(
     transcript,
-    /\.gesture\(\s*TranscriptKeyboardDismissGesture \{\s*composerFocused = false\s*\}\s*\)/,
+    /\.gesture\(\s*TranscriptKeyboardDismissGesture \{\s*composerKeyboardDismissalRequest \+= 1\s*\}\s*\)/,
   );
+  assert.match(chat, /keyboardDismissalRequest: composerKeyboardDismissalRequest/);
+  assert.match(composer, /\.onChange\(of: keyboardDismissalRequest\) \{\s*composerFocused = false\s*\}/);
   assert.match(uiTests, /testTranscriptTapDismissesKeyboardWithoutBlockingMessageControls/);
   assert.match(uiTests, /transcriptMessage\.tap\(\)/);
   assert.match(uiTests, /predicate: NSPredicate\(format: "exists == false"\)/);
