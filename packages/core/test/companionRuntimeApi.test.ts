@@ -22,6 +22,7 @@ const companion: Companion = {
   access: "owner",
   pinned: false,
   hidden: false,
+  muted: false,
   unread: false,
   last_message: null,
   runtime: {

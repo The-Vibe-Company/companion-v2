@@ -158,6 +158,16 @@ DECLARE
   owner_only_runtime_functions regprocedure[] := ARRAY[]::regprocedure[];
   internal_runtime_functions regprocedure[] := ARRAY[]::regprocedure[];
 BEGIN
+  -- The migration hook also runs at the Runtime v2 checkpoint before later migrations. Append the
+  -- Wave A table only once it exists; the post-migration pass then applies the final split grants.
+  IF pg_catalog.to_regclass('public.companion_sections') IS NOT NULL THEN
+    api_capability_managed_tables := api_capability_managed_tables || ARRAY[
+      'public.companion_sections'::regclass
+    ];
+    worker_forbidden_companion_tables := worker_forbidden_companion_tables || ARRAY[
+      'public.companion_sections'::regclass
+    ];
+  END IF;
   IF api_role IS NULL OR worker_role IS NULL OR companion_runtime_role IS NULL THEN
     RAISE EXCEPTION 'companion API, worker, and runtime roles are required';
   END IF;
@@ -469,6 +479,17 @@ BEGIN
         'public.companion_api_answer_decision(uuid,uuid,text,text,text)'::regprocedure,
         'public.companion_api_bump_skill_revision(uuid,uuid)'::regprocedure
       ];
+      IF pg_catalog.to_regprocedure('public.companion_api_list_sections(uuid)') IS NOT NULL THEN
+        companion_api_functions := companion_api_functions || ARRAY[
+          'public.companion_api_list_sections(uuid)'::regprocedure,
+          'public.companion_api_create_section(uuid,text)'::regprocedure,
+          'public.companion_api_update_section(uuid,uuid,text)'::regprocedure,
+          'public.companion_api_delete_section(uuid,uuid)'::regprocedure,
+          'public.companion_api_reorder_sections(uuid,jsonb)'::regprocedure,
+          'public.companion_api_assign_section(uuid,uuid,uuid)'::regprocedure,
+          'public.companion_api_update_member_state_v2(uuid,uuid,boolean,boolean,boolean,boolean)'::regprocedure
+        ];
+      END IF;
       internal_runtime_functions := internal_runtime_functions || ARRAY[
         'public.companion_api_actor(uuid)'::regprocedure,
         'public.companion_api_require_access(uuid,uuid,text)'::regprocedure,

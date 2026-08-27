@@ -107,6 +107,12 @@ import {
   resolveCompanionMcpBrokerAuthorization,
   registerCompanionNotificationDevice,
   unregisterCompanionNotificationDevice,
+  listCompanionSections,
+  createCompanionSection,
+  updateCompanionSection,
+  deleteCompanionSection,
+  reorderCompanionSections,
+  assignCompanionSection,
 } from "@companion/core";
 import {
   COMPANION_ATTACHMENT_MAX_BYTES,
@@ -149,6 +155,10 @@ import {
   updateCompanionRoutineInputSchema,
   updateCompanionTriggerInputSchema,
   retryCompanionTurnInputSchema,
+  createCompanionSectionInputSchema,
+  updateCompanionSectionInputSchema,
+  reorderCompanionSectionsInputSchema,
+  assignCompanionSectionInputSchema,
 } from "@companion/contracts";
 import {
   notificationDeviceRegistrationSchema,
@@ -245,6 +255,12 @@ function defaultCompanionRouteDependencies() {
     issueCompanionMcpAccessToken,
     registerCompanionNotificationDevice,
     unregisterCompanionNotificationDevice,
+    listCompanionSections,
+    createCompanionSection,
+    updateCompanionSection,
+    deleteCompanionSection,
+    reorderCompanionSections,
+    assignCompanionSection,
   };
 }
 
@@ -620,6 +636,12 @@ export function registerCompanionRoutes(
     issueCompanionMcpAccessToken,
     registerCompanionNotificationDevice,
     unregisterCompanionNotificationDevice,
+    listCompanionSections,
+    createCompanionSection,
+    updateCompanionSection,
+    deleteCompanionSection,
+    reorderCompanionSections,
+    assignCompanionSection,
   } = { ...defaultCompanionRouteDependencies(), ...dependencies };
 
   async function tenant<T>(
@@ -699,6 +721,80 @@ export function registerCompanionRoutes(
       return c.body(null, 204);
     } catch (error) {
       return notificationDeviceRouteError(c, error);
+    }
+  });
+
+  app.get("/v1/companion-sections", async (c) => {
+    try {
+      const sections = await tenant(c, ({ actor, orgId, database }) =>
+        listCompanionSections({ actor, orgId, database }));
+      c.header("Cache-Control", "private, no-store");
+      return c.json({ sections });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.post("/v1/companion-sections", async (c) => {
+    try {
+      const body = createCompanionSectionInputSchema.parse(await c.req.json());
+      const section = await tenant(c, ({ actor, orgId, database }) =>
+        createCompanionSection({ actor, orgId, name: body.name, database }));
+      return c.json({ section }, 201);
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.patch("/v1/companion-sections/:id", async (c) => {
+    try {
+      const sectionId = companionIdSchema.parse(c.req.param("id"));
+      const body = updateCompanionSectionInputSchema.parse(await c.req.json());
+      const section = await tenant(c, ({ actor, orgId, database }) =>
+        updateCompanionSection({ actor, orgId, sectionId, name: body.name, database }));
+      return c.json({ section });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.delete("/v1/companion-sections/:id", async (c) => {
+    try {
+      const sectionId = companionIdSchema.parse(c.req.param("id"));
+      const unassignedCount = await tenant(c, ({ actor, orgId, database }) =>
+        deleteCompanionSection({ actor, orgId, sectionId, database }));
+      return c.json({ ok: true, unassigned_count: unassignedCount });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.put("/v1/companion-sections/reorder", async (c) => {
+    try {
+      const body = reorderCompanionSectionsInputSchema.parse(await c.req.json());
+      const sections = await tenant(c, ({ actor, orgId, database }) =>
+        reorderCompanionSections({ actor, orgId, sectionIds: body.section_ids, database }));
+      return c.json({ sections });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.put("/v1/companions/:id/section", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const body = assignCompanionSectionInputSchema.parse(await c.req.json());
+      const companion = await tenant(c, ({ actor, orgId, database }) =>
+        assignCompanionSection({
+          actor,
+          orgId,
+          companionId,
+          sectionId: body.section_id,
+          database,
+        }));
+      return c.json({ companion });
+    } catch (error) {
+      return routeError(c, error);
     }
   });
 

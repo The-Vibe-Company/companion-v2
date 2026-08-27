@@ -10,6 +10,7 @@ export * from "./billingService";
 export * from "./featureFlags";
 export * from "./deploymentRelease";
 export * from "./companions";
+export * from "./companionSections";
 export * from "./companionRuntimeApi";
 export * from "./companionRoutines";
 export * from "./companionRoutineFireId";

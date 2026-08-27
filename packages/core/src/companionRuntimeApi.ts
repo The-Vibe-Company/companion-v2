@@ -479,6 +479,14 @@ export async function duplicateCompanionV2(input: {
     sourceCompanionId: source.id,
     database: input.database,
   });
+  if (source.section_id) {
+    await input.database.execute(sql`
+      select public.companion_api_assign_section(
+        ${input.orgId}::uuid, ${cloned.id}::uuid, ${source.section_id}::uuid
+      )
+    `);
+    return getCompanionV2({ ...input, companionId: cloned.id });
+  }
   return cloned;
 }
 
@@ -486,15 +494,16 @@ export async function updateCompanionMemberStateV2(input: {
   actor: ActorContext;
   orgId: string;
   companionId: string;
-  patch: { pinned?: boolean; hidden?: boolean; unread?: boolean };
+  patch: { pinned?: boolean; hidden?: boolean; muted?: boolean; unread?: boolean };
   database: Db;
 }): Promise<Companion> {
   await input.database.execute(sql`
-    select * from public.companion_api_update_member_state(
+    select * from public.companion_api_update_member_state_v2(
       ${input.orgId}::uuid,
       ${input.companionId}::uuid,
       ${input.patch.pinned ?? null}::boolean,
       ${input.patch.hidden ?? null}::boolean,
+      ${input.patch.muted ?? null}::boolean,
       ${input.patch.unread ?? null}::boolean
     )
   `);

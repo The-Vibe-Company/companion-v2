@@ -46,11 +46,34 @@ import {
   supplementCompanionProviderModels,
   updateCompanionInputSchema,
   updateCompanionMemberStateInputSchema,
+  assignCompanionSectionInputSchema,
+  companionSectionSchema,
+  createCompanionSectionInputSchema,
+  reorderCompanionSectionsInputSchema,
 } from "../src/companions";
 import { restartCompanionRuntimeInputSchema } from "../src/companionRuntime";
 import { companionToolRunKind } from "../src/companionToolKinds";
 
 describe("Companion provider contracts", () => {
+  it("bounds owner sections and requires exact, unique reorder membership", () => {
+    expect(createCompanionSectionInputSchema.parse({ name: "  Work  " })).toEqual({ name: "Work" });
+    expect(assignCompanionSectionInputSchema.parse({ section_id: null })).toEqual({ section_id: null });
+    expect(() => reorderCompanionSectionsInputSchema.parse({
+      section_ids: [
+        "11111111-1111-4111-8111-111111111111",
+        "11111111-1111-4111-8111-111111111111",
+      ],
+    })).toThrow();
+    expect(companionSectionSchema.parse({
+      id: "11111111-1111-4111-8111-111111111111",
+      org_id: "22222222-2222-4222-8222-222222222222",
+      owner_id: "user-1",
+      name: "Work",
+      position: 0,
+      created_at: "2026-08-27T00:00:00.000Z",
+      updated_at: "2026-08-27T00:00:00.000Z",
+    }).name).toBe("Work");
+  });
   it("keeps API keys write-only and removes browser-submitted subscription credentials", () => {
     expect(saveCompanionProviderInputSchema.parse({
       auth_method: "api_key",
@@ -195,6 +218,7 @@ describe("Companion provider contracts", () => {
 
   it("accepts member-state patches for pin, hide, and unread", () => {
     expect(updateCompanionMemberStateInputSchema.parse({ pinned: true })).toEqual({ pinned: true });
+    expect(updateCompanionMemberStateInputSchema.parse({ muted: true })).toEqual({ muted: true });
     expect(updateCompanionMemberStateInputSchema.parse({
       hidden: true,
       unread: false,

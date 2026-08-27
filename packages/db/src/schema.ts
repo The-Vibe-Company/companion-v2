@@ -428,6 +428,44 @@ export const memberships = pgTable(
 );
 
 /**
+ * Owner-managed organization for one member's Companions. Sections are roster metadata only:
+ * assigning one never changes Companion access, runtime configuration, or Box/Pi state.
+ */
+export const companionSections = pgTable(
+  "companion_sections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    position: integer("position").notNull(),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    uniqueOrgOwnerId: unique("companion_sections_org_owner_id_uq").on(t.orgId, t.ownerId, t.id),
+    uniqueOwnerName: uniqueIndex("companion_sections_owner_name_uq")
+      .on(t.orgId, t.ownerId, sql`lower(${t.name})`),
+    byOwnerPosition: index("companion_sections_owner_position_idx")
+      .on(t.orgId, t.ownerId, t.position),
+    ownerMembershipFk: foreignKey({
+      columns: [t.orgId, t.ownerId],
+      foreignColumns: [memberships.orgId, memberships.userId],
+      name: "companion_sections_owner_membership_fk",
+    }),
+    nameBounds: check(
+      "companion_sections_name_check",
+      sql`char_length(btrim(${t.name})) between 1 and 80 and ${t.name} !~ E'[\\n\\r]'`,
+    ),
+    positionBounds: check("companion_sections_position_check", sql`${t.position} >= 0`),
+  }),
+);
+
+/**
  * Durable control-plane projection for one Companion. Runtime sessions and transcripts stay on
  * the Box disk; this row contains only enough metadata to list/open without contacting or waking
  * the Box. Provider credentials and desktop URLs must never be stored here.
@@ -442,6 +480,7 @@ export const companions = pgTable(
     ownerId: text("owner_id")
       .notNull()
       .references(() => user.id),
+    sectionId: uuid("section_id"),
     name: text("name").notNull(),
     /** One short operator-authored line describing the Companion; never a system prompt. */
     persona: text("persona"),
@@ -488,11 +527,17 @@ export const companions = pgTable(
     uniqueOrgId: unique("companions_org_id_id_uq").on(t.orgId, t.id),
     uniqueOwnerIdentity: unique("companions_org_id_id_owner_id_uq").on(t.orgId, t.id, t.ownerId),
     byOrgUpdated: index("companions_org_updated_idx").on(t.orgId, t.updatedAt),
+    bySection: index("companions_section_idx").on(t.orgId, t.sectionId),
     ownerMembershipFk: foreignKey({
       columns: [t.orgId, t.ownerId],
       foreignColumns: [memberships.orgId, memberships.userId],
       name: "companions_owner_membership_fk",
     }),
+    sectionFk: foreignKey({
+      columns: [t.orgId, t.ownerId, t.sectionId],
+      foreignColumns: [companionSections.orgId, companionSections.ownerId, companionSections.id],
+      name: "companions_section_fk",
+    }).onDelete("restrict"),
     personaLength: check(
       "companions_persona_check",
       sql`${t.persona} is null or char_length(${t.persona}) <= 280`,
@@ -1482,6 +1527,8 @@ export const companionMemberState = pgTable(
     pinnedAt: timestamp("pinned_at", { withTimezone: true }),
     /** When true, the Companion is removed from the member's main list without deleting it. */
     hidden: boolean("hidden").notNull().default(false),
+    /** When true, new push-notification deliveries are not enqueued for this member. */
+    muted: boolean("muted").notNull().default(false),
     /**
      * Highest transcript ordinal this member has read. Null means never opened; unread when the
      * thread's highest ordinal is greater than this watermark (treating null as -1).
