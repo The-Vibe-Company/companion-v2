@@ -387,11 +387,18 @@ New explicit recovery actions are:
 Native iOS composer dictation uses
 `POST /v1/companions/:id/transcription-sessions`. The route requires current Owner/Editor access,
 uses the API-only `COMPANION_GEMINI_TRANSCRIPTION_API_KEY`, and vends a single-use, short-lived
-Gemini token constrained to `gemini-3.5-transcribe-live` transcription. This deployment-owned key
-enables the capability for every workspace. Thread reads expose only a boolean availability bit so
-clients omit the control when the key is absent. The client then sends microphone audio directly to
-Google's constrained Live WebSocket. The API returns no long-lived key and never proxies, stores,
-logs, or projects audio. This shared, capability-named endpoint is not a client-surface
+Gemini Live token with a one-minute new-session window and ten-minute expiry. Google currently
+rejects `liveConnectConstraints` on the deployed authorization-key path, so the token request does
+not lock model/config; the first-party client selects `gemini-3.5-transcribe-live`, text output,
+Smart transcription, and automatic language detection in its setup message. This deployment-owned
+key enables the capability for every workspace. Thread reads expose only a boolean availability bit
+so clients omit the control when the key is absent. The client then sends microphone audio directly
+to Google's constrained Live WebSocket. The API returns no long-lived key and never proxies, stores,
+logs, or projects audio. Failed token exchanges emit only the structured process event
+`api.companion_transcription.provider_failure`, a safe category (`transport`, `4xx`, `5xx`, or
+`invalid_response`), and the numeric HTTP status when Google returned one. The event never carries
+the key, request URL, response body, thrown provider diagnostic, member identity, or audio. This
+shared, capability-named endpoint is not a client-surface
 discriminator; another first-party client could adopt the same contract later.
 
 `POST /v1/hooks/triggers/:triggerId/:secret` fires a webhook-fired Companion trigger — the
