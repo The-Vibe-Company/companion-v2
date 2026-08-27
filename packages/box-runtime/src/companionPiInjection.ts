@@ -51,6 +51,7 @@ export interface CompanionStagedMcpAccount {
   oauthBroker?: {
     credentialGeneration: string;
     github: boolean;
+    allowedTools?: readonly string[];
   };
 }
 
@@ -59,6 +60,7 @@ export interface CompanionMcpGatewayAccount {
   credentialGeneration: string;
   upstreamUrl: string;
   github: boolean;
+  allowedTools?: string[];
 }
 
 function adapterName(account: Pick<CompanionMcpAccount, "id" | "label">): string {
@@ -123,12 +125,16 @@ export function buildMcpAdapterInjection(
             ),
         };
     if (staged.oauthBroker && account.transport === "http") {
-      gatewayAccounts.push({
+      const gatewayAccount: CompanionMcpGatewayAccount = {
         accountId: account.id,
         credentialGeneration: staged.oauthBroker.credentialGeneration,
         upstreamUrl: account.url,
         github: staged.oauthBroker.github,
-      });
+      };
+      if (staged.oauthBroker.allowedTools) {
+        gatewayAccount.allowedTools = [...staged.oauthBroker.allowedTools];
+      }
+      gatewayAccounts.push(gatewayAccount);
     }
     metadata.push({
       id: account.id,

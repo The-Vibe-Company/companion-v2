@@ -1082,6 +1082,10 @@ final class CompanionUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["demo.management.plugin.github"].exists)
         XCTAssertTrue(app.descendants(matching: .any)["demo.management.plugin.notion"].exists)
         XCTAssertTrue(app.descendants(matching: .any)["demo.management.plugin.conductor"].exists)
+        let gmail = app.descendants(matching: .any)["demo.management.plugin.gmail"]
+        XCTAssertTrue(gmail.waitForExistence(timeout: 2))
+        XCTAssertTrue(gmail.label.contains("Search and read email"))
+        XCTAssertTrue(gmail.label.contains("never sends mail"))
         let addLinearAccount = app.buttons["demo.management.add-linear-account"]
         XCTAssertTrue(addLinearAccount.exists)
         if !addLinearAccount.isHittable {

@@ -10,6 +10,7 @@ export const COMPANION_PLUGIN_OAUTH_SERVER_NAMES = [
   "io.github.github/github-mcp-server",
   "com.notion/mcp",
   "build.conductor/mcp",
+  "com.google.workspace/gmail",
 ] as const;
 export const companionPluginOAuthServerNameSchema = z.enum(
   COMPANION_PLUGIN_OAUTH_SERVER_NAMES,
@@ -20,7 +21,7 @@ export type CompanionPluginOAuthServerName = z.infer<
 
 export interface CompanionPluginCatalogEntry {
   server_name: CompanionPluginOAuthServerName;
-  provider: "linear" | "github" | "notion" | "conductor";
+  provider: "linear" | "github" | "notion" | "conductor" | "gmail";
   title: string;
   description: string;
 }
@@ -50,6 +51,12 @@ export const COMPANION_PLUGIN_CATALOG = [
     provider: "conductor",
     title: "Conductor",
     description: "Conductor cloud workspaces, sessions, and coding agents.",
+  },
+  {
+    server_name: "com.google.workspace/gmail",
+    provider: "gmail",
+    title: "Gmail",
+    description: "Search and read email, and create drafts for review in Gmail.",
   },
 ] as const satisfies readonly CompanionPluginCatalogEntry[];
 

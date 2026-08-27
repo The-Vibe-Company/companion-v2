@@ -309,6 +309,13 @@ unselected accounts cannot use it. An explicit upstream `401` before any MCP res
 one refresh and one retry. Timeouts, disconnects, redirects, and other ambiguous outcomes are never
 replayed.
 
+Gmail uses a deployment-owned Google web OAuth client distinct from Better Auth sign-in and pins
+Google's Developer Preview remote at `https://gmailmcp.googleapis.com/mcp/v1`. The account requests
+`gmail.readonly` and `gmail.compose`, but the loopback gateway exposes only `search_threads`,
+`get_message`, `get_thread`, `list_drafts`, `list_labels`, and `create_draft`. It filters
+`tools/list` and rejects every other `tools/call` before token vending or upstream contact, so
+Google adding a send or mailbox-mutation tool cannot silently expand Companion authority.
+
 Git uses a credential helper and `gh` uses an audited wrapper; each command asks the same loopback
 gateway, so neither `GITHUB_TOKEN` nor `GH_TOKEN` is persisted in the Box environment or on disk.
 OAuth refresh updates the encrypted envelope with a credential-version CAS while keeping the

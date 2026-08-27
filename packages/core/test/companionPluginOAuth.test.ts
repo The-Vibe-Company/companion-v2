@@ -181,6 +181,134 @@ describe("Companion plugin OAuth broker", () => {
     }));
   });
 
+  it("uses Google's configured Gmail client for offline read-and-draft MCP access", async () => {
+    const fetchImpl = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({
+        resource: "https://gmailmcp.googleapis.com/mcp/v1",
+        authorization_servers: ["https://accounts.google.com/"],
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        authorization_endpoint: "https://accounts.google.com/o/oauth2/v2/auth",
+        token_endpoint: "https://oauth2.googleapis.com/token",
+      }));
+    const env = {
+      COMPANION_MCP_GMAIL_CLIENT_ID: "gmail-client",
+      COMPANION_MCP_GMAIL_CLIENT_SECRET: "gmail-client-secret",
+    };
+    const started = await beginCompanionPluginOAuth({
+      serverName: "com.google.workspace/gmail",
+      redirectUri: "https://companion.example/v1/companion-plugins/oauth/callback",
+      state: "gmail-state",
+      env,
+      fetchImpl,
+    });
+
+    expect(fetchImpl.mock.calls.map((call) => call[0])).toEqual([
+      "https://gmailmcp.googleapis.com/.well-known/oauth-protected-resource/mcp/v1",
+      "https://accounts.google.com/.well-known/oauth-authorization-server",
+    ]);
+    const authorization = new URL(started.authorizationUrl);
+    expect(authorization.origin + authorization.pathname).toBe(
+      "https://accounts.google.com/o/oauth2/v2/auth",
+    );
+    expect(authorization.searchParams.get("scope")).toBe([
+      "https://www.googleapis.com/auth/gmail.readonly",
+      "https://www.googleapis.com/auth/gmail.compose",
+    ].join(" "));
+    expect(authorization.searchParams.get("access_type")).toBe("offline");
+    expect(authorization.searchParams.get("include_granted_scopes")).toBe("true");
+    expect(authorization.searchParams.get("prompt")).toBe("consent select_account");
+    expect(authorization.searchParams.has("resource")).toBe(false);
+
+    const exchangeFetch = vi.fn<typeof fetch>(async (_url, init) => {
+      const body = formBody(init);
+      expect(body.has("resource")).toBe(false);
+      expect(body.get("client_id")).toBe("gmail-client");
+      expect(body.get("client_secret")).toBe("gmail-client-secret");
+      return jsonResponse({
+        access_token: "gmail-access",
+        refresh_token: "gmail-refresh",
+        expires_in: 3600,
+        scope: [
+          "https://www.googleapis.com/auth/gmail.compose",
+          "https://www.googleapis.com/auth/gmail.readonly",
+        ].join(" "),
+      });
+    });
+    const credential = await completeCompanionPluginOAuth({
+      flow: started.flow,
+      code: "gmail-code",
+      redirectUri: "https://companion.example/v1/companion-plugins/oauth/callback",
+      fetchImpl: exchangeFetch,
+    });
+    expect(credential.client).toEqual({
+      clientId: "gmail-client",
+      clientSecret: null,
+      tokenEndpointAuthMethod: "client_secret_post",
+    });
+    expect(JSON.stringify(credential)).not.toContain("gmail-client-secret");
+
+    const refreshFetch = vi.fn<typeof fetch>(async (_url, init) => {
+      const body = formBody(init);
+      expect(body.has("resource")).toBe(false);
+      expect(body.get("client_secret")).toBe("gmail-client-secret");
+      return jsonResponse({ access_token: "gmail-access-two", expires_in: 3600 });
+    });
+    await expect(refreshCompanionPluginOAuth({
+      credential,
+      env,
+      fetchImpl: refreshFetch,
+    })).resolves.toMatchObject({
+      accessToken: "gmail-access-two",
+      refreshToken: "gmail-refresh",
+      scope: expect.stringContaining("gmail.readonly"),
+    });
+  });
+
+  it("fails Gmail OAuth when configuration or either required scope is missing", async () => {
+    const metadataFetch = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({
+        resource: "https://gmailmcp.googleapis.com/mcp/v1",
+        authorization_servers: ["https://accounts.google.com/"],
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        authorization_endpoint: "https://accounts.google.com/o/oauth2/v2/auth",
+        token_endpoint: "https://oauth2.googleapis.com/token",
+      }));
+    await expect(beginCompanionPluginOAuth({
+      serverName: "com.google.workspace/gmail",
+      redirectUri: "https://companion.example/callback",
+      state: "state",
+      env: {},
+      fetchImpl: metadataFetch,
+    })).rejects.toEqual(expect.objectContaining({ code: "oauth_not_configured" }));
+
+    await expect(completeCompanionPluginOAuth({
+      flow: {
+        serverName: "com.google.workspace/gmail",
+        provider: "gmail",
+        remoteUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+        authorizationEndpoint: "https://accounts.google.com/o/oauth2/v2/auth",
+        tokenEndpoint: "https://oauth2.googleapis.com/token",
+        resource: "https://gmailmcp.googleapis.com/mcp/v1",
+        scope: "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose",
+        codeVerifier: "pkce-verifier",
+        client: {
+          clientId: "gmail-client",
+          clientSecret: "gmail-client-secret",
+          tokenEndpointAuthMethod: "client_secret_post",
+        },
+      },
+      code: "gmail-code",
+      redirectUri: "https://companion.example/callback",
+      fetchImpl: vi.fn<typeof fetch>(async () => jsonResponse({
+        access_token: "gmail-access",
+        refresh_token: "gmail-refresh",
+        scope: "https://www.googleapis.com/auth/gmail.readonly",
+      })),
+    })).rejects.toEqual(expect.objectContaining({ code: "oauth_exchange_failed" }));
+  });
+
   it("rejects discovery metadata that moves the resource off the curated remote", async () => {
     const fetchImpl = vi.fn<typeof fetch>(async () => jsonResponse({
       resource: "https://mcp.linear.app/other-resource",

@@ -85,6 +85,11 @@ confirmed Editor/Owner action. Automatic repair may recycle Pi only.
 Provider connections and member MCP accounts are envelope-encrypted and survive the one-time legacy
 Companion purge. Old Companions, Boxes, transcripts, runtime rows, pools, and leases do not migrate.
 
+Gmail is a product-owned, member-level plugin backed by Google's remote Gmail MCP server. A labeled
+account grants only search/read and draft creation; the member reviews and sends every draft in
+Gmail. Companion does not expose send, label mutation, deletion, or new-email triggers in v1.
+Email content is external untrusted data and never becomes runtime instruction.
+
 ## Explicit exclusions
 
 Historical Projects and generic skill runs remain removed. This release adds no multi-Bot
