@@ -551,6 +551,83 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    func testMessageLongPressOffersCopyShareAndSelectableText() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-glass-chat-demo"]
+        app.launch()
+
+        let reply = app.descendants(matching: .any)["demo.markdown.reply"]
+        XCTAssertTrue(reply.waitForExistence(timeout: 5))
+        reply.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 1.2)
+
+        XCTAssertTrue(app.buttons["Copy"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.buttons["Share"].exists)
+        XCTAssertTrue(app.buttons["Select Text"].exists)
+        // Activating an iOS 26 context-menu command leaves XCUI waiting indefinitely for app
+        // idleness. The deterministic source-shape test covers each command's handler payload.
+    }
+
+    @MainActor
+    func testMarkdownCodeBlockCopyShowsSuccessStateAndNativeHitTarget() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-glass-chat-demo"]
+        app.launch()
+
+        let copy = app.buttons.matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "markdown.code-copy.")
+        ).firstMatch
+        XCTAssertTrue(copy.waitForExistence(timeout: 5))
+        XCTAssertGreaterThanOrEqual(copy.frame.height, 44)
+        XCTAssertGreaterThanOrEqual(copy.frame.width, 44)
+
+        copy.tap()
+        XCTAssertTrue(app.buttons["Code copied"].waitForExistence(timeout: 2))
+    }
+
+    @MainActor
+    func testQueuedOwnMessageContextDeleteUsesExistingRemoval() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-queued-demo"]
+        app.launch()
+
+        let queue = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "3 queued")
+        ).firstMatch
+        XCTAssertTrue(queue.waitForExistence(timeout: 5))
+        queue.tap()
+        let item = app.staticTexts[
+            "Compare these screenshots and call out the visual regressions."
+        ]
+        XCTAssertTrue(item.waitForExistence(timeout: 5))
+        item.press(forDuration: 1.2)
+        XCTAssertTrue(app.buttons["Delete"].waitForExistence(timeout: 2))
+    }
+
+    @MainActor
+    func testQueuedTeammateContextDeleteIsUnavailableToEditor() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-queued-demo"]
+        app.launchEnvironment["COMPANION_QUEUED_DEMO_ACCESS"] = "editor"
+        app.launch()
+
+        let queue = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "3 queued")
+        ).firstMatch
+        XCTAssertTrue(queue.waitForExistence(timeout: 5))
+        queue.tap()
+        let item = app.staticTexts[
+            "Compare these screenshots and call out the visual regressions."
+        ]
+        XCTAssertTrue(item.waitForExistence(timeout: 5))
+        let visibleRemoval = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Delete queued message:")
+        ).firstMatch
+        XCTAssertTrue(visibleRemoval.waitForExistence(timeout: 2))
+        item.press(forDuration: 1.2)
+        XCTAssertFalse(app.buttons["Delete"].waitForExistence(timeout: 1))
+    }
+
+    @MainActor
     func testTranscriptWindowDemoStartsWithOnlyTheNewestFiftyMessages() throws {
         let app = XCUIApplication()
         app.launchArguments = ["-companion-transcript-window-demo"]

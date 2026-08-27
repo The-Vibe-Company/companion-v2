@@ -128,7 +128,10 @@ deterministic without installing or invoking XcodeBuildMCP in CI.
 Queued messages stay collapsed above the composer until opened. Owner and Editor can remove an
 unstarted queued turn through the shared cancel route; Viewer remains read-only. The shared `/v1`
 contract does not expose a queued-message edit mutation, so iOS does not offer editing or invent a
-mobile-only replacement endpoint.
+mobile-only replacement endpoint. This interaction follow-up calls that action Delete in the queue
+and still sends the existing cancel request; cancel-and-resend is not an edit. Reply or thread
+actions and regenerate are deliberately out of scope here and remain unavailable until the shared
+contract provides those mutations.
 
 ## TestFlight release
 

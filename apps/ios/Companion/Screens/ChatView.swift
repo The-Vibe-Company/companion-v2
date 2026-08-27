@@ -378,6 +378,7 @@ struct ChatView: View {
                 CompanionQueuedMessagesView(
                     entries: queuedEntries,
                     canManage: thread?.canSend == true,
+                    viewerID: thread?.viewerID,
                     accent: visualTheme.accent,
                     onRemove: cancelTurn
                 )
@@ -1226,6 +1227,7 @@ struct ChatMessageBubble: View {
             if kind != .mine { Spacer(minLength: kind == .assistant ? 12 : 36) }
         }
         .frame(maxWidth: .infinity)
+        .companionMessageInteractionMenu(rawContent: content)
     }
 
     @ViewBuilder
@@ -1245,12 +1247,15 @@ struct ChatMessageBubble: View {
             }
 
             if kind == .assistant, let markdown {
-                MarkdownMessageView(document: markdown, accent: .companionInk)
+                MarkdownMessageView(
+                    document: markdown,
+                    accent: .companionInk,
+                    allowsTextSelection: false
+                )
             } else {
                 Text(content)
                     .font(.body)
                     .foregroundStyle(Color.companionInk)
-                    .textSelection(.enabled)
             }
 
             if !localAttachments.isEmpty {
