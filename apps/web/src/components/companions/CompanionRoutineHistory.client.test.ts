@@ -27,6 +27,7 @@ const { CompanionRoutineHistory } = await import("./CompanionRoutineHistory");
 const companionId = "11111111-1111-4111-8111-111111111111";
 const routineId = "22222222-2222-4222-8222-222222222222";
 const runId = "33333333-3333-4333-8333-333333333333";
+const secondRunId = "44444444-4444-4444-8444-444444444444";
 const roots: Root[] = [];
 
 const summary: CompanionRoutineRunSummary = {
@@ -78,6 +79,25 @@ const secondPage: CompanionRoutineRunDetail = {
     },
     decision: null,
     created_at: "2026-08-27T09:00:04.000Z",
+  }],
+  next_entry_cursor: null,
+};
+
+const alternateSummary: CompanionRoutineRunSummary = {
+  ...summary,
+  run_id: secondRunId,
+  created_at: "2026-08-27T10:00:00.000Z",
+  started_at: "2026-08-27T10:00:01.000Z",
+  settled_at: "2026-08-27T10:00:05.000Z",
+};
+
+const alternateDetail: CompanionRoutineRunDetail = {
+  ...alternateSummary,
+  internal_entries: [{
+    ...firstPage.internal_entries[0]!,
+    event_id: "routine:assistant:alternate",
+    content: "The later run completed cleanly.",
+    created_at: "2026-08-27T10:00:02.000Z",
   }],
   next_entry_cursor: null,
 };
@@ -170,5 +190,48 @@ describe("Companion routine history", () => {
     expect(container.textContent).toContain("Routine run");
     expect(container.textContent).toContain("Checked the overnight deployment.");
     expect(container.querySelector("button[aria-label='Back to Morning brief runs']")).not.toBeNull();
+  });
+
+  it("ignores stale detail failures after selecting a different run", async () => {
+    let rejectFirst!: (cause: Error) => void;
+    let resolveSecond!: (detail: CompanionRoutineRunDetail) => void;
+    const firstRequest = new Promise<CompanionRoutineRunDetail>((_resolve, reject) => {
+      rejectFirst = reject;
+    });
+    const secondRequest = new Promise<CompanionRoutineRunDetail>((resolve) => {
+      resolveSecond = resolve;
+    });
+    historyApi.listCompanionRoutineRuns.mockResolvedValue({
+      runs: [summary, alternateSummary],
+      next_cursor: null,
+    });
+    historyApi.readCompanionRoutineRun.mockReset();
+    historyApi.readCompanionRoutineRun.mockImplementation(
+      (_orgId: string, _companionId: string, requestedRunId: string) => (
+        requestedRunId === runId ? firstRequest : secondRequest
+      ),
+    );
+
+    const container = await mount();
+    const runButtons = () => [
+      ...container.querySelectorAll<HTMLButtonElement>(".routine-history__run-button"),
+    ];
+    await act(async () => runButtons()[0]?.click());
+    await flush();
+    const back = container.querySelector<HTMLButtonElement>(
+      "button[aria-label='Back to Morning brief runs']",
+    );
+    await act(async () => back?.click());
+    await flush();
+    await act(async () => runButtons()[1]?.click());
+
+    await act(async () => resolveSecond(alternateDetail));
+    await flush();
+    expect(container.textContent).toContain("The later run completed cleanly.");
+
+    await act(async () => rejectFirst(new Error("stale first-run failure")));
+    await flush();
+    expect(container.textContent).not.toContain("stale first-run failure");
+    expect(container.textContent).toContain("The later run completed cleanly.");
   });
 });

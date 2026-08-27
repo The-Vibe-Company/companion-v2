@@ -205,6 +205,7 @@ export function CompanionRoutineHistory({
   const [detailLoading, setDetailLoading] = useState(target.runId !== null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const selectedRunIdRef = useRef<string | null>(target.runId);
+  const detailRequestGenerationRef = useRef(0);
   const displayTimezone = memberTimezone ?? detectedBrowserTimeZone();
 
   const loadRuns = useCallback(async (cursor?: string) => {
@@ -226,6 +227,11 @@ export function CompanionRoutineHistory({
   }, [companionId, orgId, target.routineId]);
 
   const loadDetail = useCallback(async (runId: string, cursor?: number) => {
+    const generation = ++detailRequestGenerationRef.current;
+    const requestIsCurrent = () => (
+      detailRequestGenerationRef.current === generation
+      && selectedRunIdRef.current === runId
+    );
     setDetailLoading(true);
     setDetailError(null);
     try {
@@ -233,16 +239,23 @@ export function CompanionRoutineHistory({
         entryLimit: 50,
         entryCursor: cursor,
       });
-      if (selectedRunIdRef.current !== runId) return;
+      if (!requestIsCurrent()) return;
       setDetail((current) => cursor !== undefined && current?.run_id === page.run_id
         ? { ...page, internal_entries: [...current.internal_entries, ...page.internal_entries] }
         : page);
     } catch (cause) {
+      if (!requestIsCurrent()) return;
       setDetailError(cause instanceof Error ? cause.message : "This routine run could not be loaded.");
     } finally {
-      setDetailLoading(false);
+      if (requestIsCurrent()) setDetailLoading(false);
     }
   }, [companionId, orgId]);
+
+  const selectRun = useCallback((runId: string | null) => {
+    selectedRunIdRef.current = runId;
+    detailRequestGenerationRef.current += 1;
+    setSelectedRunId(runId);
+  }, []);
 
   useEffect(() => {
     if (!target.routineId) return;
@@ -254,6 +267,7 @@ export function CompanionRoutineHistory({
     if (!selectedRunId) {
       setDetail(null);
       setDetailError(null);
+      setDetailLoading(false);
       return;
     }
     setDetail(null);
@@ -315,7 +329,7 @@ export function CompanionRoutineHistory({
               type="button"
               className="iconbtn"
               aria-label={`Back to ${target.name} runs`}
-              onClick={() => setSelectedRunId(null)}
+              onClick={() => selectRun(null)}
             >
               <ArrowLeftIcon aria-hidden="true" className="size-4" />
             </button>
@@ -423,7 +437,7 @@ export function CompanionRoutineHistory({
                       key={run.run_id}
                       run={run}
                       timezone={displayTimezone}
-                      onOpen={() => setSelectedRunId(run.run_id)}
+                      onOpen={() => selectRun(run.run_id)}
                     />
                   ))}
                 </ul>
