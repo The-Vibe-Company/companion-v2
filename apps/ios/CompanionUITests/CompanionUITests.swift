@@ -648,10 +648,13 @@ final class CompanionUITests: XCTestCase {
         app.launchEnvironment["COMPANION_TRANSCRIPT_DEMO_SHORT"] = "1"
         app.launch()
 
-        let composer = app.descendants(matching: .any)["chat.composer"]
         let latestMessage = app.descendants(matching: .any)["chat.entry.long-10"]
+        XCTAssertTrue(latestMessage.waitForExistence(timeout: 12))
+
+        // SwiftUI does not consistently surface the multiline field's identifier to
+        // XCTest, so locate the fixture's sole text field by its element role.
+        let composer = app.textFields.firstMatch
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
-        XCTAssertTrue(latestMessage.waitForExistence(timeout: 5))
 
         composer.tap()
         composer.typeText("Draft")
