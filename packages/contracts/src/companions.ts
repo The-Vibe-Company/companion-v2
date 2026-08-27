@@ -97,7 +97,7 @@ export const COMPANION_PROVIDER_CATALOG = [
     models: [
       { id: "glm-4.7", name: "GLM-4.7", default: true },
       { id: "glm-5-turbo", name: "GLM-5-Turbo" },
-      { id: "glm-5.3-flash", name: "GLM 5.3 Flash" },
+      { id: "glm-5.3-flash", name: "GLM 5.3 Flash", input: ["text", "image"] },
     ],
   },
   {
@@ -148,7 +148,7 @@ type CompanionProviderCatalogModel = {
  */
 export const COMPANION_PROVIDER_SUPPLEMENTARY_MODELS = {
   zai: [
-    { id: "glm-5.3-flash", name: "GLM 5.3 Flash" },
+    { id: "glm-5.3-flash", name: "GLM 5.3 Flash", input: ["text", "image"] },
   ],
 } as const satisfies Partial<Record<
   (typeof COMPANION_PROVIDER_CATALOG)[number]["id"],

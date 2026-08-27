@@ -294,6 +294,33 @@ fi`;
     });
   });
 
+  it("captures Pi 0.84.2 rejecting GLM 5.3 Flash when no custom model is staged", async () => {
+    const machine = createBoxSimCommandMachine({ boxId: "bx_23456789", scenario: "normal" });
+    machine.persistentFiles.set(".companion/pi/auth.json", Buffer.from("{}\n"));
+    machine.persistentFiles.set(
+      ".companion/runtime/state/providers.env",
+      Buffer.from("ZAI_API_KEY=simulator-only\n"),
+    );
+    machine.persistentFiles.set(
+      ".companion/runtime/state/model.txt",
+      Buffer.from("glm-5.3-flash\n"),
+    );
+
+    const result = await executeBoxCommand(
+      machine,
+      "staged_credential_file=x; systemctl --user daemon-reload; systemctl --user start companion-pi-daemon.service",
+    );
+
+    expect(result).toMatchObject({
+      success: true,
+      stdout: "failed\ncompanion-pi-broker-unready\n",
+    });
+    expect(machine.daemon).toMatchObject({ status: "failed", rpcReady: false });
+    expect(machine.daemon.stderrLog).toBe(
+      'Error: Model "glm-5.3-flash" not found. Use --list-models to see available models.\n',
+    );
+  });
+
   it("models credential movement, daemon lifecycle, correlated RPC, and warm probes", async () => {
     const machine = createBoxSimCommandMachine({ boxId: "bx_23456789", scenario: "normal" });
     const handleRpc = vi.fn(async (command: Record<string, unknown>) => ({

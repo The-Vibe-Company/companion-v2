@@ -2,6 +2,7 @@ export * from "./boxCompanionRuntime";
 export * from "./boxMaintenanceClient";
 export * from "./companionPermissionBroker";
 export * from "./companionPiInjection";
+export * from "./companionPiModels";
 export * from "./companionPiBroker";
 export * from "./companionBoxAgent";
 export * from "./companionBoxAgentClient";

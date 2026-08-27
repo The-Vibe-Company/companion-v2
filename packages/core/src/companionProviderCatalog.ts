@@ -81,7 +81,12 @@ interface CompanionProviderCatalogOptions {
 
 function bundledModels(providerId: string): CatalogModels {
   const provider = COMPANION_PROVIDER_CATALOG.find((candidate) => candidate.id === providerId);
-  return provider?.models.map((model) => ({ ...model })) ?? [];
+  return provider?.models.map((model) => {
+    const clone: CatalogModels[number] = { id: model.id, name: model.name };
+    if ("default" in model && model.default !== undefined) clone.default = model.default;
+    if ("input" in model && model.input !== undefined) clone.input = [...model.input];
+    return clone;
+  }) ?? [];
 }
 
 function normalizePiModels(

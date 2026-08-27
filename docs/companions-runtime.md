@@ -764,7 +764,11 @@ The Pi model catalog's `input` field is preserved through normalization. A model
 support rejects image work before prompt dispatch with a stable `model_capability` error and an
 action to switch model. A bounded bundled catalog covers Pi catalog outage, and bounded curated
 supplements cover released models Pi has not published yet. Pi's same-id metadata replaces a
-supplement as soon as it appears. Runtime does not learn or globally publish capability claims from
+supplement as soon as it appears. If the selected supplement is absent from the pinned Pi release,
+the exact Box material snapshot includes `~/.companion/pi/models.json` with the required provider
+transport and declared input capabilities. Every other selection stages an empty provider map so a
+stale custom override cannot survive a settings change. The override is removed once the pinned Pi
+catalog publishes the model. Runtime does not learn or globally publish capability claims from
 arbitrary provider errors.
 
 Persisted runtime errors contain exactly:
