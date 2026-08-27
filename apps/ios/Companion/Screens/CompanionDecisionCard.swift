@@ -42,14 +42,14 @@ struct CompanionDecisionCard: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(12)
                 .background(
-                    Color.companionCanvas,
+                    CompanionIOSTheme.innerBubble,
                     in: RoundedRectangle(cornerRadius: 12, style: .continuous)
                 )
 
             if let error {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
-                    .foregroundStyle(Color.companionDanger)
+                    .foregroundStyle(CompanionIOSTheme.danger)
                     .accessibilityLabel("Error. \(error)")
                     .accessibilityIdentifier("decision.error.\(decision.requestID)")
             }
@@ -59,7 +59,7 @@ struct CompanionDecisionCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(14)
         .background(
-            Color(red: 0.937, green: 0.937, blue: 0.945),
+            CompanionIOSTheme.botBubble,
             in: RoundedRectangle(cornerRadius: 18, style: .continuous)
         )
     }
@@ -68,18 +68,18 @@ struct CompanionDecisionCard: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(outcome.bubbleText)
                 .font(.system(size: 16))
-                .foregroundStyle(Color.companionInk)
+                .foregroundStyle(CompanionIOSTheme.textPrimary)
 
             if let name = decision.decidedByName, !name.isEmpty {
                 Text("\(statusLabel) by \(name)")
                     .font(.system(size: 12))
-                    .foregroundStyle(Color.companionMuted)
+                    .foregroundStyle(CompanionIOSTheme.textSecondary)
             }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
         .background(
-            Color(red: 0.937, green: 0.937, blue: 0.945),
+            CompanionIOSTheme.botBubble,
             in: RoundedRectangle(cornerRadius: 18, style: .continuous)
         )
         .accessibilityElement(children: .combine)
@@ -89,12 +89,12 @@ struct CompanionDecisionCard: View {
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Image(systemName: symbol)
-                .foregroundStyle(Color.companionMuted)
+                .foregroundStyle(CompanionIOSTheme.textSecondary)
                 .accessibilityHidden(true)
 
             Text(heading)
                 .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Color.companionInk)
+                .foregroundStyle(CompanionIOSTheme.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
 
             Spacer(minLength: 4)
@@ -113,7 +113,7 @@ struct CompanionDecisionCard: View {
         if decision.proposal != nil, !decision.title.isEmpty {
             Text(decision.title)
                 .font(.footnote)
-                .foregroundStyle(Color.companionInk)
+                .foregroundStyle(CompanionIOSTheme.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
         }
 
@@ -127,7 +127,7 @@ struct CompanionDecisionCard: View {
         case nil:
             Text(decision.title)
                 .font(.system(.footnote, design: .monospaced))
-                .foregroundStyle(Color.companionInk)
+                .foregroundStyle(CompanionIOSTheme.textPrimary)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -136,12 +136,12 @@ struct CompanionDecisionCard: View {
             DisclosureGroup("Details") {
                 Text(detail)
                     .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(Color.companionInk)
+                    .foregroundStyle(CompanionIOSTheme.textPrimary)
                     .textSelection(.enabled)
                     .padding(.top, 6)
             }
             .font(.caption.weight(.semibold))
-            .tint(Color.companionMuted)
+            .tint(CompanionIOSTheme.textSecondary)
         }
     }
 
@@ -151,7 +151,7 @@ struct CompanionDecisionCard: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Your answer")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(Color.companionInk)
+                    .foregroundStyle(CompanionIOSTheme.textPrimary)
 
                 TextField("Type an answer", text: $answer, axis: .vertical)
                     .lineLimit(1...5)
@@ -197,7 +197,7 @@ struct CompanionDecisionCard: View {
         } else if let waitingMessage = projection.waitingMessage {
             Text(waitingMessage)
                 .font(.caption)
-                .foregroundStyle(Color.companionMuted)
+                .foregroundStyle(CompanionIOSTheme.textSecondary)
         }
     }
 
@@ -219,9 +219,9 @@ struct CompanionDecisionCard: View {
                     }
                 }
                 .frame(maxWidth: .infinity, minHeight: 44)
-                .foregroundStyle(Color.white)
+                .foregroundStyle(CompanionIOSTheme.primaryCTAText)
                 .background(
-                    Color(red: 0.043, green: 0.043, blue: 0.059),
+                    CompanionIOSTheme.primaryCTA,
                     in: Capsule()
                 )
             }
@@ -240,8 +240,8 @@ struct CompanionDecisionCard: View {
                     }
                 }
                 .frame(maxWidth: .infinity, minHeight: 44)
-                .foregroundStyle(Color.companionInk)
-                .background(Color.companionSurfaceRaised, in: Capsule())
+                .foregroundStyle(CompanionIOSTheme.textPrimary)
+                .background(CompanionIOSTheme.card, in: Capsule())
             }
             .buttonStyle(.plain)
             .disabled(busy || disabled)
@@ -259,16 +259,16 @@ struct CompanionDecisionCard: View {
                 if let reason = connection.reason {
                     Text(reason)
                         .font(.footnote)
-                        .foregroundStyle(Color.companionMuted)
+                        .foregroundStyle(CompanionIOSTheme.textSecondary)
                 }
                 Button(action: onOpenPlugins) {
                     Label("Connect", systemImage: "puzzlepiece.extension")
                         .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.white)
+                            .foregroundStyle(CompanionIOSTheme.primaryCTAText)
                         .padding(.horizontal, 16)
                         .frame(minHeight: 44)
                         .background(
-                            Color(red: 0.043, green: 0.043, blue: 0.059),
+                            CompanionIOSTheme.primaryCTA,
                             in: Capsule()
                         )
                 }
@@ -282,11 +282,15 @@ struct CompanionDecisionCard: View {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text(row.sign)
                             .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(Color.companionMuted)
+                            .foregroundStyle(CompanionIOSTheme.textSecondary)
                             .frame(width: 14, alignment: .leading)
                         Text(row.label)
                             .font(.footnote)
-                            .foregroundStyle(row.known ? Color.companionInk : Color.companionMuted)
+                            .foregroundStyle(
+                                row.known
+                                    ? CompanionIOSTheme.textPrimary
+                                    : CompanionIOSTheme.textSecondary
+                            )
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -295,12 +299,12 @@ struct CompanionDecisionCard: View {
                     DisclosureGroup("Instructions") {
                         Text(personaText(proposal))
                             .font(.footnote)
-                            .foregroundStyle(Color.companionInk)
+                            .foregroundStyle(CompanionIOSTheme.textPrimary)
                             .textSelection(.enabled)
                             .padding(.top, 6)
                     }
                     .font(.caption.weight(.semibold))
-                    .tint(Color.companionMuted)
+                    .tint(CompanionIOSTheme.textSecondary)
                 }
             }
         }
@@ -312,7 +316,7 @@ struct CompanionDecisionCard: View {
                 .font(.footnote.weight(.medium))
             Text("\(proposal.cron) · \(proposal.timezone)")
                 .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(Color.companionMuted)
+                .foregroundStyle(CompanionIOSTheme.textSecondary)
                 .textSelection(.enabled)
             promptDisclosure(proposal.prompt)
         }
@@ -324,7 +328,7 @@ struct CompanionDecisionCard: View {
                 .font(.footnote.weight(.medium))
             Text(proposal.provider)
                 .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(Color.companionMuted)
+                .foregroundStyle(CompanionIOSTheme.textSecondary)
             if let repo = proposal.target?.repo {
                 Text(repo)
                     .font(.system(.caption, design: .monospaced))
@@ -333,7 +337,7 @@ struct CompanionDecisionCard: View {
             if let events = proposal.target?.events, !events.isEmpty {
                 Text(events.joined(separator: ", "))
                     .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(Color.companionMuted)
+                    .foregroundStyle(CompanionIOSTheme.textSecondary)
                     .textSelection(.enabled)
             }
             promptDisclosure(proposal.prompt)
@@ -344,12 +348,12 @@ struct CompanionDecisionCard: View {
         DisclosureGroup("Prompt") {
             Text(prompt)
                 .font(.footnote)
-                .foregroundStyle(Color.companionInk)
+                .foregroundStyle(CompanionIOSTheme.textPrimary)
                 .textSelection(.enabled)
                 .padding(.top, 6)
         }
         .font(.caption.weight(.semibold))
-        .tint(Color.companionMuted)
+        .tint(CompanionIOSTheme.textSecondary)
     }
 
     private func personaText(_ proposal: CompanionConfigProposal) -> String {
@@ -418,10 +422,10 @@ struct CompanionDecisionCard: View {
 
     private var statusColor: Color {
         switch decision.status {
-        case .pending: Color.companionWarning
-        case .allowed, .answered: Color.companionSuccess
-        case .denied, .expired: Color.companionDanger
-        case .cancelled, .unknown: Color.companionMuted
+        case .pending: CompanionIOSTheme.textSecondary
+        case .allowed, .answered: CompanionIOSTheme.toggleGreen
+        case .denied, .expired: CompanionIOSTheme.danger
+        case .cancelled, .unknown: CompanionIOSTheme.textSecondary
         }
     }
 

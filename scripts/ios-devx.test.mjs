@@ -141,8 +141,8 @@ test("chat uses the approved two-sided bubbles and morphing composer", () => {
     bubble,
     /\.background\(bubbleColor, in: RoundedRectangle\(cornerRadius: 18, style: \.continuous\)\)/,
   );
-  assert.match(bubble, /kind == \.mine[\s\S]{0,120}?Color\(red: 0\.043/);
-  assert.match(bubble, /Color\(red: 0\.937, green: 0\.937, blue: 0\.945\)/);
+  assert.match(bubble, /kind == \.mine \? CompanionIOSTheme\.userBubble/);
+  assert.match(bubble, /CompanionIOSTheme\.botBubble/);
   assert.match(
     bubble,
     /MarkdownMessageView\([\s\S]{0,120}?document: markdown,[\s\S]{0,120}?accent: primaryTextColor/,
@@ -151,7 +151,8 @@ test("chat uses the approved two-sided bubbles and morphing composer", () => {
   assert.doesNotMatch(chat, /\.toolbar \{ headerToolbar \}\s*\.tint\(visualTheme\.accent\)/);
   assert.match(composer, /TextField\("Ask \\\(companionName\)"/);
   assert.match(composer, /else if showsSendButton \|\| !transcriptionAvailable/);
-  assert.match(composer, /\.background\(Color\(red: 0\.043[\s\S]{0,100}?in: Circle\(\)\)/);
+  assert.match(composer, /\.background\(CompanionIOSTheme\.primaryCTA, in: Circle\(\)\)/);
+  assert.match(chat, /CharacterMark\([\s\S]{0,220}?size: 20/);
   assert.doesNotMatch(decisionCard, /pending \? accent\.opacity/);
   assert.doesNotMatch(glassDemoBubbles, /accent:|tint:/);
   assert.doesNotMatch(queuedDemoBubbles, /accent:|tint:/);

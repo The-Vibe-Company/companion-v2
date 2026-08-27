@@ -76,7 +76,7 @@ struct CompanionToolRunCard: View {
     private var familyIcon: some View {
         Image(systemName: tool.kind.systemImage)
             .font(.subheadline.weight(.semibold))
-            .foregroundStyle(Color.companionMuted)
+            .foregroundStyle(CompanionIOSTheme.textSecondary)
             .frame(width: 28, height: 28)
             .accessibilityHidden(true)
     }
@@ -85,13 +85,13 @@ struct CompanionToolRunCard: View {
         VStack(alignment: .leading, spacing: 2) {
             Text("Tool · \(displayToolName)")
                 .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(Color.companionMuted)
+                .foregroundStyle(CompanionIOSTheme.textSecondary)
                 .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
                 .truncationMode(.middle)
 
             Text(summaryTitle)
                 .font(.system(size: 13))
-                .foregroundStyle(Color.companionMuted)
+                .foregroundStyle(CompanionIOSTheme.textSecondary)
                 .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
                 .truncationMode(.middle)
         }
@@ -133,7 +133,7 @@ struct CompanionToolRunCard: View {
     @ViewBuilder
     private var cardBackground: some View {
         Capsule()
-            .fill(Color.companionSurfaceRaised)
+            .fill(CompanionIOSTheme.chip)
             .overlay {
                 if isFailure {
                     Capsule()

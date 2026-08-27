@@ -38,11 +38,11 @@ struct ComposerAttachmentStrip: View {
         ZStack(alignment: .topTrailing) {
             LocalAttachmentImage(data: attachment.data, maximumPixelSize: 160)
                 .frame(width: 64, height: 64)
-                .background(Color.companionSurfaceRaised)
+                .background(CompanionIOSTheme.card)
                 .clipShape(.rect(cornerRadius: 10))
                 .overlay {
                     RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color.companionDivider, lineWidth: 1)
+                        .stroke(CompanionIOSTheme.separator, lineWidth: 1)
                 }
                 .accessibilityLabel(attachment.filename)
 
@@ -56,14 +56,14 @@ struct ComposerAttachmentStrip: View {
     private func documentChip(_ attachment: CompanionMessageAttachment) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "doc")
-                .foregroundStyle(Color.companionMuted)
+                .foregroundStyle(CompanionIOSTheme.textSecondary)
             VStack(alignment: .leading, spacing: 1) {
                 Text(attachment.filename)
                     .font(.caption.weight(.medium))
                     .lineLimit(1)
                 Text(attachmentSizeLabel(attachment.byteSize))
                     .font(.caption2.monospacedDigit())
-                    .foregroundStyle(Color.companionMuted)
+                    .foregroundStyle(CompanionIOSTheme.textSecondary)
             }
             removeButton(attachment)
         }
@@ -81,8 +81,8 @@ struct ComposerAttachmentStrip: View {
             Image(systemName: "xmark")
                 .font(.caption2.weight(.bold))
                 .frame(width: 24, height: 24)
-                .background(Color.companionCanvas, in: Circle())
-                .overlay { Circle().stroke(Color.companionDivider, lineWidth: 1) }
+                .background(CompanionIOSTheme.canvas, in: Circle())
+                .overlay { Circle().stroke(CompanionIOSTheme.separator, lineWidth: 1) }
                 .frame(width: 44, height: 44)
                 .contentShape(.circle)
         }
@@ -101,11 +101,11 @@ struct LocalMessageAttachmentList: View {
                     LocalAttachmentImage(data: attachment.data, maximumPixelSize: 640)
                         .frame(minHeight: 112, maxHeight: 220)
                         .frame(maxWidth: .infinity)
-                        .background(Color.companionSurfaceRaised)
+                        .background(CompanionIOSTheme.card)
                         .clipShape(.rect(cornerRadius: 10))
                         .overlay {
                             RoundedRectangle(cornerRadius: 10)
-                                .stroke(Color.companionDivider, lineWidth: 1)
+                                .stroke(CompanionIOSTheme.separator, lineWidth: 1)
                         }
                         .accessibilityLabel(attachment.filename)
                 } else {
@@ -199,18 +199,18 @@ private struct AttachmentDocumentCard: View {
         HStack(spacing: 10) {
             Image(systemName: "doc.text.fill")
                 .font(.system(size: 18))
-                .foregroundStyle(Color.companionInk)
+                .foregroundStyle(CompanionIOSTheme.textPrimary)
                 .frame(width: 36, height: 36)
-                .background(Color.companionSurfaceRaised, in: RoundedRectangle(cornerRadius: 9))
+                .background(CompanionIOSTheme.card, in: RoundedRectangle(cornerRadius: 9))
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(filename)
                     .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(Color.companionInk)
+                    .foregroundStyle(CompanionIOSTheme.textPrimary)
                     .lineLimit(1)
                 Text("\(subtitle) · \(attachmentSizeLabel(byteSize))")
                     .font(.system(size: 15))
-                    .foregroundStyle(Color.companionMuted)
+                    .foregroundStyle(CompanionIOSTheme.textSecondary)
                     .lineLimit(1)
             }
 
@@ -221,12 +221,12 @@ private struct AttachmentDocumentCard: View {
             } else {
                 Image(systemName: "arrow.up.right")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(Color.companionMuted)
+                    .foregroundStyle(CompanionIOSTheme.textSecondary)
             }
         }
         .padding(10)
         .frame(maxWidth: 320, alignment: .leading)
-        .background(Color.companionCanvas, in: RoundedRectangle(cornerRadius: 12))
+        .background(CompanionIOSTheme.innerBubble, in: RoundedRectangle(cornerRadius: 12))
         .accessibilityElement(children: .combine)
     }
 }
@@ -244,7 +244,7 @@ private struct LocalAttachmentImage: View {
                     .scaledToFit()
             } else {
                 Image(systemName: "photo")
-                    .foregroundStyle(Color.companionMuted)
+                    .foregroundStyle(CompanionIOSTheme.textSecondary)
             }
         }
         .task(id: data) {
@@ -278,7 +278,7 @@ private struct RemoteAttachmentImage: View {
                         Text("Try again")
                             .font(.caption2.weight(.semibold))
                     }
-                    .foregroundStyle(Color.companionMuted)
+                    .foregroundStyle(CompanionIOSTheme.textSecondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 .buttonStyle(.plain)
@@ -286,16 +286,16 @@ private struct RemoteAttachmentImage: View {
             } else {
                 ProgressView("Loading image")
                     .font(.caption)
-                    .foregroundStyle(Color.companionMuted)
+                    .foregroundStyle(CompanionIOSTheme.textSecondary)
             }
         }
         .frame(minHeight: 112, maxHeight: 220)
         .frame(maxWidth: .infinity)
-        .background(Color.companionSurfaceRaised)
+        .background(CompanionIOSTheme.card)
         .clipShape(.rect(cornerRadius: 10))
         .overlay {
             RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.companionDivider, lineWidth: 1)
+                .stroke(CompanionIOSTheme.separator, lineWidth: 1)
         }
         .accessibilityLabel(attachment.filename)
         .task(id: loadGeneration) {

@@ -56,7 +56,7 @@ struct ChatComposer: View {
             if let error {
                 Text(error)
                     .font(.caption)
-                    .foregroundStyle(Color.companionDanger)
+                    .foregroundStyle(CompanionIOSTheme.danger)
                     .padding(.horizontal, 12)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -64,10 +64,10 @@ struct ChatComposer: View {
             if canSend == false {
                 Label("This conversation is read-only", systemImage: "eye")
                     .font(.subheadline.weight(.medium))
-                    .foregroundStyle(Color.companionMuted)
+                    .foregroundStyle(CompanionIOSTheme.textSecondary)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 14)
-                    .companionGlass(radius: 20)
+                    .background(CompanionIOSTheme.card, in: Capsule())
             } else {
                 if !draftAttachments.isEmpty {
                     ComposerAttachmentStrip(
@@ -80,7 +80,7 @@ struct ChatComposer: View {
                 if let attachmentError {
                     Text(attachmentError)
                         .font(.caption)
-                        .foregroundStyle(Color.companionDanger)
+                        .foregroundStyle(CompanionIOSTheme.danger)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 4)
                         .accessibilityLabel("Attachment error: \(attachmentError)")
@@ -114,9 +114,9 @@ struct ChatComposer: View {
                             }
                         }
                         .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(Color.companionInk)
+                        .foregroundStyle(CompanionIOSTheme.textPrimary)
                         .frame(width: 44, height: 44)
-                        .background(Color.companionCanvas, in: Circle())
+                        .background(CompanionIOSTheme.canvas, in: Circle())
                     }
                     .buttonStyle(.plain)
                     .disabled(attachDisabled)
@@ -136,6 +136,7 @@ struct ChatComposer: View {
 
                     TextField("Ask \(companionName)", text: $draft, axis: .vertical)
                         .font(.system(size: 16))
+                        .foregroundStyle(CompanionIOSTheme.textPrimary)
                         .lineLimit(1...5)
                         .focused($composerFocused)
                         .padding(.horizontal, 8)
@@ -145,7 +146,7 @@ struct ChatComposer: View {
                     trailingControl
                 }
                 .padding(4)
-                .background(Color.companionSurfaceRaised, in: Capsule())
+                .background(CompanionIOSTheme.card, in: Capsule())
                 .animation(
                     reduceMotion ? nil : .easeOut(duration: 0.2),
                     value: showsSendButton
@@ -155,7 +156,7 @@ struct ChatComposer: View {
                    draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     Text("Add a message to send \(draftAttachments.count == 1 ? "this file" : "these files").")
                         .font(.caption)
-                        .foregroundStyle(Color.companionMuted)
+                        .foregroundStyle(CompanionIOSTheme.textSecondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 4)
                 }
@@ -229,15 +230,15 @@ struct ChatComposer: View {
         Button(action: send) {
             Group {
                 if sending {
-                    ProgressView().controlSize(.small).tint(.white)
+                    ProgressView().controlSize(.small).tint(CompanionIOSTheme.primaryCTAText)
                 } else {
                     Image(systemName: "arrow.up")
                 }
             }
             .font(.system(size: 17, weight: .bold))
-            .foregroundStyle(Color.white)
+            .foregroundStyle(CompanionIOSTheme.primaryCTAText)
             .frame(width: 44, height: 44)
-            .background(Color(red: 0.043, green: 0.043, blue: 0.059), in: Circle())
+            .background(CompanionIOSTheme.primaryCTA, in: Circle())
         }
         .buttonStyle(.plain)
         .disabled(sendDisabled)
@@ -257,7 +258,11 @@ struct ChatComposer: View {
                 }
             }
             .font(.system(size: 16, weight: .semibold))
-            .foregroundStyle(transcription.isBusy ? Color.companionDanger : Color.companionMuted)
+            .foregroundStyle(
+                transcription.isBusy
+                    ? CompanionIOSTheme.danger
+                    : CompanionIOSTheme.textSecondary
+            )
             .frame(width: 44, height: 44)
         }
         .buttonStyle(.plain)

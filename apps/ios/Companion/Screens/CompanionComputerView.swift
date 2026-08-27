@@ -123,11 +123,10 @@ struct CompanionComputerView: View {
         ToolbarItem(placement: .principal) {
             Button(action: onSettings) {
                 HStack(spacing: 8) {
-                    CompanionAvatar(
+                    CharacterMark(
                         name: companion.name,
                         icon: companion.icon,
-                        size: 20,
-                        state: .still
+                        size: 20
                     )
                     Text(companion.name)
                         .font(.system(size: 15, weight: .semibold))

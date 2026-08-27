@@ -165,7 +165,10 @@ struct ChatView: View {
         let renderedEntries = visibleEntries
         let queuedEntries = queuedEntries(in: thread)
         let renderedScrollRevision = scrollContentRevision
-        CompanionBackdrop {
+        ZStack {
+            CompanionIOSTheme.canvas
+                .ignoresSafeArea()
+
             ScrollViewReader { proxy in
                 VStack(spacing: 0) {
                     ScrollView {
@@ -409,7 +412,7 @@ struct ChatView: View {
         }
         .navigationBarBackButtonHidden(true)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(Color.companionCanvas, for: .navigationBar)
+        .toolbarBackground(CompanionIOSTheme.canvas, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
         .toolbar { headerToolbar }
         .navigationDestination(isPresented: $showingComputer) {
@@ -481,21 +484,20 @@ struct ChatView: View {
         ToolbarItem(placement: .principal) {
             Button(action: onSettings) {
                 HStack(spacing: 8) {
-                    CompanionAvatar(
+                    CharacterMark(
                         name: currentCompanion.name,
                         icon: currentCompanion.icon,
-                        size: 20,
-                        state: .still
+                        size: 20
                     )
                     Text(currentCompanion.name)
                         .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(Color.companionInk)
+                        .foregroundStyle(CompanionIOSTheme.textPrimary)
                         .lineLimit(1)
                 }
                 .padding(.leading, 10)
                 .padding(.trailing, 14)
                 .frame(minHeight: 36)
-                .background(Color.companionSurfaceRaised, in: Capsule())
+                .background(CompanionIOSTheme.card, in: Capsule())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Details for \(currentCompanion.name)")
@@ -523,10 +525,10 @@ struct ChatView: View {
             } label: {
                 Image(systemName: "ellipsis")
                     .frame(width: 44, height: 44)
-                    .background(Color.companionSurfaceRaised, in: Circle())
+                    .background(CompanionIOSTheme.card, in: Circle())
             }
             .buttonStyle(.plain)
-            .foregroundStyle(Color.companionInk)
+            .foregroundStyle(CompanionIOSTheme.textPrimary)
             .accessibilityLabel("Chat actions")
             .accessibilityIdentifier("chat.actions")
         }
@@ -541,10 +543,10 @@ struct ChatView: View {
             Image(systemName: systemImage)
                 .font(.system(size: 16, weight: .semibold))
                 .frame(width: 44, height: 44)
-                .background(Color.companionSurfaceRaised, in: Circle())
+                .background(CompanionIOSTheme.card, in: Circle())
         }
         .buttonStyle(.plain)
-        .foregroundStyle(Color.companionInk)
+        .foregroundStyle(CompanionIOSTheme.textPrimary)
         .accessibilityLabel(label)
     }
 
@@ -607,7 +609,7 @@ struct ChatView: View {
     private func dayMarker(for date: Date) -> some View {
         Text(dayLabel(for: date))
             .font(.system(size: 12))
-            .foregroundStyle(Color.companionMuted)
+            .foregroundStyle(CompanionIOSTheme.textSecondary)
             .frame(maxWidth: .infinity)
             .accessibilityAddTraits(.isHeader)
             .accessibilityIdentifier("chat.day-marker.\(dayLabel(for: date))")
@@ -645,13 +647,13 @@ struct ChatView: View {
 
     private var emptyState: some View {
         VStack(spacing: 18) {
-            CompanionAvatar(name: currentCompanion.name, icon: currentCompanion.icon, size: 80, state: .idle)
+            CharacterMark(name: currentCompanion.name, icon: currentCompanion.icon, size: 76)
             VStack(spacing: 6) {
                 Text("Start the conversation")
                     .font(.title3.weight(.semibold))
                 Text("Send the first message to wake \(currentCompanion.name).")
                     .font(.subheadline)
-                    .foregroundStyle(Color.companionMuted)
+                    .foregroundStyle(CompanionIOSTheme.textSecondary)
                     .multilineTextAlignment(.center)
             }
         }
@@ -1815,17 +1817,17 @@ struct ChatMessageBubble: View {
     }
 
     private var bubbleColor: Color {
-        kind == .mine
-            ? Color(red: 0.043, green: 0.043, blue: 0.059)
-            : Color(red: 0.937, green: 0.937, blue: 0.945)
+        kind == .mine ? CompanionIOSTheme.userBubble : CompanionIOSTheme.botBubble
     }
 
     private var primaryTextColor: Color {
-        kind == .mine ? .white : .companionInk
+        kind == .mine ? CompanionIOSTheme.userBubbleText : CompanionIOSTheme.textPrimary
     }
 
     private var secondaryTextColor: Color {
-        kind == .mine ? .white.opacity(0.68) : .companionMuted
+        kind == .mine
+            ? CompanionIOSTheme.userBubbleText.opacity(0.68)
+            : CompanionIOSTheme.textSecondary
     }
 
     private var displayReasoning: String? {
@@ -1872,7 +1874,7 @@ struct CompanionThinkingDisclosure: View {
                 .foregroundStyle(secondaryStyle)
                 .padding(.horizontal, 10)
                 .frame(minHeight: 32)
-                .background(Color.companionSurfaceRaised, in: Capsule())
+                .background(CompanionIOSTheme.chip, in: Capsule())
             }
             .buttonStyle(.plain)
 
@@ -1952,10 +1954,10 @@ struct CompanionThinkingStatus: View {
             }
         }
         .font(.system(size: 13, weight: .medium))
-        .foregroundStyle(Color.companionMuted)
+        .foregroundStyle(CompanionIOSTheme.textSecondary)
         .padding(.horizontal, 10)
         .frame(minHeight: 32)
-        .background(Color.companionSurfaceRaised, in: Capsule())
+        .background(CompanionIOSTheme.chip, in: Capsule())
         .contentShape(Capsule())
     }
 }
@@ -2181,7 +2183,7 @@ private struct PendingMessageView: View {
 
             if let progress = message.uploadProgress, !message.failed {
                 ProgressView(value: progress)
-                    .tint(Color.companionMuted)
+                    .tint(CompanionIOSTheme.textSecondary)
                     .frame(maxWidth: 220)
                     .accessibilityLabel("Uploading attachments")
                     .accessibilityValue(progress.formatted(.percent.precision(.fractionLength(0))))
@@ -2191,7 +2193,7 @@ private struct PendingMessageView: View {
                 VStack(alignment: .trailing, spacing: 6) {
                     Text("Delivery could not be confirmed. Retrying reuses the same request.")
                         .font(.caption2)
-                        .foregroundStyle(Color.companionDanger)
+                        .foregroundStyle(CompanionIOSTheme.danger)
                     HStack(spacing: 8) {
                         Button("Dismiss", action: dismiss)
                             .buttonStyle(.glass)
