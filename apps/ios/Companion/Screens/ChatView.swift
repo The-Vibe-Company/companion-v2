@@ -1134,11 +1134,15 @@ struct ChatView: View {
     ) {
         switch request.destination {
         case .bottom:
+            // Target the last concrete row registered by scrollTargetLayout. A standalone
+            // sentinel can be geometrically ready while ScrollViewProxy still cannot resolve it
+            // in a transcript whose targets are supplied by the lazy layout.
+            let targetID = bottomScrollTargetID
             if reduceMotion || !request.animated {
-                proxy.scrollTo("bottom", anchor: .bottom)
+                proxy.scrollTo(targetID, anchor: .bottom)
             } else {
                 withAnimation(.easeOut(duration: 0.18)) {
-                    proxy.scrollTo("bottom", anchor: .bottom)
+                    proxy.scrollTo(targetID, anchor: .bottom)
                 }
             }
         case .entry(let eventID):
@@ -1171,6 +1175,16 @@ struct ChatView: View {
             }
             loadingEarlier = false
         }
+    }
+
+    private var bottomScrollTargetID: String {
+        if let pending = pendingMessages.last {
+            return "pending-\(pending.id)"
+        }
+        if let interruptedTurn = thread?.interruptedTurn {
+            return "interrupted-\(interruptedTurn.id)"
+        }
+        return entries.last?.id ?? "bottom"
     }
 
     private func markInitialBottomReady(for renderedRevision: Int) {
