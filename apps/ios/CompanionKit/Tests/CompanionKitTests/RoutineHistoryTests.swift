@@ -29,12 +29,13 @@ func requestsAndDecodesRoutineHistoryUsingTheSharedContract() async throws {
     configuration.protocolClasses = [RoutineHistoryMockURLProtocol.self]
     RoutineHistoryMockURLProtocol.handler = { request in
         let url = try #require(request.url)
+        let components = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false))
         #expect(request.httpMethod == "GET")
         #expect(request.value(forHTTPHeaderField: "Cookie") == "better-auth.session_token=session")
         #expect(request.value(forHTTPHeaderField: "x-companion-org") == "org-1")
 
-        if url.path == "/v1/companions/companion id/routines/routine id/runs" {
-            let query = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems)
+        if components.percentEncodedPath == "/v1/companions/companion%20id/routines/routine%20id/runs" {
+            let query = try #require(components.queryItems)
             #expect(query == [
                 URLQueryItem(name: "limit", value: "20"),
                 URLQueryItem(name: "cursor", value: "cursor id"),
@@ -48,8 +49,8 @@ func requestsAndDecodesRoutineHistoryUsingTheSharedContract() async throws {
             return (response, Data(#"{"runs":[{"run_id":"33333333-3333-4333-8333-333333333333","companion_id":"11111111-1111-4111-8111-111111111111","routine":{"id":"22222222-2222-4222-8222-222222222222","name":"Morning brief"},"status":"succeeded","outcome":"surfaced","surface_mode":"notify","main_entry_event_id":"routine-return:1","relay_turn_id":null,"created_at":"2026-08-27T09:00:00.000Z","started_at":"2026-08-27T09:00:01.000Z","settled_at":"2026-08-27T09:00:05.000Z","error":null}],"next_cursor":null}"#.utf8))
         }
 
-        if url.path == "/v1/companions/companion id/routine-runs/run id" {
-            let query = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems)
+        if components.percentEncodedPath == "/v1/companions/companion%20id/routine-runs/run%20id" {
+            let query = try #require(components.queryItems)
             #expect(query == [
                 URLQueryItem(name: "entry_limit", value: "50"),
                 URLQueryItem(name: "entry_cursor", value: "0"),
