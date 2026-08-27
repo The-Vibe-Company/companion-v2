@@ -269,6 +269,13 @@ test("native chat reading restoration stays deterministic and delegated to Apple
   assert.notEqual(scrollRevisionObserver, -1);
   assert.ok(deferredScrollDelivery > scrollRevisionObserver);
   assert.ok(consumedScrollRequest > deferredScrollDelivery);
+  const lazyTranscriptTargets = chat.indexOf(".scrollTargetLayout()");
+  const eagerBottomTarget = chat.indexOf(
+    'Color.clear.frame(height: 1).id("bottom")',
+    lazyTranscriptTargets,
+  );
+  assert.notEqual(lazyTranscriptTargets, -1);
+  assert.ok(eagerBottomTarget > lazyTranscriptTargets);
   const scrollOwner = chat.indexOf("private func performScroll");
   assert.notEqual(scrollOwner, -1);
   assert.doesNotMatch(chat.slice(0, scrollOwner), /proxy\.scrollTo\(/);

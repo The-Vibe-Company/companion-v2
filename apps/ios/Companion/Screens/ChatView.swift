@@ -109,94 +109,98 @@ struct ChatView: View {
             ScrollViewReader { proxy in
                 VStack(spacing: 0) {
                     ScrollView {
-                        LazyVStack(spacing: 16) {
-                        if loading && thread == nil {
-                            ProgressView("Loading conversation…")
-                                .padding(.top, 80)
-                        } else if let error, thread == nil {
-                            unavailableState(error)
-                        } else if visibleEntries.isEmpty && pendingMessages.isEmpty
-                                    && thread?.interruptedTurn == nil {
-                            emptyState
-                        } else {
-                            if transcriptWindow.hasEarlierEntries {
-                                loadEarlierButton
-                            }
+                        VStack(spacing: 16) {
+                            LazyVStack(spacing: 16) {
+                                if loading && thread == nil {
+                                    ProgressView("Loading conversation…")
+                                        .padding(.top, 80)
+                                } else if let error, thread == nil {
+                                    unavailableState(error)
+                                } else if visibleEntries.isEmpty && pendingMessages.isEmpty
+                                            && thread?.interruptedTurn == nil {
+                                    emptyState
+                                } else {
+                                    if transcriptWindow.hasEarlierEntries {
+                                        loadEarlierButton
+                                    }
 
-                            ForEach(Array(renderedEntries.enumerated()), id: \.element.eventID) { index, entry in
-                                if startsNewDay(
-                                    entry,
-                                    after: index > 0 ? renderedEntries[index - 1] : nil
-                                ) {
-                                    dayMarker(for: transcriptDate(entry.createdAt) ?? .now)
-                                }
-                                Group {
-                                    if let decision = entry.decision {
-                                        CompanionDecisionCard(
-                                            decision: decision,
-                                            companionName: currentCompanion.name,
+                                    ForEach(Array(renderedEntries.enumerated()), id: \.element.eventID) { index, entry in
+                                        if startsNewDay(
+                                            entry,
+                                            after: index > 0 ? renderedEntries[index - 1] : nil
+                                        ) {
+                                            dayMarker(for: transcriptDate(entry.createdAt) ?? .now)
+                                        }
+                                        Group {
+                                            if let decision = entry.decision {
+                                                CompanionDecisionCard(
+                                                    decision: decision,
+                                                    companionName: currentCompanion.name,
+                                                    canAct: thread?.canSend == true,
+                                                    catalog: decisionCatalog,
+                                                    accent: visualTheme.accent,
+                                                    accentForeground: visualTheme.accentForeground,
+                                                    onDecide: { action in
+                                                        try await decide(
+                                                            requestID: decision.requestID,
+                                                            action: action
+                                                        )
+                                                    },
+                                                    onOpenPlugins: onPlugins
+                                                )
+                                            } else {
+                                                MessageEntryView(
+                                                    entry: entry,
+                                                    own: entry.role == "user" && entry.authorID == thread?.viewerID,
+                                                    companion: currentCompanion,
+                                                    markdown: markdownByEventID[entry.eventID]?.document,
+                                                    tailReveal: assistantTailReveal?.eventID == entry.eventID
+                                                        ? assistantTailReveal
+                                                        : nil,
+                                                    reasoningExpansion: reasoningBinding(for: entry.eventID),
+                                                    onOpenToolDetails: { selectedToolDetail = $0 }
+                                                )
+                                            }
+                                        }
+                                        .id(entry.id)
+                                    }
+
+                                    if let interruptedTurn = thread?.interruptedTurn {
+                                        CompanionInterruptedTurnNotice(
+                                            turn: interruptedTurn,
+                                            queuedCount: thread?.queuedCount ?? 0,
                                             canAct: thread?.canSend == true,
-                                            catalog: decisionCatalog,
+                                            latestOperation: currentCompanion.runtime.latestOperation,
                                             accent: visualTheme.accent,
                                             accentForeground: visualTheme.accentForeground,
-                                            onDecide: { action in
-                                                try await decide(
-                                                    requestID: decision.requestID,
-                                                    action: action
-                                                )
-                                            },
-                                            onOpenPlugins: onPlugins
+                                            onRetry: retryInterruptedTurn,
+                                            onCancel: cancelTurn
                                         )
-                                    } else {
-                                        MessageEntryView(
-                                            entry: entry,
-                                            own: entry.role == "user" && entry.authorID == thread?.viewerID,
-                                            companion: currentCompanion,
-                                            markdown: markdownByEventID[entry.eventID]?.document,
-                                            tailReveal: assistantTailReveal?.eventID == entry.eventID
-                                                ? assistantTailReveal
-                                                : nil,
-                                            reasoningExpansion: reasoningBinding(for: entry.eventID),
-                                            onOpenToolDetails: { selectedToolDetail = $0 }
+                                        .id("interrupted-\(interruptedTurn.id)")
+                                    }
+
+                                    if !pendingMessages.isEmpty, pendingStartsNewDay {
+                                        dayMarker(for: .now)
+                                    }
+
+                                    ForEach(pendingMessages) { pending in
+                                        PendingMessageView(
+                                            message: pending,
+                                            accent: visualTheme.accent,
+                                            accentForeground: visualTheme.accentForeground,
+                                            retry: { retry(pending.id) },
+                                            dismiss: { dismiss(pending.id) }
                                         )
+                                        .id("pending-\(pending.id)")
                                     }
                                 }
-                                .id(entry.id)
                             }
+                            .scrollTargetLayout()
 
-                            if let interruptedTurn = thread?.interruptedTurn {
-                                CompanionInterruptedTurnNotice(
-                                    turn: interruptedTurn,
-                                    queuedCount: thread?.queuedCount ?? 0,
-                                    canAct: thread?.canSend == true,
-                                    latestOperation: currentCompanion.runtime.latestOperation,
-                                    accent: visualTheme.accent,
-                                    accentForeground: visualTheme.accentForeground,
-                                    onRetry: retryInterruptedTurn,
-                                    onCancel: cancelTurn
-                                )
-                                .id("interrupted-\(interruptedTurn.id)")
-                            }
-
-                            if !pendingMessages.isEmpty, pendingStartsNewDay {
-                                dayMarker(for: .now)
-                            }
-
-                            ForEach(pendingMessages) { pending in
-                                PendingMessageView(
-                                    message: pending,
-                                    accent: visualTheme.accent,
-                                    accentForeground: visualTheme.accentForeground,
-                                    retry: { retry(pending.id) },
-                                    dismiss: { dismiss(pending.id) }
-                                )
-                                .id("pending-\(pending.id)")
-                            }
-                        }
-
+                            // Keep the coordinator's bottom destination outside the lazy stack.
+                            // Its identity then exists before any programmatic scroll is consumed.
                             Color.clear.frame(height: 1).id("bottom")
                         }
-                        .scrollTargetLayout()
                         .padding(.horizontal, 16)
                         .padding(.top, 16)
                         .padding(.bottom, 22)
