@@ -729,7 +729,7 @@ final class CompanionUITests: XCTestCase {
         app.launchEnvironment["COMPANION_TRANSCRIPT_DEMO_STAGED_POLL"] = "1"
         app.launch()
 
-        let latest = app.descendants(matching: .any)["chat.entry.long-120"]
+        let latest = app.staticTexts["Long-thread message 120"]
         XCTAssertTrue(latest.waitForExistence(timeout: 12))
         app.swipeDown()
 
