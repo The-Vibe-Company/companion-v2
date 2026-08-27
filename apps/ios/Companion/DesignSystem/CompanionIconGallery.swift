@@ -5,9 +5,9 @@ import CompanionKit
 /// models for compatibility but are intentionally never exposed or rendered.
 struct CharacterPicker: View {
     @Binding var selection: CompanionSummary.Icon
-    var defaultSelection: CompanionSummary.Icon?
+    var defaultSelection: CompanionSummary.Icon? = nil
     var accessibilityIdentifierPrefix = "companion.character"
-    var reduceMotionOverride: Bool?
+    var reduceMotionOverride: Bool? = nil
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 

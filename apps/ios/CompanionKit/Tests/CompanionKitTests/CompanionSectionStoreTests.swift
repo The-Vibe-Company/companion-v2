@@ -44,6 +44,17 @@ func unassignedCanStayCollapsedAcrossReconciliation() throws {
     #expect(store.groups(companions: try decodeCompanions()).last?.isCollapsed == true)
 }
 
+@Test
+func missingSectionsEndpointFallsBackWithoutMaskingOtherErrors() throws {
+    let missing = APIError(status: 404, code: "not_found", message: "Not found")
+    #expect(try CompanionSectionCompatibility.fallback(for: missing).isEmpty)
+
+    let forbidden = APIError(status: 403, code: "forbidden", message: "Forbidden")
+    #expect(throws: APIError.self) {
+        try CompanionSectionCompatibility.fallback(for: forbidden)
+    }
+}
+
 private func decodeSections() throws -> [CompanionSection] {
     let data = Data(#"""
     [

@@ -1,3 +1,5 @@
+import Foundation
+
 public struct CompanionRosterState: Sendable {
     private struct OptimisticRemoval: Sendable {
         let companion: CompanionSummary
@@ -128,6 +130,17 @@ public struct CompanionHomeSection: Identifiable, Equatable, Sendable {
     public let isCollapsed: Bool
 
     public var usesPinnedGrid: Bool { !companions.isEmpty && companions.count <= 3 }
+}
+
+public enum CompanionSectionCompatibility {
+    /// Sections were added after the base roster endpoint. A newer client can still render the
+    /// unassigned roster while a rolling or self-hosted deployment serves the older API shape.
+    public static func fallback(for error: any Error) throws -> [CompanionSection] {
+        if let apiError = error as? APIError, apiError.status == 404 {
+            return []
+        }
+        throw error
+    }
 }
 
 public struct CompanionSectionStore: Sendable {

@@ -323,6 +323,15 @@ BEGIN
   END IF;
 
   IF p_muted IS NOT NULL THEN
+    -- Enqueue takes the same transaction-scoped lock before it checks mute state. This makes the
+    -- state update plus queued-delivery cleanup linearizable with concurrent notification inserts:
+    -- an enqueue either commits before this delete or observes the committed muted row afterward.
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+      'companion-notification:member:' || p_org_id::text || ':' || p_companion_id::text || ':' ||
+        v_actor_id,
+      0
+    ));
+
     INSERT INTO public.companion_member_state(
       org_id, companion_id, user_id, muted, created_at, updated_at
     ) VALUES (
@@ -369,6 +378,14 @@ BEGIN
   END IF;
   IF v_title = '' THEN v_title := 'Companion update'; END IF;
   IF v_body = '' THEN v_body := 'Open the conversation for details.'; END IF;
+
+  -- Serialize with member mute changes so an enqueue cannot snapshot the old preference and then
+  -- commit a delivery after the mute transaction has already deleted its visible queue entries.
+  PERFORM pg_advisory_xact_lock(hashtextextended(
+    'companion-notification:member:' || p_org_id::text || ':' || p_companion_id::text || ':' ||
+      p_recipient_user_id,
+    0
+  ));
 
   INSERT INTO public.companion_notification_deliveries(
     org_id, device_id, companion_id, recipient_user_id, event_key, event,

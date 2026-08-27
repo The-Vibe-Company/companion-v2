@@ -341,4 +341,45 @@ describe("Companion sections", () => {
       database,
     }))).muted).toBe(true);
   });
+
+  it("serializes notification enqueue with a concurrent mute", async () => {
+    const deviceToken = "8".repeat(64);
+    await integrationSql`
+      insert into public.companion_notification_devices(
+        org_id, installation_id, user_id, device_token, environment, bundle_id
+      ) values (
+        ${fixture.orgA}::uuid, gen_random_uuid(), ${fixture.developer.id}, ${deviceToken},
+        'sandbox', 'dev.companion.mobile.dev'
+      )
+    `;
+
+    await integrationSql.begin(async (mutingTransaction) => {
+      await mutingTransaction`select
+        set_config('app.org_id', ${fixture.orgA}, true),
+        set_config('app.user_id', ${fixture.developer.id}, true)`;
+      await mutingTransaction`
+        select public.companion_api_update_member_state_v2(
+          ${fixture.orgA}::uuid, ${companionId}::uuid, null, null, true, null
+        )
+      `;
+
+      await expect(integrationSql.begin(async (enqueueTransaction) => {
+        await enqueueTransaction`set local lock_timeout = '100ms'`;
+        return enqueueTransaction`
+          select public.companion_notification_enqueue(
+            ${fixture.orgA}::uuid, ${companionId}::uuid, ${fixture.developer.id},
+            'concurrent-mute', 'reply', 'Luna replied', 'Concurrent mute'
+          )
+        `;
+      })).rejects.toSatisfy(hasDatabaseCode("55P03"));
+    });
+
+    const after = await integrationSql<{ inserted: number }[]>`
+      select public.companion_notification_enqueue(
+        ${fixture.orgA}::uuid, ${companionId}::uuid, ${fixture.developer.id},
+        'after-concurrent-mute', 'reply', 'Luna replied', 'After concurrent mute'
+      )::int as inserted
+    `;
+    expect(after[0]?.inserted).toBe(0);
+  });
 });

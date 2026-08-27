@@ -35,7 +35,6 @@ struct CompanionListView: View {
     @State private var deleteRequestIDs: [String: UUID] = [:]
     @State private var deletingCompanionIDs: Set<String> = []
     @State private var rosterActionCompanionIDs: Set<String> = []
-    @State private var showingHidden = false
     @State private var showingSearch = false
     @State private var companionToMove: CompanionSummary?
     @State private var pendingNewSectionCompanion: CompanionSummary?
@@ -397,25 +396,16 @@ struct CompanionListView: View {
         }
         .accessibilityActions {
             Button("Settings") { path.append(.settings(companion.id)) }
-            if companion.hidden {
-                Button("Unhide") {
-                    Task { await updateMemberState(companion, patch: .init(hidden: false)) }
+            Button(companion.pinned ? "Unpin" : "Pin") {
+                Task { await updateMemberState(companion, patch: .init(pinned: !companion.pinned)) }
+            }
+            if !companion.unread {
+                Button("Mark as unread") {
+                    Task { await updateMemberState(companion, patch: .init(unread: true)) }
                 }
-            } else {
-                Button(companion.pinned ? "Unpin" : "Pin") {
-                    Task { await updateMemberState(companion, patch: .init(pinned: !companion.pinned)) }
-                }
-                if !companion.unread {
-                    Button("Mark as unread") {
-                        Task { await updateMemberState(companion, patch: .init(unread: true)) }
-                    }
-                }
-                if companion.access.canDeleteCompanion {
-                    Button("Duplicate") { Task { await duplicate(companion) } }
-                }
-                Button("Hide") {
-                    Task { await updateMemberState(companion, patch: .init(hidden: true)) }
-                }
+            }
+            if companion.access.canDeleteCompanion {
+                Button("Duplicate") { Task { await duplicate(companion) } }
             }
             if canRequestDeletion(of: companion), !busy {
                 Button("Delete") { companionToDelete = companion }
@@ -468,11 +458,21 @@ struct CompanionListView: View {
             if let services {
                 async let companionResult = services.listCompanions()
                 async let sectionResult = services.listSections()
-                (next, nextSections) = try await (companionResult, sectionResult)
+                next = try await companionResult
+                do {
+                    nextSections = try await sectionResult
+                } catch {
+                    nextSections = try CompanionSectionCompatibility.fallback(for: error)
+                }
             } else {
                 async let companionResult = sessionStore.listCompanions()
                 async let sectionResult = sessionStore.listCompanionSections()
-                (next, nextSections) = try await (companionResult, sectionResult)
+                next = try await companionResult
+                do {
+                    nextSections = try await sectionResult
+                } catch {
+                    nextSections = try CompanionSectionCompatibility.fallback(for: error)
+                }
             }
             guard generation == reloadGeneration else { return }
             rosterState.reconcile(with: next)

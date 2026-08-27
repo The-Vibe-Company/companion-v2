@@ -42,8 +42,9 @@ func avatarRequestsAuthenticateOnlyAgainstTheCompanionAPIOrigin() async throws {
         #expect(request.url?.host == "api.example.test")
         #expect(request.value(forHTTPHeaderField: "Cookie") == "session=secret")
         #expect(request.value(forHTTPHeaderField: "x-companion-org") != nil)
+        let requestURL = try #require(request.url)
         return (try #require(HTTPURLResponse(
-            url: try #require(request.url), statusCode: 200, httpVersion: nil,
+            url: requestURL, statusCode: 200, httpVersion: nil,
             headerFields: ["Content-Type": "image/png"]
         )), Data([0x89, 0x50]))
     }
@@ -53,8 +54,9 @@ func avatarRequestsAuthenticateOnlyAgainstTheCompanionAPIOrigin() async throws {
         #expect(request.url?.host == "secure.gravatar.com")
         #expect(request.value(forHTTPHeaderField: "Cookie") == nil)
         #expect(request.value(forHTTPHeaderField: "x-companion-org") == nil)
+        let requestURL = try #require(request.url)
         return (try #require(HTTPURLResponse(
-            url: try #require(request.url), statusCode: 200, httpVersion: nil,
+            url: requestURL, statusCode: 200, httpVersion: nil,
             headerFields: ["Content-Type": "image/png"]
         )), Data([0x89, 0x50]))
     }
