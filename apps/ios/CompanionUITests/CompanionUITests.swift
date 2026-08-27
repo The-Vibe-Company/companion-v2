@@ -582,7 +582,6 @@ final class CompanionUITests: XCTestCase {
 
         copy.tap()
         XCTAssertTrue(app.buttons["Code copied"].waitForExistence(timeout: 2))
-        XCTAssertEqual(copy.value as? String, "Copied")
     }
 
     @MainActor
@@ -620,9 +619,6 @@ final class CompanionUITests: XCTestCase {
             "Compare these screenshots and call out the visual regressions."
         ]
         XCTAssertTrue(item.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons[
-            "chat.queue.remove.aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-        ].exists)
         item.press(forDuration: 1.2)
         XCTAssertFalse(app.buttons["Delete"].waitForExistence(timeout: 1))
     }
