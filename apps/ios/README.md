@@ -29,6 +29,11 @@ one accessible unread indicator rather than inventing an exact message count.
 Connected resources now lives inside those settings as one child management page. It retains the
 native Skills, routines, and triggers status views, lists the member's attached MCP plugin accounts
 by provider and label, and lets the Companion Owner attach or detach already-connected accounts.
+Each routine row also opens its newest-first durable run history, including status, outcome,
+timestamps, bounded internal transcript pages, and safe errors. A routine-origin chat entry is a
+compact clickable marker instead of a prompt bubble; it opens that exact run, while surfaced
+`relay` and `notify` outputs remain ordinary main-thread history. These reads use the shared bounded
+API, remain available to Viewers, and never wake Box or Pi.
 The existing projection returns only the viewing member's private account ids, so Editor attachment
 changes stay read-only in native iOS rather than risk dropping an Owner's hidden selection. Detach
 is the existing `selected_mcp_account_ids` replacement update: it removes the account from this
@@ -116,6 +121,33 @@ xcodebuildmcp swift-package test --package-path apps/ios/CompanionKit
 
 Release builds ignore launch arguments and environment variables and always use
 `https://api.thecompanion.sh`.
+
+## External authorization and Universal Links
+
+Google sign-in and curated plugin authorization open in the device's default browser. Each Google
+flow adds a cryptographically random native state to the existing callback URL and keeps that value
+in memory until the matching callback arrives. A plugin flow binds the callback to the exact
+`redirect_uri` and signed provider `state` returned by the authenticated start response. The
+authorization code, signed state, PKCE values, and callback cookie remain owned by the existing API
+contract; native iOS keeps only the short-lived callback handoff in memory.
+
+Production plugin callbacks use
+`https://thecompanion.sh/v1/companion-plugins/oauth/callback`, and the completion response must
+redirect only to `https://thecompanion.sh/companions` with the documented OAuth result marker. The
+committed AASA and production entitlement cover that signed domain. Local Conductor uses HTTP on a
+loopback address, which cannot deliver an Apple Universal Link to the app; this production-signed
+build therefore does not claim native plugin callback support for arbitrary self-hosted domains.
+The client accepts a non-production origin only when the authenticated start response supplies that
+exact origin; HTTP loopback still cannot deliver a Universal Link. Supporting a self-hosted native
+callback would require a separately coordinated client policy, HTTPS domain, AASA document,
+entitlement, and signed build.
+
+The app entitlement includes `applinks:thecompanion.sh`. Release and Debug provisioning profiles
+must be regenerated with Associated Domains enabled for their respective bundle IDs, and the
+Apple team must be `K28B69CWQ7`. Production DNS/TLS must serve the committed AASA document at
+`https://thecompanion.sh/.well-known/apple-app-site-association` with `application/json` and the
+exact callback component. Verify Universal Link routing on a physical signed build; simulator
+testing does not prove the production profile, entitlement, or AASA association.
 
 The Debug-only `-glass-chat-demo`, `-glass-chat-thinking-demo`, `-companion-queued-demo`, `-markdown-table-demo`,
 `-glass-management-demo`, `-glass-management-demo-plugins`,

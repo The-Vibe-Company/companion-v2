@@ -104,6 +104,11 @@ Runtime state is explicit and durable:
   resolved content type, size, digest, sanitized filename, and position. Deleting a row journals its
   storage key into the durable object-deletion outbox in the same transaction, so an object cannot
   outlive the entry, the Companion, or the tenant.
+- A scheduled routine fire continues to use its routine-origin `companion_turns.id` as the durable
+  run id. `companion_routine_run_entries` is the private, no-wake transcript projection for that
+  run; read APIs page it by ordinal under entry-count and byte ceilings. `companion_routine_returns`
+  is its at-most-one terminal bridge to the main thread. The return row stores only mode and durable
+  references; surfaced content exists once, on its ordinary main-thread entry.
 
 All rows are org-scoped and force-RLS-enabled. API, worker, and runtime use distinct
 `NOSUPERUSER NOBYPASSRLS NOINHERIT` roles. Runtime claims, renewals, checkpoints, and settlements use
@@ -227,6 +232,35 @@ Layout 14 installs a small Node broker under systemd between runtime commands an
 - malformed or oversized lines advance without persisting their raw content;
 - unknown event types are counted and ignored rather than treated as user-fatal errors.
 
+The routine-isolation cutover extends this broker layout without adding a second harness or runtime
+owner. A routine-origin turn is still claimed and serialized by the Companion's one PostgreSQL
+lease, but runtime launches the same Pi binary with the same staged tools, skills, plugins, model,
+and provider material under a run-scoped session directory and broker socket. The main Pi daemon is
+idle and never receives the routine prompt. PostgreSQL, rather than the ephemeral Box session
+directory, is the durable routine-history authority.
+
+That run-scoped Pi receives one routine-only terminal tool. Its first accepted call is the run's
+return value and immediately shuts down that Pi process. `notify` commits one visible Companion
+entry to the main thread and no turn; `relay` commits the same kind of visible entry and an
+idempotent ordinary turn that feeds that entry to the main Pi. Neither mode copies the payload into
+the private run transcript. A normal settlement without a terminal call is successful
+`no_output`. This bridge is atomic and replay-safe: a unique return row makes the first accepted
+call win, and no post-return Pi event can create another main-thread effect.
+
+The rollout is deliberately additive: first land the run/return schema and read API, then web and
+iOS history readers, and only then switch execution and the main-thread projection. Until the final
+cutover, routine-origin turns retain their existing ordinary-turn behavior. The additive read model
+projects a succeeded ordinary-turn reply as a virtual `notify`: its existing final assistant entry
+is referenced as the main-thread payload and omitted from the compatibility history transcript, so
+it is neither mislabeled `no_output` nor duplicated. Client-only filtering is not an acceptable
+final architecture because it would make privacy, unread state, notifications, and future clients
+depend on duplicating the same hiding rule.
+
+The isolated routine Pi receives a pinned, content-addressed main-conversation background made from
+the latest accepted main-Pi compaction summary plus a deterministic recent transcript tail. This is
+runtime-only material, never a public API resource. Its source, 4,000-token budget, refresh rules,
+and takeover contract are specified in [Routine Pi context substrate](routine-pi-context-substrate.md).
+
 Staging writes a composed operating brief to `~/.companion/runtime/state/instructions.txt` and Pi
 receives it as `--append-system-prompt`. The brief describes the runtime contract Pi is held to —
 the thread, the durable disk, turn bounds, tools, routines, triggers, and the ask/propose surface —
@@ -261,8 +295,8 @@ wins; there is no global learned capability table.
 First-party Companion starts resolve the actor's currently accessible selected Skills and member MCP
 accounts through the same API contract. Runtime revalidates every id before staging. Empty selection
 means no library Skills or member MCP pins; the bundled Companion skill remains the Skills Hub
-bridge. The iOS app authenticates email credentials directly or completes Google OAuth in the system
-browser, then keeps the same secure Better Auth cookie contract; new Google accounts may join a
+bridge. The iOS app authenticates email credentials directly or completes Google OAuth in the
+member's default browser, then keeps the same secure Better Auth cookie contract; new Google accounts may join a
 domain-matched organization or create a minimal workspace before entering the product. The iOS app
 does not introduce a client identifier as a product-capability or authorization boundary. Companion
 ownership is not a resource-access fallback: an Editor cannot stage an
@@ -276,6 +310,16 @@ tokens never leave the control plane; OAuth access tokens reach only a loopback 
 the one outbound request it is forwarding. They never appear in user-facing responses, logs, audit
 metadata, projections, or durable Box files. The provider auth file remains on Box disk only where
 Pi itself must refresh the model provider connection.
+
+Native iOS also opens curated plugin authorization in the member's default browser. The existing
+callback URI, signed state, and PKCE exchange remain unchanged. The authenticated start response
+provides the exact callback origin and signed state; a narrowly scoped Universal Link returns that
+callback to the app only when both match the pending flow. The client holds the short-lived callback
+cookie and binding only in memory, does not follow the callback's final redirect, and validates the
+original 303 Location against that same origin, `/companions`, and exactly one OAuth result marker.
+Production uses the committed `thecompanion.sh` AASA/entitlement; a custom HTTPS origin is accepted
+only when the authenticated start response supplies it, while local HTTP loopback cannot deliver an
+Apple Universal Link and the production-signed app makes no general self-hosted-domain claim.
 
 PostgreSQL distinguishes the latest available selected-Skills revision from the minimum revision
 required before dispatch. A publication advances only the available revision, so waking a Box
@@ -421,6 +465,15 @@ the browser or device zone when no value has been saved. The same stored value d
 creation and all routine-next-fire and trigger-last-fire presentation. Routine rows retain and show
 their own cron timezone as server truth while absolute activity instants are formatted for the
 member; triggers remain event-driven and have no schedule timezone.
+
+The web and native Apple routine rows expose run history, and a routine-origin thread marker carrying
+`run_id` is a compact button rather than a message bubble. Both clients use only the bounded
+routine-history APIs, list newest runs first, distinguish notify, relay, silent, pending, and error
+outcomes, and page the private transcript forward by ordinal. A deleted routine remains directly
+readable from its marker because the run id and identity snapshot are durable. Web presents a
+responsive right-side drawer that traps focus, uses a scrim and Esc dismissal, and takes the full
+chat stage on a phone; iOS uses native navigation from Connected Resources and a modal navigation
+stack from the marker. Neither client contacts or wakes Box.
 
 Each Companion carries a cosmetic blob icon — four smallint indexes (`icon_shape`, `icon_mouth`,
 `icon_accessory`, `icon_color`) into fixed client-side catalogs rendered as inline SVG. Create and

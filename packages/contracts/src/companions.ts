@@ -6,6 +6,8 @@ import {
   companionActiveTurnSchema,
   companionInterruptedTurnSchema,
   companionLatestOperationSchema,
+  companionRuntimeSafeErrorSchema,
+  companionTurnStatusSchema,
   companionTurnSchema,
 } from "./companionRuntime";
 import { sniffCommentImageMime } from "./skill";
@@ -289,6 +291,179 @@ export const COMPANION_ROUTINE_MAX_PER_COMPANION = 10;
 export const COMPANION_ROUTINE_MIN_INTERVAL_MS = 5 * 60 * 1000;
 export const COMPANION_ROUTINE_MISSED_GRACE_MS = 10 * 60 * 1000;
 export const COMPANION_ROUTINE_MAX_CONSECUTIVE_FAILURES = 5;
+
+/**
+ * A routine fire is represented by its ordinary Companion turn. Keeping this status contract in
+ * the shared package means list/detail readers can describe the same ordered lifecycle as the main
+ * thread without making a client know about the executor's private tables.
+ */
+export const companionRoutineRunStatusSchema = companionTurnStatusSchema;
+export type CompanionRoutineRunStatus = z.infer<typeof companionRoutineRunStatusSchema>;
+
+/**
+ * Outcome of the routine's private execution and terminal surface protocol. `no_output` is an
+ * explicit non-surfaced outcome; it must never be presented as a successful terminal return. The
+ * executor uses `surfaced` only after the normalized return row and its main-thread entry commit.
+ */
+export const companionRoutineRunOutcomeSchema = z.enum([
+  "pending",
+  "no_output",
+  "surfaced",
+  "error",
+]);
+export type CompanionRoutineRunOutcome = z.infer<typeof companionRoutineRunOutcomeSchema>;
+
+/** The only terminal surface modes a routine may return to its main Companion thread. */
+export const companionRoutineSurfaceModeSchema = z.enum(["relay", "notify"]);
+export type CompanionRoutineSurfaceMode = z.infer<typeof companionRoutineSurfaceModeSchema>;
+
+/** Routine history is keyset-paginated so one long Pi transcript cannot exhaust an API/client. */
+export const COMPANION_ROUTINE_RUN_ENTRY_PAGE_DEFAULT = 50;
+export const COMPANION_ROUTINE_RUN_ENTRY_PAGE_MAX = 100;
+
+/** Immutable routine identity carried by a run so history remains readable after deletion/rename. */
+export const companionRoutineIdentitySnapshotSchema = z.object({
+  id: z.string().uuid().nullable(),
+  name: z.string().trim().min(1).max(COMPANION_ROUTINE_NAME_MAX_CHARACTERS),
+}).strict();
+export type CompanionRoutineIdentitySnapshot = z.infer<
+  typeof companionRoutineIdentitySnapshotSchema
+>;
+
+/** A bounded entry from the routine-only transcript; main-thread surface payloads are not copied. */
+export const companionRoutineRunEntrySchema = z.object({
+  event_id: z.string().min(1).max(200),
+  ordinal: z.number().int().nonnegative(),
+  role: z.enum(["user", "assistant", "system", "tool", "decision"]),
+  content: z.string().max(1_048_576),
+  reasoning: z.string().max(16_000).nullable().default(null),
+  tool: z.lazy(() => companionToolRunSchema).nullable().default(null),
+  decision: z.lazy(() => companionDecisionSchema).nullable().default(null),
+  created_at: z.string().datetime({ offset: true }),
+}).strict().superRefine((entry, context) => {
+  if ((entry.role === "tool") !== (entry.tool !== null)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["tool"],
+      message: "a routine tool entry carries a tool run and no other role may",
+    });
+  }
+  if ((entry.role === "decision") !== (entry.decision !== null)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["decision"],
+      message: "a routine decision entry carries a decision and no other role may",
+    });
+  }
+  if (entry.reasoning !== null && entry.role !== "assistant") {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["reasoning"],
+      message: "only a routine assistant entry carries reasoning",
+    });
+  }
+});
+export type CompanionRoutineRunEntry = z.infer<typeof companionRoutineRunEntrySchema>;
+
+const companionRoutineRunTimestamps = {
+  created_at: z.string().datetime({ offset: true }),
+  started_at: z.string().datetime({ offset: true }).nullable(),
+  settled_at: z.string().datetime({ offset: true }).nullable(),
+} as const;
+
+/** Fields common to the bounded newest-first list and the full run detail. */
+const companionRoutineRunFields = {
+  run_id: z.string().uuid(),
+  companion_id: z.string().uuid(),
+  routine: companionRoutineIdentitySnapshotSchema,
+  status: companionRoutineRunStatusSchema,
+  outcome: companionRoutineRunOutcomeSchema,
+  surface_mode: companionRoutineSurfaceModeSchema.nullable(),
+  main_entry_event_id: z.string().min(1).max(200).nullable(),
+  relay_turn_id: z.string().uuid().nullable(),
+  ...companionRoutineRunTimestamps,
+  error: companionRuntimeSafeErrorSchema.nullable(),
+} as const;
+
+function validateCompanionRoutineRunResult(
+  run: {
+    status: CompanionRoutineRunStatus;
+    outcome: CompanionRoutineRunOutcome;
+    surface_mode: CompanionRoutineSurfaceMode | null;
+    main_entry_event_id: string | null;
+    relay_turn_id: string | null;
+  },
+  context: z.RefinementCtx,
+): void {
+  const surfaced = run.outcome === "surfaced";
+  if (
+    surfaced !== (run.surface_mode !== null)
+    || surfaced !== (run.main_entry_event_id !== null)
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["surface_mode"],
+      message: "a surfaced run carries exactly one terminal mode and main-thread entry reference",
+    });
+  }
+  if ((run.surface_mode === "relay") !== (run.relay_turn_id !== null)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["relay_turn_id"],
+      message: "only relay mode creates a main-Pi turn",
+    });
+  }
+  if (run.outcome === "no_output" && run.status !== "succeeded") {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["outcome"],
+      message: "no_output is a successful routine completion without a terminal return",
+    });
+  }
+  if (run.outcome === "error" && !["failed", "interrupted", "cancelled"].includes(run.status)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["outcome"],
+      message: "error outcome requires a failed, interrupted, or cancelled run",
+    });
+  }
+}
+
+export const companionRoutineRunSummarySchema = z.object(companionRoutineRunFields).strict()
+  .superRefine(validateCompanionRoutineRunResult);
+export type CompanionRoutineRunSummary = z.infer<typeof companionRoutineRunSummarySchema>;
+
+export const companionRoutineRunDetailSchema = z.object({
+  ...companionRoutineRunFields,
+  /** One bounded page of internal Pi history; surfaced payloads remain main-thread references. */
+  internal_entries: z.array(companionRoutineRunEntrySchema)
+    .max(COMPANION_ROUTINE_RUN_ENTRY_PAGE_MAX),
+  next_entry_cursor: z.number().int().nonnegative().nullable(),
+}).strict().superRefine(validateCompanionRoutineRunResult);
+export type CompanionRoutineRunDetail = z.infer<typeof companionRoutineRunDetailSchema>;
+
+export const companionRoutineRunListSchema = z.object({
+  runs: z.array(companionRoutineRunSummarySchema),
+  next_cursor: z.string().uuid().nullable(),
+}).strict();
+export type CompanionRoutineRunList = z.infer<typeof companionRoutineRunListSchema>;
+
+/** Bounded query input for the read-only routine history list. */
+export const companionRoutineRunListQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  cursor: z.string().uuid().optional(),
+}).strict();
+export type CompanionRoutineRunListQuery = z.infer<typeof companionRoutineRunListQuerySchema>;
+
+/** Bounded keyset input for one routine run's private transcript page. */
+export const companionRoutineRunDetailQuerySchema = z.object({
+  entry_limit: z.coerce.number().int().min(1).max(COMPANION_ROUTINE_RUN_ENTRY_PAGE_MAX)
+    .default(COMPANION_ROUTINE_RUN_ENTRY_PAGE_DEFAULT),
+  entry_cursor: z.coerce.number().int().nonnegative().optional(),
+}).strict();
+export type CompanionRoutineRunDetailQuery = z.infer<
+  typeof companionRoutineRunDetailQuerySchema
+>;
 
 /**
  * Upper bounds for a Companion trigger — the event-driven sibling of a routine. A trigger is a
@@ -1214,6 +1389,8 @@ export const companionTranscriptEntrySchema = z.object({
   routine: z.object({
     id: z.string().uuid().nullable(),
     name: companionRoutineNameSchema,
+    /** Stable id of the routine-origin turn that represents this fire. Optional for old rows. */
+    run_id: z.string().uuid().nullable().optional(),
   }).nullable().default(null),
   /**
    * Present on a user entry that was enqueued by a trigger's webhook. Masked exactly like a

@@ -45,6 +45,48 @@ private final class ManagementMockURLProtocol: URLProtocol, @unchecked Sendable 
     override func stopLoading() {}
 }
 
+private final class PluginOAuthRedirectMockURLProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+    nonisolated(unsafe) static var authorizationURL = "https://mcp.linear.app/authorize?state=signed-state&redirect_uri=https%3A%2F%2Fthecompanion.sh%2Fv1%2Fcompanion-plugins%2Foauth%2Fcallback"
+    nonisolated(unsafe) static var redirectLocation = ""
+    nonisolated(unsafe) static var unexpectedRedirectRequests = 0
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        do {
+            let handler = try #require(Self.handler)
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
+private final class RedirectDelegateFactoryRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var decisions: [Bool] = []
+
+    func record(followRedirects: Bool) {
+        lock.lock()
+        decisions.append(followRedirects)
+        lock.unlock()
+    }
+
+    func snapshot() -> [Bool] {
+        lock.lock()
+        let snapshot = decisions
+        lock.unlock()
+        return snapshot
+    }
+}
+
 private final class RuntimeManagementMockURLProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
 
@@ -268,6 +310,88 @@ func keepsTheLinkSchemeAllowlistCaseInsensitiveAndFailClosed() throws {
 
     let conductorURL = try #require(CompanionLinkPolicy.parse("CONDUCTOR://workspace?id=workspace-1"))
     #expect(CompanionLinkPolicy.isConductor(conductorURL))
+}
+
+@Test
+func routesOnlyPendingExternalOAuthCallbackShapes() throws {
+    let googleScheme = "dev.companion.mobile.dev"
+    let googleState = "native-state"
+    let google = try #require(URL(string: "\(googleScheme)://?cookie=better-auth.session_token%3Dgoogle-session&native_state=\(googleState)"))
+    let staleGoogle = try #require(URL(string: "\(googleScheme)://?cookie=better-auth.session_token%3Dgoogle-session&native_state=stale-state"))
+    let wrongGoogleScheme = try #require(URL(string: "dev.companion.mobile://?cookie=session"))
+    let plugin = try #require(URL(string: "https://thecompanion.sh/v1/companion-plugins/oauth/callback?code=code&state=state"))
+    let pluginCallback = try #require(URL(string: "https://thecompanion.sh/v1/companion-plugins/oauth/callback"))
+    let stalePlugin = try #require(URL(string: "https://thecompanion.sh/v1/companion-plugins/oauth/callback?code=code&state=stale-state"))
+    let customPluginCallback = try #require(URL(string: "https://oauth.example/v1/companion-plugins/oauth/callback"))
+    let customPlugin = try #require(URL(string: "https://oauth.example/v1/companion-plugins/oauth/callback?code=code&state=state"))
+    let localPluginCallback = try #require(URL(string: "http://127.0.0.1:3001/v1/companion-plugins/oauth/callback"))
+    let localPlugin = try #require(URL(string: "http://127.0.0.1:3001/v1/companion-plugins/oauth/callback?code=code&state=state"))
+    let wrongPluginPath = try #require(URL(string: "https://thecompanion.sh/v1/companion-plugins/oauth/start?code=code"))
+    let wrongPluginHost = try #require(URL(string: "https://api.thecompanion.sh/v1/companion-plugins/oauth/callback?code=code&state=state"))
+    let pluginWithUserInfo = try #require(URL(string: "https://attacker@thecompanion.sh/v1/companion-plugins/oauth/callback?code=code&state=state"))
+
+    #expect(CompanionOAuthCallbackPolicy.route(
+        for: google,
+        googleCallbackScheme: googleScheme,
+        googleNativeState: googleState
+    ) == .google)
+    #expect(CompanionOAuthCallbackPolicy.googleCookie(
+        from: google,
+        callbackScheme: googleScheme,
+        expectedNativeState: googleState
+    ) == "better-auth.session_token=google-session")
+    #expect(CompanionOAuthCallbackPolicy.route(
+        for: staleGoogle,
+        googleCallbackScheme: googleScheme,
+        googleNativeState: googleState
+    ) == .blocked)
+    #expect(CompanionOAuthCallbackPolicy.route(
+        for: wrongGoogleScheme,
+        googleCallbackScheme: googleScheme,
+        googleNativeState: googleState
+    ) == .blocked)
+    #expect(CompanionOAuthCallbackPolicy.route(
+        for: plugin,
+        googleCallbackScheme: googleScheme,
+        pluginCallbackURL: pluginCallback,
+        pluginCallbackState: "state"
+    ) == .plugin)
+    #expect(CompanionOAuthCallbackPolicy.route(
+        for: stalePlugin,
+        googleCallbackScheme: nil,
+        pluginCallbackURL: pluginCallback,
+        pluginCallbackState: "state"
+    ) == .blocked)
+    #expect(CompanionOAuthCallbackPolicy.route(
+        for: localPlugin,
+        googleCallbackScheme: nil,
+        pluginCallbackURL: localPluginCallback,
+        pluginCallbackState: "state"
+    ) == .plugin)
+    #expect(CompanionOAuthCallbackPolicy.route(
+        for: customPlugin,
+        googleCallbackScheme: nil,
+        pluginCallbackURL: customPluginCallback,
+        pluginCallbackState: "state"
+    ) == .plugin)
+    #expect(CompanionOAuthCallbackPolicy.route(
+        for: wrongPluginPath,
+        googleCallbackScheme: nil,
+        pluginCallbackURL: pluginCallback,
+        pluginCallbackState: "state"
+    ) == .blocked)
+    #expect(CompanionOAuthCallbackPolicy.route(
+        for: wrongPluginHost,
+        googleCallbackScheme: nil,
+        pluginCallbackURL: pluginCallback,
+        pluginCallbackState: "state"
+    ) == .blocked)
+    #expect(CompanionOAuthCallbackPolicy.route(
+        for: pluginWithUserInfo,
+        googleCallbackScheme: nil,
+        pluginCallbackURL: pluginCallback,
+        pluginCallbackState: "state"
+    ) == .blocked)
 }
 
 @Test
@@ -2388,17 +2512,43 @@ func buildsTheGoogleAuthorizationProxyWithExpoState() async throws {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [MockURLProtocol.self]
     MockURLProtocol.handler = { request in
-        #expect(request.url?.path == "/auth/sign-in/social")
-        #expect(request.value(forHTTPHeaderField: "expo-origin") == "dev.companion.mobile.dev://")
         let requestURL = try #require(request.url)
-        let response = try #require(HTTPURLResponse(
-            url: requestURL,
-            statusCode: 200,
-            httpVersion: nil,
-            headerFields: ["Set-Cookie": "better-auth.oauth_state=signed-state; Path=/; HttpOnly"]
-        ))
-        let data = Data(#"{"url":"https://accounts.google.com/o/oauth2/auth?state=state","redirect":true}"#.utf8)
-        return (response, data)
+        switch requestURL.path {
+        case "/auth/sign-in/social":
+            #expect(request.value(forHTTPHeaderField: "expo-origin") == "dev.companion.mobile.dev://")
+            let body = try requestBody(request)
+            let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: String])
+            let callbackURL = try #require(URL(string: json["callbackURL"] ?? ""))
+            #expect(json["newUserCallbackURL"] == json["callbackURL"])
+            #expect(json["errorCallbackURL"] == json["callbackURL"])
+            #expect(CompanionOAuthCallbackPolicy.queryValue(
+                named: CompanionOAuthCallbackPolicy.googleNativeStateQueryName,
+                from: callbackURL
+            ) != nil)
+            let response = try #require(HTTPURLResponse(
+                url: requestURL,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Set-Cookie": "better-auth.oauth_state=signed-state; Path=/; HttpOnly"]
+            ))
+            let data = Data(#"{"url":"https://accounts.google.com/o/oauth2/auth?state=state","redirect":true}"#.utf8)
+            return (response, data)
+
+        case "/v1/auth/whoami":
+            #expect(request.value(forHTTPHeaderField: "Cookie") == "better-auth.session_token=google-session")
+            let response = try #require(HTTPURLResponse(
+                url: requestURL,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            ))
+            let data = Data(#"{"userId":"user-1","email":"stan@example.com","name":"Stan","timezone":"UTC","org":{"org_id":"org-1","name":"Workspace"},"onboarded":true,"needsOnboarding":false}"#.utf8)
+            return (response, data)
+
+        default:
+            Issue.record("Unexpected Google request to \(requestURL)")
+            throw APIError(status: 500, code: "unexpected_request", message: "Unexpected test request")
+        }
     }
     defer { MockURLProtocol.handler = nil }
 
@@ -2407,10 +2557,27 @@ func buildsTheGoogleAuthorizationProxyWithExpoState() async throws {
         session: URLSession(configuration: configuration)
     )
     let authorization = try await client.beginGoogleSignIn(callbackScheme: "dev.companion.mobile.dev")
+    #expect(authorization.nativeState.count == 64)
     let components = try #require(URLComponents(url: authorization.proxyURL, resolvingAgainstBaseURL: false))
     #expect(components.path == "/auth/expo-authorization-proxy")
     #expect(components.queryItems?.first(where: { $0.name == "oauthState" })?.value == "signed-state")
     #expect(components.queryItems?.first(where: { $0.name == "authorizationURL" })?.value?.hasPrefix("https://accounts.google.com/") == true)
+
+    let replacement = try await client.beginGoogleSignIn(callbackScheme: "dev.companion.mobile.dev")
+    #expect(replacement.nativeState != authorization.nativeState)
+    await client.cancelGoogleSignIn(expectedNativeState: authorization.nativeState)
+    var callbackComponents = URLComponents()
+    callbackComponents.scheme = "dev.companion.mobile.dev"
+    callbackComponents.queryItems = [
+        URLQueryItem(name: CompanionOAuthCallbackPolicy.googleNativeStateQueryName, value: replacement.nativeState),
+        URLQueryItem(name: "cookie", value: "better-auth.session_token=google-session"),
+    ]
+    let callbackURL = try #require(callbackComponents.url)
+    let session = try await client.completeGoogleSignIn(
+        callbackURL: callbackURL,
+        callbackScheme: "dev.companion.mobile.dev"
+    )
+    #expect(session.user.id == "user-1")
 }
 
 @Test
@@ -2483,6 +2650,32 @@ func usesRealCompanionManagementRoutesAndRetainsProviderOAuthAuthority() async t
             #expect(json["credential_name"] as? String == "Authorization")
             response = try #require(HTTPURLResponse(url: requestURL, statusCode: 201, httpVersion: nil, headerFields: nil))
             data = Data(#"{"account":{"id":"b4d8a690-32d2-4dff-b6e0-3f742c056f95","provider":"custom","label":"Team MCP","transport":"http","endpoint":"https://mcp.example.com","connected":true,"created_at":"2026-08-24T12:00:00.000Z","updated_at":"2026-08-24T12:00:00.000Z"}}"#.utf8)
+
+        case "/v1/companion-plugins/oauth/start":
+            #expect(request.httpMethod == "POST")
+            let body = try requestBody(request)
+            let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: String])
+            #expect(json == ["server_name": "app.linear/linear", "label": "client-a"])
+            response = try #require(HTTPURLResponse(
+                url: requestURL,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Set-Cookie": "companion_mcp_oauth_nonce=opaque-flow; Path=/v1/companion-plugins/oauth/callback; HttpOnly"]
+            ))
+            data = Data(#"{"authorization_url":"https://mcp.linear.app/authorize?state=signed-state&redirect_uri=https%3A%2F%2Fthecompanion.sh%2Fv1%2Fcompanion-plugins%2Foauth%2Fcallback"}"#.utf8)
+
+        case "/v1/companion-plugins/oauth/callback":
+            #expect(request.httpMethod == "GET")
+            #expect(request.value(forHTTPHeaderField: "Cookie") == "better-auth.session_token=session; companion_mcp_oauth_nonce=opaque-flow")
+            response = try #require(HTTPURLResponse(
+                url: requestURL,
+                statusCode: 303,
+                httpVersion: nil,
+                headerFields: [
+                    "Location": "https://thecompanion.sh/companions?view=plugins&oauth=connected&provider=linear",
+                ]
+            ))
+            data = Data()
 
         case "/v1/companion-providers/oauth/start":
             #expect(request.httpMethod == "POST")
@@ -2589,22 +2782,197 @@ func usesRealCompanionManagementRoutesAndRetainsProviderOAuthAuthority() async t
     ))
     #expect(plugin.label == "Team MCP")
 
-    let pluginOAuthRequest = try await client.companionPluginOAuthRequest(
+    let pluginOAuthStart = try await client.startCompanionPluginOAuth(
         serverName: "app.linear/linear",
         label: "client-a"
     )
-    #expect(pluginOAuthRequest.url?.path == "/v1/companion-plugins/oauth/start")
-    #expect(pluginOAuthRequest.httpMethod == "POST")
-    #expect(pluginOAuthRequest.value(forHTTPHeaderField: "Cookie") == "better-auth.session_token=session")
-    #expect(pluginOAuthRequest.value(forHTTPHeaderField: "x-companion-org") == "org-1")
-    let pluginOAuthBody = try #require(pluginOAuthRequest.httpBody)
-    let pluginOAuthJSON = try #require(JSONSerialization.jsonObject(with: pluginOAuthBody) as? [String: String])
-    #expect(pluginOAuthJSON == ["server_name": "app.linear/linear", "label": "client-a"])
+    #expect(pluginOAuthStart.authorizationURL.absoluteString == "https://mcp.linear.app/authorize?state=signed-state&redirect_uri=https%3A%2F%2Fthecompanion.sh%2Fv1%2Fcompanion-plugins%2Foauth%2Fcallback")
+    try await client.completeCompanionPluginOAuth(
+        callbackURL: URL(string: "https://thecompanion.sh/v1/companion-plugins/oauth/callback?code=oauth-code&state=signed-state")!
+    )
 
     let oauth = try await client.startCompanionProviderOAuth(providerID: "openai-codex")
     #expect(oauth.userCode == "ABCD-EFGH")
     let poll = try await client.pollCompanionProviderOAuth()
     #expect(poll.status == .pending)
+}
+
+@Test
+func validatesCompanionPluginOAuthRedirectBeforeReturning() async throws {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [PluginOAuthRedirectMockURLProtocol.self]
+    PluginOAuthRedirectMockURLProtocol.redirectLocation = ""
+    PluginOAuthRedirectMockURLProtocol.unexpectedRedirectRequests = 0
+    PluginOAuthRedirectMockURLProtocol.handler = { request in
+        let requestURL = try #require(request.url)
+        switch requestURL.path {
+        case "/v1/companion-plugins/oauth/start":
+            #expect(request.httpMethod == "POST")
+            let response = try #require(HTTPURLResponse(
+                url: requestURL,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: [
+                    "Set-Cookie": "companion_mcp_oauth_nonce=opaque-flow; Path=/v1/companion-plugins/oauth/callback; HttpOnly",
+                ]
+            ))
+            return (response, Data(#"{"authorization_url":"\#(PluginOAuthRedirectMockURLProtocol.authorizationURL)"}"#.utf8))
+
+        case "/v1/companion-plugins/oauth/callback":
+            #expect(request.httpMethod == "GET")
+            #expect(request.value(forHTTPHeaderField: "Cookie") == "better-auth.session_token=session; companion_mcp_oauth_nonce=opaque-flow")
+            let response = try #require(HTTPURLResponse(
+                url: requestURL,
+                statusCode: 303,
+                httpVersion: nil,
+                headerFields: ["Location": PluginOAuthRedirectMockURLProtocol.redirectLocation]
+            ))
+            return (response, Data())
+
+        default:
+            PluginOAuthRedirectMockURLProtocol.unexpectedRedirectRequests += 1
+            Issue.record("The plugin callback followed an unexpected redirect to \(requestURL)")
+            let response = try #require(HTTPURLResponse(
+                url: requestURL,
+                statusCode: 404,
+                httpVersion: nil,
+                headerFields: nil
+            ))
+            return (response, Data())
+        }
+    }
+    defer {
+        PluginOAuthRedirectMockURLProtocol.handler = nil
+        PluginOAuthRedirectMockURLProtocol.authorizationURL = "https://mcp.linear.app/authorize?state=signed-state&redirect_uri=https%3A%2F%2Fthecompanion.sh%2Fv1%2Fcompanion-plugins%2Foauth%2Fcallback"
+        PluginOAuthRedirectMockURLProtocol.redirectLocation = ""
+        PluginOAuthRedirectMockURLProtocol.unexpectedRedirectRequests = 0
+    }
+
+    let redirectRecorder = RedirectDelegateFactoryRecorder()
+    let client = APIClient(
+        baseURL: URL(string: "http://127.0.0.1:3001")!,
+        session: URLSession(configuration: configuration),
+        redirectDelegateFactory: APIClientRedirectDelegateFactory { followRedirects in
+            redirectRecorder.record(followRedirects: followRedirects)
+            return nil
+        }
+    )
+    await client.setAuthority(Session(
+        cookie: "better-auth.session_token=session",
+        orgID: "org-1",
+        needsOnboarding: false,
+        user: .init(id: "user-1", email: "stan@example.com", name: "Stan")
+    ))
+
+    let callbackURL = URL(string: "https://thecompanion.sh/v1/companion-plugins/oauth/callback?code=oauth-code&state=signed-state")!
+    let staleCallbackURL = URL(string: "https://thecompanion.sh/v1/companion-plugins/oauth/callback?code=old-code&state=old-state")!
+    PluginOAuthRedirectMockURLProtocol.redirectLocation = "https://thecompanion.sh/companions?view=plugins&oauth=connected&provider=linear"
+    _ = try await client.startCompanionPluginOAuth(serverName: "app.linear/linear", label: "client-a")
+    do {
+        try await client.completeCompanionPluginOAuth(callbackURL: staleCallbackURL)
+        Issue.record("Expected a stale plugin callback to be rejected")
+    } catch let error as APIError {
+        #expect(error.code == "invalid_oauth_callback")
+    }
+    try await client.completeCompanionPluginOAuth(callbackURL: callbackURL)
+
+    let cases: [(location: String, errorCode: String?)] = [
+        (
+            "https://thecompanion.sh/companions?view=plugins&oauth=connected&provider=linear",
+            nil
+        ),
+        (
+            "https://thecompanion.sh/companions?view=plugins&oauth_error=duplicate_label",
+            "duplicate_label"
+        ),
+        (
+            "https://evil.example/companions?view=plugins&oauth=connected",
+            "invalid_oauth_redirect"
+        ),
+    ]
+
+    for testCase in cases {
+        PluginOAuthRedirectMockURLProtocol.redirectLocation = testCase.location
+        _ = try await client.startCompanionPluginOAuth(
+            serverName: "app.linear/linear",
+            label: "client-a"
+        )
+        if let errorCode = testCase.errorCode {
+            do {
+                try await client.completeCompanionPluginOAuth(callbackURL: callbackURL)
+                Issue.record("Expected plugin callback failure for \(testCase.location)")
+            } catch let error as APIError {
+                #expect(error.code == errorCode)
+            }
+        } else {
+            try await client.completeCompanionPluginOAuth(callbackURL: callbackURL)
+        }
+    }
+
+    PluginOAuthRedirectMockURLProtocol.authorizationURL = "https://mcp.linear.app/authorize?state=signed-state&redirect_uri=https%3A%2F%2Foauth.example%3A443%2Fv1%2Fcompanion-plugins%2Foauth%2Fcallback"
+    let customCallbackURL = URL(string: "https://oauth.example:443/v1/companion-plugins/oauth/callback?code=oauth-code&state=signed-state")!
+    let customLocations: [(location: String, errorCode: String?)] = [
+        (
+            "https://oauth.example/companions?view=plugins&oauth=connected&provider=linear",
+            nil
+        ),
+        (
+            "https://oauth.example:444/companions?view=plugins&oauth=connected",
+            "invalid_oauth_redirect"
+        ),
+        (
+            "http://oauth.example/companions?view=plugins&oauth=connected",
+            "invalid_oauth_redirect"
+        ),
+        (
+            "https://evil.example/companions?view=plugins&oauth=connected",
+            "invalid_oauth_redirect"
+        ),
+    ]
+    for testCase in customLocations {
+        PluginOAuthRedirectMockURLProtocol.redirectLocation = testCase.location
+        _ = try await client.startCompanionPluginOAuth(
+            serverName: "app.linear/linear",
+            label: "client-a"
+        )
+        if let errorCode = testCase.errorCode {
+            do {
+                try await client.completeCompanionPluginOAuth(callbackURL: customCallbackURL)
+                Issue.record("Expected custom plugin callback failure for \(testCase.location)")
+            } catch let error as APIError {
+                #expect(error.code == errorCode)
+            }
+        } else {
+            try await client.completeCompanionPluginOAuth(callbackURL: customCallbackURL)
+        }
+    }
+    let redirectDecisions = redirectRecorder.snapshot()
+    #expect(redirectDecisions.filter { !$0 }.count == cases.count + customLocations.count + 1)
+    #expect(PluginOAuthRedirectMockURLProtocol.unexpectedRedirectRequests == 0)
+}
+
+@Test
+func refusesCompanionPluginOAuthRedirects() throws {
+    let session = URLSession(configuration: .ephemeral)
+    let callbackURL = try #require(URL(string: "https://thecompanion.sh/v1/companion-plugins/oauth/callback"))
+    let task = session.dataTask(with: callbackURL)
+    let response = try #require(HTTPURLResponse(
+        url: callbackURL,
+        statusCode: 303,
+        httpVersion: nil,
+        headerFields: ["Location": "https://thecompanion.sh/companions?oauth=connected"]
+    ))
+    let delegate = NoRedirectURLSessionDelegate()
+    var redirectedRequest: URLRequest?
+    delegate.urlSession(
+        session,
+        task: task,
+        willPerformHTTPRedirection: response,
+        newRequest: URLRequest(url: URL(string: "https://thecompanion.sh/companions")!),
+        completionHandler: { redirectedRequest = $0 }
+    )
+    #expect(redirectedRequest == nil)
+    task.cancel()
 }
 
 @Test

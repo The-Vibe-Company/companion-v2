@@ -225,6 +225,116 @@ test("native message interactions stay accessible without simulator CI", () => {
   assert.match(readme, /Reply or thread\s+actions and regenerate are deliberately out of scope/);
 });
 
+test("external iOS links and OAuth stay browser-owned and callback-scoped", () => {
+  const markdown = read("apps/ios/Companion/Screens/MarkdownMessageView.swift");
+  const login = read("apps/ios/Companion/Screens/LoginView.swift");
+  const plugins = read("apps/ios/Companion/Screens/PluginManagementView.swift");
+  const coordinator = read("apps/ios/Companion/Support/ExternalOAuthCoordinator.swift");
+  const launcher = read("apps/ios/Companion/Support/ExternalURLLauncher.swift");
+  const root = read("apps/ios/Companion/Navigation/RootView.swift");
+  const kitClient = read("apps/ios/CompanionKit/Sources/CompanionKit/APIClient.swift");
+  const kitSessionStore = read("apps/ios/CompanionKit/Sources/CompanionKit/SessionStore.swift");
+  const callbackPolicy = read(
+    "apps/ios/CompanionKit/Sources/CompanionKit/CompanionOAuthCallbackPolicy.swift",
+  );
+  const kitTests = read("apps/ios/CompanionKit/Tests/CompanionKitTests/CompanionKitTests.swift");
+  const entitlements = read("apps/ios/Config/Companion.entitlements");
+  const aasa = JSON.parse(read("apps/web/public/.well-known/apple-app-site-association"));
+  const nextConfig = read("apps/web/next.config.ts");
+  const design = read("docs/design.md");
+  const authFlow = [markdown, login, plugins, coordinator, launcher, root, kitClient, callbackPolicy].join("\n");
+
+  assert.match(markdown, /UIApplication\.shared\.open\(url/);
+  assert.match(markdown, /case \.conductor:\s*[\s\S]{0,240}?\.systemAction/);
+  assert.match(coordinator, /UIApplication\.shared\.open\(pendingURL/);
+  assert.match(coordinator, /guard let activeFlow, phase != \.completing, callbackURL == nil/);
+  assert.match(root, /\.onOpenURL\s*\{[\s\S]{0,180}?externalOAuth\.handle/);
+  assert.match(root, /\.onContinueUserActivity\(NSUserActivityTypeBrowsingWeb\)/);
+  assert.match(launcher, /@MainActor\s+static func open/);
+  assert.match(login, /login\.google\.waiting/);
+  assert.match(login, /Button\("Reopen"/);
+  assert.match(login, /Button\("Cancel"/);
+  assert.match(login, /No callback arrived/);
+  assert.match(login, /activeFlow\?\.googleNativeState/);
+  assert.match(login, /cancelGoogleSignIn\(expectedNativeState: nativeState\)/);
+  assert.match(plugins, /startCompanionPluginOAuth/);
+  assert.match(plugins, /completeCompanionPluginOAuth\(callbackURL:/);
+  assert.match(plugins, /beginPlugin\(authorizationURL:/);
+  assert.match(plugins, /plugins\.oauth\.reopen/);
+  assert.match(plugins, /plugins\.oauth\.cancel/);
+  assert.match(plugins, /No callback arrived\. Reopen this authorization or cancel this attempt\./);
+  assert.match(plugins, /externalOAuth\.reopen\(\)/);
+  assert.match(plugins, /cancellationPending/);
+  assert.match(plugins, /\.disabled\(submitting \|\| cancellationPending \|\| externalOAuth\.phase == \.completing\)/);
+  assert.match(plugins, /\.interactiveDismissDisabled\([\s\S]{0,120}?externalOAuth\.phase == \.completing/);
+  assert.match(plugins, /finishCancellation\(/);
+  assert.match(plugins, /requestCancellation\(fromDisappear: true\)/);
+  assert.doesNotMatch(plugins, /onChange\(of: externalOAuth\.phase\)/);
+  const provider = read("apps/ios/Companion/Screens/ProviderManagementView.swift");
+  assert.match(provider, /systemImage: "arrow\.up\.right\.square"/);
+  assert.doesNotMatch(provider, /systemImage: "safari"/);
+  assert.match(kitClient, /companionPluginOAuthCookie/);
+  assert.match(kitClient, /header\(named: "set-cookie"/);
+  assert.match(kitClient, /companion_mcp_oauth_/);
+  assert.match(kitClient, /SecRandomCopyBytes/);
+  assert.match(kitClient, /googleOAuthState/);
+  assert.match(kitClient, /cancelGoogleSignIn\(expectedNativeState: String\)/);
+  assert.match(kitSessionStore, /cancelGoogleSignIn\(expectedNativeState: String\)/);
+  assert.match(kitClient, /companionPluginOAuthState/);
+  assert.match(kitClient, /redirect_uri/);
+  assert.match(kitClient, /APIClientRedirectDelegateFactory/);
+  assert.match(kitClient, /redirectDelegateFactory/);
+  assert.match(kitClient, /make\(followRedirects: followRedirects\)/);
+  assert.match(kitClient, /NoRedirectURLSessionDelegate/);
+  assert.match(kitClient, /followRedirects: false/);
+  assert.match(kitClient, /response\.statusCode == 303/);
+  assert.match(kitClient, /pluginOAuthRedirect/);
+  const redirectParser = kitClient.slice(
+    kitClient.indexOf("private static func pluginOAuthRedirect"),
+    kitClient.indexOf("private static func randomOAuthState"),
+  );
+  assert.match(redirectParser, /expectedScheme/);
+  assert.match(redirectParser, /expectedHost/);
+  assert.match(redirectParser, /effectivePort/);
+  assert.doesNotMatch(redirectParser, /pluginCallbackHost/);
+  assert.match(kitTests, /validatesCompanionPluginOAuthRedirectBeforeReturning/);
+  assert.match(kitTests, /refusesCompanionPluginOAuthRedirects/);
+  assert.match(kitTests, /willPerformHTTPRedirection/);
+  assert.match(kitTests, /RedirectDelegateFactoryRecorder/);
+  assert.match(kitTests, /redirectDelegateFactory:/);
+  assert.doesNotMatch(kitTests, /wasRedirectedTo:/);
+  assert.doesNotMatch(kitTests, /redirectEvents/);
+  assert.match(kitTests, /cancelGoogleSignIn\(expectedNativeState: authorization\.nativeState\)/);
+  assert.match(kitTests, /oauth_error=duplicate_label/);
+  assert.match(kitTests, /oauth\.example/);
+  assert.match(kitTests, /oauth\.example:444/);
+  assert.match(kitTests, /http:\/\/oauth\.example/);
+  assert.match(kitTests, /https:\/\/evil\.example\/companions/);
+  assert.match(callbackPolicy, /pluginCallbackHost = "thecompanion\.sh"/);
+  assert.match(callbackPolicy, /pluginCallbackPath = "\/v1\/companion-plugins\/oauth\/callback"/);
+  assert.match(callbackPolicy, /googleNativeStateQueryName = "native_state"/);
+  assert.match(callbackPolicy, /expectedCallbackURL/);
+  assert.match(callbackPolicy, /url\.user == nil/);
+  assert.match(callbackPolicy, /url\.password == nil/);
+  assert.match(entitlements, /com\.apple\.developer\.associated-domains/);
+  assert.match(entitlements, /applinks:thecompanion\.sh/);
+  assert.deepEqual(aasa, {
+    applinks: {
+      details: [{
+        appIDs: ["K28B69CWQ7.dev.companion.mobile", "K28B69CWQ7.dev.companion.mobile.dev"],
+        components: [{ "/": "/v1/companion-plugins/oauth/callback" }],
+      }],
+    },
+  });
+  assert.match(nextConfig, /source: "\/.well-known\/apple-app-site-association"/);
+  assert.match(nextConfig, /key: "Content-Type", value: "application\/json"/);
+  assert.match(nextConfig, /key: "Cache-Control", value: "public, max-age=300, must-revalidate"/);
+  assert.match(read("apps/ios/README.md"), /HTTP on a\s+loopback address, which cannot deliver an Apple Universal Link/i);
+  assert.match(design, /authenticated start response\s+provides the exact callback origin and signed state/);
+  assert.match(design, /production-signed app makes no general self-hosted-domain claim/);
+  assert.doesNotMatch(authFlow, /WKWebView|SFSafariViewController|ASWebAuthenticationSession/);
+});
+
 test("the chat scroll-to-bottom control floats over the transcript", () => {
   const chat = read("apps/ios/Companion/Screens/ChatView.swift");
   const transcript = chat.slice(
@@ -552,6 +662,32 @@ test("the staged reply fixture is armed only after the UI reader leaves the tail
   assert.match(chatView, /isNearBottom: readerIsNearBottom/);
   assert.match(chatView, /completedReveal\.followsTail, isNearBottom, !loadingEarlier/);
   assert.match(chatView, /source: \.poll,\s+animated: false/);
+});
+
+test("native routine history keeps private runs separate and reachable", () => {
+  const chat = read("apps/ios/Companion/Screens/ChatView.swift");
+  const resources = read(
+    "apps/ios/Companion/Screens/CompanionConnectedResourcesView.swift",
+  );
+  const history = read("apps/ios/Companion/Screens/CompanionRoutineHistoryView.swift");
+  const models = read("apps/ios/CompanionKit/Sources/CompanionKit/Models.swift");
+  const client = read("apps/ios/CompanionKit/Sources/CompanionKit/APIClient.swift");
+  const readme = read("apps/ios/README.md");
+
+  assert.match(chat, /if let routine = input\.entry\.routine/);
+  assert.match(chat, /Text\("Routine: \\\(routine\.name\)"\)/);
+  assert.match(chat, /CompanionRoutineHistoryTarget\([\s\S]*?runID: runID/);
+  assert.match(resources, /CompanionRoutineHistoryView\([\s\S]*?routineID: routine\.id/);
+  assert.match(resources, /Shows this routine's persisted runs and internal transcripts/);
+  assert.match(history, /Text\("Internal transcript"\)/);
+  assert.match(history, /case \.noOutput: return "Completed silently"/);
+  assert.match(history, /nextRunsCursor != nil/);
+  assert.match(history, /run\.nextEntryCursor != nil/);
+  assert.match(models, /case routine\s*[\r\n]/);
+  assert.match(models, /case runID = "run_id"/);
+  assert.match(client, /\/routines\/\\\(routine\)\/runs\?\\\(query\)/);
+  assert.match(client, /\/routine-runs\/\\\(run\)\?\\\(query\)/);
+  assert.match(readme, /compact clickable marker instead of a prompt bubble/);
 });
 
 test("GitHub Actions never installs or invokes XcodeBuildMCP", () => {

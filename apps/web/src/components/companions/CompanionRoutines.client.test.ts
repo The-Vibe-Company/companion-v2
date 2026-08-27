@@ -32,7 +32,11 @@ const { CompanionRoutines } = await import("./CompanionRoutines");
 const companionId = "11111111-1111-4111-8111-111111111111";
 const roots: Root[] = [];
 
-async function mount(memberTimezone?: string | null) {
+async function mount(
+  memberTimezone?: string | null,
+  routines: CompanionRoutine[] = [],
+  onOpenHistory: (routine: CompanionRoutine) => void = () => undefined,
+) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -41,10 +45,11 @@ async function mount(memberTimezone?: string | null) {
     root.render(React.createElement(CompanionRoutines, {
       orgId: "org-1",
       companionId,
-      routines: [],
+      routines,
       memberTimezone,
       canEdit: true,
       onChange: () => undefined,
+      onOpenHistory,
     }));
   });
   return container;
@@ -181,5 +186,33 @@ describe("Companion routine editor", () => {
       companionId,
       expect.objectContaining({ timezone: scheduleTimezone }),
     );
+  });
+
+  it("opens durable history from a connected routine row", async () => {
+    const routine: CompanionRoutine = {
+      id: "22222222-2222-4222-8222-222222222222",
+      companion_id: companionId,
+      name: "Morning brief",
+      prompt: "Summarize overnight activity.",
+      cron: "0 9 * * 1-5",
+      timezone: "UTC",
+      enabled: true,
+      next_fire_at: "2026-08-28T09:00:00.000Z",
+      last_fired_at: "2026-08-27T09:00:00.000Z",
+      last_error_code: null,
+      last_error_message: null,
+      last_error_at: null,
+      consecutive_failures: 0,
+      created_at: "2026-08-26T13:42:17.000Z",
+      updated_at: "2026-08-27T09:00:00.000Z",
+    };
+    const onOpenHistory = vi.fn();
+    const container = await mount("UTC", [routine], onOpenHistory);
+    const history = [...container.querySelectorAll("button")]
+      .find((button) => button.textContent === "History");
+
+    await act(async () => history?.click());
+
+    expect(onOpenHistory).toHaveBeenCalledWith(routine);
   });
 });

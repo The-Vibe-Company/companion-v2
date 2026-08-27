@@ -21,7 +21,14 @@ import {
   type AppendMessage,
   type AssistantRuntime,
 } from "@assistant-ui/react";
-import { ArrowUpIcon, PaperclipIcon, PlusIcon, SquareIcon, XIcon } from "lucide-react";
+import {
+  ArrowUpIcon,
+  ChevronRightIcon,
+  PaperclipIcon,
+  PlusIcon,
+  SquareIcon,
+  XIcon,
+} from "lucide-react";
 import type {
   Companion,
   CompanionThread as Thread,
@@ -111,6 +118,7 @@ interface TranscriptChrome {
   onSendClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   onStop: () => void;
   onCancelQueued: (turnId: string) => void;
+  onOpenRoutineRun?: (routine: NonNullable<CompanionTranscriptEntry["routine"]>) => void;
   dequeueingTurnId: string | null;
 }
 
@@ -251,7 +259,7 @@ function AssistantFrame({ children }: { children: ReactNode }) {
 
 function UserFrame({ children }: { children: ReactNode }) {
   const message = useTranscriptMessage();
-  const { canSend, onCancelQueued, dequeueingTurnId } = useChrome();
+  const { canSend, onCancelQueued, onOpenRoutineRun, dequeueingTurnId } = useChrome();
   const routine = message?.entries[0]?.routine ?? null;
   const trigger = message?.entries[0]?.trigger ?? null;
   const queued = message?.queued === true;
@@ -268,7 +276,17 @@ function UserFrame({ children }: { children: ReactNode }) {
           wrapper would make that percentage resolve against the bubble's own text. */}
       <div className={cn("flex w-full flex-col items-end", (message?.sending || queued) && "opacity-60")}>
         {routine ? (
-          <p className="chat-routine-header">Routine: {routine.name}</p>
+          routine.run_id && onOpenRoutineRun ? (
+            <button
+              type="button"
+              className="chat-routine-header chat-routine-header--button"
+              aria-label={`Open ${routine.name} routine run`}
+              onClick={() => onOpenRoutineRun(routine)}
+            >
+              Routine: {routine.name}
+              <ChevronRightIcon aria-hidden="true" className="size-3.5" />
+            </button>
+          ) : <p className="chat-routine-header">Routine: {routine.name}</p>
         ) : trigger ? (
           // A trigger's composed prompt carries an untrusted event payload nobody typed, so it is
           // masked behind the same compact header a routine fire gets.
@@ -400,6 +418,7 @@ export function CompanionTranscript({
   onSend,
   onStop,
   onCancelQueued,
+  onOpenRoutineRun,
   onThread,
 }: {
   companion: Companion;
@@ -421,6 +440,8 @@ export function CompanionTranscript({
   onStop?: (turnId: string) => Promise<void>;
   /** Remove a queued follow-up. Absent for a Viewer. */
   onCancelQueued?: (turnId: string) => Promise<void>;
+  /** Open the private history associated with a routine-origin marker. */
+  onOpenRoutineRun?: (routine: NonNullable<CompanionTranscriptEntry["routine"]>) => void;
   /** Replace the thread after a permission card is decided, without a full poll cycle. */
   onThread: (thread: Thread) => void;
 }) {
@@ -696,6 +717,7 @@ export function CompanionTranscript({
     onSendClick: swallowClickAfterPress,
     onStop: stopTurn,
     onCancelQueued: cancelQueued,
+    onOpenRoutineRun,
     dequeueingTurnId,
   }), [
     attachmentError,
@@ -711,6 +733,7 @@ export function CompanionTranscript({
     loading,
     onAttach,
     onRemoveAttachment,
+    onOpenRoutineRun,
     onStop,
     replying,
     sendOnPress,

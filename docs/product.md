@@ -63,8 +63,9 @@ slash-separated, multi-assigned, and may exist without skills.
    Skills, and selected member MCP accounts; send work and leave while it continues.
 9. Return to a durable thread that truthfully shows queued, active, input-needed, completed, failed,
    interrupted, or cancelled work, and explicitly Retry or Cancel an ambiguous attempt.
-10. See and create routine schedules, trigger activity, and Companion time references in the
-    member's stored timezone on web and native Apple clients.
+10. See and create routine schedules, open each run's private transcript from its compact chat
+    marker, and distinguish terminal relay, notify, no-output, and error outcomes on web and native
+    Apple clients. Time references render in the member's stored timezone.
 
 ## Hosted Companion boundary
 

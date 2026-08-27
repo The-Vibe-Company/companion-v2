@@ -140,7 +140,10 @@ struct CompanionMacLoginView: View {
                     at: authorization.proxyURL,
                     callbackScheme: CompanionMacAppConfig.callbackScheme
                 )
-                try await sessionStore.completeGoogleSignIn(callbackURL: callbackURL)
+                try await sessionStore.completeGoogleSignIn(
+                    callbackURL: callbackURL,
+                    callbackScheme: CompanionMacAppConfig.callbackScheme
+                )
             } catch CompanionMacGoogleSignInError.cancelled {
                 error = nil
             } catch let apiError as APIError where apiError.status == 0 {
