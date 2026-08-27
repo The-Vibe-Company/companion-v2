@@ -715,6 +715,35 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    func testTranscriptQuestionKeepsCardFocusedAndSubmitsAnswer() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-transcript-window-demo"]
+        app.launchEnvironment["COMPANION_TRANSCRIPT_DEMO_SHORT"] = "1"
+        app.launchEnvironment["COMPANION_TRANSCRIPT_DEMO_QUESTION"] = "1"
+        app.launch()
+
+        let composer = app.descendants(matching: .any)["chat.composer"]
+        let answerField = decisionAnswerField(in: app)
+        let answerButton = app.buttons["decision.answer.question-1"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 12))
+        XCTAssertTrue(answerField.waitForExistence(timeout: 5))
+
+        composer.tap()
+        composer.typeText("Keep this draft")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 2))
+
+        XCTAssertTrue(answerField.isHittable)
+        answerField.tap()
+        answerField.typeText("Ship the stable release")
+        XCTAssertEqual(composer.value as? String, "Keep this draft")
+        XCTAssertTrue(answerButton.isHittable)
+        answerButton.tap()
+
+        XCTAssertTrue(app.staticTexts["Ship the stable release"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["Answered"].exists)
+    }
+
+    @MainActor
     func testTranscriptWindowDemoLoadsEarlierMessages() throws {
         let app = XCUIApplication()
         app.launchArguments = ["-companion-transcript-window-demo"]

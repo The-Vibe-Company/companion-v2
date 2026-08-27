@@ -18,10 +18,12 @@ struct CompanionDecisionCard: View {
     let accentForeground: Color
     let onDecide: @MainActor (CompanionDecisionAction) async throws -> Void
     let onOpenPlugins: () -> Void
+    let onAnswerFocusChange: (Bool) -> Void
 
     @State private var answer = ""
     @State private var busy = false
     @State private var error: String?
+    @FocusState private var answerFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -143,9 +145,18 @@ struct CompanionDecisionCard: View {
                 TextField("Type an answer", text: $answer, axis: .vertical)
                     .lineLimit(1...5)
                     .textFieldStyle(.roundedBorder)
+                    .focused($answerFocused)
+                    .submitLabel(.send)
                     .disabled(busy)
                     .onChange(of: answer) { _, value in
                         if value.count > 8_000 { answer = String(value.prefix(8_000)) }
+                    }
+                    .onSubmit {
+                        guard !answerValue.isEmpty else { return }
+                        perform(.answer(answerValue))
+                    }
+                    .onChange(of: answerFocused) { _, focused in
+                        onAnswerFocusChange(focused)
                     }
                     .accessibilityLabel("Answer")
                     .accessibilityIdentifier("decision.answer-field.\(decision.requestID)")

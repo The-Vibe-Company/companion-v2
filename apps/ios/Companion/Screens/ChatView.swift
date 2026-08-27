@@ -53,6 +53,18 @@ private struct TranscriptKeyboardDismissGesture: UIGestureRecognizerRepresentabl
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         func gestureRecognizer(
             _ gestureRecognizer: UIGestureRecognizer,
+            shouldReceive touch: UITouch
+        ) -> Bool {
+            var view = touch.view
+            while let current = view {
+                if current is UITextField || current is UITextView { return false }
+                view = current.superview
+            }
+            return true
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
             shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
         ) -> Bool {
             true
@@ -114,6 +126,7 @@ struct ChatView: View {
     @State private var assistantTailReveal: AssistantTailReveal?
     @State private var assistantTailRevealTask: Task<Void, Never>?
     @State private var selectedToolDetail: ToolRunDetailRoute?
+    @State private var inputFocusCoordinator = CompanionChatInputFocusCoordinator()
 
     private let bottomProximityThreshold: CGFloat = 80
 
@@ -182,6 +195,14 @@ struct ChatView: View {
                                                     action: action
                                                 )
                                             },
+                                            onAnswerFocusChange: { focused in
+                                                guard let decision = entry.decision else { return }
+                                                decisionAnswerFocusChanged(
+                                                    focused,
+                                                    requestID: decision.requestID,
+                                                    eventID: entry.eventID
+                                                )
+                                            },
                                             onOpenPlugins: onPlugins,
                                             onReasoningExpansionChange: { isExpanded in
                                                 setReasoningExpanded(isExpanded, for: entry.eventID)
@@ -244,6 +265,7 @@ struct ChatView: View {
                     .accessibilityValue(transcriptScrollDiagnostics)
                     .gesture(
                         TranscriptKeyboardDismissGesture {
+                            inputFocusCoordinator.transcriptBackgroundTapped()
                             UIApplication.shared.sendAction(
                                 #selector(UIResponder.resignFirstResponder),
                                 to: nil,
@@ -566,6 +588,16 @@ struct ChatView: View {
                 sending: sending,
                 accent: visualTheme.accent,
                 accentForeground: visualTheme.accentForeground,
+                canAutomaticallyFocus: {
+                    inputFocusCoordinator.allowsAutomaticComposerFocus
+                },
+                onFocusChange: { focused in
+                    if focused {
+                        inputFocusCoordinator.userFocused(.composer)
+                    } else {
+                        inputFocusCoordinator.userBlurred(.composer)
+                    }
+                },
                 onThinkingTap: onThinkingTap,
                 onSend: send(content:attachments:)
             )
@@ -601,6 +633,24 @@ struct ChatView: View {
     private func nonEmptyReasoning(_ value: String?) -> Bool {
         guard let value else { return false }
         return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func decisionAnswerFocusChanged(
+        _ focused: Bool,
+        requestID: String,
+        eventID: String
+    ) {
+        let input = CompanionChatInputFocus.decision(requestID: requestID)
+        if focused {
+            inputFocusCoordinator.userFocused(input)
+            requestScroll(
+                to: .entry(eventID),
+                source: .inputFocus,
+                animated: false
+            )
+        } else {
+            inputFocusCoordinator.userBlurred(input)
+        }
     }
 
     private func setReasoningExpanded(_ isExpanded: Bool, for eventID: String) {
@@ -676,6 +726,7 @@ struct ChatView: View {
                 next = try await sessionStore.thread(companionID: companion.id)
             }
             guard refreshGate.accepts(generation) else { return }
+            reconcileInputFocus(from: previousThread, to: next)
             let readerWasNearBottom = isNearBottom
 
             let previousEntries = previousThread.map { transcriptEntries(in: $0) } ?? []
@@ -987,6 +1038,27 @@ struct ChatView: View {
             .sorted(by: transcriptOrder)
     }
 
+    private func reconcileInputFocus(
+        from previousThread: CompanionThread?,
+        to nextThread: CompanionThread
+    ) {
+        let previous = pendingDecisionRequestIDs(in: previousThread)
+        let next = pendingDecisionRequestIDs(in: nextThread)
+        for requestID in next.subtracting(previous) {
+            inputFocusCoordinator.pendingDecisionAppeared(requestID: requestID)
+        }
+        for requestID in previous.subtracting(next) {
+            inputFocusCoordinator.decisionSettled(requestID: requestID)
+        }
+    }
+
+    private func pendingDecisionRequestIDs(in thread: CompanionThread?) -> Set<String> {
+        Set((thread?.entries ?? []).compactMap { entry in
+            guard entry.decision?.status == .pending else { return nil }
+            return entry.decision?.requestID
+        })
+    }
+
     private func queuedEntries(in thread: CompanionThread?) -> [TranscriptEntry] {
         guard let thread else { return [] }
         return thread.entries
@@ -1242,6 +1314,7 @@ struct ChatView: View {
         decisionCatalog = .empty
         decisionCatalogLoaded = false
         selectedToolDetail = nil
+        inputFocusCoordinator.reset()
         loading = true
         loadingEarlier = false
         scrollCoordinator.reset(
@@ -1354,6 +1427,7 @@ struct ChatView: View {
 
             refreshGate.invalidate()
             threadProjection.replaceAfterMutation(with: next)
+            inputFocusCoordinator.decisionSettled(requestID: requestID)
             _ = observeActualTail(of: next, source: .poll)
             let nextEntries = transcriptEntries(in: next)
             var nextWindow = transcriptWindow
@@ -1760,6 +1834,7 @@ private struct TranscriptRowInput: Equatable {
 private struct TranscriptRowView: View, @MainActor Equatable {
     let input: TranscriptRowInput
     let onDecide: @MainActor (CompanionDecisionAction) async throws -> Void
+    let onAnswerFocusChange: (Bool) -> Void
     let onOpenPlugins: () -> Void
     let onReasoningExpansionChange: (Bool) -> Void
     let onOpenToolDetails: (ToolRunDetailRoute) -> Void
@@ -1779,7 +1854,8 @@ private struct TranscriptRowView: View, @MainActor Equatable {
                 accent: visualTheme.accent,
                 accentForeground: visualTheme.accentForeground,
                 onDecide: onDecide,
-                onOpenPlugins: onOpenPlugins
+                onOpenPlugins: onOpenPlugins,
+                onAnswerFocusChange: onAnswerFocusChange
             )
         } else if input.entry.role == "tool", let tool = input.entry.tool {
             CompanionToolRunCard(tool: tool, eventID: input.entry.eventID) {

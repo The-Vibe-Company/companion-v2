@@ -51,6 +51,50 @@ public struct CompanionThreadProjection: Equatable, Sendable {
     }
 }
 
+public enum CompanionChatInputFocus: Equatable, Sendable {
+    case composer
+    case decision(requestID: String)
+}
+
+/// Arbitrates the two editable surfaces in chat without making a newly polled decision interrupt
+/// an Owner or Editor who is already composing a message.
+public struct CompanionChatInputFocusCoordinator: Equatable, Sendable {
+    public private(set) var focusedInput: CompanionChatInputFocus?
+
+    public init(focusedInput: CompanionChatInputFocus? = nil) {
+        self.focusedInput = focusedInput
+    }
+
+    public var allowsAutomaticComposerFocus: Bool {
+        guard case .decision = focusedInput else { return true }
+        return false
+    }
+
+    public mutating func userFocused(_ input: CompanionChatInputFocus) {
+        focusedInput = input
+    }
+
+    public mutating func userBlurred(_ input: CompanionChatInputFocus) {
+        if focusedInput == input { focusedInput = nil }
+    }
+
+    public mutating func pendingDecisionAppeared(requestID: String) {
+        // Arrival alone is not user intent. Preserve an in-progress composer draft and keyboard.
+    }
+
+    public mutating func decisionSettled(requestID: String) {
+        userBlurred(.decision(requestID: requestID))
+    }
+
+    public mutating func transcriptBackgroundTapped() {
+        focusedInput = nil
+    }
+
+    public mutating func reset() {
+        focusedInput = nil
+    }
+}
+
 /// The two presentation modes of a transcript. This is deliberately separate from the server's
 /// unread watermark: a reader can be looking at history while the Companion is still producing
 /// newer entries.
@@ -69,6 +113,7 @@ public enum CompanionScrollRequestSource: String, Equatable, Sendable {
     case userLatest
     case localSend
     case reasoning
+    case inputFocus
 }
 
 public enum CompanionScrollDestination: Equatable, Sendable {
@@ -181,7 +226,7 @@ public struct CompanionScrollCoordinator: Equatable, Sendable {
                   followState == .followingTail,
                   pendingRequest == nil else { return changed }
             requestBottom(source: .poll, animated: false)
-        case .restoration, .loadEarlier, .userLatest, .localSend, .reasoning:
+        case .restoration, .loadEarlier, .userLatest, .localSend, .reasoning, .inputFocus:
             break
         }
         return changed
@@ -219,7 +264,8 @@ public struct CompanionScrollCoordinator: Equatable, Sendable {
         animated: Bool = false
     ) {
         programmaticBottomScrollOutstanding = false
-        if source == .restoration || source == .loadEarlier || source == .reasoning {
+        if source == .restoration || source == .loadEarlier || source == .reasoning
+            || source == .inputFocus {
             followState = .userReading
         }
         enqueue(
@@ -242,7 +288,8 @@ public struct CompanionScrollCoordinator: Equatable, Sendable {
             programmaticBottomScrollOutstanding = false
             if request.source == .restoration
                 || request.source == .loadEarlier
-                || request.source == .reasoning {
+                || request.source == .reasoning
+                || request.source == .inputFocus {
                 followState = .userReading
             }
         }
@@ -353,7 +400,8 @@ public struct CompanionScrollCoordinator: Equatable, Sendable {
         case .reasoning: return 40
         case .loadEarlier: return 50
         case .restoration: return 60
-        case .userLatest: return 70
+        case .inputFocus: return 70
+        case .userLatest: return 80
         }
     }
 }
