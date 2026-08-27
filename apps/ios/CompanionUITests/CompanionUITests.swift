@@ -738,6 +738,9 @@ final class CompanionUITests: XCTestCase {
 
         let unseen = app.buttons["chat.scroll-to-bottom"]
         XCTAssertTrue(unseen.waitForExistence(timeout: 4))
+        let stageReply = app.buttons["demo.stage-reply"]
+        XCTAssertTrue(stageReply.waitForExistence(timeout: 3))
+        stageReply.tap()
         let unseenLabel = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "value == %@", "1 new reply"),
             object: unseen

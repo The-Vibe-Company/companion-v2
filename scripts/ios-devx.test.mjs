@@ -370,6 +370,19 @@ test("CI tests iOS without secrets and keeps the live provider diagnostic manual
   assert.match(e2e, /node scripts\/ios-e2e-fixture\.mjs cleanup/);
 });
 
+test("the staged reply fixture is armed only after the UI reader leaves the tail", () => {
+  const demo = read("apps/ios/Companion/Screens/CompanionTranscriptWindowDemoView.swift");
+  const uiTests = read("apps/ios/CompanionUITests/CompanionUITests.swift");
+
+  assert.match(demo, /Button\("Stage reply"\)/);
+  assert.match(demo, /accessibilityIdentifier\("demo\.stage-reply"\)/);
+  assert.match(demo, /guard stagesNextPoll else \{ return initial \}/);
+  assert.match(uiTests, /let unseen = app\.buttons\["chat\.scroll-to-bottom"\]/);
+  assert.match(uiTests, /let stageReply = app\.buttons\["demo\.stage-reply"\]/);
+  assert.match(uiTests, /stageReply\.tap\(\)/);
+  assert.match(uiTests, /value == %@", "1 new reply"/);
+});
+
 test("GitHub Actions never installs or invokes XcodeBuildMCP", () => {
   const workflows = readdirSync(resolve(ROOT, ".github/workflows"))
     .filter((file) => file.endsWith(".yml") || file.endsWith(".yaml"));

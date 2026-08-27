@@ -35,6 +35,16 @@ struct CompanionTranscriptWindowDemoView: View {
                 }
             }
         }
+        .toolbar {
+            if let stagedFixture = CompanionTranscriptWindowDemoFixtures.stagedFixture {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Stage reply") {
+                        stagedFixture.stageNextPoll()
+                    }
+                    .accessibilityIdentifier("demo.stage-reply")
+                }
+            }
+        }
     }
 
     private var selectedCompanion: CompanionSummary {
@@ -222,13 +232,14 @@ private enum CompanionTranscriptWindowDemoFixtures {
         ]
     }
 
+    static let stagedFixture = usesStagedPoll
+        ? DemoStagedThreadFixture(initial: thread)
+        : nil
+
     static let services: ChatServices = {
         let fixtureThread = thread
         let fixtureCompanion = companion
         let secondFixtureCompanion = secondCompanion
-        let stagedFixture = usesStagedPoll
-            ? DemoStagedThreadFixture(initial: fixtureThread)
-            : nil
         return ChatServices(
             thread: { companionID in
                 if companionID == fixtureCompanion.id, let stagedFixture {
@@ -254,17 +265,18 @@ private enum CompanionTranscriptWindowDemoFixtures {
 @MainActor
 private final class DemoStagedThreadFixture {
     private let initial: CompanionThread
-    private var pollCount = 0
+    private var stagesNextPoll = false
 
     init(initial: CompanionThread) {
         self.initial = initial
     }
 
+    func stageNextPoll() {
+        stagesNextPoll = true
+    }
+
     func nextThread() -> CompanionThread {
-        pollCount += 1
-        // Keep the first silent poll unchanged so the UI test can deliberately leave the tail
-        // before the following four-second poll delivers the staged revision.
-        guard pollCount >= 3 else { return initial }
+        guard stagesNextPoll else { return initial }
 
         let encoded = try! JSONEncoder().encode(initial)
         var payload = try! JSONSerialization.jsonObject(with: encoded) as! [String: Any]
