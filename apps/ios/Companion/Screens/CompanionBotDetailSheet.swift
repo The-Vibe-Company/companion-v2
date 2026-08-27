@@ -21,8 +21,10 @@ struct CompanionSettingsView: View {
     @State private var showingNewRoutine = false
     @State private var routinesLoading = true
     @State private var savingIdentity = false
+    @State private var savingNotifications = false
     @State private var error: String?
     @AppStorage private var notificationsEnabled: Bool
+    @AppStorage(CompanionPreferenceKeys.notifications) private var globalNotificationsEnabled = true
     @FocusState private var titleFocused: Bool
 
     init(
@@ -41,7 +43,7 @@ struct CompanionSettingsView: View {
         self.services = services
         _model = State(initialValue: CompanionBotDetailSheetModel(companion: companion))
         _notificationsEnabled = AppStorage(
-            wrappedValue: true,
+            wrappedValue: !companion.muted,
             CompanionPreferenceKeys.notificationPrefix + companion.id
         )
     }
@@ -63,6 +65,7 @@ struct CompanionSettingsView: View {
                     instructionsCard
                     routinesSection
                     notificationsCard
+                    legacySettingsCard
 
                     if !canEdit {
                         Text("You have read-only access to this Bot.")
@@ -81,9 +84,13 @@ struct CompanionSettingsView: View {
         .toolbar(.hidden, for: .navigationBar)
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
-        .task(id: companion.id) { await loadRoutines() }
+        .task(id: companion.id) {
+            synchronizeNotificationPreference(with: companion)
+            await loadRoutines()
+        }
         .onChange(of: companion) { _, updated in
             model = CompanionBotDetailSheetModel(companion: updated, routines: model.routines)
+            synchronizeNotificationPreference(with: updated)
         }
         .onChange(of: titleFocused) { _, focused in
             if !focused, editingTitle { Task { await saveIdentity() } }
@@ -131,7 +138,7 @@ struct CompanionSettingsView: View {
         }
         .buttonStyle(.plain)
         .disabled(!canEdit)
-        .accessibilityLabel(canEdit ? "Change (model.name)'s character" : "(model.name)'s character")
+        .accessibilityLabel(canEdit ? "Change \(model.name)'s character" : "\(model.name)'s character")
         .accessibilityIdentifier("companion.details.character")
     }
 
@@ -296,13 +303,88 @@ struct CompanionSettingsView: View {
 
     private var notificationsCard: some View {
         CompanionSheetCard {
-            CompanionSheetToggleRow(title: "Notifications", isOn: $notificationsEnabled)
-                .disabled(!canEdit)
-                .onChange(of: notificationsEnabled) { _, enabled in
-                    guard canEdit else { return }
-                    UISelectionFeedbackGenerator().selectionChanged()
-                    if enabled { Task { await notifications.requestAuthorizationAndRegister() } }
-                }
+            CompanionSheetToggleRow(title: "Notifications", isOn: notificationBinding)
+                .disabled(!canEdit || savingNotifications)
+        }
+    }
+
+    private var legacySettingsCard: some View {
+        CompanionSheetCard {
+            NavigationLink {
+                CompanionLegacySettingsView(
+                    companion: model.companion,
+                    onSaved: { updated in apply(updated) },
+                    onDeletionStarted: onDeletionStarted,
+                    onDeletionAccepted: onDeletionAccepted,
+                    onDeletionFailed: onDeletionFailed,
+                    services: services
+                )
+            } label: {
+                CompanionSheetValueRow(
+                    title: "Companion settings",
+                    detail: "Provider, model, resources, and deletion",
+                    symbol: "gearshape"
+                )
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("companion.details.settings")
+        }
+    }
+
+    private var notificationBinding: Binding<Bool> {
+        Binding(
+            get: { notificationsEnabled },
+            set: { enabled in
+                guard canEdit, !savingNotifications, enabled != notificationsEnabled else { return }
+                let previous = notificationsEnabled
+                savingNotifications = true
+                notificationsEnabled = enabled
+                UISelectionFeedbackGenerator().selectionChanged()
+                Task { await saveNotifications(enabled: enabled, previous: previous) }
+            }
+        )
+    }
+
+    private func synchronizeNotificationPreference(
+        with companion: CompanionSummary,
+        whileSaving: Bool = false
+    ) {
+        guard whileSaving || !savingNotifications else { return }
+        notificationsEnabled = !companion.muted
+    }
+
+    private func saveNotifications(enabled: Bool, previous: Bool) async {
+        guard canEdit else {
+            notificationsEnabled = previous
+            savingNotifications = false
+            return
+        }
+        error = nil
+        defer { savingNotifications = false }
+
+        do {
+            let updated: CompanionSummary
+            if let updateMemberState = services?.updateMemberState {
+                updated = try await updateMemberState(
+                    model.companion.id,
+                    CompanionMemberStatePatch(muted: !enabled)
+                )
+            } else {
+                updated = try await sessionStore.updateCompanionMemberState(
+                    companionID: model.companion.id,
+                    patch: CompanionMemberStatePatch(muted: !enabled)
+                )
+            }
+            apply(updated, forceNotificationSync: true)
+            if enabled && !updated.muted && globalNotificationsEnabled {
+                await notifications.requestAuthorizationAndRegister()
+            }
+        } catch {
+            notificationsEnabled = previous
+            self.error = companionDisplayMessage(
+                error,
+                fallback: "Notification settings could not be saved."
+            )
         }
     }
 
@@ -361,9 +443,10 @@ struct CompanionSettingsView: View {
         return try await sessionStore.updateCompanion(companionID: model.companion.id, input: input)
     }
 
-    private func apply(_ updated: CompanionSummary) {
+    private func apply(_ updated: CompanionSummary, forceNotificationSync: Bool = false) {
         let reconciled = updated.preservingListProjection(from: model.companion)
         model = CompanionBotDetailSheetModel(companion: reconciled, routines: model.routines)
+        synchronizeNotificationPreference(with: reconciled, whileSaving: forceNotificationSync)
         onSaved(reconciled)
     }
 
@@ -697,10 +780,14 @@ private struct CompanionRoutineDetailSheet: View {
                                 CompanionRoutineRunSheet(
                                     companionID: companionID,
                                     run: run,
-                                    services: services
+                                    services: services,
+                                    memberTimezone: memberTimezone
                                 )
                             } label: {
-                                CompanionRoutineRunRow(run: run)
+                                CompanionRoutineRunRow(
+                                    run: run,
+                                    memberTimezone: memberTimezone
+                                )
                             }
                             .buttonStyle(.plain)
                         }
@@ -716,10 +803,15 @@ private struct CompanionRoutineDetailSheet: View {
             }
         }
     }
+
+    private var memberTimezone: String {
+        sessionStore.memberTimezone ?? MemberTimezone.deviceIdentifier
+    }
 }
 
 private struct CompanionRoutineRunRow: View {
     let run: CompanionRoutineRunSummary
+    let memberTimezone: String
 
     var body: some View {
         HStack(spacing: 12) {
@@ -731,7 +823,7 @@ private struct CompanionRoutineRunRow: View {
                 Text(statusLabel)
                     .font(.system(size: 17, weight: .semibold))
                     .foregroundStyle(CompanionIOSTheme.textPrimary)
-                Text(MemberTimezone.formatInstant(run.createdAt, in: nil) ?? run.createdAt)
+                Text(MemberTimezone.formatInstant(run.createdAt, in: memberTimezone) ?? run.createdAt)
                     .font(.system(size: 15))
                     .foregroundStyle(CompanionIOSTheme.textSecondary)
             }
@@ -774,6 +866,7 @@ private struct CompanionRoutineRunSheet: View {
     let companionID: String
     let run: CompanionRoutineRunSummary
     let services: CompanionSettingsServices?
+    let memberTimezone: String
     @State private var store: CompanionRoutineRunDetailStore?
 
     var body: some View {
@@ -781,7 +874,7 @@ private struct CompanionRoutineRunSheet: View {
             ScrollView {
                 VStack(spacing: 20) {
                     CompanionSheetHeader(title: "Routine run", leadingStyle: .back) { dismiss() }
-                    CompanionRoutineRunRow(run: run)
+                    CompanionRoutineRunRow(run: run, memberTimezone: memberTimezone)
 
                     if let store {
                         if let message = store.errorMessage, store.entries.isEmpty {

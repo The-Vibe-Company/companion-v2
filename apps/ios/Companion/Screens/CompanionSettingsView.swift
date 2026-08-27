@@ -11,6 +11,7 @@ struct CompanionSettingsServices {
     let updatePluginSelection: ([String]) async throws -> CompanionSummary
     let loadCompanion: () async throws -> CompanionSummary
     let restart: (CompanionRuntimeRestartTarget, UUID) async throws -> CompanionOperationSummary
+    let updateMemberState: ((String, CompanionMemberStatePatch) async throws -> CompanionSummary)?
     let listRoutines: (() async throws -> [CompanionRoutine])?
     let createRoutine: ((CreateCompanionRoutineInput) async throws -> CompanionRoutine)?
     let updateRoutine: ((String, UpdateCompanionRoutineInput) async throws -> CompanionRoutine)?
@@ -26,6 +27,7 @@ struct CompanionSettingsServices {
         updatePluginSelection: @escaping ([String]) async throws -> CompanionSummary,
         loadCompanion: @escaping () async throws -> CompanionSummary,
         restart: @escaping (CompanionRuntimeRestartTarget, UUID) async throws -> CompanionOperationSummary,
+        updateMemberState: ((String, CompanionMemberStatePatch) async throws -> CompanionSummary)? = nil,
         listRoutines: (() async throws -> [CompanionRoutine])? = nil,
         createRoutine: ((CreateCompanionRoutineInput) async throws -> CompanionRoutine)? = nil,
         updateRoutine: ((String, UpdateCompanionRoutineInput) async throws -> CompanionRoutine)? = nil,
@@ -40,6 +42,7 @@ struct CompanionSettingsServices {
         self.updatePluginSelection = updatePluginSelection
         self.loadCompanion = loadCompanion
         self.restart = restart
+        self.updateMemberState = updateMemberState
         self.listRoutines = listRoutines
         self.createRoutine = createRoutine
         self.updateRoutine = updateRoutine
@@ -48,7 +51,7 @@ struct CompanionSettingsServices {
     }
 }
 
-private struct LegacyCompanionSettingsView: View {
+struct CompanionLegacySettingsView: View {
     @Environment(SessionStore.self) private var sessionStore
 
     let companion: CompanionSummary
@@ -563,7 +566,14 @@ private enum CompanionSettingsDemoFixtures {
                 companion(access: access, selectedMCPAccountIDs: selectedIDs)
             },
             loadCompanion: { companion(access: access) },
-            restart: { target, _ in restartOperation(target) }
+            restart: { target, _ in restartOperation(target) },
+            updateMemberState: { _, patch in
+                companion(
+                    access: access,
+                    selectedMCPAccountIDs: ["55555555-5555-4555-8555-555555555555"],
+                    muted: patch.muted ?? false
+                )
+            }
         )
     }
 
@@ -643,7 +653,8 @@ private enum CompanionSettingsDemoFixtures {
 
     private static func companion(
         access: CompanionAccess,
-        selectedMCPAccountIDs: [String]
+        selectedMCPAccountIDs: [String],
+        muted: Bool = false
     ) -> CompanionSummary {
         let object: [String: Any] = [
             "id": "c96ab360-00f3-4497-a51a-51442db8add1",
@@ -655,6 +666,7 @@ private enum CompanionSettingsDemoFixtures {
             "icon": ["shape": 6, "mouth": 1, "accessory": 6, "color": 2],
             "access": access.rawValue,
             "hidden": false,
+            "muted": muted,
             "unread": false,
             "last_message": NSNull(),
             "runtime": [
