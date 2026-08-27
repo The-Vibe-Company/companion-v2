@@ -932,6 +932,13 @@
       "when": 1791220000000,
       "tag": "0132_member_timezone",
       "breakpoints": true
+    },
+    {
+      "idx": 133,
+      "version": "7",
+      "when": 1791306400000,
+      "tag": "0133_companion_tool_identity",
+      "breakpoints": true
     }
   ]
 }

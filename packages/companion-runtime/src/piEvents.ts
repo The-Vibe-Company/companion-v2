@@ -265,7 +265,12 @@ const MAX_ASSISTANT = 100_000;
 const MAX_REASONING = 16_000;
 const MAX_REASONING_BYTES = 48_000;
 const MAX_DECISION_DETAIL = 8_000;
-/** A delegated run's task, and then its progress, are the only tool payloads a transcript keeps. */
+/** The shared contract and SQL projection both reject a longer disclosed tool payload. */
+const MAX_TOOL_DETAIL = 16_000;
+/** Provider JSON stays far below the broker line cap once this projection has enough to explain it. */
+const MAX_TOOL_PAYLOAD_DEPTH = 24;
+const MAX_TOOL_PAYLOAD_NODES = 512;
+/** Delegated progress stays tighter because it can update repeatedly during one long-running tool. */
 const MAX_SUBAGENT_DETAIL = 8_000;
 /** One line naming the child agent. Anything longer is a payload, not a name. */
 const MAX_SUBAGENT_AGENT = 120;
@@ -285,6 +290,30 @@ function withoutOrphanSurrogate(value: string, edge: "start" | "end"): string {
   }
   const first = value.charCodeAt(0);
   return first >= 0xdc00 && first <= 0xdfff ? value.slice(1) : value;
+}
+
+/** PostgreSQL jsonb rejects U+0000 and unpaired UTF-16 surrogates anywhere in a string. */
+function postgresSafeText(value: string): string {
+  let safe = "";
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code === 0) {
+      safe += "\uFFFD";
+      continue;
+    }
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        safe += value.slice(index, index + 2);
+        index += 1;
+      } else {
+        safe += "\uFFFD";
+      }
+      continue;
+    }
+    safe += code >= 0xdc00 && code <= 0xdfff ? "\uFFFD" : value.charAt(index);
+  }
+  return safe;
 }
 
 function bounded(value: string, maximum: number): string {
@@ -406,14 +435,131 @@ function assistantProjection(
   };
 }
 
-/** The argument object of a tool call, under whichever of Pi's names carries it. */
-function toolArguments(event: Record<string, unknown>): Record<string, unknown> | null {
-  for (const candidate of [event.args, event.arguments, event.input, event.toolInput]) {
-    if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
-      return candidate as Record<string, unknown>;
-    }
+function dictionary(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+type ToolPayload = string | number | boolean | ToolPayload[] | { [key: string]: ToolPayload };
+
+/** Known envelopes used by Pi RPC and OpenAI-compatible function-call streams. */
+function toolCallEnvelopes(event: Record<string, unknown>): Record<string, unknown>[] {
+  const envelopes = [
+    event.toolCall,
+    event.tool_call,
+    event.functionCall,
+    event.function_call,
+    event.tool,
+    event.call,
+  ].map(dictionary).filter((value): value is Record<string, unknown> => Boolean(value));
+  const envelopeCount = envelopes.length;
+  for (let index = 0; index < envelopeCount; index += 1) {
+    const callable = dictionary(envelopes[index]?.function);
+    if (callable) envelopes.push(callable);
+  }
+  return envelopes;
+}
+
+function toolEventName(event: Record<string, unknown>): string | null {
+  const envelopes = toolCallEnvelopes(event);
+  const candidates = [
+    event.toolName,
+    event.tool_name,
+    ...envelopes.flatMap((envelope) => [envelope.toolName, envelope.tool_name, envelope.name]),
+    event.name,
+  ].map((value) => {
+    if (typeof value !== "string") return null;
+    return value.trim() && !/[\r\n]/.test(value) ? value : null;
+  }).filter((value): value is string => Boolean(value));
+  return candidates.find((value) => value.toLowerCase() !== "tool") ?? candidates[0] ?? null;
+}
+
+function toolEventCallId(event: Record<string, unknown>): string | null {
+  const envelopes = toolCallEnvelopes(event);
+  for (const candidate of [
+    event.toolCallId,
+    event.tool_call_id,
+    event.callId,
+    ...envelopes.flatMap((envelope) => [
+      envelope.toolCallId,
+      envelope.tool_call_id,
+      envelope.callId,
+      envelope.id,
+    ]),
+  ]) {
+    const callId = hashedCallId(candidate);
+    if (callId) return callId;
   }
   return null;
+}
+
+interface ToolPayloadBudget {
+  remainingNodes: number;
+}
+
+/** Parse serialized function arguments without requiring one provider adapter's envelope. */
+function normalizedToolPayload(
+  value: unknown,
+  parseSerialized = true,
+  depth = 0,
+  budget: ToolPayloadBudget = { remainingNodes: MAX_TOOL_PAYLOAD_NODES },
+): ToolPayload | null {
+  if (depth > MAX_TOOL_PAYLOAD_DEPTH || budget.remainingNodes <= 0) return null;
+  budget.remainingNodes -= 1;
+  if (typeof value === "string") {
+    const normalized = value.trim();
+    if (!normalized) return null;
+    if (parseSerialized) {
+      try {
+        return normalizedToolPayload(JSON.parse(normalized), false, depth, budget) ?? value;
+      } catch {
+        return value;
+      }
+    }
+    return value;
+  }
+  if (typeof value === "number" || typeof value === "boolean") return value;
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => normalizedToolPayload(item, false, depth + 1, budget))
+      .filter((item): item is ToolPayload => item !== null);
+  }
+  const record = dictionary(value);
+  if (record) {
+    const normalized: { [key: string]: ToolPayload } = {};
+    for (const [key, item] of Object.entries(record)) {
+      const parsed = normalizedToolPayload(item, false, depth + 1, budget);
+      if (parsed !== null) normalized[key] = parsed;
+    }
+    return normalized;
+  }
+  return null;
+}
+
+/** Tool arguments under Pi RPC or a raw OpenAI-compatible function-call envelope. */
+function toolArguments(event: Record<string, unknown>): ToolPayload | null {
+  const envelopes = toolCallEnvelopes(event);
+  for (const candidate of [
+    event.args,
+    event.arguments,
+    event.input,
+    event.toolInput,
+    ...envelopes.flatMap((envelope) => [
+      envelope.args,
+      envelope.arguments,
+      envelope.input,
+      envelope.toolInput,
+    ]),
+  ]) {
+    const normalized = normalizedToolPayload(candidate);
+    if (normalized !== null) return normalized;
+  }
+  return null;
+}
+
+function toolArgumentObject(event: Record<string, unknown>): Record<string, unknown> | null {
+  return dictionary(toolArguments(event));
 }
 
 function firstText(
@@ -423,7 +569,7 @@ function firstText(
   if (!source) return null;
   for (const key of keys) {
     const value = source[key];
-    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "string" && value.trim()) return value;
   }
   return null;
 }
@@ -437,7 +583,7 @@ function firstText(
  * shape is what this reads first.
  */
 function payloadText(value: unknown): string | null {
-  if (typeof value === "string") return value.trim() || null;
+  if (typeof value === "string") return value.trim() ? value : null;
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const blocks = (value as Record<string, unknown>).content;
   if (!Array.isArray(blocks)) return null;
@@ -448,9 +594,145 @@ function payloadText(value: unknown): string | null {
         && typeof (block as Record<string, unknown>).text === "string"
         ? (block as Record<string, unknown>).text as string
         : "")
-    .join("")
-    .trim();
-  return text || null;
+    .join("");
+  return text.trim() ? text : null;
+}
+
+function printableToolPayload(value: ToolPayload | null, preferContentText = false): string | null {
+  if (value === null || value === undefined) return null;
+  if (preferContentText) {
+    const content = payloadText(value);
+    if (content) return content;
+  }
+  if (typeof value === "string") return value.trim() || null;
+  try {
+    return JSON.stringify(value, null, 2)?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function decodedJsonEscapes(value: string): string | null {
+  const escapes: Record<string, string> = {
+    "\"": "\"",
+    "\\": "\\",
+    "/": "/",
+    b: "\b",
+    f: "\f",
+    n: "\n",
+    r: "\r",
+    t: "\t",
+  };
+  let decoded = value;
+  for (let pass = 0; pass < 8; pass += 1) {
+    const next = decoded
+      .replace(/\\u([0-9a-f]{4})/gi, (_match, hex: string) =>
+        String.fromCharCode(Number.parseInt(hex, 16)))
+      .replace(/\\(["\\/bfnrt])/g, (_match, escaped: string) => escapes[escaped] ?? "");
+    if (next === decoded) return decoded;
+    decoded = next;
+  }
+  // A provider can nest escaping arbitrarily. Bound the work, but never disclose a partially
+  // decoded value whose remaining layer could still hide an exact credential.
+  return null;
+}
+
+/** Fail closed when JSON escaping is the only thing hiding credential material. */
+function redactDisclosedToolText(value: string, redact: RuntimeVisibleTextRedactor): string {
+  const decoded = decodedJsonEscapes(value);
+  if (decoded === null || (decoded !== value && redact(decoded) !== decoded)) return "";
+  return postgresSafeText(redact(value));
+}
+
+/**
+ * Redact structured payloads before JSON escaping them. Exact credentials can contain quotes or
+ * backslashes, and once escaped their byte sequence no longer matches the turn-local dictionary.
+ */
+function redactedToolPayload(
+  value: ToolPayload | null,
+  redact: RuntimeVisibleTextRedactor,
+  depth = 0,
+): ToolPayload | null {
+  if (value === null || depth > MAX_TOOL_PAYLOAD_DEPTH) return null;
+  if (typeof value === "string") return redactDisclosedToolText(value, redact);
+  if (typeof value === "number" || typeof value === "boolean") return value;
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => redactedToolPayload(item, redact, depth + 1))
+      .filter((item): item is ToolPayload => item !== null);
+  }
+  const scrubbed: { [key: string]: ToolPayload } = {};
+  for (const [key, item] of Object.entries(value)) {
+    const safeKey = redactDisclosedToolText(key, redact).trim();
+    if (!safeKey) continue;
+    const safeItem = redactedToolPayload(item, redact, depth + 1);
+    if (safeItem !== null) scrubbed[safeKey] = safeItem;
+  }
+  return scrubbed;
+}
+
+function firstScalarText(value: unknown, depth = 0): string | null {
+  if (depth > MAX_TOOL_PAYLOAD_DEPTH) return null;
+  if (typeof value === "string") return value.trim() ? value : null;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const text = firstScalarText(item, depth + 1);
+      if (text) return text;
+    }
+    return null;
+  }
+  const record = dictionary(value);
+  if (!record) return null;
+  for (const key of ["command", "cmd", "script", "path", "file", "filePath", "url", "query"]) {
+    const text = firstScalarText(record[key], depth + 1);
+    if (text) return text;
+  }
+  for (const item of Object.values(record)) {
+    const text = firstScalarText(item, depth + 1);
+    if (text) return text;
+  }
+  return null;
+}
+
+function disclosedToolDetail(
+  label: "Arguments" | "Result",
+  value: ToolPayload | null,
+  redact: RuntimeVisibleTextRedactor,
+  preferContentText = false,
+): string | null {
+  const printable = printableToolPayload(redactedToolPayload(value, redact), preferContentText);
+  if (!printable) return null;
+  const scrubbed = redactDisclosedToolText(printable, redact).trim();
+  return scrubbed ? bounded(`${label}\n${scrubbed}`, MAX_TOOL_DETAIL) : null;
+}
+
+function ordinaryToolStart(
+  event: Record<string, unknown>,
+  fallbackTitle: string,
+  redact: RuntimeVisibleTextRedactor,
+): { title: string; detail: string | null } {
+  const args = toolArguments(event);
+  const headline = firstScalarText(args);
+  const scrubbedHeadline = headline ? firstLine(redactDisclosedToolText(headline, redact)).trim() : "";
+  return {
+    title: scrubbedHeadline ? bounded(scrubbedHeadline, MAX_TITLE) : fallbackTitle,
+    detail: disclosedToolDetail("Arguments", args, redact),
+  };
+}
+
+function toolResult(event: Record<string, unknown>): ToolPayload | null {
+  for (const candidate of [
+    event.result,
+    event.toolResult,
+    event.tool_result,
+    event.output,
+    event.content,
+  ]) {
+    const normalized = normalizedToolPayload(candidate, false);
+    if (normalized !== null) return normalized;
+  }
+  return null;
 }
 
 /** The newest thing a running tool has said about itself, under any shape Pi reports it in. */
@@ -482,7 +764,7 @@ function subagentStart(
   fallbackTitle: string,
   redact: RuntimeVisibleTextRedactor,
 ): { title: string; detail: string | null } {
-  const args = toolArguments(event);
+  const args = toolArgumentObject(event);
   const rawAgent = firstText(args, ["agent", "agent_name", "agentName", "name"]);
   const rawTask = firstText(args, ["task", "prompt", "description", "instructions"]);
   // Redact before cutting, never after. The turn dictionary removes exact values by whole-string
@@ -490,9 +772,12 @@ function subagentStart(
   // surviving half is what gets persisted. `decisionRequestKey` refuses provider input for the same
   // reason; here there is a safe answer, which is to scrub first and bound the scrubbed text.
   const agent = rawAgent
-    ? withoutOrphanSurrogate(firstLine(redact(rawAgent)).slice(0, MAX_SUBAGENT_AGENT), "end")
+    ? withoutOrphanSurrogate(
+      firstLine(redactDisclosedToolText(rawAgent, redact)).slice(0, MAX_SUBAGENT_AGENT),
+      "end",
+    )
     : null;
-  const task = rawTask ? redact(rawTask) : null;
+  const task = rawTask ? redactDisclosedToolText(rawTask, redact) : null;
   const headline = [agent, task ? firstLine(task) : null].filter(Boolean).join(": ");
   return {
     title: headline ? bounded(headline, MAX_TITLE) : fallbackTitle,
@@ -507,11 +792,11 @@ function firstLine(value: string): string {
 /**
  * One tool run, as the transcript stores it.
  *
- * Arguments are never persisted for a tool the catalog only knows generically: a shell command or a
- * file path is the payload most likely to carry a credential, and the card says enough without it.
- * A delegated agent is the exception, because "a tool ran for six minutes" tells a reader nothing
- * about what their Companion is doing while it runs. So a subagent run carries its task and its
- * progress, redacted and bounded, and settles in place through the shared `call_id`.
+ * Pi 0.84.2 normalizes provider adapters to top-level `toolName`, `args`, and `result`, but older or
+ * alternate RPC envelopes can still carry a serialized OpenAI-compatible `function.arguments`.
+ * Both shapes are projected through the same redaction and size boundary. A delegated agent keeps
+ * its specialized task/progress presentation; every other tool uses its first meaningful argument
+ * as the headline and a disclosed, literal arguments/result excerpt as detail.
  *
  * Empty title, empty content, and null detail are inherit sentinels the projection reads as "keep
  * what the row already holds". Classification stays stateless per event: nothing here remembers a
@@ -527,25 +812,31 @@ function toolProjection(
     && event.type !== "tool_execution_update"
     && event.type !== "tool_execution_end"
   ) return null;
-  const callId = hashedCallId(event.toolCallId ?? event.tool_call_id ?? event.callId);
-  const rawName = optionalId(event.toolName ?? event.tool_name ?? event.name, 120) ?? "tool";
+  const callId = toolEventCallId(event);
+  const rawName = toolEventName(event) ?? "tool";
   // Transcript entry keys have a strict DB-safe grammar. Provider-controlled
   // call ids remain structured metadata, never part of the idempotency key.
   const entryKey = `tool:${sequence}`;
   const kind = toolKind(rawName);
-  const { name, title } = safeToolMetadata(kind);
-  // Only a delegated run reports progress. Every other kind's update stays what it has always been:
-  // activity, which keeps the turn alive without touching the card.
+  const safe = safeToolMetadata(kind);
+  const scrubbedName = firstLine(
+    redactDisclosedToolText(kind === "subagent" ? safe.name : rawName, redact),
+  ).trim();
+  const name = bounded(scrubbedName || safe.name, 120);
+  const title = safe.title;
   if (event.type === "tool_execution_update") {
     // Without a call id there is no card to merge into, and one row per progress line would bury
     // the thread. Progress is only ever an update to a run that already named itself.
-    if (kind !== "subagent" || !callId) return null;
+    if (!callId) return null;
     const progress = progressText(event);
     // Emptiness is judged after redaction, not before. A line that was entirely a credential leaves
     // nothing to show, and an empty detail is not the inherit sentinel — it would overwrite the task
     // the card is holding with nothing, and take the disclosure with it.
-    const scrubbed = progress ? redact(progress).trim() : "";
+    const scrubbed = progress ? redactDisclosedToolText(progress, redact).trim() : "";
     if (!scrubbed) return null;
+    const detail = kind === "subagent"
+      ? boundedTail(scrubbed, MAX_SUBAGENT_DETAIL)
+      : boundedTail(`Result\n${scrubbed}`, MAX_TOOL_DETAIL);
     return {
       sequence,
       type: "tool",
@@ -557,7 +848,7 @@ function toolProjection(
         name,
         title: "",
         status: "running",
-        detail: boundedTail(scrubbed, MAX_SUBAGENT_DETAIL),
+        detail,
         screenshot: null,
       },
     };
@@ -565,7 +856,7 @@ function toolProjection(
   if (event.type === "tool_execution_start") {
     const started = kind === "subagent"
       ? subagentStart(event, title, redact)
-      : { title, detail: null };
+      : ordinaryToolStart(event, title, redact);
     return {
       sequence,
       type: "tool",
@@ -583,8 +874,12 @@ function toolProjection(
     };
   }
   const failed = event.isError === true || event.is_error === true || event.success === false;
-  // A settled subagent keeps the headline and the last progress it was already showing.
-  const settledTitle = kind === "subagent" ? "" : title;
+  // A result with a call id merges into its start card. Empty title/content preserve the command
+  // headline, while a null detail preserves arguments or the last progress when Pi returns no body.
+  const settledTitle = callId ? "" : title;
+  const detail = kind === "subagent"
+    ? null
+    : disclosedToolDetail("Result", toolResult(event), redact, true);
   return {
     sequence,
     type: "tool",
@@ -596,7 +891,7 @@ function toolProjection(
       name,
       title: settledTitle,
       status: failed ? "error" : "ok",
-      detail: null,
+      detail,
       screenshot: null,
     },
   };

@@ -31,6 +31,9 @@ const GLM_5_3_FLASH = {
     supportsReasoningEffort: true,
     maxTokensField: "max_tokens",
     thinkingFormat: "zai",
+    // z.ai's coding endpoint requires this request flag to stream function-call arguments. Every
+    // built-in z.ai model in the pinned Pi catalog carries the same compatibility bit.
+    zaiToolStream: true,
   },
 } as const;
 
