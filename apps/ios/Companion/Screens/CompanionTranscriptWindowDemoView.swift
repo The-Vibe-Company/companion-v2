@@ -4,18 +4,23 @@ import Foundation
 import Observation
 import SwiftUI
 
+@MainActor
 struct CompanionTranscriptWindowDemoView: View {
     @State private var selectedCompanionID = CompanionTranscriptWindowDemoFixtures.companionID
     @State private var readingPositions = CompanionChatReadingPositionStore()
+    @State private var stagedFixture = CompanionTranscriptWindowDemoFixtures.makeStagedFixture()
 
     var body: some View {
         let companionID = selectedCompanionID
+        let services = CompanionTranscriptWindowDemoFixtures.services(
+            stagedFixture: stagedFixture
+        )
         NavigationStack {
             ChatView(
                 companion: selectedCompanion,
                 readingPosition: readingPositions.position(for: companionID),
                 onPlugins: {},
-                services: CompanionTranscriptWindowDemoFixtures.services,
+                services: services,
                 onReadingPositionChange: { position in
                     readingPositions.record(position, for: companionID)
                 },
@@ -37,7 +42,7 @@ struct CompanionTranscriptWindowDemoView: View {
             }
         }
         .safeAreaInset(edge: .top, spacing: 0) {
-            if let stagedFixture = CompanionTranscriptWindowDemoFixtures.stagedFixture {
+            if let stagedFixture {
                 HStack {
                     Spacer()
                     Button(stagedFixture.deliveredStagedReply ? "Reply delivered" : "Stage reply") {
@@ -237,19 +242,18 @@ private enum CompanionTranscriptWindowDemoFixtures {
         ]
     }
 
-    static let stagedFixture = usesStagedPoll
-        ? DemoStagedThreadFixture(initial: thread)
-        : nil
+    static func makeStagedFixture() -> DemoStagedThreadFixture? {
+        usesStagedPoll ? DemoStagedThreadFixture(initial: thread) : nil
+    }
 
-    static let services: ChatServices = {
+    static func services(stagedFixture: DemoStagedThreadFixture?) -> ChatServices {
         let fixtureThread = thread
         let fixtureCompanion = companion
         let secondFixtureCompanion = secondCompanion
-        let fixtureStagedReply = stagedFixture
         return ChatServices(
             thread: { companionID in
-                if companionID == fixtureCompanion.id, let fixtureStagedReply {
-                    return fixtureStagedReply.nextThread()
+                if companionID == fixtureCompanion.id, let stagedFixture {
+                    return stagedFixture.nextThread()
                 }
                 return fixtureThread
             },
@@ -261,7 +265,7 @@ private enum CompanionTranscriptWindowDemoFixtures {
             listPlugins: { [] },
             listProviders: { throw CompanionTranscriptWindowDemoError.unavailable }
         )
-    }()
+    }
 
     private static func decode<Value: Decodable>(_ json: String) -> Value {
         try! JSONDecoder().decode(Value.self, from: Data(json.utf8))

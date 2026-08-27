@@ -378,6 +378,11 @@ test("the staged reply fixture is armed only after the UI reader leaves the tail
   const demo = read("apps/ios/Companion/Screens/CompanionTranscriptWindowDemoView.swift");
   const uiTests = read("apps/ios/CompanionUITests/CompanionUITests.swift");
 
+  assert.match(
+    demo,
+    /@State private var stagedFixture = CompanionTranscriptWindowDemoFixtures\.makeStagedFixture\(\)/,
+  );
+  assert.match(demo, /services\(\s*stagedFixture: stagedFixture\s*\)/);
   assert.match(demo, /stagedFixture\.deliveredStagedReply \? "Reply delivered" : "Stage reply"/);
   assert.match(demo, /accessibilityIdentifier\("demo\.stage-reply"\)/);
   assert.match(demo, /guard stagesNextPoll else \{ return initial \}/);
