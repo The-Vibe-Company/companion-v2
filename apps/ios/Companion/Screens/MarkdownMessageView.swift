@@ -117,12 +117,25 @@ struct MarkdownNode: Identifiable, Equatable, Sendable {
 struct MarkdownMessageView: View {
     let document: MarkdownDocument
     let accent: Color
+    let allowsTextSelection: Bool
+
+    init(document: MarkdownDocument, accent: Color, allowsTextSelection: Bool = true) {
+        self.document = document
+        self.accent = accent
+        self.allowsTextSelection = allowsTextSelection
+    }
 
     var body: some View {
-        MarkdownNodesView(nodes: document.blocks, accent: accent)
-            .textSelection(.enabled)
-            .tint(accent)
-            .environment(
+        Group {
+            if allowsTextSelection {
+                MarkdownNodesView(nodes: document.blocks, accent: accent)
+                    .textSelection(.enabled)
+            } else {
+                MarkdownNodesView(nodes: document.blocks, accent: accent)
+            }
+        }
+        .tint(accent)
+        .environment(
                 \.openURL,
                 OpenURLAction { url in
                     switch CompanionLinkPolicy.route(for: url) {

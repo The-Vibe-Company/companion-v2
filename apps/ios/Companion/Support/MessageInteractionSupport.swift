@@ -35,6 +35,7 @@ struct CompanionMessageInteractionModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         content
+            .contentShape(.rect)
             .contextMenu {
                 Button {
                     copyMessage()

@@ -612,9 +612,13 @@ final class CompanionUITests: XCTestCase {
         app.launchArguments = ["-companion-queued-demo"]
         app.launch()
 
-        app.buttons["chat.queue.toggle"].tap()
-        let item = app.descendants(matching: .any)[
-            "chat.queue.item.msg:11111111-1111-4111-8111-111111111111"
+        let queue = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "3 queued")
+        ).firstMatch
+        XCTAssertTrue(queue.waitForExistence(timeout: 5))
+        queue.tap()
+        let item = app.staticTexts[
+            "Compare these screenshots and call out the visual regressions."
         ]
         XCTAssertTrue(item.waitForExistence(timeout: 5))
         item.press(forDuration: 1.2)
@@ -623,11 +627,7 @@ final class CompanionUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Remove from queue"].waitForExistence(timeout: 2))
         app.buttons["Remove from queue"].tap()
         let updatedQueue = app.buttons.matching(
-            NSPredicate(
-                format: "identifier == %@ AND label == %@",
-                "chat.queue.toggle",
-                "2 queued messages"
-            )
+            NSPredicate(format: "label BEGINSWITH %@", "2 queued")
         ).firstMatch
         XCTAssertTrue(updatedQueue.waitForExistence(timeout: 2))
     }
@@ -639,9 +639,13 @@ final class CompanionUITests: XCTestCase {
         app.launchEnvironment["COMPANION_QUEUED_DEMO_ACCESS"] = "editor"
         app.launch()
 
-        app.buttons["chat.queue.toggle"].tap()
-        let item = app.descendants(matching: .any)[
-            "chat.queue.item.msg:11111111-1111-4111-8111-111111111111"
+        let queue = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "3 queued")
+        ).firstMatch
+        XCTAssertTrue(queue.waitForExistence(timeout: 5))
+        queue.tap()
+        let item = app.staticTexts[
+            "Compare these screenshots and call out the visual regressions."
         ]
         XCTAssertTrue(item.waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons[

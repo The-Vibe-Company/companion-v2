@@ -1248,12 +1248,15 @@ struct ChatMessageBubble: View {
             }
 
             if kind == .assistant, let markdown {
-                MarkdownMessageView(document: markdown, accent: .companionInk)
+                MarkdownMessageView(
+                    document: markdown,
+                    accent: .companionInk,
+                    allowsTextSelection: false
+                )
             } else {
                 Text(content)
                     .font(.body)
                     .foregroundStyle(Color.companionInk)
-                    .textSelection(.enabled)
             }
 
             if !localAttachments.isEmpty {

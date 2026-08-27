@@ -138,7 +138,10 @@ test("chat content stays neutral while Companion accents remain on actions and i
   );
 
   assert.match(bubble, /\.companionGlass\(radius: 18\)/);
-  assert.match(bubble, /MarkdownMessageView\(document: markdown, accent: \.companionInk\)/);
+  assert.match(
+    bubble,
+    /MarkdownMessageView\([\s\S]{0,120}?document: markdown,[\s\S]{0,120}?accent: \.companionInk/,
+  );
   assert.doesNotMatch(bubble, /var accent\b|accent\.opacity|visualTheme\.accent|tint:/);
   assert.doesNotMatch(chat, /\.toolbar \{ headerToolbar \}\s*\.tint\(visualTheme\.accent\)/);
   assert.match(chat, /\.buttonStyle\(\.glassProminent\)\s*\.buttonBorderShape\(\.circle\)\s*\.tint\(visualTheme\.accent\)/);
@@ -164,6 +167,7 @@ test("native message interactions stay accessible and CI-verifiable without Xcod
   const ci = read(".github/workflows/ci.yml");
 
   assert.match(chat, /\.companionMessageInteractionMenu\(rawContent: content\)/);
+  assert.match(chat, /allowsTextSelection: false/);
   for (const action of ["Copy", "Share", "Select Text"]) {
     assert.match(interactions, new RegExp(`Label\\("${action}"`));
   }
@@ -174,6 +178,7 @@ test("native message interactions stay accessible and CI-verifiable without Xcod
     /\.sensoryFeedback\(\.impact\(weight: \.light\), trigger: shareFeedbackTrigger\)/,
   );
   assert.match(interactions, /UIAccessibility\.post\(notification: \.announcement/);
+  assert.match(interactions, /\.contentShape\(\.rect\)\s*\.contextMenu/);
   assert.match(interactions, /\.textSelection\(\.enabled\)/);
 
   assert.match(markdown, /\.frame\(minWidth: 44, minHeight: 44\)/);
