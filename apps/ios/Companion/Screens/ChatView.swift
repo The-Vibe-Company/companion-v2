@@ -275,17 +275,26 @@ struct ChatView: View {
                         }
                     }
                     .onScrollPhaseChange { _, newPhase, context in
-                        guard newPhase == .interacting else { return }
                         let wasNearBottom = isNearBottom
                         let geometry = context.geometry
                         let bottomDistance = max(
                             0,
                             geometry.contentSize.height - geometry.visibleRect.maxY
                         )
-                        let stateChanged = scrollCoordinator.beginUserInteraction(
-                            bottomDistance: Double(bottomDistance),
-                            threshold: Double(bottomProximityThreshold)
-                        )
+                        let stateChanged = if newPhase == .interacting {
+                            scrollCoordinator.beginUserInteraction(
+                                bottomDistance: Double(bottomDistance),
+                                threshold: Double(bottomProximityThreshold)
+                            )
+                        } else {
+                            // The role-scoped initial anchor can coalesce geometry callbacks during
+                            // a fast swipe. Phase geometry is the authoritative clamped position,
+                            // including for transcripts too short to move at all.
+                            scrollCoordinator.observeGeometry(
+                                bottomDistance: Double(bottomDistance),
+                                threshold: Double(bottomProximityThreshold)
+                            )
+                        }
                         if isNearBottom, !wasNearBottom {
                             unseenTracker.markReaderAtBottom()
                             unseenCount = 0

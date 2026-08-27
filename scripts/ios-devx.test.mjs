@@ -325,6 +325,7 @@ test("native chat reading restoration stays deterministic and delegated to Apple
   assert.match(chat, /scrollCoordinator\.takePendingRequest\(\)/);
   assert.match(chat, /\.onScrollPhaseChange/);
   assert.match(chat, /scrollCoordinator\.beginUserInteraction/);
+  assert.match(chat, /newPhase == \.interacting[\s\S]*scrollCoordinator\.observeGeometry/);
   assert.match(chat, /\.defaultScrollAnchor\(\.bottom, for: \.initialOffset\)/);
   assert.doesNotMatch(chat, /\.defaultScrollAnchor\(\.bottom\)\s*/);
   assert.match(chat, /\.id\(transcriptScrollIdentity\)/);

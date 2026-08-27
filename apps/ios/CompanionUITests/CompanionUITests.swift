@@ -945,11 +945,14 @@ final class CompanionUITests: XCTestCase {
         XCTAssertLessThanOrEqual(queue.frame.maxY, composer.frame.minY)
 
         app.swipeDown()
-        let scrollToBottom = app.buttons["chat.scroll-to-bottom"]
-        XCTAssertTrue(scrollToBottom.waitForExistence(timeout: 3))
         let transcript = app.scrollViews.matching(
             NSPredicate(format: "identifier == %@", "chat.transcript")
         ).firstMatch
+        let scrollToBottom = app.buttons["chat.scroll-to-bottom"]
+        XCTAssertTrue(
+            scrollToBottom.waitForExistence(timeout: 3),
+            "Scroll diagnostics: \(transcript.value)"
+        )
         XCTAssertTrue(transcript.exists)
         XCTAssertTrue(
             transcript.frame.intersects(scrollToBottom.frame),
