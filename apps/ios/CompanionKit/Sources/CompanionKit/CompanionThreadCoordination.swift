@@ -42,6 +42,48 @@ public struct CompanionThreadProjection: Equatable, Sendable {
     }
 }
 
+/// A client-local snapshot of where one member was reading a Companion transcript.
+///
+/// This is intentionally presentation state rather than the server's unread watermark. The
+/// transcript counts let a restored window keep the saved anchor rendered when messages arrived
+/// while the chat was away from the navigation stack.
+public struct CompanionChatReadingPosition: Equatable, Sendable {
+    public let anchorEventID: String
+    public let isFollowingTail: Bool
+    public let exposedEntryCount: Int
+    public let transcriptEntryCount: Int
+
+    public init(
+        anchorEventID: String,
+        isFollowingTail: Bool,
+        exposedEntryCount: Int,
+        transcriptEntryCount: Int
+    ) {
+        self.anchorEventID = anchorEventID
+        self.isFollowingTail = isFollowingTail
+        self.exposedEntryCount = max(0, exposedEntryCount)
+        self.transcriptEntryCount = max(0, transcriptEntryCount)
+    }
+}
+
+/// Keeps reading positions isolated by Companion for the lifetime of the native roster.
+public struct CompanionChatReadingPositionStore: Equatable, Sendable {
+    private var positions: [String: CompanionChatReadingPosition] = [:]
+
+    public init() {}
+
+    public func position(for companionID: String) -> CompanionChatReadingPosition? {
+        positions[companionID]
+    }
+
+    public mutating func record(
+        _ position: CompanionChatReadingPosition,
+        for companionID: String
+    ) {
+        positions[companionID] = position
+    }
+}
+
 /// Tracks the progressively disclosed portion of a complete thread response.
 ///
 /// The thread endpoint intentionally remains unpaginated. This value keeps the client-side
@@ -103,6 +145,24 @@ public struct CompanionTranscriptWindow: Equatable, Sendable {
         } else {
             exposedCount = min(exposedCount, count)
         }
+    }
+
+    /// Restores a previously exposed window and keeps its anchor renderable after tail growth.
+    public mutating func restore(
+        totalCount: Int,
+        previouslyExposedCount: Int,
+        previousTotalCount: Int,
+        anchorIndex: Int
+    ) {
+        let count = max(0, totalCount)
+        let appendedCount = max(0, count - max(0, previousTotalCount))
+        let restoredExposedCount = max(0, previouslyExposedCount) + appendedCount
+        let anchorExposedCount = count - min(max(0, anchorIndex), count)
+        self.totalCount = count
+        exposedCount = min(
+            count,
+            max(min(pageSize, count), max(restoredExposedCount, anchorExposedCount))
+        )
     }
 
     /// Reveals one older page and returns whether the window changed.

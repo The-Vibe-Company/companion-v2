@@ -124,6 +124,10 @@ Native chat layout regressions use the deterministic transcript-window demo. Lin
 statically verify that its selected UI assertions remain wired into Apple Quality; the macOS 26
 lane performs the actual Swift build and simulator geometry checks. This keeps cloud development
 deterministic without installing or invoking XcodeBuildMCP in CI.
+The same fixture can switch between Luna and Orbit to verify that the roster-scoped, in-memory
+reading-position store restores the first visible message without animated hydration. CompanionKit
+tests cover per-Companion isolation and window restoration, while Apple Quality owns the rendered
+switch-and-return assertion.
 
 Queued messages stay collapsed above the composer until opened. Owner and Editor can remove an
 unstarted queued turn through the shared cancel route; Viewer remains read-only. The shared `/v1`

@@ -32,6 +32,7 @@ struct CompanionListView: View {
     @State private var showingHidden = false
     @State private var rosterNotice: String?
     @State private var rosterActionError: String?
+    @State private var chatReadingPositions = CompanionChatReadingPositionStore()
 
     init(session: Session, services: CompanionListServices? = nil) {
         self.session = session
@@ -457,7 +458,11 @@ struct CompanionListView: View {
             case .chat(let companionID):
                 ChatView(
                     companion: companion,
+                    readingPosition: chatReadingPositions.position(for: companionID),
                     onPlugins: { showingPlugins = true },
+                    onReadingPositionChange: { position in
+                        chatReadingPositions.record(position, for: companionID)
+                    },
                     onSettings: { path.append(.settings(companionID)) }
                 )
                 .onAppear { notifications.activeCompanionID = companionID }

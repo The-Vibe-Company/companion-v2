@@ -233,6 +233,31 @@ test("the chat scroll-to-bottom control floats over the transcript", () => {
   assert.match(button, /\.shadow\(color: visualTheme\.shadow\.opacity\(0\.2\), radius: 8, y: 3\)/);
 });
 
+test("native chat reading restoration stays deterministic and delegated to Apple Quality", () => {
+  const chat = read("apps/ios/Companion/Screens/ChatView.swift");
+  const roster = read("apps/ios/Companion/Screens/CompanionListView.swift");
+  const coordination = read(
+    "apps/ios/CompanionKit/Sources/CompanionKit/CompanionThreadCoordination.swift",
+  );
+  const uiTests = read("apps/ios/CompanionUITests/CompanionUITests.swift");
+  const ci = read(".github/workflows/ci.yml");
+
+  assert.match(roster, /CompanionChatReadingPositionStore\(\)/);
+  assert.match(roster, /readingPosition: chatReadingPositions\.position\(for: companionID\)/);
+  assert.match(chat, /private let readingPosition: CompanionChatReadingPosition\?/);
+  assert.match(chat, /self\.readingPosition = readingPosition/);
+  assert.match(chat, /\.onScrollTargetVisibilityChange\(/);
+  assert.match(chat, /isRestoringReadingPosition \? 0 : 1/);
+  assert.match(chat, /previousThread != nil/);
+  assert.match(coordination, /func position\(for companionID: String\)/);
+  assert.match(coordination, /public mutating func restore\(/);
+  assert.match(uiTests, /testTranscriptWindowDemoRestoresReadingPositionAfterCompanionSwitch/);
+  assert.match(
+    ci,
+    /-only-testing:CompanionUITests\/CompanionUITests\/testTranscriptWindowDemoRestoresReadingPositionAfterCompanionSwitch/,
+  );
+});
+
 test("the project is synchronized, shared, and backed by CompanionKit", () => {
   const project = read("apps/ios/Companion.xcodeproj/project.pbxproj");
   const scheme = read("apps/ios/Companion.xcodeproj/xcshareddata/xcschemes/Companion.xcscheme");
@@ -320,6 +345,7 @@ test("CI tests iOS without secrets and keeps the live provider diagnostic manual
   assert.match(ci, /swift test --package-path apps\/ios\/CompanionKit/);
   assert.match(ci, /xcodebuild test/);
   assert.match(ci, /testTranscriptWindowDemoLoadsEarlierMessages/);
+  assert.match(ci, /testTranscriptWindowDemoRestoresReadingPositionAfterCompanionSwitch/);
   assert.match(ci, /testTranscriptWindowDemoKeepsLatestEntriesOrderedAndSeparated/);
   assert.match(ci, /testTranscriptWindowDemoBottomControlsNeverCoverChatContent/);
   assert.match(ci, /testMarkdownTableDemoKeepsRowsAndColumnsSeparated/);
