@@ -654,6 +654,280 @@ public struct CompanionRoutine: Codable, Identifiable, Equatable, Sendable {
     }
 }
 
+/// The durable lifecycle of one scheduled routine fire. This intentionally follows the shared
+/// turn status vocabulary so history can describe a run without knowing anything about Box/Pi.
+public enum CompanionRoutineRunStatus: String, Codable, Equatable, Hashable, Sendable {
+    case queued
+    case starting
+    case dispatching
+    case running
+    case needsInput = "needs_input"
+    case succeeded
+    case failed
+    case interrupted
+    case cancelled
+    case unknown
+
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = Self(rawValue: value) ?? .unknown
+    }
+}
+
+/// The private routine execution result. A silent completion is distinct from surfaced output.
+public enum CompanionRoutineRunOutcome: String, Codable, Equatable, Hashable, Sendable {
+    case pending
+    case noOutput = "no_output"
+    case surfaced
+    case error
+    case unknown
+
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = Self(rawValue: value) ?? .unknown
+    }
+}
+
+public enum CompanionRoutineSurfaceMode: String, Codable, Equatable, Hashable, Sendable {
+    case relay
+    case notify
+    case unknown
+
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = Self(rawValue: value) ?? .unknown
+    }
+}
+
+/// Immutable routine identity carried by history and transcript markers.
+public struct CompanionRoutineIdentitySnapshot: Codable, Equatable, Hashable, Sendable {
+    public let id: String?
+    public let name: String
+
+    public init(id: String?, name: String) {
+        self.id = id
+        self.name = name
+    }
+}
+
+/// One bounded internal event from a routine's private transcript.
+public struct CompanionRoutineRunEntry: Codable, Identifiable, Equatable, Sendable {
+    public let eventID: String
+    public let ordinal: Int
+    public let role: String
+    public let content: String
+    public let reasoning: String?
+    public let tool: CompanionToolRun?
+    public let decision: CompanionDecision?
+    public let createdAt: String
+
+    public var id: String { eventID }
+
+    enum CodingKeys: String, CodingKey {
+        case eventID = "event_id"
+        case ordinal
+        case role
+        case content
+        case reasoning
+        case tool
+        case decision
+        case createdAt = "created_at"
+    }
+
+    public init(
+        eventID: String,
+        ordinal: Int,
+        role: String,
+        content: String,
+        reasoning: String? = nil,
+        tool: CompanionToolRun? = nil,
+        decision: CompanionDecision? = nil,
+        createdAt: String
+    ) {
+        self.eventID = eventID
+        self.ordinal = ordinal
+        self.role = role
+        self.content = content
+        self.reasoning = reasoning
+        self.tool = tool
+        self.decision = decision
+        self.createdAt = createdAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        eventID = try container.decode(String.self, forKey: .eventID)
+        ordinal = try container.decode(Int.self, forKey: .ordinal)
+        role = try container.decode(String.self, forKey: .role)
+        content = try container.decode(String.self, forKey: .content)
+        reasoning = try container.decodeIfPresent(String.self, forKey: .reasoning)
+        tool = try container.decodeIfPresent(CompanionToolRun.self, forKey: .tool)
+        decision = try container.decodeIfPresent(CompanionDecision.self, forKey: .decision)
+        createdAt = try container.decode(String.self, forKey: .createdAt)
+    }
+}
+
+public struct CompanionRoutineRunSummary: Codable, Identifiable, Equatable, Sendable {
+    public let runID: String
+    public let companionID: String
+    public let routine: CompanionRoutineIdentitySnapshot
+    public let status: CompanionRoutineRunStatus
+    public let outcome: CompanionRoutineRunOutcome
+    public let surfaceMode: CompanionRoutineSurfaceMode?
+    public let mainEntryEventID: String?
+    public let relayTurnID: String?
+    public let createdAt: String
+    public let startedAt: String?
+    public let settledAt: String?
+    public let error: CompanionRuntimeSafeError?
+
+    public var id: String { runID }
+
+    public init(
+        runID: String,
+        companionID: String,
+        routine: CompanionRoutineIdentitySnapshot,
+        status: CompanionRoutineRunStatus,
+        outcome: CompanionRoutineRunOutcome,
+        surfaceMode: CompanionRoutineSurfaceMode?,
+        mainEntryEventID: String?,
+        relayTurnID: String?,
+        createdAt: String,
+        startedAt: String?,
+        settledAt: String?,
+        error: CompanionRuntimeSafeError?
+    ) {
+        self.runID = runID
+        self.companionID = companionID
+        self.routine = routine
+        self.status = status
+        self.outcome = outcome
+        self.surfaceMode = surfaceMode
+        self.mainEntryEventID = mainEntryEventID
+        self.relayTurnID = relayTurnID
+        self.createdAt = createdAt
+        self.startedAt = startedAt
+        self.settledAt = settledAt
+        self.error = error
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case runID = "run_id"
+        case companionID = "companion_id"
+        case routine
+        case status
+        case outcome
+        case surfaceMode = "surface_mode"
+        case mainEntryEventID = "main_entry_event_id"
+        case relayTurnID = "relay_turn_id"
+        case createdAt = "created_at"
+        case startedAt = "started_at"
+        case settledAt = "settled_at"
+        case error
+    }
+}
+
+public struct CompanionRoutineRunDetail: Codable, Equatable, Sendable {
+    public let runID: String
+    public let companionID: String
+    public let routine: CompanionRoutineIdentitySnapshot
+    public let status: CompanionRoutineRunStatus
+    public let outcome: CompanionRoutineRunOutcome
+    public let surfaceMode: CompanionRoutineSurfaceMode?
+    public let mainEntryEventID: String?
+    public let relayTurnID: String?
+    public let createdAt: String
+    public let startedAt: String?
+    public let settledAt: String?
+    public let error: CompanionRuntimeSafeError?
+    public let internalEntries: [CompanionRoutineRunEntry]
+    public let nextEntryCursor: Int?
+
+    public init(
+        runID: String,
+        companionID: String,
+        routine: CompanionRoutineIdentitySnapshot,
+        status: CompanionRoutineRunStatus,
+        outcome: CompanionRoutineRunOutcome,
+        surfaceMode: CompanionRoutineSurfaceMode?,
+        mainEntryEventID: String?,
+        relayTurnID: String?,
+        createdAt: String,
+        startedAt: String?,
+        settledAt: String?,
+        error: CompanionRuntimeSafeError?,
+        internalEntries: [CompanionRoutineRunEntry],
+        nextEntryCursor: Int?
+    ) {
+        self.runID = runID
+        self.companionID = companionID
+        self.routine = routine
+        self.status = status
+        self.outcome = outcome
+        self.surfaceMode = surfaceMode
+        self.mainEntryEventID = mainEntryEventID
+        self.relayTurnID = relayTurnID
+        self.createdAt = createdAt
+        self.startedAt = startedAt
+        self.settledAt = settledAt
+        self.error = error
+        self.internalEntries = internalEntries
+        self.nextEntryCursor = nextEntryCursor
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case runID = "run_id"
+        case companionID = "companion_id"
+        case routine
+        case status
+        case outcome
+        case surfaceMode = "surface_mode"
+        case mainEntryEventID = "main_entry_event_id"
+        case relayTurnID = "relay_turn_id"
+        case createdAt = "created_at"
+        case startedAt = "started_at"
+        case settledAt = "settled_at"
+        case error
+        case internalEntries = "internal_entries"
+        case nextEntryCursor = "next_entry_cursor"
+    }
+}
+
+public struct CompanionRoutineRunList: Codable, Equatable, Sendable {
+    public let runs: [CompanionRoutineRunSummary]
+    public let nextCursor: String?
+
+    public init(runs: [CompanionRoutineRunSummary], nextCursor: String?) {
+        self.runs = runs
+        self.nextCursor = nextCursor
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case runs
+        case nextCursor = "next_cursor"
+    }
+}
+
+/// A routine-origin user entry may predate durable run ids. Keep both nullable for old rows and
+/// retain the routine snapshot so the prompt itself can stay hidden from the chat surface.
+public struct CompanionTranscriptRoutineOrigin: Codable, Equatable, Sendable {
+    public let id: String?
+    public let name: String
+    public let runID: String?
+
+    public init(id: String?, name: String, runID: String? = nil) {
+        self.id = id
+        self.name = name
+        self.runID = runID
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case runID = "run_id"
+    }
+}
+
 public enum CompanionTriggerProvider: String, Codable, CaseIterable, Equatable, Hashable, Sendable {
     case linear
     case github
@@ -1584,6 +1858,7 @@ public struct TranscriptEntry: Codable, Identifiable, Equatable, Sendable {
     public let authorName: String?
     public let decision: CompanionDecision?
     public let tool: CompanionToolRun?
+    public let routine: CompanionTranscriptRoutineOrigin?
     public let turnID: String?
     public let queued: Bool
     public let attachments: [CompanionAttachment]
@@ -1601,6 +1876,7 @@ public struct TranscriptEntry: Codable, Identifiable, Equatable, Sendable {
         case authorName = "author_name"
         case decision
         case tool
+        case routine
         case turnID = "turn_id"
         case queued
         case attachments
@@ -1618,6 +1894,7 @@ public struct TranscriptEntry: Codable, Identifiable, Equatable, Sendable {
         authorName = try container.decodeIfPresent(String.self, forKey: .authorName)
         decision = try container.decodeIfPresent(CompanionDecision.self, forKey: .decision)
         tool = try container.decodeIfPresent(CompanionToolRun.self, forKey: .tool)
+        routine = try container.decodeIfPresent(CompanionTranscriptRoutineOrigin.self, forKey: .routine)
         turnID = try container.decodeIfPresent(String.self, forKey: .turnID)
         queued = try container.decodeIfPresent(Bool.self, forKey: .queued) ?? false
         attachments = try container.decodeIfPresent([CompanionAttachment].self, forKey: .attachments) ?? []

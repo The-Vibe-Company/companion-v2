@@ -251,6 +251,48 @@ public final class SessionStore {
         }
     }
 
+    public func listCompanionRoutineRuns(
+        companionID: String,
+        routineID: String,
+        limit: Int = 50,
+        cursor: String? = nil
+    ) async throws -> CompanionRoutineRunList {
+        do {
+            let runs = try await client.listCompanionRoutineRuns(
+                companionID: companionID,
+                routineID: routineID,
+                limit: limit,
+                cursor: cursor
+            )
+            await persistRollingAuthority()
+            return runs
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func readCompanionRoutineRun(
+        companionID: String,
+        runID: String,
+        entryLimit: Int = 50,
+        entryCursor: Int? = nil
+    ) async throws -> CompanionRoutineRunDetail {
+        do {
+            let run = try await client.readCompanionRoutineRun(
+                companionID: companionID,
+                runID: runID,
+                entryLimit: entryLimit,
+                entryCursor: entryCursor
+            )
+            await persistRollingAuthority()
+            return run
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
     public func listCompanionTriggers(companionID: String) async throws -> [CompanionTrigger] {
         do {
             let triggers = try await client.listCompanionTriggers(companionID: companionID)
