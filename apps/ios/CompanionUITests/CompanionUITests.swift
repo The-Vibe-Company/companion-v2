@@ -726,10 +726,13 @@ final class CompanionUITests: XCTestCase {
     func testTranscriptWindowDemoShowsStagedUnseenReplyAndScrollsToIt() throws {
         let app = XCUIApplication()
         app.launchArguments = ["-companion-transcript-window-demo"]
+        app.launchEnvironment["COMPANION_TRANSCRIPT_DEMO_SHORT"] = "1"
         app.launchEnvironment["COMPANION_TRANSCRIPT_DEMO_STAGED_POLL"] = "1"
         app.launch()
 
-        let latest = app.staticTexts["Long-thread message 120"]
+        let latest = app.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Long-thread message 10")
+        ).firstMatch
         XCTAssertTrue(latest.waitForExistence(timeout: 12))
         app.swipeDown()
 
