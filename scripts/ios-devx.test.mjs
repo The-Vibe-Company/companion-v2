@@ -289,8 +289,10 @@ test("native transcript taps dismiss the keyboard without consuming message cont
   assert.match(chat, /#selector\(UIResponder\.resignFirstResponder\)/);
   assert.doesNotMatch(chat, /composerKeyboardDismissalRequest/);
   assert.match(uiTests, /testTranscriptTapDismissesKeyboardWithoutBlockingMessageControls/);
-  assert.match(uiTests, /transcriptMessage\.tap\(\)/);
+  assert.match(uiTests, /identifier == %@", "chat\.transcript"/);
+  assert.match(uiTests, /transcript\.coordinate\(withNormalizedOffset:[\s\S]*?\)\.tap\(\)/);
   assert.match(uiTests, /predicate: NSPredicate\(format: "exists == false"\)/);
+  assert.match(uiTests, /label CONTAINS %@", "run_layout_checks"/);
   assert.match(uiTests, /for _ in 0\.\.<3 where !toolCard\.isHittable \{\s*app\.swipeUp\(\)/);
   assert.match(uiTests, /XCTAssertTrue\(toolCard\.isHittable\)/);
   assert.match(uiTests, /toolCard\.tap\(\)/);

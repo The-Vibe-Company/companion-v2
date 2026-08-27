@@ -661,18 +661,22 @@ final class CompanionUITests: XCTestCase {
         let keyboard = app.keyboards.firstMatch
         XCTAssertTrue(keyboard.waitForExistence(timeout: 2))
 
-        // The keyboard shortens the lazy transcript and moves the tail entry out of
-        // the accessibility tree. Tap stable text in the still-visible message above it.
-        let transcriptMessage = app.staticTexts["iOS chat"]
-        XCTAssertTrue(transcriptMessage.waitForExistence(timeout: 2))
-        transcriptMessage.tap()
+        // Tap the transcript surface directly so this test does not depend on XCTest
+        // resolving a lazily rendered Markdown descendant while the keyboard is animating.
+        let transcript = app.scrollViews.matching(
+            NSPredicate(format: "identifier == %@", "chat.transcript")
+        ).firstMatch
+        XCTAssertTrue(transcript.isHittable)
+        transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2)).tap()
         let keyboardDismissed = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "exists == false"),
             object: keyboard
         )
-        wait(for: [keyboardDismissed], timeout: 2)
+        wait(for: [keyboardDismissed], timeout: 5)
 
-        let toolCard = app.buttons["tool-run.open-details.long-8"]
+        let toolCard = app.buttons.matching(
+            NSPredicate(format: "label CONTAINS %@", "run_layout_checks")
+        ).firstMatch
         for _ in 0..<3 where !toolCard.isHittable {
             app.swipeUp()
         }
