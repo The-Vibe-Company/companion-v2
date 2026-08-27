@@ -1788,15 +1788,12 @@ func scrollCoordinatorKeepsLongThreadInitialAndStablePollsBounded() {
 
     let initialChanged = coordinator.observeTail(initialTail, source: .initial)
     #expect(initialChanged)
-    #expect(coordinator.pendingRequest?.source == .initial)
-    let initialRequest = coordinator.takePendingRequest()
-    #expect(initialRequest?.animated == false)
-    #expect(coordinator.issuedRequestBatchCount == 1)
+    #expect(coordinator.pendingRequest == nil)
+    #expect(coordinator.issuedRequestBatchCount == 0)
 
-    // Layout can report the old viewport several times before the explicit bottom scroll lands.
-    for distance in [420.0, 280.0, 120.0, 0.0, 0.0] {
-        _ = coordinator.observeGeometry(bottomDistance: distance, threshold: 80)
-    }
+    // Initial placement is declarative layout state, so geometry has no outstanding imperative
+    // request to reinterpret while the long transcript is first being placed.
+    _ = coordinator.observeGeometry(bottomDistance: 0, threshold: 80)
     #expect(coordinator.followState == .followingTail)
     #expect(!coordinator.isProgrammaticBottomScrollOutstanding)
 
@@ -1807,7 +1804,7 @@ func scrollCoordinatorKeepsLongThreadInitialAndStablePollsBounded() {
         #expect(!stableChanged)
         #expect(stableRequest == nil)
     }
-    #expect(coordinator.issuedRequestBatchCount == 1)
+    #expect(coordinator.issuedRequestBatchCount == 0)
 }
 
 @Test
@@ -1834,7 +1831,7 @@ func scrollCoordinatorScrollsOnceForEachRealTailRevisionAndIgnoresDuplicates() {
     let duplicateRequest = coordinator.takePendingRequest()
     #expect(!duplicateChanged)
     #expect(duplicateRequest == nil)
-    #expect(coordinator.issuedRequestBatchCount == 2)
+    #expect(coordinator.issuedRequestBatchCount == 1)
 }
 
 @Test
@@ -1848,6 +1845,7 @@ func scrollCoordinatorDoesNotLoseARealTailWhenPriorBottomGeometryIsUnchanged() {
     )
 
     _ = coordinator.observeTail(firstTail, source: .initial)
+    coordinator.requestBottom(source: .userLatest, animated: false)
     _ = coordinator.takePendingRequest()
     #expect(coordinator.isProgrammaticBottomScrollOutstanding)
 

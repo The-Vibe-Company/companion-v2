@@ -325,13 +325,15 @@ test("native chat reading restoration stays deterministic and delegated to Apple
   assert.match(chat, /scrollCoordinator\.takePendingRequest\(\)/);
   assert.match(chat, /\.onScrollPhaseChange/);
   assert.match(chat, /scrollCoordinator\.beginUserInteraction/);
-  assert.doesNotMatch(chat, /\.defaultScrollAnchor\(/);
+  assert.match(chat, /\.defaultScrollAnchor\(\.bottom, for: \.initialOffset\)/);
+  assert.doesNotMatch(chat, /\.defaultScrollAnchor\(\.bottom\)\s*/);
+  assert.match(chat, /\.id\(transcriptScrollIdentity\)/);
   const acceptedThread = chat.indexOf("threadProjection.update(next)");
   const observedTail = chat.indexOf("let tailChanged = observeActualTail", acceptedThread);
   assert.notEqual(acceptedThread, -1);
   assert.ok(observedTail > acceptedThread);
   assert.match(chat, /let renderedScrollRevision = scrollContentRevision/);
-  const scrollRevisionObserver = chat.indexOf(".task(id: renderedScrollDeliveryRevision)");
+  const scrollRevisionObserver = chat.indexOf(".task(id: renderedScrollRevision)");
   const deferredScrollDelivery = chat.indexOf("await Task.yield()", scrollRevisionObserver);
   const consumedScrollRequest = chat.indexOf(
     "scrollCoordinator.takePendingRequest()",
@@ -342,35 +344,22 @@ test("native chat reading restoration stays deterministic and delegated to Apple
   assert.ok(consumedScrollRequest > deferredScrollDelivery);
   assert.match(
     chat.slice(deferredScrollDelivery, consumedScrollRequest),
-    /renderedScrollDeliveryRevision\.contentRevision\s*== scrollContentRevision/,
+    /renderedScrollRevision == scrollContentRevision/,
   );
   const lazyTranscriptTargets = chat.indexOf(".scrollTargetLayout()");
   const eagerBottomTarget = chat.indexOf('.id("bottom")', lazyTranscriptTargets);
   assert.notEqual(lazyTranscriptTargets, -1);
   assert.ok(eagerBottomTarget > lazyTranscriptTargets);
-  const initialLayoutHandshake = chat.indexOf(
-    ".onGeometryChange(for: BottomDestinationLayoutSignal.self)",
-    lazyTranscriptTargets,
-  );
-  assert.ok(initialLayoutHandshake > eagerBottomTarget);
-  assert.match(
-    chat.slice(initialLayoutHandshake, chat.indexOf("bottomControls(", initialLayoutHandshake)),
-    /markInitialBottomReady/,
-  );
-  assert.match(
-    chat.slice(deferredScrollDelivery, consumedScrollRequest),
-    /pendingRequest\.source == \.initial[\s\S]*initialBottomReadyRevision/,
-  );
+  assert.doesNotMatch(chat, /BottomDestinationLayoutSignal|markInitialBottomReady/);
   assert.equal(chat.match(/scrollCoordinator\.takePendingRequest\(\)/g)?.length, 1);
   assert.match(chat, /batches=\\\(scrollCoordinator\.issuedRequestBatchCount\)/);
   assert.match(uiTests, /Scroll diagnostics:/);
   const scrollOwner = chat.indexOf("private func performScroll");
   assert.notEqual(scrollOwner, -1);
-  assert.doesNotMatch(chat.slice(0, scrollOwner), /transcriptScrollPosition\.scrollTo\(/);
-  assert.match(chat.slice(scrollOwner), /transcriptScrollPosition\.scrollTo\(/);
-  assert.doesNotMatch(chat, /ScrollViewReader/);
-  assert.match(chat, /\.scrollPosition\(\$transcriptScrollPosition\)/);
-  assert.match(chat, /transcriptScrollPosition = ScrollPosition\(idType: String\.self\)/);
+  assert.doesNotMatch(chat.slice(0, scrollOwner), /proxy\.scrollTo\(/);
+  assert.match(chat.slice(scrollOwner), /proxy\.scrollTo\(/);
+  assert.match(chat, /ScrollViewReader/);
+  assert.doesNotMatch(chat, /transcriptScrollPosition|\.scrollPosition\(/);
   assert.match(chat.slice(scrollOwner), /let targetID = bottomScrollTargetID/);
   assert.doesNotMatch(chat.slice(scrollOwner), /proxy\.scrollTo\("bottom"/);
   assert.match(chat, /return entries\.last\?\.id \?\? "bottom"/);
@@ -380,6 +369,7 @@ test("native chat reading restoration stays deterministic and delegated to Apple
   assert.match(coordination, /public struct CompanionScrollCoordinator/);
   assert.match(coordination, /case followingTail/);
   assert.match(coordination, /case userReading/);
+  assert.match(coordination, /case \.initial:\s*break/);
   assert.match(coordination, /issuedRequestBatchCount/);
   assert.match(uiTests, /testTranscriptWindowDemoRestoresReadingPositionAfterCompanionSwitch/);
   assert.match(uiTests, /testTranscriptWindowDemoStaysAtLatestAcrossPollInterval/);

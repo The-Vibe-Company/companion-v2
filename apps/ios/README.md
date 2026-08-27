@@ -157,11 +157,11 @@ lane performs the actual Swift build and simulator geometry checks. This keeps c
 deterministic without installing or invoking XcodeBuildMCP in CI.
 The poll-stability assertion launches that fixture, observes the latest entry across one real
 four-second poll, and verifies that the latest entry remains hittable without a scroll-to-bottom
-overlay. Initial delivery waits for the eager bottom destination's post-transcript geometry instead
-of guessing that a yielded render task has completed layout, then scrolls to the last concrete row
-registered by the lazy target layout. Its scroll decision is delegated to the shared
-`CompanionScrollCoordinator`, so repeated
-unchanged snapshots do not compete with the rendered viewport.
+overlay. Initial placement is the loaded scroll view's role-scoped bottom layout anchor; it is not
+an imperative request and does not apply again when poll, markdown, composer, or safe-area changes
+resize the content. Every later scroll decision is delegated to the shared
+`CompanionScrollCoordinator`, so repeated unchanged snapshots do not compete with the rendered
+viewport.
 Keyboard-dismissal regressions use the same static-plus-Apple-Quality split: the Linux guard keeps
 the simultaneous transcript tap and selected UI test wired, while the macOS fixture focuses the
 composer, taps a message, verifies the keyboard disappears, and then opens a tool card to prove

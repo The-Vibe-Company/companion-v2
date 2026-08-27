@@ -29,16 +29,6 @@ private struct AssistantTailChange: Equatable, Sendable {
     let nextContent: String
 }
 
-private struct ScrollDeliveryRevision: Equatable {
-    let contentRevision: Int
-    let initialBottomReadyRevision: Int?
-}
-
-private struct BottomDestinationLayoutSignal: Equatable {
-    let contentRevision: Int
-    let minY: CGFloat
-}
-
 /// Fences overlapping refresh tasks without making each poll a SwiftUI-observed state mutation.
 private final class ChatRefreshGate {
     private var revision = 0
@@ -115,8 +105,6 @@ struct ChatView: View {
     @State private var unseenCount = 0
     @State private var loadingEarlier = false
     @State private var scrollContentRevision = 0
-    @State private var initialBottomReadyRevision: Int?
-    @State private var transcriptScrollPosition = ScrollPosition(idType: String.self)
     @State private var pendingReadingPosition: CompanionChatReadingPosition?
     @State private var lastReportedReadingPosition: CompanionChatReadingPosition?
     @State private var visibleEntryIDs: [String] = []
@@ -159,13 +147,10 @@ struct ChatView: View {
         let renderedEntries = visibleEntries
         let queuedEntries = queuedEntries(in: thread)
         let renderedScrollRevision = scrollContentRevision
-        let renderedScrollDeliveryRevision = ScrollDeliveryRevision(
-            contentRevision: renderedScrollRevision,
-            initialBottomReadyRevision: initialBottomReadyRevision
-        )
         CompanionBackdrop {
-            VStack(spacing: 0) {
-                ScrollView {
+            ScrollViewReader { proxy in
+                VStack(spacing: 0) {
+                    ScrollView {
                         VStack(spacing: 16) {
                             LazyVStack(spacing: 16) {
                                 if loading && thread == nil {
@@ -239,26 +224,9 @@ struct ChatView: View {
                             }
                             .scrollTargetLayout()
 
-                            // Keep a layout-readiness probe outside the lazy stack so initial
-                            // delivery waits until the complete transcript content is placed.
                             Color.clear
                                 .frame(height: 1)
                                 .id("bottom")
-                                .onGeometryChange(for: BottomDestinationLayoutSignal.self) { geometry in
-                                    BottomDestinationLayoutSignal(
-                                        contentRevision: renderedScrollRevision,
-                                        minY: geometry.frame(
-                                            in: .scrollView(axis: .vertical)
-                                        ).minY
-                                    )
-                                } action: { _, signal in
-                                    // An initial request is not safe to consume merely because a
-                                    // render task yielded: the lazy transcript may not have placed
-                                    // this destination yet. A revision-tagged geometry evaluation
-                                    // is the deterministic layout-readiness handshake. It only
-                                    // wakes the sole delivery task; it never performs a scroll.
-                                    markInitialBottomReady(for: signal.contentRevision)
-                                }
                         }
                         .padding(.horizontal, 16)
                         .padding(.top, 16)
@@ -267,7 +235,11 @@ struct ChatView: View {
                     .opacity(isRestoringReadingPosition ? 0 : 1)
                     .scrollDismissesKeyboard(.interactively)
                     .scrollIndicators(.hidden)
-                    .scrollPosition($transcriptScrollPosition)
+                    // Initial placement belongs to layout, not an imperative request competing
+                    // with that layout. Scoping the anchor to initialOffset prevents later poll,
+                    // markdown, composer, and safe-area size changes from reapplying it.
+                    .defaultScrollAnchor(.bottom, for: .initialOffset)
+                    .id(transcriptScrollIdentity)
                     .accessibilityIdentifier("chat.transcript")
                     .accessibilityValue(transcriptScrollDiagnostics)
                     .gesture(
@@ -364,21 +336,16 @@ struct ChatView: View {
                 reduceMotion ? nil : .easeOut(duration: 0.18),
                 value: isNearBottom
             )
-            .task(id: renderedScrollDeliveryRevision) {
+            .task(id: renderedScrollRevision) {
                 // Unlike onChange, an id-scoped task also runs for the value installed with a
                 // newly rendered transcript. A newer revision cancels this task before the
                 // coordinator is consumed, coalescing same-turn producers at one boundary.
                 await Task.yield()
                 guard !Task.isCancelled,
-                      renderedScrollDeliveryRevision.contentRevision
-                        == scrollContentRevision,
-                      let pendingRequest = scrollCoordinator.pendingRequest else { return }
-                if pendingRequest.source == .initial {
-                    guard renderedScrollDeliveryRevision.initialBottomReadyRevision
-                        == renderedScrollRevision else { return }
-                }
+                      renderedScrollRevision == scrollContentRevision else { return }
                 guard let request = scrollCoordinator.takePendingRequest() else { return }
-                performScroll(to: request)
+                performScroll(to: request, with: proxy)
+                }
             }
         }
         .navigationBarTitleDisplayMode(.inline)
@@ -1173,18 +1140,18 @@ struct ChatView: View {
         onReadingPositionChange(position)
     }
 
-    private func performScroll(to request: CompanionScrollRequest) {
+    private func performScroll(
+        to request: CompanionScrollRequest,
+        with proxy: ScrollViewProxy
+    ) {
         switch request.destination {
         case .bottom:
-            // ScrollPosition retains this requested identity across the lazy stack's layout
-            // commit. A one-shot ScrollViewProxy request can be accepted in the same transaction
-            // that reports destination readiness and then silently discarded on long threads.
             let targetID = bottomScrollTargetID
             if reduceMotion || !request.animated {
-                transcriptScrollPosition.scrollTo(id: targetID, anchor: .bottom)
+                proxy.scrollTo(targetID, anchor: .bottom)
             } else {
                 withAnimation(.easeOut(duration: 0.18)) {
-                    transcriptScrollPosition.scrollTo(id: targetID, anchor: .bottom)
+                    proxy.scrollTo(targetID, anchor: .bottom)
                 }
             }
         case .entry(let eventID):
@@ -1193,11 +1160,11 @@ struct ChatView: View {
                 var transaction = Transaction()
                 transaction.disablesAnimations = true
                 withTransaction(transaction) {
-                    transcriptScrollPosition.scrollTo(id: eventID, anchor: anchor)
+                    proxy.scrollTo(eventID, anchor: anchor)
                 }
             } else {
                 withAnimation(.easeInOut(duration: 0.2)) {
-                    transcriptScrollPosition.scrollTo(id: eventID, anchor: anchor)
+                    proxy.scrollTo(eventID, anchor: anchor)
                 }
             }
             if request.source == .restoration {
@@ -1229,25 +1196,22 @@ struct ChatView: View {
         return entries.last?.id ?? "bottom"
     }
 
-    private func markInitialBottomReady(for renderedRevision: Int) {
-        guard renderedRevision == scrollContentRevision,
-              initialBottomReadyRevision != renderedRevision else { return }
-        initialBottomReadyRevision = renderedRevision
-    }
-
     private var transcriptScrollDiagnostics: String {
         guard ProcessInfo.processInfo.arguments.contains(
             "-companion-transcript-window-demo"
         ) else { return "" }
         return [
             "revision=\(scrollContentRevision)",
-            "ready=\(initialBottomReadyRevision.map(String.init) ?? "none")",
             "pending=\(scrollCoordinator.pendingRequest?.source.rawValue ?? "none")",
             "batches=\(scrollCoordinator.issuedRequestBatchCount)",
             "outstanding=\(scrollCoordinator.isProgrammaticBottomScrollOutstanding)",
             "follow=\(scrollCoordinator.followState.rawValue)",
             "target=\(bottomScrollTargetID)",
         ].joined(separator: ";")
+    }
+
+    private var transcriptScrollIdentity: String {
+        "\(currentCompanion.id)-\(thread == nil ? "loading" : "loaded")"
     }
 
     private func finishReadingPositionRestoration() {
@@ -1281,8 +1245,6 @@ struct ChatView: View {
         restorationTargetEventID = nil
         restorationScrollPerformed = false
         lastReportedReadingPosition = nil
-        initialBottomReadyRevision = nil
-        transcriptScrollPosition = ScrollPosition(idType: String.self)
         scrollContentRevision &+= 1
     }
 

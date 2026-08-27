@@ -134,7 +134,6 @@ public struct CompanionScrollCoordinator: Equatable, Sendable {
     public private(set) var lastActualTailSnapshot: CompanionScrollTailSnapshot?
 
     private var observedTail = false
-    private var initialSnapshotInstalled = false
     private var programmaticBottomScrollOutstanding = false
 
     public init(
@@ -146,7 +145,6 @@ public struct CompanionScrollCoordinator: Equatable, Sendable {
         self.issuedRequestBatchCount = 0
         self.lastActualTailSnapshot = lastActualTailSnapshot
         self.observedTail = lastActualTailSnapshot != nil
-        self.initialSnapshotInstalled = false
     }
 
     public var isFollowingTail: Bool {
@@ -164,8 +162,8 @@ public struct CompanionScrollCoordinator: Equatable, Sendable {
     }
 
     /// Records a complete thread's actual visible tail and optionally queues the corresponding
-    /// automatic follow decision. The initial installation always gets one request, including an
-    /// empty thread, while identical later snapshots are no-ops.
+    /// automatic follow decision. Initial placement belongs to the scroll view's layout; identical
+    /// later snapshots are no-ops.
     @discardableResult
     public mutating func observeTail(
         _ snapshot: CompanionScrollTailSnapshot,
@@ -177,9 +175,7 @@ public struct CompanionScrollCoordinator: Equatable, Sendable {
 
         switch source {
         case .initial:
-            guard !initialSnapshotInstalled else { return changed }
-            initialSnapshotInstalled = true
-            requestBottom(source: .initial, animated: false)
+            break
         case .poll:
             guard changed,
                   followState == .followingTail,
@@ -324,7 +320,6 @@ public struct CompanionScrollCoordinator: Equatable, Sendable {
         issuedRequestBatchCount = 0
         lastActualTailSnapshot = nil
         observedTail = false
-        initialSnapshotInstalled = false
         programmaticBottomScrollOutstanding = false
     }
 
