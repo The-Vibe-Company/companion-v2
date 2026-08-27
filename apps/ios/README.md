@@ -127,6 +127,11 @@ Native chat layout regressions use the deterministic transcript-window demo. Lin
 statically verify that its selected UI assertions remain wired into Apple Quality; the macOS 26
 lane performs the actual Swift build and simulator geometry checks. This keeps cloud development
 deterministic without installing or invoking XcodeBuildMCP in CI.
+Keyboard-dismissal regressions use the same static-plus-Apple-Quality split: the Linux guard keeps
+the simultaneous transcript tap and selected UI test wired, while the macOS fixture focuses the
+composer, taps a message, verifies the keyboard disappears, and then opens a tool card to prove
+message controls still receive their taps. The focus change is intentionally silent; dismissing a
+keyboard does not produce haptic feedback.
 The same fixture can switch between Luna and Orbit to verify that the roster-scoped, in-memory
 reading-position store restores the first visible message without animated hydration. CompanionKit
 tests cover per-Companion isolation and window restoration, while Apple Quality owns the rendered

@@ -200,6 +200,10 @@ struct ChatView: View {
                     .defaultScrollAnchor(.bottom)
                     .accessibilityIdentifier("chat.transcript")
                     .simultaneousGesture(
+                        TapGesture()
+                            .onEnded { composerFocused = false }
+                    )
+                    .simultaneousGesture(
                         DragGesture(minimumDistance: 2)
                             .onChanged { _ in stopFollowingTailForReveal() }
                     )

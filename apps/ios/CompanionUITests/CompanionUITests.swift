@@ -642,6 +642,38 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    func testTranscriptTapDismissesKeyboardWithoutBlockingMessageControls() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-transcript-window-demo"]
+        app.launchEnvironment["COMPANION_TRANSCRIPT_DEMO_SHORT"] = "1"
+        app.launch()
+
+        let composer = app.descendants(matching: .any)["chat.composer"]
+        let latestMessage = app.descendants(matching: .any)["chat.entry.long-10"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        XCTAssertTrue(latestMessage.waitForExistence(timeout: 5))
+
+        composer.tap()
+        composer.typeText("Draft")
+        let keyboard = app.keyboards.firstMatch
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 2))
+
+        latestMessage.tap()
+        let keyboardDismissed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: keyboard
+        )
+        wait(for: [keyboardDismissed], timeout: 2)
+
+        let toolCard = app.buttons["tool-run.open-details.layout-check"]
+        XCTAssertTrue(toolCard.waitForExistence(timeout: 3))
+        toolCard.tap()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["tool-run.detail"].waitForExistence(timeout: 3)
+        )
+    }
+
+    @MainActor
     func testTranscriptWindowDemoLoadsEarlierMessages() throws {
         let app = XCUIApplication()
         app.launchArguments = ["-companion-transcript-window-demo"]

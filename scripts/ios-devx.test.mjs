@@ -263,6 +263,34 @@ test("the chat scroll-to-bottom control floats over the transcript", () => {
   assert.match(button, /\.shadow\(color: visualTheme\.shadow\.opacity\(0\.2\), radius: 8, y: 3\)/);
 });
 
+test("native transcript taps dismiss the keyboard without consuming message controls", () => {
+  const chat = read("apps/ios/Companion/Screens/ChatView.swift");
+  const uiTests = read("apps/ios/CompanionUITests/CompanionUITests.swift");
+  const ci = read(".github/workflows/ci.yml");
+  const readme = read("apps/ios/README.md");
+  const transcript = chat.slice(
+    chat.indexOf(".scrollDismissesKeyboard(.interactively)"),
+    chat.indexOf("bottomControls(", chat.indexOf('.accessibilityIdentifier("chat.transcript")')),
+  );
+
+  assert.match(transcript, /\.scrollDismissesKeyboard\(\.interactively\)/);
+  assert.match(
+    transcript,
+    /\.simultaneousGesture\(\s*TapGesture\(\)\s*\.onEnded \{ composerFocused = false \}\s*\)/,
+  );
+  assert.match(uiTests, /testTranscriptTapDismissesKeyboardWithoutBlockingMessageControls/);
+  assert.match(uiTests, /latestMessage\.tap\(\)/);
+  assert.match(uiTests, /predicate: NSPredicate\(format: "exists == false"\)/);
+  assert.match(uiTests, /toolCard\.tap\(\)/);
+  assert.match(uiTests, /\["tool-run\.detail"\]\.waitForExistence/);
+  assert.match(
+    ci,
+    /-only-testing:CompanionUITests\/CompanionUITests\/testTranscriptTapDismissesKeyboardWithoutBlockingMessageControls/,
+  );
+  assert.match(readme, /Keyboard-dismissal regressions use the same static-plus-Apple-Quality split/);
+  assert.match(readme, /The focus change is intentionally silent/);
+});
+
 test("native chat reading restoration stays deterministic and delegated to Apple Quality", () => {
   const chat = read("apps/ios/Companion/Screens/ChatView.swift");
   const roster = read("apps/ios/Companion/Screens/CompanionListView.swift");
