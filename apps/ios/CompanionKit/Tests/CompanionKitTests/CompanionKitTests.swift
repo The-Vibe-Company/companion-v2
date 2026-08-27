@@ -702,7 +702,55 @@ func rosterDoesNotRestoreACompanionAfterTheServerOmitsIt() throws {
     #expect(roster.companions == [nova])
 }
 
-private func rosterCompanion(id: String, name: String) throws -> CompanionSummary {
+@Test
+func rosterSectionsPinnedVisibleAndHiddenCompanionsWithoutChangingServerOrder() throws {
+    let earlyPin = try rosterCompanion(id: "companion-1", name: "Luna", pinned: true)
+    let laterPin = try rosterCompanion(id: "companion-2", name: "Nova", pinned: true)
+    let visible = try rosterCompanion(id: "companion-3", name: "Orbit")
+    let hidden = try rosterCompanion(id: "companion-4", name: "Quill", hidden: true)
+    let roster = CompanionRosterState(companions: [earlyPin, laterPin, visible, hidden])
+
+    #expect(roster.sections.pinned.map(\.id) == [earlyPin.id, laterPin.id])
+    #expect(roster.sections.unpinned.map(\.id) == [visible.id])
+    #expect(roster.sections.hidden.map(\.id) == [hidden.id])
+}
+
+@Test
+func rosterRepartitionsMemberStateResponsesUntilServerOrderingReconciles() throws {
+    let pinned = try rosterCompanion(id: "companion-1", name: "Luna", pinned: true)
+    let nova = try rosterCompanion(id: "companion-2", name: "Nova")
+    let orbit = try rosterCompanion(id: "companion-3", name: "Orbit")
+    var roster = CompanionRosterState(companions: [pinned, nova, orbit])
+
+    let newlyPinned = try rosterCompanion(id: nova.id, name: nova.name, pinned: true)
+    #expect(roster.replaceAndRepartition(newlyPinned))
+    #expect(roster.companions.map(\.id) == [pinned.id, nova.id, orbit.id])
+
+    let newlyHidden = try rosterCompanion(id: pinned.id, name: pinned.name, hidden: true)
+    #expect(roster.replaceAndRepartition(newlyHidden))
+    #expect(roster.companions.map(\.id) == [nova.id, orbit.id, pinned.id])
+    #expect(roster.sections.hidden.map(\.id) == [pinned.id])
+}
+
+@Test
+func rosterKeepsOrderForUnreadOnlyMemberStateResponses() throws {
+    let luna = try rosterCompanion(id: "companion-1", name: "Luna")
+    let nova = try rosterCompanion(id: "companion-2", name: "Nova")
+    var roster = CompanionRosterState(companions: [luna, nova])
+
+    let unreadLuna = try rosterCompanion(id: luna.id, name: luna.name, unread: true)
+    #expect(roster.replaceAndRepartition(unreadLuna))
+    #expect(roster.companions.map(\.id) == [luna.id, nova.id])
+    #expect(roster.companions.first?.unread == true)
+}
+
+private func rosterCompanion(
+    id: String,
+    name: String,
+    pinned: Bool = false,
+    hidden: Bool = false,
+    unread: Bool = false
+) throws -> CompanionSummary {
     try JSONDecoder().decode(CompanionSummary.self, from: Data(#"""
     {
       "id":"\#(id)",
@@ -710,8 +758,9 @@ private func rosterCompanion(id: String, name: String) throws -> CompanionSummar
       "persona":null,
       "model_id":"claude-sonnet",
       "access":"owner",
-      "hidden":false,
-      "unread":false,
+      "pinned":\#(pinned),
+      "hidden":\#(hidden),
+      "unread":\#(unread),
       "last_message":null,
       "runtime":{"state":"running","replying":false,"last_error":null,"provider_ids":["anthropic"]}
     }
@@ -1868,6 +1917,21 @@ func usesRealCompanionManagementRoutesAndRetainsProviderOAuthAuthority() async t
                 data = Data(#"{"operation":{"id":"14757274-8d64-455c-a394-334665a258f0","kind":"delete","status":"pending","error":null}}"#.utf8)
             }
 
+        case "/v1/companions/c96ab360-00f3-4497-a51a-51442db8add1/member-state":
+            #expect(request.httpMethod == "PATCH")
+            let body = try requestBody(request)
+            let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+            #expect(json["pinned"] as? Bool == true)
+            #expect(json["hidden"] == nil)
+            #expect(json["unread"] == nil)
+            response = try #require(HTTPURLResponse(url: requestURL, statusCode: 200, httpVersion: nil, headerFields: nil))
+            data = Data(#"{"companion":{"id":"c96ab360-00f3-4497-a51a-51442db8add1","name":"Luna Prime","persona":null,"model_id":"claude-sonnet","icon":{"shape":6,"mouth":1,"accessory":6,"color":2},"access":"owner","pinned":true,"hidden":false,"unread":false,"last_message":null,"runtime":{"state":"running","replying":false,"last_error":null,"provider_ids":["anthropic"],"latest_operation":null}}}"#.utf8)
+
+        case "/v1/companions/c96ab360-00f3-4497-a51a-51442db8add1/duplicate":
+            #expect(request.httpMethod == "POST")
+            response = try #require(HTTPURLResponse(url: requestURL, statusCode: 201, httpVersion: nil, headerFields: nil))
+            data = Data(#"{"companion":{"id":"a06a767f-2227-47d7-9e4b-b935f82cdd64","name":"Luna Prime copy","persona":null,"model_id":"claude-sonnet","icon":{"shape":6,"mouth":1,"accessory":6,"color":2},"access":"owner","pinned":false,"hidden":false,"unread":false,"last_message":null,"runtime":{"state":"not_created","replying":false,"last_error":null,"provider_ids":["anthropic"],"latest_operation":null}}}"#.utf8)
+
         case "/v1/companion-plugins":
             #expect(request.httpMethod == "POST")
             let body = try requestBody(request)
@@ -1942,6 +2006,16 @@ func usesRealCompanionManagementRoutesAndRetainsProviderOAuthAuthority() async t
     )
     #expect(updated.name == "Luna Prime")
     #expect(updated.runtime.providerIDs == ["anthropic"])
+
+    let pinned = try await client.updateCompanionMemberState(
+        companionID: companion.id,
+        patch: .init(pinned: true)
+    )
+    #expect(pinned.pinned)
+
+    let duplicate = try await client.duplicateCompanion(companionID: companion.id)
+    #expect(duplicate.name == "Luna Prime copy")
+    #expect(!duplicate.pinned)
 
     let deleteRequestID = try #require(UUID(uuidString: "14f2690b-9e55-4d45-9d0c-3f9e20bc4888"))
     do {

@@ -309,6 +309,7 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
     public let selectedMCPAccountIDs: [String]
     public let icon: Icon?
     public let access: CompanionAccess
+    public let pinned: Bool
     public let hidden: Bool
     public let unread: Bool
     public let lastMessage: LastMessage?
@@ -381,6 +382,7 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
         case selectedMCPAccountIDs = "selected_mcp_account_ids"
         case icon
         case access
+        case pinned
         case hidden
         case unread
         case lastMessage = "last_message"
@@ -397,6 +399,7 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
         selectedMCPAccountIDs = try container.decodeIfPresent([String].self, forKey: .selectedMCPAccountIDs) ?? []
         icon = try container.decodeIfPresent(Icon.self, forKey: .icon)
         access = try container.decodeIfPresent(CompanionAccess.self, forKey: .access) ?? .viewer
+        pinned = try container.decodeIfPresent(Bool.self, forKey: .pinned) ?? false
         hidden = try container.decodeIfPresent(Bool.self, forKey: .hidden) ?? false
         unread = try container.decodeIfPresent(Bool.self, forKey: .unread) ?? false
         lastMessage = try container.decodeIfPresent(LastMessage.self, forKey: .lastMessage)
@@ -418,6 +421,7 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
             selectedMCPAccountIDs: selectedMCPAccountIDs,
             icon: icon,
             access: access,
+            pinned: pinned,
             hidden: hidden,
             unread: unread,
             lastMessage: lastMessage ?? previous.lastMessage,
@@ -439,6 +443,7 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
             selectedMCPAccountIDs: selectedMCPAccountIDs,
             icon: icon,
             access: access,
+            pinned: pinned,
             hidden: hidden,
             unread: unread,
             lastMessage: lastMessage,
@@ -455,6 +460,7 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
         selectedMCPAccountIDs: [String],
         icon: Icon?,
         access: CompanionAccess,
+        pinned: Bool,
         hidden: Bool,
         unread: Bool,
         lastMessage: LastMessage?,
@@ -468,10 +474,23 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
         self.selectedMCPAccountIDs = selectedMCPAccountIDs
         self.icon = icon
         self.access = access
+        self.pinned = pinned
         self.hidden = hidden
         self.unread = unread
         self.lastMessage = lastMessage
         self.runtime = runtime
+    }
+}
+
+public struct CompanionMemberStatePatch: Codable, Equatable, Sendable {
+    public let pinned: Bool?
+    public let hidden: Bool?
+    public let unread: Bool?
+
+    public init(pinned: Bool? = nil, hidden: Bool? = nil, unread: Bool? = nil) {
+        self.pinned = pinned
+        self.hidden = hidden
+        self.unread = unread
     }
 }
 

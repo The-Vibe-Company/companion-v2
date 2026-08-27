@@ -20,6 +20,12 @@ later roster poll may honestly reintroduce a Companion the control plane still r
 settings cover the Companion icon, name, instructions, provider, and model. Identity opens as a
 dedicated pushed editor for Owner and Editor, and both creation and editing show the complete visual
 icon catalog; Viewer access remains read-only.
+The roster keeps the server's member-private order, shows pinned and hidden sections, and exposes
+Settings plus safe pin, hide, duplicate, and confirmed delete actions through native swipe,
+long-press, and accessibility actions. Opening a thread advances that member's unread watermark, so
+there is no separate Mark as read command; Mark as unread remains available through the existing
+member-state endpoint. The current list contract projects unread as a Boolean, so native iOS shows
+one accessible unread indicator rather than inventing an exact message count.
 Connected resources now lives inside those settings as one child management page. It retains the
 native Skills, routines, and triggers status views, lists the member's attached MCP plugin accounts
 by provider and label, and lets the Companion Owner attach or detach already-connected accounts.
