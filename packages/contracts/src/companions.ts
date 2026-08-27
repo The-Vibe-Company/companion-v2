@@ -1363,6 +1363,30 @@ export function companionMessageEventId(clientMessageId: string): string {
 export const companionClientSurfaceSchema = z.enum(["web", "mobile_web", "native_mobile"]);
 export type CompanionClientSurface = z.infer<typeof companionClientSurfaceSchema>;
 
+/**
+ * The one model exposed by the first-party dictation capability. This is deliberately separate
+ * from the selectable Companion provider catalog: dictation is a constrained Google Live API
+ * session and never changes the Companion's model or runtime configuration.
+ */
+export const COMPANION_TRANSCRIPTION_MODEL = "gemini-3.5-transcribe-live" as const;
+
+/** A transcription-session request has no caller-controlled settings or payload. */
+export const createCompanionTranscriptionSessionInputSchema = z.object({}).strict();
+export type CreateCompanionTranscriptionSessionInput = z.infer<
+  typeof createCompanionTranscriptionSessionInputSchema
+>;
+
+/**
+ * A short-lived, single-use Google Live API token. The long-lived workspace provider key is never
+ * part of this response (or any client-controlled request).
+ */
+export const companionTranscriptionSessionSchema = z.object({
+  token: z.string().trim().min(1),
+  expires_at: z.string().datetime(),
+  model: z.literal(COMPANION_TRANSCRIPTION_MODEL),
+}).strict();
+export type CompanionTranscriptionSession = z.infer<typeof companionTranscriptionSessionSchema>;
+
 export const sendCompanionMessageInputSchema = z.object({
   content: z.string().trim().min(1).max(16_384),
   client_message_id: companionClientMessageIdSchema,

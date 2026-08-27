@@ -460,6 +460,7 @@ struct ChatView: View {
             }
 
             ChatComposer(
+                companionID: currentCompanion.id,
                 companionName: currentCompanion.name,
                 companionIcon: currentCompanion.icon,
                 canSend: thread?.canSend,

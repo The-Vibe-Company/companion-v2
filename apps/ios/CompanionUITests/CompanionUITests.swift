@@ -66,6 +66,20 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    func testChatComposerExposesAccessibleVoiceTranscriptionControl() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-settings-demo"]
+        app.launchEnvironment["COMPANION_SETTINGS_DEMO_ACCESS"] = "owner"
+        app.launch()
+
+        let microphone = app.buttons["chat.transcription.toggle"]
+        XCTAssertTrue(microphone.waitForExistence(timeout: 5))
+        XCTAssertEqual(microphone.label, "Start voice transcription")
+        XCTAssertGreaterThanOrEqual(microphone.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(microphone.frame.height, 44)
+    }
+
+    @MainActor
     func testDecisionDemoAnswersAndApprovesRequests() throws {
         let app = XCUIApplication()
         app.launchArguments = ["-companion-decision-demo"]

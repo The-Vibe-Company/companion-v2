@@ -168,7 +168,9 @@ explicitly recoverable interruption even after the browser, API, or one runtime 
 ## Explicit exclusions
 
 - Generic Projects and skill runs, multi-Bot orchestration, Bot-to-Bot handoffs, group Bot chats,
-  proactive jobs, voice, and a new navigation or visual language.
+  proactive jobs, Companion voice conversation/runtime audio, and a new navigation or visual
+  language. Native iOS dictation may transiently convert microphone audio into editable composer
+  text without creating a turn, attachment, or Box/Pi capability.
 - A file library, file versioning, or any artifact surface outside a thread. Chat files themselves
   are in scope: bounded image and document uploads on a message, and bounded images Pi hands back.
 - Harnesses other than Pi, runtime providers other than box.ascii.dev, generic provider/model

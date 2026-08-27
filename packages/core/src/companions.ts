@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { and, asc, desc, eq, inArray, max } from "drizzle-orm";
+import { z } from "zod";
 import type {
   Companion,
   CompanionAccess,
@@ -13,26 +14,39 @@ import type {
   CompanionProvidersResponse,
   CompanionShareRole,
   CompanionShares,
+  CompanionTranscriptionSession,
   SaveCompanionPluginInput,
 } from "@companion/contracts";
 import {
   COMPANION_LAST_MESSAGE_PREVIEW_MAX_CHARACTERS,
   COMPANION_PROVIDER_CATALOG,
+  COMPANION_TRANSCRIPTION_MODEL,
   companionMcpAccountSchema,
   companionProviderDefaultModel,
 } from "@companion/contracts";
 import { db, schema, type Db } from "@companion/db";
 import { canManageOrg } from "./authz";
-import { encryptOpaqueValue } from "./secretsCrypto";
+import { decryptOpaqueValue, encryptOpaqueValue, loadSecretsMasterKey } from "./secretsCrypto";
 import { assertMember, getOrgRole, listSkills, type ActorContext } from "./services";
 import type { CompanionPluginStoredOAuthCredential } from "./companionPluginOAuth";
 import { getCompanionProviderCatalog } from "./companionProviderCatalog";
 
-
-
 type CompanionRow = typeof schema.companions.$inferSelect;
 const PROVIDER_CREDENTIAL_PURPOSE = "companion-provider-credential";
 const MCP_CREDENTIAL_PURPOSE = "companion-mcp-credential";
+const TRANSCRIPTION_PROVIDER_ID = "google";
+const TRANSCRIPTION_AUTH_TOKEN_URL = "https://generativelanguage.googleapis.com/v1beta/auth_tokens";
+/** A token may open one Live session within a minute and then stream for at most ten minutes. */
+export const COMPANION_TRANSCRIPTION_NEW_SESSION_TTL_MS = 60_000;
+export const COMPANION_TRANSCRIPTION_TOKEN_TTL_MS = 10 * 60_000;
+
+const transcriptionProviderCredentialSchema = z.object({
+  type: z.literal("api_key"),
+  key: z.string().min(1).refine((value) => value.trim().length > 0),
+}).strict();
+const transcriptionAuthTokenResponseSchema = z.object({
+  name: z.string().trim().min(1),
+}).strip();
 
 /** Drizzle query errors nest postgres.js SQLSTATE on `cause`; check both layers. */
 // oxlint-disable-next-line anti-slop/no-unknown-parameters -- legacy pattern predating the incremental anti-slop gate
@@ -539,6 +553,170 @@ export async function getCompanion(input: {
     access,
     withLastMessage: input.withLastMessage,
   });
+}
+
+function transcriptionProviderError(
+  code: CompanionProviderError["code"],
+  message: string,
+): CompanionProviderError {
+  return new CompanionProviderError(code, message, TRANSCRIPTION_PROVIDER_ID);
+}
+
+/**
+ * Resolve one workspace Google API key and exchange it for the constrained Live transcription
+ * token. This capability intentionally does not involve the Companion Box, Pi, runtime, or
+ * transcript: audio goes directly from the first-party client to Google's Live API.
+ */
+export async function createCompanionTranscriptionSession(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  /** Route callers pass the already-authorized PostgreSQL projection to avoid a second lookup. */
+  companion?: Pick<Companion, "access">;
+  masterKey?: Buffer;
+  database?: Db;
+  fetchImpl?: typeof fetch;
+  now?: () => number;
+}): Promise<CompanionTranscriptionSession> {
+  const database = input.database ?? db;
+  const companion = input.companion ?? await getCompanion({
+    actor: input.actor,
+    orgId: input.orgId,
+    companionId: input.companionId,
+    database,
+  });
+  if (!canWakeCompanion(companion.access)) throw new CompanionRuntimeForbiddenError();
+
+  // Select only the Google connection and only the encrypted fields needed for this exchange. A
+  // subscription credential is never decrypted or sent to a provider that is not its owner.
+  const [connection] = await database
+    .select({
+      authMethod: schema.companionProviderConnections.authMethod,
+      credentialGeneration: schema.companionProviderConnections.credentialGeneration,
+      ciphertext: schema.companionProviderConnections.ciphertext,
+      iv: schema.companionProviderConnections.iv,
+      authTag: schema.companionProviderConnections.authTag,
+      wrappedDek: schema.companionProviderConnections.wrappedDek,
+      wrapIv: schema.companionProviderConnections.wrapIv,
+      wrapAuthTag: schema.companionProviderConnections.wrapAuthTag,
+      keyId: schema.companionProviderConnections.keyId,
+    })
+    .from(schema.companionProviderConnections)
+    .where(and(
+      eq(schema.companionProviderConnections.orgId, input.orgId),
+      eq(schema.companionProviderConnections.providerId, TRANSCRIPTION_PROVIDER_ID),
+    ))
+    .limit(1);
+
+  if (!connection) {
+    throw transcriptionProviderError(
+      "provider_not_configured",
+      "Google Gemini transcription is not configured.",
+    );
+  }
+  if (connection.authMethod !== "api_key") {
+    throw transcriptionProviderError(
+      "provider_auth_invalid",
+      "Google Gemini transcription requires a workspace API key.",
+    );
+  }
+
+  let apiKey: string;
+  try {
+    const plaintext = decryptOpaqueValue({
+      orgId: input.orgId,
+      purpose: PROVIDER_CREDENTIAL_PURPOSE,
+      subjectId: `${TRANSCRIPTION_PROVIDER_ID}:${connection.credentialGeneration}`,
+      ciphertext: connection.ciphertext,
+      iv: connection.iv,
+      authTag: connection.authTag,
+      wrappedDek: connection.wrappedDek,
+      wrapIv: connection.wrapIv,
+      wrapAuthTag: connection.wrapAuthTag,
+      keyId: connection.keyId,
+    }, input.masterKey ?? loadSecretsMasterKey());
+    // SAFETY: the plaintext is authenticated by decryptOpaqueValue; the schema below accepts only
+    // the exact API-key envelope written by saveCompanionProvider.
+    apiKey = transcriptionProviderCredentialSchema.parse(JSON.parse(plaintext)).key;
+  } catch {
+    // Do not expose whether decryption, parsing, or the deployment key was the failing step.
+    throw transcriptionProviderError(
+      "provider_auth_invalid",
+      "Google Gemini transcription credentials are unavailable.",
+    );
+  }
+
+  const now = input.now?.() ?? Date.now();
+  const expiresAt = new Date(now + COMPANION_TRANSCRIPTION_TOKEN_TTL_MS).toISOString();
+  const newSessionExpiresAt = new Date(now + COMPANION_TRANSCRIPTION_NEW_SESSION_TTL_MS).toISOString();
+  const fetchImpl = input.fetchImpl ?? fetch;
+  let response: Response;
+  try {
+    response = await fetchImpl(TRANSCRIPTION_AUTH_TOKEN_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": apiKey,
+      },
+      body: JSON.stringify({
+        uses: 1,
+        expireTime: expiresAt,
+        newSessionExpireTime: newSessionExpiresAt,
+        liveConnectConstraints: {
+          model: `models/${COMPANION_TRANSCRIPTION_MODEL}`,
+          config: {
+            responseModalities: ["TEXT"],
+            inputAudioTranscription: {
+              mode: "SMART",
+              languageCodes: [],
+            },
+            sessionResumption: {},
+          },
+        },
+      }),
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch {
+    throw transcriptionProviderError(
+      "provider_unavailable",
+      "Google Gemini transcription is temporarily unavailable. Try again.",
+    );
+  }
+
+  if (!response.ok) {
+    throw transcriptionProviderError(
+      response.status === 401 || response.status === 403
+        ? "provider_auth_invalid"
+        : "provider_unavailable",
+      response.status === 401 || response.status === 403
+        ? "Google Gemini transcription credentials were rejected."
+        : "Google Gemini transcription is temporarily unavailable. Try again.",
+    );
+  }
+
+  let token: string;
+  try {
+    // Parse only the token identifier. Provider diagnostics and all other fields are intentionally
+    // discarded so they cannot cross this boundary or become part of an error message.
+    token = transcriptionAuthTokenResponseSchema.parse(await response.json()).name;
+  } catch {
+    throw transcriptionProviderError(
+      "provider_unavailable",
+      "Google Gemini transcription returned an invalid session.",
+    );
+  }
+  if (token === apiKey) {
+    throw transcriptionProviderError(
+      "provider_unavailable",
+      "Google Gemini transcription returned an invalid session.",
+    );
+  }
+
+  return {
+    token,
+    expires_at: expiresAt,
+    model: COMPANION_TRANSCRIPTION_MODEL,
+  };
 }
 
 /**

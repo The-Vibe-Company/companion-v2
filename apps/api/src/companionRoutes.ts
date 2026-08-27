@@ -56,6 +56,7 @@ import {
   createCompanionV2,
   createCompanionRoutineV2,
   createCompanionTriggerV2,
+  createCompanionTranscriptionSession,
   deleteCompanionRoutineV2,
   deleteCompanionTriggerV2,
   duplicateCompanionV2,
@@ -66,6 +67,7 @@ import {
   fireCompanionTrigger,
   getCompanionDecisionV2,
   getCompanionTriggerForWebhook,
+  getCompanion,
   getCompanionV2,
   listCompanionsV2,
   listCompanionRoutinesV2,
@@ -110,7 +112,9 @@ import {
   type CompanionThread,
   type CompanionTurn,
   type SendCompanionMessageInput,
+  companionTranscriptionSessionSchema,
   createCompanionInputSchema,
+  createCompanionTranscriptionSessionInputSchema,
   createCompanionRoutineInputSchema,
   createCompanionTriggerInputSchema,
   declaredCompanionAttachmentContentType,
@@ -200,12 +204,14 @@ function defaultCompanionRouteDependencies() {
     enqueueCompanionOperationV2,
     enqueueCompanionTurnV2,
     getCompanionDecisionV2,
+    getCompanion,
     getCompanionV2,
     listCompanionsV2,
     listCompanionRoutinesV2,
     createCompanionRoutineV2,
     updateCompanionRoutineV2,
     deleteCompanionRoutineV2,
+    createCompanionTranscriptionSession,
     answerCompanionRoutineDecisionV2,
     listCompanionTriggersV2,
     createCompanionTriggerV2,
@@ -563,12 +569,14 @@ export function registerCompanionRoutes(
     enqueueCompanionOperationV2,
     enqueueCompanionTurnV2,
     getCompanionDecisionV2,
+    getCompanion,
     getCompanionV2,
     listCompanionsV2,
     listCompanionRoutinesV2,
     createCompanionRoutineV2,
     updateCompanionRoutineV2,
     deleteCompanionRoutineV2,
+    createCompanionTranscriptionSession,
     answerCompanionRoutineDecisionV2,
     listCompanionTriggersV2,
     createCompanionTriggerV2,
@@ -702,6 +710,45 @@ export function registerCompanionRoutes(
           database,
         }));
       return c.json({ companion }, 201);
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.post("/v1/companions/:id/transcription-sessions", async (c) => {
+    c.header("Cache-Control", "private, no-store");
+    c.header("Pragma", "no-cache");
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      // The body exists only for a uniform POST shape. No audio, language, model, or other
+      // provider setting is accepted from a client; the core exchange below owns the fixed config.
+      const rawBody = await c.req.text();
+      createCompanionTranscriptionSessionInputSchema.parse(
+        rawBody.trim().length === 0 ? {} : JSON.parse(rawBody),
+      );
+      const session = await tenant(c, async ({ actor, orgId, database }) => {
+        const companion = await getCompanion({ actor, orgId, companionId, database });
+        if (companion.access === "viewer") throw new CompanionRuntimeForbiddenError();
+        let masterKey: Buffer;
+        try {
+          masterKey = loadSecretsMasterKey(env.COMPANION_SECRETS_MASTER_KEY);
+        } catch {
+          throw new CompanionProviderError(
+            "provider_auth_invalid",
+            "Google Gemini transcription credentials are unavailable.",
+            "google",
+          );
+        }
+        return await createCompanionTranscriptionSession({
+          actor,
+          orgId,
+          companionId,
+          companion,
+          masterKey,
+          database,
+        });
+      });
+      return c.json(companionTranscriptionSessionSchema.parse(session));
     } catch (error) {
       return routeError(c, error);
     }
