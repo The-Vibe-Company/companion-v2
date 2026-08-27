@@ -261,8 +261,8 @@ wins; there is no global learned capability table.
 First-party Companion starts resolve the actor's currently accessible selected Skills and member MCP
 accounts through the same API contract. Runtime revalidates every id before staging. Empty selection
 means no library Skills or member MCP pins; the bundled Companion skill remains the Skills Hub
-bridge. The iOS app authenticates email credentials directly or completes Google OAuth in the system
-browser, then keeps the same secure Better Auth cookie contract; new Google accounts may join a
+bridge. The iOS app authenticates email credentials directly or completes Google OAuth in the
+member's default browser, then keeps the same secure Better Auth cookie contract; new Google accounts may join a
 domain-matched organization or create a minimal workspace before entering the product. The iOS app
 does not introduce a client identifier as a product-capability or authorization boundary. Companion
 ownership is not a resource-access fallback: an Editor cannot stage an
@@ -276,6 +276,16 @@ tokens never leave the control plane; OAuth access tokens reach only a loopback 
 the one outbound request it is forwarding. They never appear in user-facing responses, logs, audit
 metadata, projections, or durable Box files. The provider auth file remains on Box disk only where
 Pi itself must refresh the model provider connection.
+
+Native iOS also opens curated plugin authorization in the member's default browser. The existing
+callback URI, signed state, and PKCE exchange remain unchanged. The authenticated start response
+provides the exact callback origin and signed state; a narrowly scoped Universal Link returns that
+callback to the app only when both match the pending flow. The client holds the short-lived callback
+cookie and binding only in memory, does not follow the callback's final redirect, and validates the
+original 303 Location against that same origin, `/companions`, and exactly one OAuth result marker.
+Production uses the committed `thecompanion.sh` AASA/entitlement; a custom HTTPS origin is accepted
+only when the authenticated start response supplies it, while local HTTP loopback cannot deliver an
+Apple Universal Link and the production-signed app makes no general self-hosted-domain claim.
 
 PostgreSQL distinguishes the latest available selected-Skills revision from the minimum revision
 required before dispatch. A publication advances only the available revision, so waking a Box

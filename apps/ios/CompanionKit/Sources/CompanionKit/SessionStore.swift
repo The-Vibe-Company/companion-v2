@@ -153,10 +153,20 @@ public final class SessionStore {
         try await client.beginGoogleSignIn(callbackScheme: callbackScheme)
     }
 
-    public func completeGoogleSignIn(callbackURL: URL) async throws {
-        let authenticated = try await client.completeGoogleSignIn(callbackURL: callbackURL)
+    public func completeGoogleSignIn(
+        callbackURL: URL,
+        callbackScheme: String
+    ) async throws {
+        let authenticated = try await client.completeGoogleSignIn(
+            callbackURL: callbackURL,
+            callbackScheme: callbackScheme
+        )
         try persist(authenticated)
         publish(authenticated)
+    }
+
+    public func cancelGoogleSignIn(expectedNativeState: String) async {
+        await client.cancelGoogleSignIn(expectedNativeState: expectedNativeState)
     }
 
     /// Updates the member's shared profile and rolls the returned values into the secure session
@@ -636,12 +646,13 @@ public final class SessionStore {
         }
     }
 
-    public func companionPluginOAuthRequest(
+    public func startCompanionPluginOAuth(
         serverName: String,
         label: String
-    ) async throws -> URLRequest {
+    ) async throws -> CompanionPluginOAuthStart {
         do {
-            return try await client.companionPluginOAuthRequest(
+            await client.cancelCompanionPluginOAuth()
+            return try await client.startCompanionPluginOAuth(
                 serverName: serverName,
                 label: label
             )
@@ -649,6 +660,20 @@ public final class SessionStore {
             await clearLocalSession()
             throw error
         }
+    }
+
+    public func completeCompanionPluginOAuth(callbackURL: URL) async throws {
+        do {
+            try await client.completeCompanionPluginOAuth(callbackURL: callbackURL)
+            await persistRollingAuthority()
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func cancelCompanionPluginOAuth() async {
+        await client.cancelCompanionPluginOAuth()
     }
 
     public func deleteCompanionPlugin(accountID: String) async throws {

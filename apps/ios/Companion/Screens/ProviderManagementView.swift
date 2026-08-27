@@ -263,7 +263,6 @@ private enum ProviderConnectionResult {
 private struct ConnectProviderView: View {
     @Environment(SessionStore.self) private var sessionStore
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.openURL) private var openURL
     let catalog: [CompanionProviderDefinition]
     let shouldMakeDefault: Bool
     let onConnected: (ProviderConnectionResult) -> Void
@@ -409,8 +408,8 @@ private struct ConnectProviderView: View {
                         .font(.subheadline)
                         .foregroundStyle(Color.companionMuted)
                     if let url = oauth.authorizationURL {
-                        Button("Open \(selectedProvider?.name ?? "provider")", systemImage: "safari") {
-                            openURL(url)
+                        Button("Open \(selectedProvider?.name ?? "provider")", systemImage: "arrow.up.right.square") {
+                            openProviderPage(url)
                         }
                         .buttonStyle(.glass)
                     }
@@ -440,7 +439,7 @@ private struct ConnectProviderView: View {
                             .accessibilityLabel("One-time code \(code)")
                     }
                     if let url = oauth.verificationURL {
-                        Button("Open provider page", systemImage: "safari") { openURL(url) }
+                        Button("Open provider page", systemImage: "arrow.up.right.square") { openProviderPage(url) }
                             .buttonStyle(.glass)
                     }
                     Button(waitingForApproval ? "Still waiting…" : "Check connection", systemImage: "arrow.clockwise") {
@@ -515,11 +514,22 @@ private struct ConnectProviderView: View {
         do {
             let started = try await sessionStore.startCompanionProviderOAuth(providerID: providerID)
             oauth = started
-            if let url = started.authorizationURL ?? started.verificationURL { openURL(url) }
+            if let url = started.authorizationURL ?? started.verificationURL {
+                openProviderPage(url)
+            } else {
+                error = "The provider did not return a sign-in page. Try again."
+            }
         } catch {
             self.error = companionDisplayMessage(error, fallback: "Subscription sign-in could not be started.")
         }
         submitting = false
+    }
+
+    private func openProviderPage(_ url: URL) {
+        let errorBinding = $error
+        ExternalURLLauncher.open(url) {
+            errorBinding.wrappedValue = "The provider page could not be opened. Tap the open button to try again."
+        }
     }
 
     private func completeAuthorizationCode() async {

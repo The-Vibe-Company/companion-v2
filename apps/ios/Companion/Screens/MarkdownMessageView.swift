@@ -140,7 +140,11 @@ struct MarkdownMessageView: View {
                 OpenURLAction { url in
                     switch CompanionLinkPolicy.route(for: url) {
                     case .system:
-                        return .systemAction
+                        // External HTTP(S) and mail links leave the app through the system browser
+                        // or mail client. Keep this explicit so SwiftUI cannot present an
+                        // in-app web surface for assistant-authored links.
+                        UIApplication.shared.open(url, options: [:], completionHandler: nil)
+                        return .handled
                     case .conductor:
                         // Companion has no Conductor workspace route, so let iOS hand this URL to
                         // whichever installed app has registered the explicit scheme.

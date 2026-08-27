@@ -297,14 +297,15 @@ struct PluginManagementView: View {
 
 private struct ConnectCuratedPluginView: View {
     @Environment(SessionStore.self) private var sessionStore
+    @Environment(ExternalOAuthCoordinator.self) private var externalOAuth
     @Environment(\.dismiss) private var dismiss
     let plugin: CuratedCompanionPlugin
     let onConnected: () -> Void
 
     @State private var label = ""
-    @State private var request: URLRequest?
-    @State private var showingOAuth = false
     @State private var submitting = false
+    @State private var cancellationPending = false
+    @State private var oauthGeneration = UUID()
     @State private var error: String?
 
     var body: some View {
@@ -356,6 +357,10 @@ private struct ConnectCuratedPluginView: View {
                         .foregroundStyle(Color.companionMuted)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 4)
+
+                        if pluginFlowActive {
+                            pluginWaitingSurface
+                        }
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 12)
@@ -366,28 +371,86 @@ private struct ConnectCuratedPluginView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button(cancellationPending ? "Cancelling…" : "Cancel") {
+                        requestCancellation(dismissAfterwards: true)
+                    }
+                    .disabled(submitting || cancellationPending || externalOAuth.phase == .completing)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(submitting ? "Opening…" : "Continue") { Task { await connect() } }
-                        .disabled(trimmedLabel.isEmpty || trimmedLabel.count > 40 || submitting)
+                        .disabled(
+                            trimmedLabel.isEmpty
+                                || trimmedLabel.count > 40
+                                || submitting
+                                || cancellationPending
+                                || pluginFlowActive
+                        )
                 }
             }
-            .fullScreenCover(isPresented: $showingOAuth) {
-                if let request {
-                    CompanionPluginOAuthBrowser(title: plugin.title, request: request) { result in
-                        showingOAuth = false
-                        switch result {
-                        case .connected:
-                            onConnected()
-                            dismiss()
-                        case let .failed(message):
-                            error = message
-                        }
+            .onChange(of: externalOAuth.callbackGeneration) { _, _ in
+                guard pluginFlowActive,
+                      let callbackURL = externalOAuth.takeCallback() else { return }
+                Task { await completePluginOAuth(callbackURL) }
+            }
+            .onDisappear {
+                guard (submitting && !pluginFlowActive)
+                    || (pluginFlowActive && externalOAuth.phase != .completing) else { return }
+                requestCancellation(fromDisappear: true)
+            }
+            .interactiveDismissDisabled(
+                submitting || cancellationPending || externalOAuth.phase == .completing
+            )
+        }
+    }
+
+    private var pluginFlowActive: Bool {
+        externalOAuth.activeFlow?.isPlugin == true
+    }
+
+    @ViewBuilder
+    private var pluginWaitingSurface: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Plugin authorization", systemImage: "arrow.up.right.square")
+                .font(.headline)
+                .foregroundStyle(Color.companionInk)
+
+            switch externalOAuth.phase {
+            case .waiting:
+                Text("The provider is open in your default browser. Return here after you finish authorizing \(plugin.title).")
+            case .timedOut:
+                Text("No callback arrived. Reopen this authorization or cancel this attempt.")
+            case .failed(let message):
+                Text(message)
+            case .completing:
+                Text("Finishing plugin authorization…")
+            case .idle:
+                EmptyView()
+            }
+
+            if externalOAuth.phase != .completing {
+                HStack(spacing: 10) {
+                    Button("Reopen", systemImage: "arrow.clockwise") {
+                        reopenPluginAuthorization()
                     }
+                    .buttonStyle(.glass)
+                    .accessibilityIdentifier("plugins.oauth.reopen.\(plugin.provider)")
+
+                    Button(cancellationPending ? "Cancelling…" : "Cancel", systemImage: "xmark") {
+                        requestCancellation()
+                    }
+                    .buttonStyle(.glass)
+                    .disabled(cancellationPending)
+                    .accessibilityIdentifier("plugins.oauth.cancel.\(plugin.provider)")
                 }
             }
         }
+        .font(.subheadline)
+        .foregroundStyle(Color.companionMuted)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .companionGlass(radius: 20)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("plugins.oauth.waiting.\(plugin.provider)")
     }
 
     private var trimmedLabel: String {
@@ -403,18 +466,88 @@ private struct ConnectCuratedPluginView: View {
 
     private func connect() async {
         guard !trimmedLabel.isEmpty, trimmedLabel.count <= 40 else { return }
+        await startOAuthFlow()
+    }
+
+    private func startOAuthFlow() async {
+        guard !trimmedLabel.isEmpty,
+              trimmedLabel.count <= 40,
+              !submitting,
+              !cancellationPending else { return }
         submitting = true
         error = nil
+        let generation = oauthGeneration
+        defer { submitting = false }
         do {
-            request = try await sessionStore.companionPluginOAuthRequest(
+            let started = try await sessionStore.startCompanionPluginOAuth(
                 serverName: plugin.id,
                 label: trimmedLabel
             )
-            showingOAuth = true
+            guard generation == oauthGeneration, !cancellationPending else {
+                return
+            }
+            guard externalOAuth.beginPlugin(authorizationURL: started.authorizationURL) else {
+                await sessionStore.cancelCompanionPluginOAuth()
+                self.error = "The plugin authorization response was not recognized. Try again."
+                return
+            }
         } catch {
+            guard generation == oauthGeneration, !cancellationPending else { return }
             self.error = companionDisplayMessage(error, fallback: "The plugin connection could not be started.")
         }
-        submitting = false
+    }
+
+    private func reopenPluginAuthorization() {
+        externalOAuth.reopen()
+    }
+
+    private func requestCancellation(
+        dismissAfterwards: Bool = false,
+        fromDisappear: Bool = false
+    ) {
+        guard !cancellationPending,
+              fromDisappear || (!submitting && externalOAuth.phase != .completing) else { return }
+        cancellationPending = true
+        let cancellationGeneration = UUID()
+        oauthGeneration = cancellationGeneration
+        externalOAuth.cancel()
+        Task { @MainActor in
+            await finishCancellation(
+                generation: cancellationGeneration,
+                dismissAfterwards: dismissAfterwards
+            )
+        }
+    }
+
+    private func finishCancellation(generation: UUID, dismissAfterwards: Bool) async {
+        await sessionStore.cancelCompanionPluginOAuth()
+        guard oauthGeneration == generation else { return }
+        if dismissAfterwards {
+            dismiss()
+        }
+        cancellationPending = false
+    }
+
+    private func completePluginOAuth(_ callbackURL: URL) async {
+        guard !cancellationPending else { return }
+        submitting = true
+        error = nil
+        let generation = oauthGeneration
+        defer { submitting = false }
+        do {
+            try await sessionStore.completeCompanionPluginOAuth(callbackURL: callbackURL)
+            guard generation == oauthGeneration, !cancellationPending else { return }
+            externalOAuth.completeSuccessfully()
+            onConnected()
+            dismiss()
+        } catch {
+            guard generation == oauthGeneration, !cancellationPending else { return }
+            externalOAuth.fail("The plugin authorization could not be completed.")
+            self.error = companionDisplayMessage(
+                error,
+                fallback: "The plugin authorization could not be completed."
+            )
+        }
     }
 }
 
