@@ -673,6 +673,9 @@ final class CompanionUITests: XCTestCase {
         wait(for: [keyboardDismissed], timeout: 2)
 
         let toolCard = app.buttons["tool-run.open-details.layout-check"]
+        for _ in 0..<3 where !toolCard.exists {
+            app.swipeUp()
+        }
         XCTAssertTrue(toolCard.waitForExistence(timeout: 3))
         toolCard.tap()
         XCTAssertTrue(

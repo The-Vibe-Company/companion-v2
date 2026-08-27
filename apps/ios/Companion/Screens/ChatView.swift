@@ -51,6 +51,23 @@ private final class ChatRefreshGate {
     }
 }
 
+private struct TranscriptKeyboardDismissGesture: UIGestureRecognizerRepresentable {
+    let onTap: () -> Void
+
+    func makeUIGestureRecognizer(context: Context) -> UITapGestureRecognizer {
+        let recognizer = UITapGestureRecognizer()
+        recognizer.cancelsTouchesInView = false
+        return recognizer
+    }
+
+    func handleUIGestureRecognizerAction(
+        _ recognizer: UITapGestureRecognizer,
+        context: Context
+    ) {
+        onTap()
+    }
+}
+
 struct ChatView: View {
     @Environment(SessionStore.self) private var sessionStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -200,8 +217,9 @@ struct ChatView: View {
                     .defaultScrollAnchor(.bottom)
                     .accessibilityIdentifier("chat.transcript")
                     .simultaneousGesture(
-                        TapGesture()
-                            .onEnded { composerFocused = false }
+                        TranscriptKeyboardDismissGesture {
+                            composerFocused = false
+                        }
                     )
                     .simultaneousGesture(
                         DragGesture(minimumDistance: 2)

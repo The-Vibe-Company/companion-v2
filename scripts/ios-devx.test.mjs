@@ -275,8 +275,13 @@ test("native transcript taps dismiss the keyboard without consuming message cont
 
   assert.match(transcript, /\.scrollDismissesKeyboard\(\.interactively\)/);
   assert.match(
+    chat,
+    /struct TranscriptKeyboardDismissGesture: UIGestureRecognizerRepresentable/,
+  );
+  assert.match(chat, /recognizer\.cancelsTouchesInView = false/);
+  assert.match(
     transcript,
-    /\.simultaneousGesture\(\s*TapGesture\(\)\s*\.onEnded \{ composerFocused = false \}\s*\)/,
+    /\.simultaneousGesture\(\s*TranscriptKeyboardDismissGesture \{\s*composerFocused = false\s*\}\s*\)/,
   );
   assert.match(uiTests, /testTranscriptTapDismissesKeyboardWithoutBlockingMessageControls/);
   assert.match(uiTests, /transcriptMessage\.tap\(\)/);
