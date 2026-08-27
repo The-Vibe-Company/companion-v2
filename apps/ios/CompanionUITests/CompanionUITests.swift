@@ -693,6 +693,36 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    func testTranscriptWindowDemoStaysAtLatestAcrossPollInterval() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-transcript-window-demo"]
+        app.launch()
+
+        let latest = app.staticTexts["Long-thread message 120"]
+        XCTAssertTrue(latest.waitForExistence(timeout: 5))
+        XCTAssertTrue(latest.isHittable)
+
+        // The fixture's four-second poll is real, but returns the same visible tail. Waiting past
+        // it catches the old layout/poll feedback loop without exposing diagnostics in the app.
+        // Sampling the whole interval also catches a down/up oscillation that happens to end at
+        // the same coordinate where it began.
+        var sampledBottoms = [latest.frame.maxY]
+        for sample in 1...9 {
+            let sampleInterval = expectation(description: "poll stability sample \(sample)")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                sampleInterval.fulfill()
+            }
+            wait(for: [sampleInterval], timeout: 1)
+            sampledBottoms.append(latest.frame.maxY)
+        }
+
+        XCTAssertTrue(latest.isHittable)
+        XCTAssertFalse(app.buttons["chat.scroll-to-bottom"].exists)
+        let movement = (sampledBottoms.max() ?? 0) - (sampledBottoms.min() ?? 0)
+        XCTAssertLessThan(movement, 12)
+    }
+
+    @MainActor
     func testTranscriptWindowDemoRestoresReadingPositionAfterCompanionSwitch() throws {
         let app = XCUIApplication()
         app.launchArguments = ["-companion-transcript-window-demo"]

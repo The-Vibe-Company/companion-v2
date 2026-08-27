@@ -16,11 +16,6 @@ struct ChatServices {
     let listProviders: () async throws -> CompanionProvidersResponse
 }
 
-private enum ChatScrollTarget: Equatable {
-    case bottom(animated: Bool)
-    case entry(String)
-}
-
 struct ChatView: View {
     @Environment(SessionStore.self) private var sessionStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -49,14 +44,15 @@ struct ChatView: View {
     @State private var decisionCatalog = CompanionDecisionCatalog.empty
     @State private var decisionCatalogLoaded = false
     @State private var transcriptWindow = CompanionTranscriptWindow()
-    @State private var isNearBottom = true
+    @State private var scrollCoordinator = CompanionScrollCoordinator()
     @State private var loadingEarlier = false
-    @State private var pendingScrollTarget: ChatScrollTarget?
     @State private var scrollContentRevision = 0
     @State private var pendingReadingPosition: CompanionChatReadingPosition?
     @State private var visibleEntryIDs: [String] = []
     @State private var isRestoringReadingPosition = false
     @State private var restorationTargetEventID: String?
+    @State private var restorationScrollPerformed = false
+    @State private var lastReportedReadingPosition: CompanionChatReadingPosition?
     @FocusState private var composerFocused: Bool
     @State private var selectedToolDetail: ToolRunDetailRoute?
 
@@ -78,7 +74,13 @@ struct ChatView: View {
         self.onSettings = onSettings
         _currentCompanion = State(initialValue: companion)
         _pendingReadingPosition = State(initialValue: readingPosition)
-        _isNearBottom = State(initialValue: readingPosition?.isFollowingTail ?? true)
+        _scrollCoordinator = State(
+            initialValue: CompanionScrollCoordinator(
+                followState: readingPosition?.isFollowingTail == false
+                    ? .userReading
+                    : .followingTail
+            )
+        )
     }
 
     var body: some View {
@@ -181,15 +183,28 @@ struct ChatView: View {
                     .opacity(isRestoringReadingPosition ? 0 : 1)
                     .scrollDismissesKeyboard(.interactively)
                     .scrollIndicators(.hidden)
-                    .defaultScrollAnchor(.bottom)
                     .accessibilityIdentifier("chat.transcript")
                     .onScrollGeometryChange(for: CGFloat.self) { geometry in
                         max(0, geometry.contentSize.height - geometry.visibleRect.maxY)
                     } action: { _, bottomDistance in
-                        let nextIsNearBottom = bottomDistance <= bottomProximityThreshold
-                        guard nextIsNearBottom != isNearBottom else { return }
-                        isNearBottom = nextIsNearBottom
-                        recordReadingPosition()
+                        let stateChanged = scrollCoordinator.observeGeometry(
+                            bottomDistance: Double(bottomDistance),
+                            threshold: Double(bottomProximityThreshold)
+                        )
+                        if stateChanged { recordReadingPosition() }
+                    }
+                    .onScrollPhaseChange { _, newPhase, context in
+                        guard newPhase == .interacting else { return }
+                        let geometry = context.geometry
+                        let bottomDistance = max(
+                            0,
+                            geometry.contentSize.height - geometry.visibleRect.maxY
+                        )
+                        let stateChanged = scrollCoordinator.beginUserInteraction(
+                            bottomDistance: Double(bottomDistance),
+                            threshold: Double(bottomProximityThreshold)
+                        )
+                        if stateChanged { recordReadingPosition() }
                     }
                     .onScrollTargetVisibilityChange(
                         idType: String.self,
@@ -197,6 +212,7 @@ struct ChatView: View {
                     ) { identifiers in
                         visibleEntryIDs = identifiers
                         if let restorationTargetEventID,
+                           restorationScrollPerformed,
                            identifiers.contains(restorationTargetEventID) {
                             finishReadingPositionRestoration()
                         }
@@ -205,7 +221,11 @@ struct ChatView: View {
                     .overlay(alignment: .bottomTrailing) {
                         if !isNearBottom {
                             scrollToBottomButton {
-                                requestScroll(to: .bottom(animated: true))
+                                requestScroll(
+                                    to: .bottom,
+                                    source: .userLatest,
+                                    animated: true
+                                )
                             }
                             .padding(.trailing, 16)
                             .padding(.bottom, 12)
@@ -219,7 +239,7 @@ struct ChatView: View {
 
                     bottomControls(
                         queuedEntries: queuedEntries,
-                        onThinkingTap: { revealLiveReasoning(using: proxy) }
+                        onThinkingTap: revealLiveReasoning
                     )
                 }
                 .animation(
@@ -227,9 +247,8 @@ struct ChatView: View {
                     value: isNearBottom
                 )
                 .onChange(of: scrollContentRevision) {
-                    guard let target = pendingScrollTarget else { return }
-                    pendingScrollTarget = nil
-                    performScroll(to: target, with: proxy)
+                    guard let request = scrollCoordinator.takePendingRequest() else { return }
+                    performScroll(to: request, with: proxy)
                 }
             }
         }
@@ -578,6 +597,10 @@ struct ChatView: View {
         CompanionVisualTheme(icon: currentCompanion.icon)
     }
 
+    private var isNearBottom: Bool {
+        scrollCoordinator.isFollowingTail
+    }
+
     private var isReplying: Bool {
         guard let thread else { return currentCompanion.runtime.replying }
         return thread.activeTurn?.replying == true
@@ -614,16 +637,24 @@ struct ChatView: View {
         )
     }
 
-    private func revealLiveReasoning(using proxy: ScrollViewProxy) {
+    private func revealLiveReasoning() {
         guard let eventID = liveReasoningEventID else { return }
         if reduceMotion {
             expandedReasoningEventIDs.insert(eventID)
-            proxy.scrollTo(eventID, anchor: .center)
+            requestScroll(
+                to: .entry(eventID),
+                source: .reasoning,
+                animated: false
+            )
         } else {
             withAnimation(.easeInOut(duration: 0.2)) {
                 expandedReasoningEventIDs.insert(eventID)
-                proxy.scrollTo(eventID, anchor: .center)
             }
+            requestScroll(
+                to: .entry(eventID),
+                source: .reasoning,
+                animated: true
+            )
         }
     }
 
@@ -643,6 +674,7 @@ struct ChatView: View {
         if silently, loadingEarlier { return }
         let generation = threadProjection.beginRefresh()
         let previousThread = threadProjection.thread
+        let hasPreviousThread = previousThread != nil
         if !silently { loading = true }
         do {
             let next: CompanionThread
@@ -678,20 +710,19 @@ struct ChatView: View {
             )
             guard threadProjection.accepts(refresh: generation) else { return }
 
+            _ = observeActualTail(
+                of: next,
+                source: hasPreviousThread ? .poll : .initial
+            )
+
             let persistedEventIDs = Set(next.entries.map(\.eventID))
-            let pendingCount = pendingMessages.count
             pendingMessages.removeAll { pending in
                 persistedEventIDs.contains("msg:\(pending.id.uuidString.lowercased())")
             }
-            let pendingChanged = pendingMessages.count != pendingCount
             let restorationTarget = restoration.flatMap { position -> String? in
                 guard !position.isFollowingTail, restorationAnchorIndex != nil else { return nil }
                 return position.anchorEventID
             }
-            let shouldFollowTail = !loadingEarlier
-                && previousThread != nil
-                && (transcriptTailChanged(from: previousThread, to: next) || pendingChanged)
-                && isNearBottom
 
             transcriptWindow = nextWindow
             markdownByEventID = renderedMarkdown
@@ -701,20 +732,20 @@ struct ChatView: View {
             if let restorationTarget {
                 isRestoringReadingPosition = true
                 restorationTargetEventID = restorationTarget
-                requestScroll(to: .entry(restorationTarget))
+                restorationScrollPerformed = false
+                requestScroll(
+                    to: .entry(restorationTarget),
+                    source: .restoration,
+                    animated: false
+                )
             } else {
                 pendingReadingPosition = nil
                 isRestoringReadingPosition = false
                 restorationTargetEventID = nil
+                restorationScrollPerformed = false
                 if restoration != nil, restorationAnchorIndex == nil {
-                    isNearBottom = true
+                    scrollCoordinator.setFollowState(.followingTail)
                 }
-                if previousThread == nil {
-                    requestScroll(to: .bottom(animated: false))
-                }
-            }
-            if shouldFollowTail {
-                requestScroll(to: .bottom(animated: true))
             }
         } catch {
             guard threadProjection.accepts(refresh: generation) else { return }
@@ -828,15 +859,17 @@ struct ChatView: View {
         parseCompanionTimestamp(value)
     }
 
-    private func transcriptTailChanged(
-        from previous: CompanionThread?,
-        to next: CompanionThread
+    @discardableResult
+    private func observeActualTail(
+        of thread: CompanionThread,
+        source: CompanionScrollRequestSource
     ) -> Bool {
-        guard let previous else { return true }
-        return previous.entries.count != next.entries.count
-            || previous.entries.last != next.entries.last
-            || previous.interruptedTurn != next.interruptedTurn
-            || previous.queuedCount != next.queuedCount
+        let previousRequest = scrollCoordinator.pendingRequest
+        let changed = scrollCoordinator.observeTail(of: thread, source: source)
+        if previousRequest != scrollCoordinator.pendingRequest {
+            scrollContentRevision &+= 1
+        }
+        return changed
     }
 
     private func loadEarlier() async {
@@ -860,17 +893,31 @@ struct ChatView: View {
 
         markdownByEventID = renderedMarkdown
         transcriptWindow = expandedWindow
-        requestScroll(to: .entry(firstEventID))
+        requestScroll(
+            to: .entry(firstEventID),
+            source: .loadEarlier,
+            animated: false
+        )
     }
 
-    private func requestScroll(to target: ChatScrollTarget) {
-        if case .bottom(_) = target {
+    private func requestScroll(
+        to destination: CompanionScrollDestination,
+        source: CompanionScrollRequestSource,
+        animated: Bool
+    ) {
+        if case .bottom = destination {
             guard !loadingEarlier else { return }
             pendingReadingPosition = nil
             isRestoringReadingPosition = false
             restorationTargetEventID = nil
         }
-        pendingScrollTarget = target
+        scrollCoordinator.request(
+            CompanionScrollRequest(
+                destination: destination,
+                source: source,
+                animated: animated
+            )
+        )
         scrollContentRevision &+= 1
     }
 
@@ -881,20 +928,24 @@ struct ChatView: View {
         guard let anchor = transcript.first(where: { visibleIDs.contains($0.eventID) }) else {
             return
         }
-        onReadingPositionChange(
-            CompanionChatReadingPosition(
-                anchorEventID: anchor.eventID,
-                isFollowingTail: isNearBottom,
-                exposedEntryCount: transcriptWindow.exposedCount,
-                transcriptEntryCount: transcript.count
-            )
+        let position = CompanionChatReadingPosition(
+            anchorEventID: anchor.eventID,
+            isFollowingTail: isNearBottom,
+            exposedEntryCount: transcriptWindow.exposedCount,
+            transcriptEntryCount: transcript.count
         )
+        guard position != lastReportedReadingPosition else { return }
+        lastReportedReadingPosition = position
+        onReadingPositionChange(position)
     }
 
-    private func performScroll(to target: ChatScrollTarget, with proxy: ScrollViewProxy) {
-        switch target {
-        case .bottom(let animated):
-            if reduceMotion || !animated {
+    private func performScroll(
+        to request: CompanionScrollRequest,
+        with proxy: ScrollViewProxy
+    ) {
+        switch request.destination {
+        case .bottom:
+            if reduceMotion || !request.animated {
                 proxy.scrollTo("bottom", anchor: .bottom)
             } else {
                 withAnimation(.easeOut(duration: 0.18)) {
@@ -902,10 +953,20 @@ struct ChatView: View {
                 }
             }
         case .entry(let eventID):
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
-                proxy.scrollTo(eventID, anchor: .top)
+            let anchor: UnitPoint = request.source == .reasoning ? .center : .top
+            if reduceMotion || !request.animated {
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    proxy.scrollTo(eventID, anchor: anchor)
+                }
+            } else {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    proxy.scrollTo(eventID, anchor: anchor)
+                }
+            }
+            if request.source == .restoration {
+                restorationScrollPerformed = true
             }
             if restorationTargetEventID == eventID {
                 Task { @MainActor in
@@ -925,6 +986,7 @@ struct ChatView: View {
 
     private func finishReadingPositionRestoration() {
         restorationTargetEventID = nil
+        restorationScrollPerformed = false
         pendingReadingPosition = nil
         isRestoringReadingPosition = false
     }
@@ -939,11 +1001,16 @@ struct ChatView: View {
         selectedToolDetail = nil
         loading = true
         loadingEarlier = false
-        isNearBottom = pendingReadingPosition?.isFollowingTail ?? true
+        scrollCoordinator.reset(
+            followState: pendingReadingPosition?.isFollowingTail == false
+                ? .userReading
+                : .followingTail
+        )
         visibleEntryIDs = []
         isRestoringReadingPosition = false
         restorationTargetEventID = nil
-        pendingScrollTarget = nil
+        restorationScrollPerformed = false
+        lastReportedReadingPosition = nil
         scrollContentRevision &+= 1
     }
 
@@ -959,7 +1026,11 @@ struct ChatView: View {
         )
         pendingMessages.append(message)
         if isNearBottom {
-            requestScroll(to: .bottom(animated: true))
+            requestScroll(
+                to: .bottom,
+                source: .localSend,
+                animated: true
+            )
         }
         draft = ""
         draftAttachments = []
@@ -1042,6 +1113,7 @@ struct ChatView: View {
             }
 
             threadProjection.replaceAfterMutation(with: next)
+            _ = observeActualTail(of: next, source: .poll)
             let nextEntries = transcriptEntries(in: next)
             transcriptWindow.refresh(totalCount: nextEntries.count)
             let visibleRange = transcriptWindow.visibleRange(for: nextEntries.count)
@@ -1092,6 +1164,7 @@ struct ChatView: View {
                 )
             }
             threadProjection.replaceAfterMutation(with: next)
+            _ = observeActualTail(of: next, source: .poll)
             let nextEntries = transcriptEntries(in: next)
             transcriptWindow.refresh(totalCount: nextEntries.count)
             let visibleRange = transcriptWindow.visibleRange(for: nextEntries.count)

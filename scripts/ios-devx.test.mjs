@@ -249,13 +249,32 @@ test("native chat reading restoration stays deterministic and delegated to Apple
   assert.match(chat, /\.onScrollTargetVisibilityChange\(/);
   assert.match(chat, /isRestoringReadingPosition \? 0 : 1/);
   assert.match(chat, /previousThread != nil/);
+  assert.match(chat, /CompanionScrollCoordinator/);
+  assert.match(chat, /scrollCoordinator\.takePendingRequest\(\)/);
+  assert.match(chat, /\.onScrollPhaseChange/);
+  assert.match(chat, /scrollCoordinator\.beginUserInteraction/);
+  assert.doesNotMatch(chat, /\.defaultScrollAnchor\(/);
+  const scrollOwner = chat.indexOf("private func performScroll");
+  assert.notEqual(scrollOwner, -1);
+  assert.doesNotMatch(chat.slice(0, scrollOwner), /proxy\.scrollTo\(/);
+  assert.match(chat.slice(scrollOwner), /proxy\.scrollTo\(/);
   assert.match(coordination, /func position\(for companionID: String\)/);
   assert.match(coordination, /public mutating func restore\(/);
+  assert.match(coordination, /public struct CompanionScrollCoordinator/);
+  assert.match(coordination, /case followingTail/);
+  assert.match(coordination, /case userReading/);
+  assert.match(coordination, /issuedRequestBatchCount/);
   assert.match(uiTests, /testTranscriptWindowDemoRestoresReadingPositionAfterCompanionSwitch/);
+  assert.match(uiTests, /testTranscriptWindowDemoStaysAtLatestAcrossPollInterval/);
   assert.match(
     ci,
     /-only-testing:CompanionUITests\/CompanionUITests\/testTranscriptWindowDemoRestoresReadingPositionAfterCompanionSwitch/,
   );
+  assert.match(
+    ci,
+    /-only-testing:CompanionUITests\/CompanionUITests\/testTranscriptWindowDemoStaysAtLatestAcrossPollInterval/,
+  );
+  assert.match(read("apps/ios/README.md"), /four-second poll/);
 });
 
 test("the project is synchronized, shared, and backed by CompanionKit", () => {

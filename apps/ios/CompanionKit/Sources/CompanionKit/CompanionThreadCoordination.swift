@@ -42,6 +42,318 @@ public struct CompanionThreadProjection: Equatable, Sendable {
     }
 }
 
+/// The two presentation modes of a transcript. This is deliberately separate from the server's
+/// unread watermark: a reader can be looking at history while the Companion is still producing
+/// newer entries.
+public enum CompanionScrollFollowState: String, Equatable, Sendable {
+    case followingTail
+    case userReading
+}
+
+/// The operation which caused a scroll decision. Keeping this value in the shared package makes
+/// the decision policy testable without constructing a SwiftUI view.
+public enum CompanionScrollRequestSource: String, Equatable, Sendable {
+    case initial
+    case restoration
+    case loadEarlier
+    case poll
+    case userLatest
+    case localSend
+    case reasoning
+}
+
+public enum CompanionScrollDestination: Equatable, Sendable {
+    case bottom
+    case entry(String)
+}
+
+public struct CompanionScrollRequest: Equatable, Sendable {
+    public let destination: CompanionScrollDestination
+    public let source: CompanionScrollRequestSource
+    public let animated: Bool
+
+    public init(
+        destination: CompanionScrollDestination,
+        source: CompanionScrollRequestSource,
+        animated: Bool
+    ) {
+        self.destination = destination
+        self.source = source
+        self.animated = animated
+    }
+}
+
+/// The only portion of a thread which can justify an automatic tail scroll.
+///
+/// Queued messages, queued counts, runtime status, and markdown cache changes are intentionally
+/// absent. The last nonqueued entry is sorted in the same deterministic order as the transcript
+/// window, and the interrupted turn is included because its presentation occupies the tail.
+public struct CompanionScrollTailSnapshot: Equatable, Sendable {
+    public let lastEntry: TranscriptEntry?
+    public let interruptedTurn: CompanionTurn?
+
+    public init(
+        lastEntry: TranscriptEntry? = nil,
+        interruptedTurn: CompanionTurn? = nil
+    ) {
+        self.lastEntry = lastEntry
+        self.interruptedTurn = interruptedTurn
+    }
+
+    public init(thread: CompanionThread) {
+        let lastEntry = thread.entries
+            .filter { !$0.queued }
+            .sorted {
+                $0.ordinal == $1.ordinal ? $0.eventID < $1.eventID : $0.ordinal < $1.ordinal
+            }
+            .last
+        self.init(lastEntry: lastEntry, interruptedTurn: thread.interruptedTurn)
+    }
+}
+
+/// Owns transcript follow state and coalesces all requests made during one SwiftUI update.
+///
+/// A caller queues a request while it is updating its model, then consumes exactly one request
+/// from `takePendingRequest()` after the update has rendered. Consumption is the physical-scroll
+/// boundary: it increments `issuedRequestBatchCount` and, for a bottom request, establishes a
+/// geometry guard until the bottom is observed. Geometry callbacks arriving before that point are
+/// layout feedback, not user intent.
+public struct CompanionScrollCoordinator: Equatable, Sendable {
+    public private(set) var followState: CompanionScrollFollowState
+    public private(set) var pendingRequest: CompanionScrollRequest?
+    public private(set) var issuedRequestBatchCount: Int
+    public private(set) var lastActualTailSnapshot: CompanionScrollTailSnapshot?
+
+    private var observedTail = false
+    private var initialSnapshotInstalled = false
+    private var programmaticBottomScrollOutstanding = false
+
+    public init(
+        followState: CompanionScrollFollowState = .followingTail,
+        lastActualTailSnapshot: CompanionScrollTailSnapshot? = nil
+    ) {
+        self.followState = followState
+        self.pendingRequest = nil
+        self.issuedRequestBatchCount = 0
+        self.lastActualTailSnapshot = lastActualTailSnapshot
+        self.observedTail = lastActualTailSnapshot != nil
+        self.initialSnapshotInstalled = false
+    }
+
+    public var isFollowingTail: Bool {
+        followState == .followingTail
+    }
+
+    public var isProgrammaticBottomScrollOutstanding: Bool {
+        programmaticBottomScrollOutstanding
+    }
+
+    public mutating func setFollowState(_ state: CompanionScrollFollowState) {
+        guard pendingRequest?.destination != .bottom,
+              !programmaticBottomScrollOutstanding else { return }
+        followState = state
+    }
+
+    /// Records a complete thread's actual visible tail and optionally queues the corresponding
+    /// automatic follow decision. The initial installation always gets one request, including an
+    /// empty thread, while identical later snapshots are no-ops.
+    @discardableResult
+    public mutating func observeTail(
+        _ snapshot: CompanionScrollTailSnapshot,
+        source: CompanionScrollRequestSource
+    ) -> Bool {
+        let changed = !observedTail || lastActualTailSnapshot != snapshot
+        observedTail = true
+        lastActualTailSnapshot = snapshot
+
+        switch source {
+        case .initial:
+            guard !initialSnapshotInstalled else { return changed }
+            initialSnapshotInstalled = true
+            requestBottom(source: .initial, animated: false)
+        case .poll:
+            guard changed,
+                  followState == .followingTail,
+                  pendingRequest == nil else { return changed }
+            requestBottom(source: .poll, animated: false)
+        case .restoration, .loadEarlier, .userLatest, .localSend, .reasoning:
+            break
+        }
+        return changed
+    }
+
+    @discardableResult
+    public mutating func observeTail(
+        of thread: CompanionThread,
+        source: CompanionScrollRequestSource
+    ) -> Bool {
+        observeTail(CompanionScrollTailSnapshot(thread: thread), source: source)
+    }
+
+    /// Queues a bottom request. A user-latest or initial request explicitly resumes following;
+    /// poll callers should only invoke this when already following.
+    public mutating func requestBottom(
+        source: CompanionScrollRequestSource,
+        animated: Bool
+    ) {
+        if source == .initial || source == .userLatest {
+            followState = .followingTail
+        }
+        enqueue(
+            CompanionScrollRequest(
+                destination: .bottom,
+                source: source,
+                animated: animated
+            )
+        )
+    }
+
+    public mutating func requestEntry(
+        _ eventID: String,
+        source: CompanionScrollRequestSource,
+        animated: Bool = false
+    ) {
+        programmaticBottomScrollOutstanding = false
+        if source == .restoration || source == .loadEarlier || source == .reasoning {
+            followState = .userReading
+        }
+        enqueue(
+            CompanionScrollRequest(
+                destination: .entry(eventID),
+                source: source,
+                animated: animated
+            )
+        )
+    }
+
+    /// Queues an arbitrary destination for callers which already have a request value.
+    public mutating func request(_ request: CompanionScrollRequest) {
+        switch request.destination {
+        case .bottom:
+            if request.source == .initial || request.source == .userLatest {
+                followState = .followingTail
+            }
+        case .entry:
+            programmaticBottomScrollOutstanding = false
+            if request.source == .restoration
+                || request.source == .loadEarlier
+                || request.source == .reasoning {
+                followState = .userReading
+            }
+        }
+        enqueue(request)
+    }
+
+    /// Consumes the one request selected for the current rendered update. Repeated calls without a
+    /// new request return nil, so the caller cannot accidentally issue duplicate physical scrolls.
+    public mutating func takePendingRequest() -> CompanionScrollRequest? {
+        guard let request = pendingRequest else { return nil }
+        pendingRequest = nil
+        issuedRequestBatchCount += 1
+        if request.destination == .bottom {
+            // Only geometry observed after the physical request may settle it. Treating a
+            // pre-request layout callback as completion reopens the feedback loop while the
+            // explicit scroll is still changing the viewport.
+            programmaticBottomScrollOutstanding = true
+        }
+        return request
+    }
+
+    /// User interaction always outranks an automatic or still-animating bottom request. SwiftUI's
+    /// scroll phase supplies this signal independently from layout geometry, so interrupting an
+    /// animation cannot leave the transcript permanently stuck in follow mode.
+    @discardableResult
+    public mutating func beginUserInteraction(
+        bottomDistance: Double,
+        threshold: Double
+    ) -> Bool {
+        if pendingRequest?.destination == .bottom {
+            pendingRequest = nil
+        }
+        programmaticBottomScrollOutstanding = false
+        let nextState: CompanionScrollFollowState = bottomDistance <= threshold
+            ? .followingTail
+            : .userReading
+        guard nextState != followState else { return false }
+        followState = nextState
+        return true
+    }
+
+    /// Lets geometry settle a bottom request, or records actual user movement after it settled.
+    /// While a bottom request is pending or outstanding, an away-from-bottom geometry callback is
+    /// ignored because SwiftUI is still laying out the programmatic scroll.
+    @discardableResult
+    public mutating func observeGeometry(
+        bottomDistance: Double,
+        threshold: Double
+    ) -> Bool {
+        let atBottom = bottomDistance <= threshold
+        if pendingRequest?.destination == .bottom {
+            return false
+        }
+        if programmaticBottomScrollOutstanding {
+            guard atBottom else { return false }
+            programmaticBottomScrollOutstanding = false
+            if followState != .followingTail {
+                followState = .followingTail
+                return true
+            }
+            return false
+        }
+
+        let nextState: CompanionScrollFollowState = atBottom ? .followingTail : .userReading
+        guard nextState != followState else { return false }
+        followState = nextState
+        return true
+    }
+
+    public mutating func reset(
+        followState: CompanionScrollFollowState = .followingTail
+    ) {
+        self.followState = followState
+        pendingRequest = nil
+        issuedRequestBatchCount = 0
+        lastActualTailSnapshot = nil
+        observedTail = false
+        initialSnapshotInstalled = false
+        programmaticBottomScrollOutstanding = false
+    }
+
+    private mutating func enqueue(_ request: CompanionScrollRequest) {
+        guard let existing = pendingRequest else {
+            pendingRequest = request
+            return
+        }
+
+        let candidatePriority = priority(of: request.source)
+        let existingPriority = priority(of: existing.source)
+        if candidatePriority > existingPriority {
+            pendingRequest = request
+        } else if candidatePriority == existingPriority,
+                  existing.destination == request.destination {
+            // A nonanimated request always wins a coalesced batch. This keeps initial, restoration,
+            // and poll decisions deterministic even when a later UI callback asks for motion.
+            pendingRequest = CompanionScrollRequest(
+                destination: existing.destination,
+                source: existing.source,
+                animated: existing.animated && request.animated
+            )
+        }
+    }
+
+    private func priority(of source: CompanionScrollRequestSource) -> Int {
+        switch source {
+        case .poll: return 10
+        case .initial: return 20
+        case .localSend: return 30
+        case .reasoning: return 40
+        case .loadEarlier: return 50
+        case .restoration: return 60
+        case .userLatest: return 70
+        }
+    }
+}
+
 /// A client-local snapshot of where one member was reading a Companion transcript.
 ///
 /// This is intentionally presentation state rather than the server's unread watermark. The
