@@ -215,7 +215,7 @@ func requestsAnEphemeralSessionThroughTheSharedCompanionEndpoint() async throws 
     let urlSession = URLSession(configuration: configuration)
     let apiURL = try #require(URL(string: "https://api.example.test"))
     TranscriptionSessionURLProtocol.handler = { request in
-        #expect(request.url?.path == "/v1/companions/companion%20one/transcription-sessions")
+        #expect(request.url?.percentEncodedPath == "/v1/companions/companion%20one/transcription-sessions")
         #expect(request.httpMethod == "POST")
         #expect(request.value(forHTTPHeaderField: "Cookie") == "session=secret")
         #expect(request.value(forHTTPHeaderField: "x-companion-org") == "org-one")
