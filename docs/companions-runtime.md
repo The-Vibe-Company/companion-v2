@@ -550,12 +550,19 @@ turns never show it. The companion read model (`GET /v1/companions`, `GET /v1/co
 carries the same ACK-gated fact as `runtime.replying`, so roster surfaces can animate a working
 Companion from PostgreSQL alone without a thread read.
 
+Owner-scoped roster sections and member-private notification mute are control-plane metadata. A
+section assignment only changes nullable `companions.section_id`; deleting a section unassigns its
+members and never deletes them. Neither operation advances settings/skills revisions, wakes a Box,
+or enters the runtime queue. The API owns these writes through narrow actor-scoped capabilities.
+
 ## iOS response notifications
 
 PostgreSQL creates one 24-hour delivery per active device of the durable turn author when a turn
 becomes `succeeded`, `failed`, or `interrupted`, and for each newly projected pending decision.
 `cancelled` never produces a notification. Routine- and trigger-origin turns retain the immutable
-Owner actor, so the same author rule applies without a second recipient model. Device/event
+Owner actor, so the same author rule applies without a second recipient model. A member mute removes
+that member's queued deliveries for the Companion and prevents new enqueue until unmuted; it does
+not change unread state or another member's delivery stream. Device/event
 uniqueness makes replayed settlement and claim takeover idempotent.
 
 At the routine-isolation cutover, routine-run settlement itself is excluded from this generic

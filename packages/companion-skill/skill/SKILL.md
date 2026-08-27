@@ -36,7 +36,10 @@ prompt is hidden in the thread. Agent Auth clients must not call those tools.
 
 Treat runtime provider/model settings, provider credentials, MCP accounts, and Companion
 Owner/Editor/Viewer sharing as browser-session workspace administration. Never request, read, store,
-forward, or manage them through this skill or its Agent Auth client. Never use a skill command to
+forward, or manage them through this skill or its Agent Auth client. Owner-scoped roster sections,
+section membership, and each member's notification mute preference are first-party control-plane
+settings too; they never change Box/Pi state and are not Skills Hub labels or Agent Auth APIs.
+Never use a skill command to
 wake, retry, cancel, restart, stop, or delete a hosted Companion. Scheduled routines are the
 sanctioned wake-on-a-schedule path and webhook triggers are the sanctioned wake-on-an-event path;
 both are gated by Owner/Editor approval rather than by this skill. The control plane never executes package scripts; Pi may consume the selected skill
@@ -1374,7 +1377,7 @@ skills view shows the correct status and version. Report the version from this s
 `companion.json.version`:
 
 ```sh
-printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.94.0","agent":"<your assistant name>"}}' \
+printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.95.0","agent":"<your assistant name>"}}' \
   | node scripts/companion-agent-client.mjs
 ```
 
