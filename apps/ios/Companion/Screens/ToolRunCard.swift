@@ -84,13 +84,13 @@ struct CompanionToolRunCard: View {
     private var titleStack: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("Tool · \(displayToolName)")
-                .font(.system(size: 12, weight: .medium))
+                .font(.caption.weight(.medium))
                 .foregroundStyle(CompanionIOSTheme.textSecondary)
                 .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
                 .truncationMode(.middle)
 
             Text(summaryTitle)
-                .font(.system(size: 13))
+                .font(.footnote)
                 .foregroundStyle(CompanionIOSTheme.textSecondary)
                 .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
                 .truncationMode(.middle)

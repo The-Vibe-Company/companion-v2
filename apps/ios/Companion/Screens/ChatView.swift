@@ -490,7 +490,7 @@ struct ChatView: View {
                         size: 20
                     )
                     Text(currentCompanion.name)
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.subheadline.weight(.semibold))
                         .foregroundStyle(CompanionIOSTheme.textPrimary)
                         .lineLimit(1)
                 }
@@ -608,7 +608,7 @@ struct ChatView: View {
 
     private func dayMarker(for date: Date) -> some View {
         Text(dayLabel(for: date))
-            .font(.system(size: 12))
+            .font(.caption)
             .foregroundStyle(CompanionIOSTheme.textSecondary)
             .frame(maxWidth: .infinity)
             .accessibilityAddTraits(.isHeader)
@@ -1754,7 +1754,7 @@ struct ChatMessageBubble: View {
                 }
                 if !streamingDelta.isEmpty {
                     Text(streamingDelta)
-                        .font(.system(size: 16))
+                        .font(.body)
                         .foregroundStyle(primaryTextColor)
                         .lineSpacing(3)
                 }
@@ -1767,13 +1767,13 @@ struct ChatMessageBubble: View {
                     )
                 } else {
                     Text(content)
-                        .font(.system(size: 16))
+                        .font(.body)
                         .foregroundStyle(primaryTextColor)
                         .lineSpacing(3)
                 }
             } else {
                 Text(content)
-                    .font(.system(size: 16))
+                    .font(.body)
                     .foregroundStyle(primaryTextColor)
             }
 
@@ -1797,7 +1797,7 @@ struct ChatMessageBubble: View {
                         Text(timestamp)
                     }
                 }
-                .font(.system(size: 12).monospacedDigit())
+                .font(.caption.monospacedDigit())
                 .foregroundStyle(secondaryTextColor)
             }
         }
@@ -1870,7 +1870,7 @@ struct CompanionThinkingDisclosure: View {
                     Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
                         .font(.caption2.weight(.semibold))
                 }
-                .font(.system(size: 13, weight: .medium))
+                .font(.footnote.weight(.medium))
                 .foregroundStyle(secondaryStyle)
                 .padding(.horizontal, 10)
                 .frame(minHeight: 32)
@@ -1953,7 +1953,7 @@ struct CompanionThinkingStatus: View {
                     .accessibilityHidden(true)
             }
         }
-        .font(.system(size: 13, weight: .medium))
+        .font(.footnote.weight(.medium))
         .foregroundStyle(CompanionIOSTheme.textSecondary)
         .padding(.horizontal, 10)
         .frame(minHeight: 32)

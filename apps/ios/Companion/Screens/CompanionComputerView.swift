@@ -49,7 +49,11 @@ struct CompanionComputerView: View {
                 url: url,
                 reloadToken: reloadToken,
                 keyboardToken: keyboardToken,
-                onFailure: { message in error = message }
+                onFailure: { message in
+                    error = message
+                    desktop = nil
+                    loading = false
+                }
             )
             .aspectRatio(16 / 10, contentMode: .fit)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -68,7 +72,7 @@ struct CompanionComputerView: View {
             )
         } else {
             computerState(
-                title: error ?? "Computer unavailable",
+                title: "Computer unavailable",
                 systemImage: "desktopcomputer.trianglebadge.exclamationmark"
             )
         }
@@ -129,7 +133,7 @@ struct CompanionComputerView: View {
                         size: 20
                     )
                     Text(companion.name)
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
                 }
                 .foregroundStyle(Color.white)

@@ -135,7 +135,7 @@ struct ChatComposer: View {
                     )
 
                     TextField("Ask \(companionName)", text: $draft, axis: .vertical)
-                        .font(.system(size: 16))
+                        .font(.body)
                         .foregroundStyle(CompanionIOSTheme.textPrimary)
                         .lineLimit(1...5)
                         .focused($composerFocused)

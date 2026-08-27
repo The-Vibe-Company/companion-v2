@@ -67,12 +67,12 @@ struct CompanionDecisionCard: View {
     private func settledBubble(_ outcome: CompanionDecisionCardOutcome) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(outcome.bubbleText)
-                .font(.system(size: 16))
+                .font(.body)
                 .foregroundStyle(CompanionIOSTheme.textPrimary)
 
             if let name = decision.decidedByName, !name.isEmpty {
                 Text("\(statusLabel) by \(name)")
-                    .font(.system(size: 12))
+                    .font(.caption)
                     .foregroundStyle(CompanionIOSTheme.textSecondary)
             }
         }
@@ -263,7 +263,7 @@ struct CompanionDecisionCard: View {
                 }
                 Button(action: onOpenPlugins) {
                     Label("Connect", systemImage: "puzzlepiece.extension")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.subheadline.weight(.semibold))
                             .foregroundStyle(CompanionIOSTheme.primaryCTAText)
                         .padding(.horizontal, 16)
                         .frame(minHeight: 44)

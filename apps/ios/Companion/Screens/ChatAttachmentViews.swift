@@ -126,6 +126,9 @@ struct TranscriptAttachmentList: View {
     let attachments: [CompanionAttachment]
     @State private var previewURL: URL?
     @State private var openingAttachmentID: String?
+    @State private var previewTask: Task<Void, Never>?
+    @State private var failedAttachment: CompanionAttachment?
+    @State private var previewErrorMessage: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -134,7 +137,7 @@ struct TranscriptAttachmentList: View {
                     RemoteAttachmentImage(companionID: companionID, attachment: attachment)
                 } else {
                     Button {
-                        Task { await open(attachment) }
+                        startOpening(attachment)
                     } label: {
                         AttachmentDocumentCard(
                             filename: attachment.filename,
@@ -151,34 +154,81 @@ struct TranscriptAttachmentList: View {
             }
         }
         .quickLookPreview($previewURL)
-        .onDisappear { removePreviewFile() }
+        .alert(
+            "Couldn’t Open File",
+            isPresented: Binding(
+                get: { previewErrorMessage != nil },
+                set: { presented in
+                    if !presented {
+                        previewErrorMessage = nil
+                        failedAttachment = nil
+                    }
+                }
+            )
+        ) {
+            if let failedAttachment {
+                Button("Try Again") { startOpening(failedAttachment) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(previewErrorMessage ?? "The attachment could not be opened.")
+        }
+        .onDisappear {
+            previewTask?.cancel()
+            previewTask = nil
+            removePreviewFile()
+        }
+    }
+
+    @MainActor
+    private func startOpening(_ attachment: CompanionAttachment) {
+        previewTask?.cancel()
+        previewErrorMessage = nil
+        failedAttachment = nil
+        previewTask = Task { await open(attachment) }
     }
 
     @MainActor
     private func open(_ attachment: CompanionAttachment) async {
         openingAttachmentID = attachment.id
         defer { openingAttachmentID = nil }
+        var previewDirectory: URL?
         do {
             let data = try await sessionStore.attachmentData(
                 companionID: companionID,
                 attachmentID: attachment.id
             )
-            guard !Task.isCancelled else { return }
+            try Task.checkCancellation()
             removePreviewFile()
             let safeName = URL(fileURLWithPath: attachment.filename).lastPathComponent
-            let url = FileManager.default.temporaryDirectory
-                .appending(path: "companion-preview-\(UUID().uuidString)", directoryHint: .isDirectory)
-                .appending(path: safeName)
+            let directory = FileManager.default.temporaryDirectory.appending(
+                path: "companion-preview-\(UUID().uuidString)",
+                directoryHint: .isDirectory
+            )
+            previewDirectory = directory
+            let url = directory.appending(path: safeName)
             try FileManager.default.createDirectory(
-                at: url.deletingLastPathComponent(),
+                at: directory,
                 withIntermediateDirectories: true
             )
+            try Task.checkCancellation()
             try data.write(to: url, options: [.atomic, .completeFileProtection])
             previewURL = url
+            previewDirectory = nil
         } catch is CancellationError {
+            if let previewDirectory {
+                try? FileManager.default.removeItem(at: previewDirectory)
+            }
             return
         } catch {
-            return
+            if let previewDirectory {
+                try? FileManager.default.removeItem(at: previewDirectory)
+            }
+            failedAttachment = attachment
+            previewErrorMessage = companionDisplayMessage(
+                error,
+                fallback: "The attachment could not be opened."
+            )
         }
     }
 
@@ -205,11 +255,11 @@ private struct AttachmentDocumentCard: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(filename)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.subheadline.weight(.semibold))
                     .foregroundStyle(CompanionIOSTheme.textPrimary)
                     .lineLimit(1)
                 Text("\(subtitle) · \(attachmentSizeLabel(byteSize))")
-                    .font(.system(size: 15))
+                    .font(.subheadline)
                     .foregroundStyle(CompanionIOSTheme.textSecondary)
                     .lineLimit(1)
             }

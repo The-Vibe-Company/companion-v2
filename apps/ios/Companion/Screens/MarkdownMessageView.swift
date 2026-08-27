@@ -258,12 +258,12 @@ private struct MarkdownParagraphView: View {
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text(linkTitle)
-                            .font(.system(size: 15, weight: .semibold))
+                            .font(.subheadline.weight(.semibold))
                             .foregroundStyle(CompanionIOSTheme.textPrimary)
                             .lineLimit(2)
 
                         Text(linkDomain(for: link))
-                            .font(.system(size: 15))
+                            .font(.subheadline)
                             .foregroundStyle(CompanionIOSTheme.textSecondary)
                             .lineLimit(1)
                     }

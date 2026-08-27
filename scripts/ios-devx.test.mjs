@@ -150,6 +150,8 @@ test("chat uses the approved two-sided bubbles and morphing composer", () => {
   assert.doesNotMatch(bubble, /var accent\b|accent\.opacity|visualTheme\.accent|tint:/);
   assert.doesNotMatch(chat, /\.toolbar \{ headerToolbar \}\s*\.tint\(visualTheme\.accent\)/);
   assert.match(composer, /TextField\("Ask \\\(companionName\)"/);
+  assert.match(composer, /TextField\("Ask \\\(companionName\)"[\s\S]{0,180}?\.font\(\.body\)/);
+  assert.match(bubble, /Text\(streamingDelta\)[\s\S]{0,100}?\.font\(\.body\)/);
   assert.match(composer, /else if showsSendButton \|\| !transcriptionAvailable/);
   assert.match(composer, /\.background\(CompanionIOSTheme\.primaryCTA, in: Circle\(\)\)/);
   assert.match(chat, /CharacterMark\([\s\S]{0,220}?size: 20/);
@@ -171,6 +173,17 @@ test("computer view is immersive and keeps the desktop handoff ephemeral", () =>
   assert.match(computer, /\.onDisappear \{ desktop = nil \}/);
   assert.match(computer, /\.aspectRatio\(16 \/ 10, contentMode: \.fit\)/);
   assert.doesNotMatch(computer, /UserDefaults|FileManager|print\(|Logger|os_log/);
+  assert.match(computer, /onFailure: \{ message in[\s\S]{0,120}?desktop = nil[\s\S]{0,80}?loading = false/);
+});
+
+test("document previews cancel with their view and surface retryable errors", () => {
+  const attachments = read("apps/ios/Companion/Screens/ChatAttachmentViews.swift");
+
+  assert.match(attachments, /@State private var previewTask: Task<Void, Never>\?/);
+  assert.match(attachments, /\.onDisappear \{[\s\S]{0,100}?previewTask\?\.cancel\(\)[\s\S]{0,120}?removePreviewFile\(\)/);
+  assert.match(attachments, /try Task\.checkCancellation\(\)/);
+  assert.match(attachments, /\.alert\([\s\S]{0,180}?Couldn’t Open File[\s\S]{0,500}?Button\("Try Again"\)/);
+  assert.doesNotMatch(attachments, /catch \{\s*return\s*\}/);
 });
 
 test("long-thread composer and poll work stay behind narrow invalidation boundaries", () => {
