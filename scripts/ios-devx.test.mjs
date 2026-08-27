@@ -172,6 +172,8 @@ test("native message interactions stay accessible and CI-verifiable without Xcod
     assert.match(interactions, new RegExp(`Label\\("${action}"`));
   }
   assert.match(interactions, /UIPasteboard\.general\.string = rawContent/);
+  assert.match(interactions, /presentedSheet = \.share\(rawContent\)/);
+  assert.match(interactions, /presentedSheet = \.selectText\(rawContent\)/);
   assert.match(interactions, /\.sensoryFeedback\(\.success, trigger: copyFeedbackTrigger\)/);
   assert.match(
     interactions,
@@ -190,6 +192,10 @@ test("native message interactions stay accessible and CI-verifiable without Xcod
   assert.match(queued, /entry\.authorID == viewerID/);
   assert.match(queued, /removingTurnID == nil/);
   assert.match(queued, /Button\("Delete", systemImage: "trash", role: \.destructive\)/);
+  assert.match(
+    queued,
+    /Button\("Delete", systemImage: "trash", role: \.destructive\) \{\s*requestRemoval\(of: entry\)/,
+  );
   assert.match(queuedDemo, /viewerID: viewerID/);
   assert.match(uiTests, /testMessageLongPressOffersCopyShareAndSelectableText/);
   assert.match(uiTests, /testMarkdownCodeBlockCopyShowsSuccessStateAndNativeHitTarget/);
