@@ -47,7 +47,7 @@ public enum CharacterMarkGeometry {
                 .move(.init(0.52, 0.04)),
                 .curve(.init(0.80, 0.01), .init(0.99, 0.23), .init(0.94, 0.54)),
                 .curve(.init(0.91, 0.84), .init(0.69, 1.00), .init(0.37, 0.95)),
-                .curve(.init(0.09, 0.91), .init(-0.01, 0.65), .init(0.06, 0.35)),
+                .curve(.init(0.09, 0.91), .init(0.00, 0.65), .init(0.06, 0.35)),
                 .curve(.init(0.12, 0.11), .init(0.29, 0.06), .init(0.52, 0.04)),
                 .close,
             ]
@@ -65,14 +65,14 @@ public enum CharacterMarkGeometry {
         case .flower:
             return [
                 .move(.init(0.50, 0.11)),
-                .curve(.init(0.62, -0.02), .init(0.80, 0.07), .init(0.79, 0.23)),
-                .curve(.init(0.98, 0.20), .init(1.04, 0.40), .init(0.89, 0.50)),
-                .curve(.init(1.04, 0.62), .init(0.94, 0.83), .init(0.78, 0.78)),
-                .curve(.init(0.78, 0.98), .init(0.57, 1.04), .init(0.49, 0.88)),
-                .curve(.init(0.37, 1.03), .init(0.17, 0.94), .init(0.22, 0.77)),
-                .curve(.init(0.03, 0.78), .init(-0.03, 0.57), .init(0.12, 0.49)),
-                .curve(.init(-0.03, 0.36), .init(0.08, 0.16), .init(0.24, 0.22)),
-                .curve(.init(0.23, 0.05), .init(0.43, -0.02), .init(0.50, 0.11)),
+                .curve(.init(0.62, 0.00), .init(0.80, 0.07), .init(0.79, 0.23)),
+                .curve(.init(0.98, 0.20), .init(1.00, 0.40), .init(0.89, 0.50)),
+                .curve(.init(1.00, 0.62), .init(0.94, 0.83), .init(0.78, 0.78)),
+                .curve(.init(0.78, 0.98), .init(0.57, 1.00), .init(0.49, 0.88)),
+                .curve(.init(0.37, 1.00), .init(0.17, 0.94), .init(0.22, 0.77)),
+                .curve(.init(0.03, 0.78), .init(0.00, 0.57), .init(0.12, 0.49)),
+                .curve(.init(0.00, 0.36), .init(0.08, 0.16), .init(0.24, 0.22)),
+                .curve(.init(0.23, 0.05), .init(0.43, 0.00), .init(0.50, 0.11)),
                 .close,
             ]
         case .drop:
