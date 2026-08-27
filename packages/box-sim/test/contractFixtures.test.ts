@@ -1,3 +1,4 @@
+/* oxlint-disable anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Contract fixtures are deliberately untyped JSON at this parser boundary; the assertions below validate each field before it is used. */
 import { readFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
@@ -54,7 +55,8 @@ describe("Pi contract fixture provenance", () => {
         expect(fixture.sourceIds).toEqual(["pi-rpc-docs"]);
       } else if (fixture.classification === "runtime_capture_anonymized") {
         expect(fixture.path).toMatch(/^captured-/);
-        expect(fixture.sourceIds).toEqual(["pi-runtime-0.84.2"]);
+        expect(fixture.sourceIds).toHaveLength(1);
+        expect(fixture.sourceIds[0]).toMatch(/^pi-runtime(?:-openai-completions)?-0\.84\.2$/);
       } else {
         expect(fixture.path).toBe("synthetic-faults.json");
         expect(fixture.sourceIds).toEqual([]);
@@ -74,6 +76,23 @@ describe("Pi contract fixture provenance", () => {
         isStreaming: false,
         pendingMessageCount: 0,
       },
+    });
+  });
+
+  it("locks the tool lifecycle Pi forwards from the openai-completions adapter", async () => {
+    const events = await readJsonl("captured-openai-completions-tool-events-0.84.2.jsonl");
+    expect(events[0]).toEqual({
+      type: "tool_execution_start",
+      toolCallId: "call_glm_fixture",
+      toolName: "bash",
+      args: { command: "printf 'glm fixture\\n'" },
+    });
+    expect(events.at(-1)).toMatchObject({
+      type: "tool_execution_end",
+      toolCallId: "call_glm_fixture",
+      toolName: "bash",
+      result: { content: [{ type: "text", text: "glm fixture\n" }] },
+      isError: false,
     });
   });
 

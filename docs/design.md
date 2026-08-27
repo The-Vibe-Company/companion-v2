@@ -332,9 +332,12 @@ the new fence. This prevents a rolling deploy from either publishing an unproven
 repeating proof-less start operations.
 Projection
 redaction uses every string leaf of the validated plaintext material in memory plus generic
-credential patterns; tool projections retain metadata and an opaque hashed call id only, never
-arguments or results, except a delegated `subagent` run, whose child-agent name, task, and latest
-progress are redacted against the same dictionary and bounded before they are stored. Generic
+credential patterns. Tool projections retain an opaque hashed call id and disclose a redacted,
+bounded title plus arguments, progress, or result excerpt behind the existing detail control. Pi's
+canonical `args`/`result` events and serialized OpenAI-compatible function-call envelopes cross the
+same projection boundary; the adapter never chooses the persistence policy. Once a call id has
+established a card, later projections cannot replace its kind or name. A delegated `subagent`
+run keeps its specialized child-agent name, task, and latest-progress presentation. Generic
 scrubbing removes complete Authorization and Cookie header values
 before narrower token/assignment matchers run. Redacted or oversized decision identifiers are
 rejected fail-closed.

@@ -300,17 +300,24 @@ bounded counters and stable codes, then skipped so the journal progresses. Raw e
 provider response bodies, stderr, tokens, auth JSON, and signed URLs are never stored in PostgreSQL
 or ordinary logs.
 
-**Subagent runs.** A tool run is projected as a card naming only its kind, and its arguments are
-never persisted — a shell command or a file path is the payload most likely to carry a credential.
-A delegated agent is the one exception, because a card that says only "a tool ran" tells a reader
-nothing about a run that can last minutes. A `subagent` start carries the child agent's name and its
-task; a `tool_execution_update` for that kind alone carries the latest progress; the settlement
-carries its status. All three are redacted with the turn's own redactor and bounded (300 characters
-of headline, 8 000 of task or progress), and all three settle the same card through the shared
-`call_id`. Empty title, empty content, and null detail are inherit sentinels the projection function
-reads as "keep what the row already holds", so progress never erases the headline and a settlement
-never erases the last progress. Classification remains stateless per event, so replaying a page
-still produces byte-identical projection digests. An update with no readable text stays activity.
+**Tool-run projection.** A tool start carries Pi's actual tool name, a headline derived from its
+first meaningful argument (for example a command, path, URL, or first scalar value), and a disclosed
+arguments excerpt. Progress and settlement may replace the detail with the latest progress or
+result excerpt. Every payload is scrubbed with the attempt's exact credential dictionary plus the
+generic credential patterns before it is bounded to 16 000 characters; the provider call id is
+stored only as an opaque hash. A matched card keeps the `kind` and `name` established by its start,
+even if a later progress/result envelope omits them. Pi 0.84.2 normalizes every model adapter to top-level `toolName`,
+`args`, and `result` RPC events. The projection also tolerates nested serialized function arguments
+from an OpenAI-compatible envelope so a protocol-version skew degrades to an informative card rather
+than an empty one.
+
+A delegated `subagent` keeps its specialized presentation: the start carries the child agent's name
+and task, an update carries the latest progress, and settlement carries status. Its repeatedly
+updated task/progress detail stays bounded to 8 000 characters. Empty title, empty content, and null
+detail are inherit sentinels the projection function reads as "keep what the row already holds", so
+an update or settlement never erases the command headline or last useful detail. Classification
+remains stateless per event, so replaying a page still produces byte-identical projection digests.
+An update with no readable text stays activity.
 
 **Installed Pi packages.** Every Box installs the MCP adapter plus a pinned set: `pi-web-access`
 (search and fetch, zero-config), `pi-subagents` (delegation through a `subagent` tool), and
@@ -771,6 +778,13 @@ stale custom override cannot survive a settings change. The override is removed 
 catalog publishes the model. Runtime does not learn or globally publish capability claims from
 arbitrary provider errors.
 
+The pinned Pi adapter does not drop tool arguments when using `openai-completions`: it parses the
+provider's serialized `function.arguments`, validates the result, then emits the same
+`tool_execution_start.args` and `tool_execution_end.result` RPC shape used by other adapters. A
+custom model on z.ai's coding endpoint must carry `compat.zaiToolStream: true`, matching Pi's
+built-in z.ai catalog, so the request includes `tool_stream: true`; this affects upstream function
+argument streaming, not the normalized RPC field names.
+
 Persisted runtime errors contain exactly:
 
 - stable `code`;
@@ -834,12 +848,10 @@ Box environment or disk; only each helper process receives the temporary access 
 
 The projection boundary receives an in-memory dictionary built from every string leaf of those
 validated, decrypted credentials. Assistant text and decision copy are scrubbed against those exact
-values plus bounded generic credential patterns. Tool activity is deliberately metadata-only: it
-stores a safe kind/name/title and an opaque hashed call id, never tool arguments or results, with
-one exception — a delegated `subagent` run, whose child-agent name, task, and latest progress are
-redacted against the same dictionary and bounded before they are stored, because a card that says
-only "a tool ran" tells a reader nothing about a run that can last minutes. A
-complete Authorization or Cookie header value is removed before narrower generic matchers run. A
+values plus bounded generic credential patterns. Tool activity stores the safe kind/name, opaque
+hashed call id, and a redacted bounded title plus arguments, progress, or result excerpt. A
+delegated `subagent` run uses the same dictionary for its child-agent name, task, and latest progress.
+A complete Authorization or Cookie header value is removed before narrower generic matchers run. A
 decision request key that would require redaction fails closed and interrupts the turn. A config
 proposal message is fail-closed the same way: if redaction would change the JSON, the event is
 unknown and is not stored. The dictionary, ciphertext, and raw Pi event are never serialized or

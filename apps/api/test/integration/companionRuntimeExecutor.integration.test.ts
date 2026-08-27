@@ -5159,7 +5159,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         {
           sequence: "3", type: "tool", entry_key: "tool:call-1", content: "Run check",
           tool: {
-            call_id: "call-1", kind: "shell", name: "exec", title: "Run check",
+            call_id: "call-1", kind: "tool", name: "tool", title: "Run check",
             status: "ok", detail: "input\n\noutput", screenshot: null,
           },
         },
@@ -5241,9 +5241,12 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         role: string;
         content: string;
         toolStatus: string | null;
+        toolKind: string | null;
+        toolName: string | null;
         decisionExpiresAt: string | null;
       }>>`
         select role::text as role, content, tool ->> 'status' as "toolStatus",
+          tool ->> 'kind' as "toolKind", tool ->> 'name' as "toolName",
           decision ->> 'expires_at' as "decisionExpiresAt"
         from companion_transcript_entries
         where companion_id = ${fixture.companionId}::uuid and role <> 'user'
@@ -5254,18 +5257,24 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           role: "assistant",
           content: "A durable answer",
           toolStatus: null,
+          toolKind: null,
+          toolName: null,
           decisionExpiresAt: null,
         },
         {
           role: "tool",
           content: "Run check",
           toolStatus: "ok",
+          toolKind: "shell",
+          toolName: "exec",
           decisionExpiresAt: null,
         },
         {
           role: "decision",
           content: "Choose a direction",
           toolStatus: null,
+          toolKind: null,
+          toolName: null,
           decisionExpiresAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/),
         },
       ]);

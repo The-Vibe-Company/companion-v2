@@ -237,7 +237,7 @@ describe("Pi journal validation and projection", () => {
     ]));
   });
 
-  it("redacts exact credentials and projects tool events as safe metadata only", () => {
+  it("redacts exact credentials from disclosed tool arguments and results", () => {
     const opaqueSecret = "mF9xOpaqueCredentialValue";
     const page = validatePiJournalRead({
       value: {
@@ -315,7 +315,7 @@ describe("Pi journal validation and projection", () => {
 
     expect(serialized).not.toContain(opaqueSecret);
     expect(serialized).not.toContain("raw-provider-call-id");
-    expect(serialized).not.toContain("auth.json");
+    expect(serialized).toContain("auth.json");
     expect(serialized).not.toContain("X-Amz-Signature");
     expect(tools).toHaveLength(2);
     expect(tools[0]).toMatchObject({
@@ -323,8 +323,8 @@ describe("Pi journal validation and projection", () => {
         call_id: expect.stringMatching(/^sha256:[0-9a-f]{32}$/),
         kind: "shell",
         name: "shell",
-        title: "Shell command",
-        detail: null,
+        title: "cat auth.json && echo",
+        detail: expect.stringContaining("command"),
       },
     });
     expect(tools[1]?.tool.call_id).toBe(tools[0]?.tool.call_id);
@@ -925,6 +925,257 @@ describe("Pi journal validation and projection", () => {
 
 type JsonFixture = string | number | boolean | null | { [key: string]: JsonFixture } | JsonFixture[];
 
+describe("tool run payload projection", () => {
+  function classify(
+    events: JsonFixture[],
+    redact = createRuntimeVisibleTextRedactor([]),
+  ) {
+    const page = validatePiJournalRead({
+      value: {
+        events: events.map((event, index) => ({
+          sequence: index + 1,
+          invocationId: PI_INVOCATION_ID,
+          attemptId: ATTEMPT_ID,
+          kind: "pi_event",
+          event,
+        })),
+        nextCursor: events.length,
+        acknowledgedCursor: 0,
+        hasMore: false,
+      },
+      after: 0n,
+      attemptId: ATTEMPT_ID,
+      invocationId: PI_INVOCATION_ID,
+    });
+    return classifyPiJournalPage(page, new Date("2026-08-27T08:00:00.000Z"), redact);
+  }
+
+  const informativeToolEvents: Array<{ payloadContract: string; event: JsonFixture }> = [
+    {
+      payloadContract: "Pi RPC args object",
+      event: {
+        type: "tool_execution_start",
+        toolCallId: "call-pi",
+        toolName: "bash",
+        args: { command: "pnpm test --filter companion-runtime" },
+      },
+    },
+    {
+      payloadContract: "OpenAI-compatible nested serialized arguments",
+      event: {
+        type: "tool_execution_start",
+        toolCall: {
+          id: "call-openai",
+          function: {
+            name: "bash",
+            arguments: "{\"command\":\"pnpm test --filter companion-runtime\"}",
+          },
+        },
+      },
+    },
+  ];
+
+  it.each(informativeToolEvents)(
+    "projects an informative card from $payloadContract",
+    ({ event }) => {
+      const [projection] = classify([event]).projections.filter((item) => item.type === "tool");
+
+      expect(projection).toMatchObject({
+        content: "pnpm test --filter companion-runtime",
+        tool: {
+          kind: "shell",
+          name: "bash",
+          title: "pnpm test --filter companion-runtime",
+          status: "running",
+        },
+      });
+      expect(projection?.tool.detail).toContain("command");
+      expect(projection?.tool.detail).toContain("pnpm test --filter companion-runtime");
+    },
+  );
+
+  it("projects the result excerpt without losing the command title", () => {
+    const tools = classify([
+      {
+        type: "tool_execution_start",
+        toolCallId: "call-glm",
+        toolName: "bash",
+        args: { command: "printf 'glm fixture\\n'" },
+      },
+      {
+        type: "tool_execution_end",
+        toolCallId: "call-glm",
+        toolName: "bash",
+        result: { content: [{ type: "text", text: "glm fixture\n" }] },
+        isError: false,
+      },
+    ]).projections.filter((item) => item.type === "tool");
+
+    expect(tools[0]?.tool).toMatchObject({
+      title: "printf 'glm fixture\\n'",
+      detail: expect.stringContaining("command"),
+    });
+    expect(tools[1]?.tool).toMatchObject({
+      title: "",
+      status: "ok",
+      detail: "Result\nglm fixture",
+    });
+  });
+
+  it("redacts before applying the 16k disclosure cap", () => {
+    const secret = `${"s".repeat(15_900)}-opaque-credential`;
+    const [projection] = classify([{
+      type: "tool_execution_start",
+      toolCallId: "call-long",
+      toolName: "bash",
+      args: { command: `printf safe && printf ${secret}`, extra: "x".repeat(20_000) },
+    }], createRuntimeVisibleTextRedactor([secret])).projections
+      .filter((item) => item.type === "tool");
+    const serialized = JSON.stringify(projection, bigintAwareReplacer);
+
+    expect(serialized).not.toContain(secret);
+    expect(projection?.tool.detail?.length).toBeLessThanOrEqual(16_000);
+    expect(projection?.tool.detail).toContain("[truncated]");
+  });
+
+  it("redacts structured values before JSON escaping can disguise an exact credential", () => {
+    const secret = "quote\"\\credential";
+    const [projection] = classify([{
+      type: "tool_execution_start",
+      toolCallId: "call-escaped-secret",
+      toolName: "bash",
+      args: { command: `printf safe ${secret}`, [secret]: "also-secret-key" },
+    }], createRuntimeVisibleTextRedactor([secret])).projections
+      .filter((item) => item.type === "tool");
+    const serialized = JSON.stringify(projection, bigintAwareReplacer);
+    const escapedSecret = JSON.stringify(secret).slice(1, -1);
+
+    expect(serialized).not.toContain(secret);
+    expect(serialized).not.toContain(escapedSecret);
+    expect(projection?.tool.title).toBe("printf safe");
+    expect(projection?.tool.detail).not.toContain("also-secret-key");
+  });
+
+  it("preserves edge whitespace until exact credential redaction", () => {
+    const secret = "  padded credential  ";
+    const [projection] = classify([{
+      type: "tool_execution_start",
+      toolCallId: "call-padded-secret",
+      toolName: "bash",
+      args: { command: secret },
+    }], createRuntimeVisibleTextRedactor([secret])).projections
+      .filter((item) => item.type === "tool");
+    const serialized = JSON.stringify(projection, bigintAwareReplacer);
+
+    expect(serialized).not.toContain(secret);
+    expect(serialized).not.toContain("padded credential");
+    expect(projection?.tool.title).toBe("Shell command");
+  });
+
+  it("fails closed on credentials hidden in malformed JSON-escaped arguments", () => {
+    const secret = "quote\"\\credential";
+    const escapedSecret = JSON.stringify(secret).slice(1, -1);
+    const [projection] = classify([{
+      type: "tool_execution_start",
+      toolCall: {
+        id: "call-malformed-secret",
+        function: {
+          name: "bash",
+          arguments: `{"command":"${escapedSecret}`,
+        },
+      },
+    }], createRuntimeVisibleTextRedactor([secret])).projections
+      .filter((item) => item.type === "tool");
+    const serialized = JSON.stringify(projection, bigintAwareReplacer);
+
+    expect(serialized).not.toContain(secret);
+    expect(serialized).not.toContain(escapedSecret);
+    expect(projection?.tool).toMatchObject({ title: "Shell command", detail: null });
+  });
+
+  it("fails closed when nested JSON escaping exceeds the bounded decoding work", () => {
+    const secret = "deep\"\\credential";
+    let deeplyEscaped = secret;
+    for (let depth = 0; depth < 12; depth += 1) {
+      deeplyEscaped = JSON.stringify(deeplyEscaped).slice(1, -1);
+    }
+    const [projection] = classify([{
+      type: "tool_execution_start",
+      toolCall: {
+        id: "call-deeply-escaped-secret",
+        function: { name: "bash", arguments: `{"command":"${deeplyEscaped}` },
+      },
+    }], createRuntimeVisibleTextRedactor([secret])).projections
+      .filter((item) => item.type === "tool");
+    const serialized = JSON.stringify(projection, bigintAwareReplacer);
+
+    expect(serialized).not.toContain(secret);
+    expect(serialized).not.toContain(deeplyEscaped);
+    expect(projection?.tool).toMatchObject({ title: "Shell command", detail: null });
+  });
+
+  it("replaces PostgreSQL-invalid NULs and lone surrogates in tool metadata", () => {
+    const tools = classify([
+      {
+        type: "tool_execution_start",
+        toolCallId: "call-invalid-unicode",
+        toolName: "bash\u0000\ud800",
+        args: { command: "printf\u0000safe\ud800" },
+      },
+      {
+        type: "tool_execution_update",
+        toolCallId: "call-invalid-unicode",
+        toolName: "bash\u0000\ud800",
+        partialOutput: "progress\u0000\udc00",
+      },
+      {
+        type: "tool_execution_end",
+        toolCallId: "call-invalid-unicode",
+        toolName: "bash\u0000\ud800",
+        result: { content: [{ type: "text", text: "done\u0000\ud800" }] },
+      },
+    ]).projections.filter((item) => item.type === "tool");
+    const serialized = JSON.stringify(tools, bigintAwareReplacer);
+
+    expect(serialized).not.toContain("\\u0000");
+    expect(serialized).not.toContain("\\ud800");
+    expect(serialized).not.toContain("\\udc00");
+    expect(serialized).toContain("�");
+  });
+
+  it("redacts a provider tool name before applying its 120-character bound", () => {
+    const secret = `${"provider-secret".repeat(20)}-tail`;
+    const [projection] = classify([{
+      type: "tool_execution_start",
+      toolCallId: "call-secret-name",
+      toolName: secret,
+      args: { command: "printf safe" },
+    }], createRuntimeVisibleTextRedactor([secret])).projections
+      .filter((item) => item.type === "tool");
+    const serialized = JSON.stringify(projection, bigintAwareReplacer);
+
+    expect(serialized).not.toContain(secret.slice(0, 120));
+    expect(projection?.tool.name).toBe("tool");
+  });
+
+  it("bounds traversal of deeply nested provider arguments", () => {
+    let nested: JsonFixture = "too deep to become a headline";
+    for (let depth = 0; depth < 4_000; depth += 1) nested = { nested };
+    const event = {
+      type: "tool_execution_start",
+      toolCallId: "call-deep",
+      toolName: "bash",
+      args: nested,
+    } satisfies JsonFixture;
+
+    expect(() => classify([event])).not.toThrow();
+    const [projection] = classify([event]).projections.filter((item) => item.type === "tool");
+
+    expect(projection?.tool.title).toBe("Shell command");
+    expect(projection?.tool.detail?.length).toBeLessThanOrEqual(16_000);
+  });
+});
+
 describe("delegated subagent runs", () => {
   const secret = "mF9xOpaqueCredentialValue";
 
@@ -1249,7 +1500,7 @@ describe("delegated subagent runs", () => {
     expect(classified.activity).toBe(true);
   });
 
-  it("never serializes the arguments of a tool that is not a delegated run", () => {
+  it("redacts and bounds the arguments and progress of an ordinary tool", () => {
     const classified = classify([
       {
         type: "tool_execution_start",
@@ -1269,11 +1520,14 @@ describe("delegated subagent runs", () => {
     const serialized = JSON.stringify(classified.projections, bigintAwareReplacer);
 
     expect(serialized).not.toContain(secret);
-    expect(serialized).not.toContain("Read the changelog");
-    // Two cards, not three: a shell run's progress is still activity only, and both cards carry the
-    // generic title with no payload behind it.
-    expect(tools).toHaveLength(2);
-    expect(tools.every((tool) => tool.tool.title === "Shell command" && tool.tool.detail === null))
-      .toBe(true);
+    expect(serialized).toContain("Read the changelog");
+    expect(tools).toHaveLength(3);
+    expect(tools[0]?.tool).toMatchObject({
+      name: "bash",
+      title: "echo",
+      detail: expect.stringContaining("Read the changelog"),
+    });
+    expect(tools[1]?.tool).toMatchObject({ title: "", detail: "Result\nTOKEN=" });
+    expect(tools[2]?.tool).toMatchObject({ title: "", status: "ok", detail: null });
   });
 });
