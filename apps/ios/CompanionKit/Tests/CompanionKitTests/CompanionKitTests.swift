@@ -2792,7 +2792,7 @@ func validatesCompanionPluginOAuthRedirectBeforeReturning() async throws {
                     "Set-Cookie": "companion_mcp_oauth_nonce=opaque-flow; Path=/v1/companion-plugins/oauth/callback; HttpOnly",
                 ]
             ))
-            return (response, Data(#"{"authorization_url":"\(PluginOAuthRedirectMockURLProtocol.authorizationURL)"}"#.utf8))
+            return (response, Data(#"{"authorization_url":"\#(PluginOAuthRedirectMockURLProtocol.authorizationURL)"}"#.utf8))
 
         case "/v1/companion-plugins/oauth/callback":
             #expect(request.httpMethod == "GET")
