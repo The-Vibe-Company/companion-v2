@@ -190,7 +190,6 @@ export function classifyFiles(files, { forceFull = false } = {}) {
         "packages/core/",
         "packages/companion-runtime/",
         "scripts/ios-",
-        "scripts/select-ios-simulator.mjs",
       ]));
 
   return { docs, design, quality, build, database, runtime, browser, containers, dependencies, skill, ios, full };

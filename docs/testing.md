@@ -185,6 +185,13 @@ and no excluded voice, multi-Bot, harness, deployment, or file-library chrome.
 
 ## Change verification
 
+Every required CI test must protect an identifiable product promise and run at the lowest layer
+that proves it. Apple Quality has a hard five-minute budget: its iOS path runs only the
+`CompanionKit` behavior tests and compiles the complete app for a generic iOS Simulator destination
+without booting one. Its conditional skill path retains the Darwin-only private-transport guard.
+XCUITests and rendered UI checks stay local and manual unless the repository owner explicitly
+approves a separate CI job.
+
 Run targeted affected-package tests first, followed by:
 
 ```bash
