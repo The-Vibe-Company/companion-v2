@@ -1,20 +1,26 @@
 #if DEBUG
 import CompanionKit
 import Foundation
+import Observation
 import SwiftUI
 
+@MainActor
 struct CompanionTranscriptWindowDemoView: View {
     @State private var selectedCompanionID = CompanionTranscriptWindowDemoFixtures.companionID
     @State private var readingPositions = CompanionChatReadingPositionStore()
+    @State private var stagedFixture = CompanionTranscriptWindowDemoFixtures.makeStagedFixture()
 
     var body: some View {
         let companionID = selectedCompanionID
+        let services = CompanionTranscriptWindowDemoFixtures.services(
+            stagedFixture: stagedFixture
+        )
         NavigationStack {
             ChatView(
                 companion: selectedCompanion,
                 readingPosition: readingPositions.position(for: companionID),
                 onPlugins: {},
-                services: CompanionTranscriptWindowDemoFixtures.services,
+                services: services,
                 onReadingPositionChange: { position in
                     readingPositions.record(position, for: companionID)
                 },
@@ -35,6 +41,20 @@ struct CompanionTranscriptWindowDemoView: View {
                 }
             }
         }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if let stagedFixture {
+                HStack {
+                    Spacer()
+                    Button(stagedFixture.deliveredStagedReply ? "Reply delivered" : "Stage reply") {
+                        stagedFixture.stageNextPoll()
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("demo.stage-reply")
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+            }
+        }
     }
 
     private var selectedCompanion: CompanionSummary {
@@ -50,6 +70,9 @@ private enum CompanionTranscriptWindowDemoFixtures {
     static let secondCompanionID = "d97bc471-11f4-45a8-b62b-62553ec9bee2"
     static let usesShortThread = ProcessInfo.processInfo.environment[
         "COMPANION_TRANSCRIPT_DEMO_SHORT"
+    ] == "1"
+    static let usesStagedPoll = ProcessInfo.processInfo.environment[
+        "COMPANION_TRANSCRIPT_DEMO_STAGED_POLL"
     ] == "1"
 
     static let companion: CompanionSummary = decode(#"""
@@ -219,12 +242,21 @@ private enum CompanionTranscriptWindowDemoFixtures {
         ]
     }
 
-    static let services: ChatServices = {
+    static func makeStagedFixture() -> DemoStagedThreadFixture? {
+        usesStagedPoll ? DemoStagedThreadFixture(initial: thread) : nil
+    }
+
+    static func services(stagedFixture: DemoStagedThreadFixture?) -> ChatServices {
         let fixtureThread = thread
         let fixtureCompanion = companion
         let secondFixtureCompanion = secondCompanion
         return ChatServices(
-            thread: { _ in fixtureThread },
+            thread: { companionID in
+                if companionID == fixtureCompanion.id, let stagedFixture {
+                    return stagedFixture.nextThread()
+                }
+                return fixtureThread
+            },
             listCompanions: { [fixtureCompanion, secondFixtureCompanion] },
             decide: { _, _, _ in fixtureThread },
             retryTurn: { _, _, _ in throw CompanionTranscriptWindowDemoError.unavailable },
@@ -233,10 +265,52 @@ private enum CompanionTranscriptWindowDemoFixtures {
             listPlugins: { [] },
             listProviders: { throw CompanionTranscriptWindowDemoError.unavailable }
         )
-    }()
+    }
 
     private static func decode<Value: Decodable>(_ json: String) -> Value {
         try! JSONDecoder().decode(Value.self, from: Data(json.utf8))
+    }
+}
+
+@MainActor
+@Observable
+private final class DemoStagedThreadFixture {
+    private let initial: CompanionThread
+    private var stagesNextPoll = false
+    private(set) var deliveredStagedReply = false
+
+    init(initial: CompanionThread) {
+        self.initial = initial
+    }
+
+    func stageNextPoll() {
+        stagesNextPoll = true
+    }
+
+    func nextThread() -> CompanionThread {
+        guard stagesNextPoll else { return initial }
+        deliveredStagedReply = true
+
+        let encoded = try! JSONEncoder().encode(initial)
+        var payload = try! JSONSerialization.jsonObject(with: encoded) as! [String: Any]
+        var entries = payload["entries"] as! [[String: Any]]
+        let nextOrdinal = entries.compactMap { $0["ordinal"] as? Int }.max().map { $0 + 1 } ?? 1
+        entries.append([
+            "event_id": "staged-reply",
+            "ordinal": nextOrdinal,
+            "role": "assistant",
+            "content": "Staged poll content has arrived.",
+            "author_id": NSNull(),
+            "author_name": NSNull(),
+            "decision": NSNull(),
+            "tool": NSNull(),
+            "queued": false,
+            "attachments": [Any](),
+            "created_at": "2026-08-26T12:02:00.000Z",
+        ])
+        payload["entries"] = entries
+        let data = try! JSONSerialization.data(withJSONObject: payload)
+        return try! JSONDecoder().decode(CompanionThread.self, from: data)
     }
 }
 

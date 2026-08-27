@@ -35,6 +35,7 @@ describe("Companion Pi custom models", () => {
               supportsReasoningEffort: true,
               maxTokensField: "max_tokens",
               thinkingFormat: "zai",
+              zaiToolStream: true,
             },
           }],
         },

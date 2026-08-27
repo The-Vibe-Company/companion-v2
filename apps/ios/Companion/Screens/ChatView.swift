@@ -16,6 +16,20 @@ struct ChatServices {
     let listProviders: () async throws -> CompanionProvidersResponse
 }
 
+private struct AssistantTailReveal: Equatable, Sendable {
+    let id: UUID
+    let eventID: String
+    let baseMarkdown: MarkdownDocument?
+    var visibleDelta: String
+    var followsTail: Bool
+}
+
+private struct AssistantTailChange: Equatable, Sendable {
+    let eventID: String
+    let previousContent: String
+    let nextContent: String
+}
+
 struct ChatView: View {
     @Environment(SessionStore.self) private var sessionStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -45,6 +59,8 @@ struct ChatView: View {
     @State private var decisionCatalogLoaded = false
     @State private var transcriptWindow = CompanionTranscriptWindow()
     @State private var scrollCoordinator = CompanionScrollCoordinator()
+    @State private var unseenTracker = CompanionTranscriptUnseenTracker()
+    @State private var unseenCount = 0
     @State private var loadingEarlier = false
     @State private var scrollContentRevision = 0
     @State private var pendingReadingPosition: CompanionChatReadingPosition?
@@ -53,6 +69,8 @@ struct ChatView: View {
     @State private var restorationTargetEventID: String?
     @State private var restorationScrollPerformed = false
     @State private var lastReportedReadingPosition: CompanionChatReadingPosition?
+    @State private var assistantTailReveal: AssistantTailReveal?
+    @State private var assistantTailRevealTask: Task<Void, Never>?
     @FocusState private var composerFocused: Bool
     @State private var selectedToolDetail: ToolRunDetailRoute?
 
@@ -135,6 +153,9 @@ struct ChatView: View {
                                             own: entry.role == "user" && entry.authorID == thread?.viewerID,
                                             companion: currentCompanion,
                                             markdown: markdownByEventID[entry.eventID]?.document,
+                                            tailReveal: assistantTailReveal?.eventID == entry.eventID
+                                                ? assistantTailReveal
+                                                : nil,
                                             reasoningExpansion: reasoningBinding(for: entry.eventID),
                                             onOpenToolDetails: { selectedToolDetail = $0 }
                                         )
@@ -184,17 +205,29 @@ struct ChatView: View {
                     .scrollDismissesKeyboard(.interactively)
                     .scrollIndicators(.hidden)
                     .accessibilityIdentifier("chat.transcript")
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 2)
+                            .onChanged { _ in stopFollowingTailForReveal() }
+                    )
                     .onScrollGeometryChange(for: CGFloat.self) { geometry in
                         max(0, geometry.contentSize.height - geometry.visibleRect.maxY)
                     } action: { _, bottomDistance in
+                        let wasNearBottom = isNearBottom
                         let stateChanged = scrollCoordinator.observeGeometry(
                             bottomDistance: Double(bottomDistance),
                             threshold: Double(bottomProximityThreshold)
                         )
-                        if stateChanged { recordReadingPosition() }
+                        if isNearBottom, !wasNearBottom {
+                            unseenTracker.markReaderAtBottom()
+                            unseenCount = 0
+                        }
+                        if stateChanged {
+                            recordReadingPosition()
+                        }
                     }
                     .onScrollPhaseChange { _, newPhase, context in
                         guard newPhase == .interacting else { return }
+                        let wasNearBottom = isNearBottom
                         let geometry = context.geometry
                         let bottomDistance = max(
                             0,
@@ -204,7 +237,13 @@ struct ChatView: View {
                             bottomDistance: Double(bottomDistance),
                             threshold: Double(bottomProximityThreshold)
                         )
-                        if stateChanged { recordReadingPosition() }
+                        if isNearBottom, !wasNearBottom {
+                            unseenTracker.markReaderAtBottom()
+                            unseenCount = 0
+                        }
+                        if stateChanged {
+                            recordReadingPosition()
+                        }
                     }
                     .onScrollTargetVisibilityChange(
                         idType: String.self,
@@ -263,7 +302,7 @@ struct ChatView: View {
             await reload()
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(4))
-                if !Task.isCancelled { await reload(silently: true) }
+                if !Task.isCancelled { await reload(silently: true, isPolling: true) }
             }
         }
         .task(id: decisionCatalogTaskID) {
@@ -295,6 +334,9 @@ struct ChatView: View {
             if oldValue != newValue, let oldValue {
                 expandedReasoningEventIDs.remove(oldValue)
             }
+        }
+        .onDisappear {
+            cancelAssistantTailReveal()
         }
     }
 
@@ -365,16 +407,35 @@ struct ChatView: View {
 
     private func scrollToBottomButton(action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: "arrow.down")
-                .font(.system(size: 17, weight: .semibold))
-                .frame(width: 46, height: 46)
+            HStack(spacing: unseenCount > 0 ? 8 : 0) {
+                Image(systemName: "arrow.down")
+                    .font(.system(size: 17, weight: .semibold))
+                    .frame(width: unseenCount > 0 ? nil : 46, height: 46)
+                if unseenCount > 0 {
+                    Text(unseenMessage(count: unseenCount))
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1)
+                }
+            }
+            .frame(minHeight: 46)
+            .padding(.horizontal, unseenCount > 0 ? 14 : 0)
         }
         .buttonStyle(.glass)
-        .buttonBorderShape(.circle)
+        .buttonBorderShape(unseenCount > 0 ? .capsule : .circle)
         .tint(visualTheme.accent)
         .shadow(color: visualTheme.shadow.opacity(0.2), radius: 8, y: 3)
-        .accessibilityLabel("Scroll to latest message")
+        .accessibilityLabel(
+            unseenCount > 0
+                ? "\(unseenMessage(count: unseenCount)). Scroll to latest message"
+                : "Scroll to latest message"
+        )
+        .accessibilityValue(unseenCount > 0 ? unseenMessage(count: unseenCount) : "")
+        .accessibilityHint("Double tap to scroll to the latest message.")
         .accessibilityIdentifier("chat.scroll-to-bottom")
+    }
+
+    private func unseenMessage(count: Int) -> String {
+        count == 1 ? "1 new reply" : "\(count) new replies"
     }
 
     private func dayMarker(for date: Date) -> some View {
@@ -670,8 +731,9 @@ struct ChatView: View {
         }
     }
 
-    private func reload(silently: Bool = false) async {
+    private func reload(silently: Bool = false, isPolling: Bool = false) async {
         if silently, loadingEarlier { return }
+        if !isPolling { cancelAssistantTailReveal() }
         let generation = threadProjection.beginRefresh()
         let previousThread = threadProjection.thread
         let hasPreviousThread = previousThread != nil
@@ -684,6 +746,7 @@ struct ChatView: View {
                 next = try await sessionStore.thread(companionID: companion.id)
             }
             guard threadProjection.accepts(refresh: generation) else { return }
+            let readerWasNearBottom = isNearBottom
 
             let nextEntries = transcriptEntries(in: next)
             var nextWindow = transcriptWindow
@@ -701,7 +764,7 @@ struct ChatView: View {
             } else {
                 nextWindow.refresh(
                     totalCount: nextEntries.count,
-                    preservingCurrentEntries: !isNearBottom
+                    preservingCurrentEntries: !readerWasNearBottom
                 )
             }
             let visibleRange = nextWindow.visibleRange(for: nextEntries.count)
@@ -710,10 +773,17 @@ struct ChatView: View {
             )
             guard threadProjection.accepts(refresh: generation) else { return }
 
-            _ = observeActualTail(
+            let tailChange = isPolling
+                ? assistantTailChange(from: previousThread, to: next)
+                : nil
+            let tailBaseMarkdown = tailChange.flatMap {
+                markdownByEventID[$0.eventID]?.document
+            }
+            let tailChanged = observeActualTail(
                 of: next,
                 source: hasPreviousThread ? .poll : .initial
             )
+            let readerIsNearBottom = isNearBottom
 
             let persistedEventIDs = Set(next.entries.map(\.eventID))
             pendingMessages.removeAll { pending in
@@ -723,9 +793,20 @@ struct ChatView: View {
                 guard !position.isFollowingTail, restorationAnchorIndex != nil else { return nil }
                 return position.anchorEventID
             }
+            let shouldFollowTail = !loadingEarlier
+                && previousThread != nil
+                && tailChanged
+                && readerIsNearBottom
 
             transcriptWindow = nextWindow
             markdownByEventID = renderedMarkdown
+            var nextUnseenTracker = unseenTracker
+            let nextUnseenCount = nextUnseenTracker.observe(
+                entries: nextEntries,
+                isNearBottom: readerIsNearBottom
+            )
+            unseenTracker = nextUnseenTracker
+            unseenCount = nextUnseenCount
             threadProjection.accept(next, refresh: generation)
             refreshSelectedToolDetail(from: next.entries)
             error = nil
@@ -745,6 +826,17 @@ struct ChatView: View {
                 restorationScrollPerformed = false
                 if restoration != nil, restorationAnchorIndex == nil {
                     scrollCoordinator.setFollowState(.followingTail)
+                }
+            }
+            if isPolling {
+                if let tailChange {
+                    startAssistantTailReveal(
+                        for: tailChange,
+                        baseMarkdown: tailBaseMarkdown,
+                        followTail: shouldFollowTail
+                    )
+                } else {
+                    cancelAssistantTailReveal()
                 }
             }
         } catch {
@@ -775,6 +867,126 @@ struct ChatView: View {
             sources: Array(sources),
             reusing: markdownByEventID
         )
+    }
+
+    private func assistantTailChange(
+        from previous: CompanionThread?,
+        to next: CompanionThread
+    ) -> AssistantTailChange? {
+        guard let previous,
+              next.activeTurn?.replying == true else {
+            return nil
+        }
+
+        let previousEntries = transcriptEntries(in: previous)
+        let nextEntries = transcriptEntries(in: next)
+        guard let nextTail = nextEntries.last,
+              nextTail.role == "assistant",
+              !nextTail.content.isEmpty else {
+            return nil
+        }
+
+        if let previousTail = previousEntries.last,
+           previousTail.eventID == nextTail.eventID,
+           nextTail.content.count > previousTail.content.count,
+           nextTail.content.hasPrefix(previousTail.content) {
+            return AssistantTailChange(
+                eventID: nextTail.eventID,
+                previousContent: previousTail.content,
+                nextContent: nextTail.content
+            )
+        }
+
+        let previousIDs = Set(previousEntries.map(\.eventID))
+        guard !previousIDs.contains(nextTail.eventID),
+              nextEntries.count > previousEntries.count,
+              nextTail.ordinal > (previousEntries.last?.ordinal ?? Int.min) else {
+            return nil
+        }
+        return AssistantTailChange(
+            eventID: nextTail.eventID,
+            previousContent: "",
+            nextContent: nextTail.content
+        )
+    }
+
+    private func startAssistantTailReveal(
+        for change: AssistantTailChange,
+        baseMarkdown: MarkdownDocument?,
+        followTail: Bool
+    ) {
+        assistantTailRevealTask?.cancel()
+        guard change.nextContent.hasPrefix(change.previousContent),
+              change.nextContent != change.previousContent else {
+            assistantTailReveal = nil
+            assistantTailRevealTask = nil
+            return
+        }
+
+        guard !reduceMotion else {
+            assistantTailReveal = nil
+            assistantTailRevealTask = nil
+            return
+        }
+
+        let revealID = UUID()
+        let delta = String(change.nextContent.dropFirst(change.previousContent.count))
+        let deltaCharacters = delta.count
+        assistantTailReveal = AssistantTailReveal(
+            id: revealID,
+            eventID: change.eventID,
+            baseMarkdown: baseMarkdown,
+            visibleDelta: "",
+            followsTail: followTail
+        )
+
+        let task = Task { @MainActor in
+            // Eight short updates keep the reveal near 200ms while making cancellation cheap.
+            for step in 1...8 {
+                do {
+                    try await Task.sleep(for: .milliseconds(25))
+                } catch {
+                    return
+                }
+                guard let reveal = assistantTailReveal, reveal.id == revealID else { return }
+                let characterCount = deltaCharacters * step / 8
+                assistantTailReveal = AssistantTailReveal(
+                    id: revealID,
+                    eventID: change.eventID,
+                    baseMarkdown: baseMarkdown,
+                    visibleDelta: String(delta.prefix(characterCount)),
+                    followsTail: reveal.followsTail
+                )
+            }
+
+            guard let completedReveal = assistantTailReveal,
+                  completedReveal.id == revealID else { return }
+            assistantTailReveal = nil
+            assistantTailRevealTask = nil
+            if completedReveal.followsTail, isNearBottom, !loadingEarlier {
+                // Text height can grow after the original follow-tail scroll. Re-anchor once the
+                // final markdown document is restored so a reader following the tail is not left
+                // just above the bottom.
+                requestScroll(
+                    to: .bottom,
+                    source: .poll,
+                    animated: false
+                )
+            }
+        }
+        assistantTailRevealTask = task
+    }
+
+    private func stopFollowingTailForReveal() {
+        guard var reveal = assistantTailReveal, reveal.followsTail else { return }
+        reveal.followsTail = false
+        assistantTailReveal = reveal
+    }
+
+    private func cancelAssistantTailReveal() {
+        assistantTailRevealTask?.cancel()
+        assistantTailRevealTask = nil
+        assistantTailReveal = nil
     }
 
     private var entries: [TranscriptEntry] {
@@ -879,6 +1091,7 @@ struct ChatView: View {
 
         var expandedWindow = transcriptWindow
         guard expandedWindow.loadEarlier() else { return }
+        cancelAssistantTailReveal()
         loadingEarlier = true
         threadProjection.invalidateRefreshes()
         let snapshotEntries = transcriptEntries(in: snapshot)
@@ -910,6 +1123,10 @@ struct ChatView: View {
             pendingReadingPosition = nil
             isRestoringReadingPosition = false
             restorationTargetEventID = nil
+            if source == .userLatest {
+                unseenTracker.markReaderAtBottom()
+                unseenCount = 0
+            }
         }
         scrollCoordinator.request(
             CompanionScrollRequest(
@@ -992,8 +1209,11 @@ struct ChatView: View {
     }
 
     private func resetTranscriptState() {
+        cancelAssistantTailReveal()
         threadProjection.reset()
         transcriptWindow.reset()
+        unseenTracker.reset()
+        unseenCount = 0
         pendingMessages = []
         markdownByEventID = [:]
         decisionCatalog = .empty
@@ -1098,6 +1318,7 @@ struct ChatView: View {
     ) async throws {
         let mutationID = "decision:\(requestID)"
         guard await threadMutationGate.acquire(mutationID: mutationID) else { return }
+        cancelAssistantTailReveal()
         threadProjection.invalidateRefreshes()
 
         do {
@@ -1134,6 +1355,7 @@ struct ChatView: View {
         turnID: String,
         retryID: UUID
     ) async throws -> CompanionOperationSummary {
+        cancelAssistantTailReveal()
         threadProjection.invalidateRefreshes()
         let operation: CompanionOperationSummary
         if let services {
@@ -1152,6 +1374,7 @@ struct ChatView: View {
     private func cancelTurn(turnID: String) async throws {
         let mutationID = "cancel:\(turnID)"
         guard await threadMutationGate.acquire(mutationID: mutationID) else { return }
+        cancelAssistantTailReveal()
         threadProjection.invalidateRefreshes()
         do {
             let next: CompanionThread
@@ -1377,6 +1600,8 @@ struct ChatMessageBubble: View {
     var companionID: String?
     var icon: CompanionSummary.Icon?
     var markdown: MarkdownDocument?
+    var streamingBaseMarkdown: MarkdownDocument? = nil
+    var streamingDelta: String? = nil
     var reasoning: String? = nil
     var reasoningExpansion: Binding<Bool>? = nil
     var attachments: [CompanionAttachment] = []
@@ -1426,7 +1651,21 @@ struct ChatMessageBubble: View {
                 )
             }
 
-            if kind == .assistant, let markdown {
+            if kind == .assistant, let streamingDelta {
+                if let streamingBaseMarkdown {
+                    MarkdownMessageView(
+                        document: streamingBaseMarkdown,
+                        accent: .companionInk,
+                        allowsTextSelection: false
+                    )
+                }
+                if !streamingDelta.isEmpty {
+                    Text(streamingDelta)
+                        .font(.body)
+                        .foregroundStyle(Color.companionInk)
+                        .lineSpacing(3)
+                }
+            } else if kind == .assistant, let markdown {
                 MarkdownMessageView(
                     document: markdown,
                     accent: .companionInk,
@@ -1602,6 +1841,7 @@ private struct MessageEntryView: View {
     let own: Bool
     let companion: CompanionSummary
     let markdown: MarkdownDocument?
+    let tailReveal: AssistantTailReveal?
     let reasoningExpansion: Binding<Bool>
     let onOpenToolDetails: (ToolRunDetailRoute) -> Void
 
@@ -1626,6 +1866,8 @@ private struct MessageEntryView: View {
                 companionID: companion.id,
                 icon: companion.icon,
                 markdown: entry.role == "assistant" ? markdown : nil,
+                streamingBaseMarkdown: tailReveal?.baseMarkdown,
+                streamingDelta: tailReveal?.visibleDelta,
                 reasoning: entry.role == "assistant" ? entry.reasoning : nil,
                 reasoningExpansion: reasoningExpansion,
                 attachments: entry.attachments

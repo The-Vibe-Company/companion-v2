@@ -753,6 +753,52 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    func testTranscriptWindowDemoShowsStagedUnseenReplyAndScrollsToIt() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-transcript-window-demo"]
+        app.launchEnvironment["COMPANION_TRANSCRIPT_DEMO_SHORT"] = "1"
+        app.launchEnvironment["COMPANION_TRANSCRIPT_DEMO_STAGED_POLL"] = "1"
+        app.launch()
+
+        let latest = app.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Long-thread message 10")
+        ).firstMatch
+        XCTAssertTrue(latest.waitForExistence(timeout: 12))
+        app.swipeDown()
+
+        let unseen = app.buttons["chat.scroll-to-bottom"]
+        XCTAssertTrue(unseen.waitForExistence(timeout: 4))
+        let plainButtonWidth = unseen.frame.width
+        let stageReply = app.buttons["demo.stage-reply"]
+        XCTAssertTrue(stageReply.waitForExistence(timeout: 3))
+        stageReply.tap()
+        let stagedPollDelivered = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "Reply delivered"),
+            object: stageReply
+        )
+        wait(for: [stagedPollDelivered], timeout: 15)
+        let unseenPill = XCTNSPredicateExpectation(
+            predicate: NSPredicate { object, _ in
+                guard let element = object as? XCUIElement, element.exists else { return false }
+                return element.frame.width > plainButtonWidth + 40
+            },
+            object: unseen
+        )
+        wait(for: [unseenPill], timeout: 3)
+        XCTAssertGreaterThan(unseen.frame.width, plainButtonWidth + 40)
+        unseen.tap()
+
+        let stagedReply = app.staticTexts["Staged poll content has arrived."]
+        XCTAssertTrue(stagedReply.waitForExistence(timeout: 3))
+        let stagedReplyVisible = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isHittable == true"),
+            object: stagedReply
+        )
+        wait(for: [stagedReplyVisible], timeout: 3)
+        XCTAssertTrue(stagedReply.isHittable)
+    }
+
+    @MainActor
     func testTranscriptWindowDemoKeepsLatestEntriesOrderedAndSeparated() throws {
         let app = XCUIApplication()
         app.launchArguments = ["-companion-transcript-window-demo"]

@@ -216,6 +216,7 @@ jobs:
           -only-testing:CompanionUITests/CompanionUITests/testTranscriptWindowDemoLoadsEarlierMessages
           -only-testing:CompanionUITests/CompanionUITests/testTranscriptWindowDemoStaysAtLatestAcrossPollInterval
           -only-testing:CompanionUITests/CompanionUITests/testTranscriptWindowDemoRestoresReadingPositionAfterCompanionSwitch
+          -only-testing:CompanionUITests/CompanionUITests/testTranscriptWindowDemoShowsStagedUnseenReplyAndScrollsToIt
           -only-testing:CompanionUITests/CompanionUITests/testTranscriptWindowDemoKeepsLatestEntriesOrderedAndSeparated
           -only-testing:CompanionUITests/CompanionUITests/testTranscriptWindowDemoBottomControlsNeverCoverChatContent
           -only-testing:CompanionUITests/CompanionUITests/testMarkdownTableDemoKeepsRowsAndColumnsSeparated

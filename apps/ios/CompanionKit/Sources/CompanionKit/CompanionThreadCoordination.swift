@@ -494,6 +494,119 @@ public struct CompanionTranscriptWindow: Equatable, Sendable {
     }
 }
 
+/// Tracks non-queued transcript events that arrived or visibly changed while the reader was
+/// away from the latest messages. The first complete observation establishes a baseline and never
+/// counts as unseen content. An event is counted at most once until the reader reaches the bottom.
+public struct CompanionTranscriptUnseenTracker: Equatable, Sendable {
+    private struct AssistantRevision: Equatable, Sendable {
+        let eventID: String
+        let content: String
+    }
+
+    /// A compact marker for mutable cards. Large detail and screenshot payloads are represented by
+    /// bounded metadata so the four-second poll path never retains or compares those values.
+    private struct CardRevision: Equatable, Sendable {
+        let toolStatus: CompanionToolRunStatus?
+        let toolTitle: String?
+        let toolDetailDigest: Int?
+        let toolScreenshotDigest: Int?
+        let decisionStatus: CompanionDecisionStatus?
+        let decisionAnswerDigest: Int?
+        let decisionDecidedAt: String?
+    }
+
+    private var observedEntryIDs: Set<String> = []
+    private var observedAssistantRevision: AssistantRevision?
+    private var observedCardRevisions: [String: CardRevision] = [:]
+    private var unseenIDs: Set<String> = []
+    private var hasObservedEntries = false
+
+    public init() {}
+
+    /// The distinct event IDs currently waiting below the reader's position.
+    public var unseenEventIDs: Set<String> { unseenIDs }
+
+    public var unseenCount: Int { unseenIDs.count }
+
+    /// Records an accepted complete transcript observation.
+    ///
+    /// Queued entries are excluded because they are rendered in the queue, not in the transcript.
+    /// A near-bottom observation updates the baseline and clears pending unseen IDs. Callers should
+    /// pass the canonical transcript entries; filtering here keeps the state safe for other clients.
+    @discardableResult
+    public mutating func observe(
+        entries: [TranscriptEntry],
+        isNearBottom: Bool
+    ) -> Int {
+        let currentEntries = entries.filter { !$0.queued }
+        let currentEntryIDs = Set(currentEntries.map(\.eventID))
+        let currentAssistantRevision = currentEntries.last(where: { $0.role == "assistant" }).map {
+            AssistantRevision(eventID: $0.eventID, content: $0.content)
+        }
+        let currentCardRevisions = Dictionary(uniqueKeysWithValues: currentEntries.compactMap {
+            entry -> (String, CardRevision)? in
+            guard entry.tool != nil || entry.decision != nil else { return nil }
+            return (
+                entry.eventID,
+                CardRevision(
+                    toolStatus: entry.tool?.status,
+                    toolTitle: entry.tool?.title,
+                    toolDetailDigest: entry.tool?.detail?.hashValue,
+                    toolScreenshotDigest: entry.tool?.screenshot?.hashValue,
+                    decisionStatus: entry.decision?.status,
+                    decisionAnswerDigest: entry.decision?.answer?.hashValue,
+                    decisionDecidedAt: entry.decision?.decidedAt
+                )
+            )
+        })
+
+        guard hasObservedEntries else {
+            observedEntryIDs = currentEntryIDs
+            observedAssistantRevision = currentAssistantRevision
+            observedCardRevisions = currentCardRevisions
+            hasObservedEntries = true
+            if isNearBottom { unseenIDs.removeAll() }
+            return unseenIDs.count
+        }
+
+        if !isNearBottom {
+            unseenIDs.formUnion(currentEntryIDs.subtracting(observedEntryIDs))
+            if let currentAssistantRevision,
+               let observedAssistantRevision,
+               currentAssistantRevision.eventID == observedAssistantRevision.eventID,
+               currentAssistantRevision.content != observedAssistantRevision.content {
+                unseenIDs.insert(currentAssistantRevision.eventID)
+            }
+            for (eventID, revision) in currentCardRevisions where
+                observedCardRevisions[eventID] != nil
+                    && observedCardRevisions[eventID] != revision {
+                unseenIDs.insert(eventID)
+            }
+        } else {
+            unseenIDs.removeAll()
+        }
+
+        observedEntryIDs = currentEntryIDs
+        observedAssistantRevision = currentAssistantRevision
+        observedCardRevisions = currentCardRevisions
+        return unseenIDs.count
+    }
+
+    /// Clears the pending indicator while preserving the latest observation baseline.
+    public mutating func markReaderAtBottom() {
+        unseenIDs.removeAll()
+    }
+
+    /// Clears both the observation baseline and pending indicator, such as when switching threads.
+    public mutating func reset() {
+        observedEntryIDs.removeAll()
+        observedAssistantRevision = nil
+        observedCardRevisions.removeAll()
+        unseenIDs.removeAll()
+        hasObservedEntries = false
+    }
+}
+
 /// Serializes durable writes whose response replaces the whole thread while still deduplicating the
 /// caller's stable mutation id. Distinct decision and turn-cancellation requests must not overlap
 /// and let an older snapshot replace a newer accepted mutation. A failed write releases its id so
