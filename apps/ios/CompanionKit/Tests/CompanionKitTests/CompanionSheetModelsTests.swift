@@ -176,6 +176,21 @@ func routineRunModelsDecodeThe459ListAndPrivateDetailContract() throws {
 }
 
 @Test
+func pluginOAuthCallbackPolicyBindsOriginPortPathAndSingleState() throws {
+    let expected = try #require(URL(string: "https://thecompanion.sh/v1/companion-plugins/oauth/callback"))
+    let accepted = try #require(URL(string: "https://thecompanion.sh/v1/companion-plugins/oauth/callback?code=one&state=signed"))
+    #expect(CompanionOAuthCallbackPolicy.isPluginCallback(accepted, expectedCallbackURL: expected))
+    #expect(CompanionOAuthCallbackPolicy.queryValue(named: "state", from: accepted) == "signed")
+
+    let wrongOrigin = try #require(URL(string: "https://evil.example/v1/companion-plugins/oauth/callback?state=signed"))
+    let wrongPath = try #require(URL(string: "https://thecompanion.sh/companions?state=signed"))
+    let duplicateState = try #require(URL(string: "https://thecompanion.sh/v1/companion-plugins/oauth/callback?state=one&state=two"))
+    #expect(!CompanionOAuthCallbackPolicy.isPluginCallback(wrongOrigin, expectedCallbackURL: expected))
+    #expect(!CompanionOAuthCallbackPolicy.isPluginCallback(wrongPath, expectedCallbackURL: expected))
+    #expect(CompanionOAuthCallbackPolicy.queryValue(named: "state", from: duplicateState) == nil)
+}
+
+@Test
 func routineRunClientUses459ListAndEntryPaginationRoutes() async throws {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [RoutineRunsURLProtocol.self]
