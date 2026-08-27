@@ -79,7 +79,7 @@ public enum CompanionOAuthCallbackPolicy {
               url.scheme?.caseInsensitiveCompare(expectedScheme) == .orderedSame,
               url.host?.caseInsensitiveCompare(expectedHost) == .orderedSame,
               url.path == pluginCallbackPath,
-              url.port == expectedCallbackURL.port,
+              effectivePort(for: url) == effectivePort(for: expectedCallbackURL),
               url.user == nil,
               url.password == nil,
               url.fragment == nil else {
@@ -110,5 +110,13 @@ public enum CompanionOAuthCallbackPolicy {
         } ?? []
         guard matches.count == 1 else { return nil }
         return matches[0].value
+    }
+    private static func effectivePort(for url: URL) -> Int? {
+        if let port = url.port { return port }
+        switch url.scheme?.lowercased() {
+        case "https": return 443
+        case "http": return 80
+        default: return nil
+        }
     }
 }
