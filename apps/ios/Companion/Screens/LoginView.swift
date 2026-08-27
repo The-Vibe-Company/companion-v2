@@ -271,7 +271,7 @@ struct LoginView: View {
             googleBusy = false
         } catch {
             externalOAuth.fail("Google sign-in could not be completed. Try again.")
-            error = "Google sign-in could not be completed. Try again."
+            self.error = "Google sign-in could not be completed. Try again."
             googleBusy = false
         }
     }
