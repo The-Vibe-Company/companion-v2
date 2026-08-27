@@ -178,6 +178,7 @@ export function CompanionRoutines({
   memberTimezone,
   canEdit,
   onChange,
+  onOpenHistory,
 }: {
   orgId: string;
   companionId: string;
@@ -185,6 +186,7 @@ export function CompanionRoutines({
   memberTimezone?: string | null;
   canEdit: boolean;
   onChange: (routines: CompanionRoutine[]) => void;
+  onOpenHistory: (routine: CompanionRoutine) => void;
 }) {
   const displayTimezone = memberTimezone ?? detectedBrowserTimeZone();
   const [editing, setEditing] = useState<CompanionRoutine | null | "new">(null);
@@ -262,8 +264,16 @@ export function CompanionRoutines({
                   </span>
                 )}
               </div>
-              {canEdit && (
-                <div className="chat-context__routine-actions">
+              <div className="chat-context__routine-actions">
+                <button
+                  type="button"
+                  className="chat-context__link"
+                  onClick={() => onOpenHistory(routine)}
+                >
+                  History
+                </button>
+                {canEdit && (
+                  <>
                   <button
                     type="button"
                     className="chat-context__link"
@@ -287,8 +297,9 @@ export function CompanionRoutines({
                   >
                     Delete
                   </button>
-                </div>
-              )}
+                  </>
+                )}
+              </div>
             </li>
           ))}
         </ul>

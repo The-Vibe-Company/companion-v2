@@ -9,6 +9,8 @@ import type {
   CompanionProviderOAuthStartResponse,
   CompanionProvidersResponse,
   CompanionRoutine,
+  CompanionRoutineRunDetail,
+  CompanionRoutineRunList,
   CompanionShareRole,
   CompanionShares,
   CompanionThread,
@@ -463,6 +465,41 @@ export async function listCompanionRoutines(
     { headers: orgHeaders(orgId) },
   );
   return result.routines;
+}
+
+/** Read one routine's newest-first durable run history without contacting or waking its Box. */
+export async function listCompanionRoutineRuns(
+  orgId: string,
+  companionId: string,
+  routineId: string,
+  input: { limit?: number; cursor?: string } = {},
+): Promise<CompanionRoutineRunList> {
+  const query = new URLSearchParams({ limit: String(input.limit ?? 20) });
+  if (input.cursor) query.set("cursor", input.cursor);
+  return apiFetch<CompanionRoutineRunList>(
+    `/v1/companions/${encodeURIComponent(companionId)}`
+      + `/routines/${encodeURIComponent(routineId)}/runs?${query.toString()}`,
+    { headers: orgHeaders(orgId) },
+  );
+}
+
+/** Read one bounded page of a routine Pi transcript; the surfaced payload stays in main chat. */
+export async function readCompanionRoutineRun(
+  orgId: string,
+  companionId: string,
+  runId: string,
+  input: { entryLimit?: number; entryCursor?: number } = {},
+): Promise<CompanionRoutineRunDetail> {
+  const query = new URLSearchParams({ entry_limit: String(input.entryLimit ?? 50) });
+  if (input.entryCursor !== undefined) {
+    query.set("entry_cursor", String(input.entryCursor));
+  }
+  const result = await apiFetch<{ run: CompanionRoutineRunDetail }>(
+    `/v1/companions/${encodeURIComponent(companionId)}`
+      + `/routine-runs/${encodeURIComponent(runId)}?${query.toString()}`,
+    { headers: orgHeaders(orgId) },
+  );
+  return result.run;
 }
 
 export async function createCompanionRoutine(

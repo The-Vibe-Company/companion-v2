@@ -456,6 +456,14 @@ creation and all routine-next-fire and trigger-last-fire presentation. Routine r
 their own cron timezone as server truth while absolute activity instants are formatted for the
 member; triggers remain event-driven and have no schedule timezone.
 
+The web routine row exposes a History action, and a routine-origin thread marker carrying `run_id`
+is a compact button rather than a message bubble. Both open one responsive right-side drawer backed
+only by the bounded routine-history APIs. It lists newest runs first, distinguishes notify, relay,
+silent, pending, and error outcomes, and pages the private transcript forward by ordinal. A deleted
+routine remains directly readable from its marker because the run id and identity snapshot are
+durable. The drawer traps focus, uses a scrim and Esc dismissal, takes the full chat stage on a phone,
+and does not contact or wake Box.
+
 Each Companion carries a cosmetic blob icon — four smallint indexes (`icon_shape`, `icon_mouth`,
 `icon_accessory`, `icon_color`) into fixed client-side catalogs rendered as inline SVG. Create and
 update accept them; the update path treats them as cosmetic only, so an icon save never bumps a
