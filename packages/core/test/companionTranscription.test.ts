@@ -13,7 +13,7 @@ const apiKey = "google-global-transcription-key";
 const now = Date.parse("2026-08-27T10:00:00.000Z");
 
 describe("Companion Gemini Live transcription sessions", () => {
-  it("exchanges only the global Google key for one constrained short-lived session", async () => {
+  it("exchanges only the global Google key for one single-use timing-bounded session", async () => {
     const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       expect(init?.headers).toMatchObject({
         "Content-Type": "application/json",
@@ -24,18 +24,8 @@ describe("Companion Gemini Live transcription sessions", () => {
         uses: 1,
         expireTime: new Date(now + COMPANION_TRANSCRIPTION_TOKEN_TTL_MS).toISOString(),
         newSessionExpireTime: new Date(now + COMPANION_TRANSCRIPTION_NEW_SESSION_TTL_MS).toISOString(),
-        liveConnectConstraints: {
-          model: "models/gemini-3.5-transcribe-live",
-          config: {
-            responseModalities: ["TEXT"],
-            inputAudioTranscription: {
-              mode: "SMART",
-              languageCodes: [],
-            },
-            sessionResumption: {},
-          },
-        },
       });
+      expect(request).not.toHaveProperty("liveConnectConstraints");
       expect(JSON.stringify(request)).not.toContain("realtimeInput");
       expect(JSON.stringify(request)).not.toContain("workspace-audio");
       return Response.json({ name: "ephemeral-session-token" });

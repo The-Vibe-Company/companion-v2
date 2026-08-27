@@ -160,6 +160,7 @@ import {
   type ApiVariables,
 } from "./context";
 import { mintCompanionDesktop, RuntimeDesktopClientError } from "./runtimeDesktopClient";
+import { createCompanionTranscriptionDiagnostics } from "./companionTranscriptionDiagnostics";
 
 const companionIdSchema = z.string().uuid();
 
@@ -741,6 +742,7 @@ export function registerCompanionRoutes(
     async (c) => {
       c.header("Cache-Control", "private, no-store");
       c.header("Pragma", "no-cache");
+      const transcriptionDiagnostics = createCompanionTranscriptionDiagnostics();
       try {
         const companionId = companionIdSchema.parse(c.req.param("id"));
         // The body exists only for a uniform POST shape. No audio, language, model, or other
@@ -759,10 +761,12 @@ export function registerCompanionRoutes(
             companion,
             apiKey: transcriptionApiKey,
             database,
+            fetchImpl: transcriptionDiagnostics.fetchImpl,
           });
         });
         return c.json(companionTranscriptionSessionSchema.parse(session));
       } catch (error) {
+        transcriptionDiagnostics.reportInvalidResponse();
         return routeError(c, error);
       }
     },

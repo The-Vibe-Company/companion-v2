@@ -57,9 +57,11 @@ The chat composer also supports iOS-only voice transcription when the API deploy
 the thread payload exposes only `transcription_available`, and the app omits the microphone entirely
 when it is false or absent. When an Owner or Editor taps the microphone in an accessible thread,
 `POST /v1/companions/:id/transcription-sessions` reauthorizes that access and asks Google for a
-single-use, short-lived token constrained to `gemini-3.5-transcribe-live`, text output, automatic
-language detection, Smart transcription, and session resumption. CompanionKit then connects
-directly to Gemini's constrained Live WebSocket and streams 16 kHz mono PCM in bounded chunks.
+single-use token with a one-minute new-session window and ten-minute expiry. Because Google currently
+rejects `liveConnectConstraints` on the deployed authorization-key path, CompanionKit selects
+`gemini-3.5-transcribe-live`, text output, automatic language detection, Smart transcription, and
+session resumption in the setup message, then connects directly to Gemini's constrained Live WebSocket
+and streams 16 kHz mono PCM in bounded chunks.
 Interim text stays beside the composer; stopping commits the final transcript into the editable
 message field. The long-lived key never enters the app binary or API response, and audio never
 passes through or persists in Companion's API, PostgreSQL, object storage, Box, Pi, or transcript.

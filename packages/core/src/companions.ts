@@ -559,9 +559,12 @@ function transcriptionProviderError(
 }
 
 /**
- * Exchange the deployment-owned Google transcription key for one constrained Live token. The
- * global key enables the same input method for every authorized Companion member and never enters
- * a client, Box, Pi, runtime, transcript, or tenant row.
+ * Exchange the deployment-owned Google transcription key for one single-use, timing-bounded Live
+ * token. The global key enables the same input method for every authorized Companion member and
+ * never enters a client, Box, Pi, runtime, transcript, or tenant row. Model/config constraints are
+ * intentionally omitted: Google currently rejects liveConnectConstraints on the deployed
+ * authorization-key path, while the constrained WebSocket accepts this short-lived token and the
+ * client-owned setup.
  */
 export async function createCompanionTranscriptionSession(input: {
   actor: ActorContext;
@@ -607,17 +610,6 @@ export async function createCompanionTranscriptionSession(input: {
         uses: 1,
         expireTime: expiresAt,
         newSessionExpireTime: newSessionExpiresAt,
-        liveConnectConstraints: {
-          model: `models/${COMPANION_TRANSCRIPTION_MODEL}`,
-          config: {
-            responseModalities: ["TEXT"],
-            inputAudioTranscription: {
-              mode: "SMART",
-              languageCodes: [],
-            },
-            sessionResumption: {},
-          },
-        },
       }),
       signal: AbortSignal.timeout(15_000),
     });
