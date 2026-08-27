@@ -444,6 +444,19 @@ public final class SessionStore {
         }
     }
 
+    /// Returns one in-memory desktop handoff for an already-running Companion Box. The URL is
+    /// intentionally not cached in the session snapshot.
+    public func openCompanionDesktop(companionID: String) async throws -> CompanionDesktop {
+        do {
+            let desktop = try await client.openCompanionDesktop(companionID: companionID)
+            await persistRollingAuthority()
+            return desktop
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
     public func restartCompanion(
         companionID: String,
         target: CompanionRuntimeRestartTarget,
