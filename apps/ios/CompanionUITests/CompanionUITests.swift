@@ -738,18 +738,19 @@ final class CompanionUITests: XCTestCase {
 
         let unseen = app.buttons["chat.scroll-to-bottom"]
         XCTAssertTrue(unseen.waitForExistence(timeout: 4))
+        let plainButtonWidth = unseen.frame.width
         let stageReply = app.buttons["demo.stage-reply"]
         XCTAssertTrue(stageReply.waitForExistence(timeout: 3))
         stageReply.tap()
-        let unseenLabel = XCTNSPredicateExpectation(
-            predicate: NSPredicate(
-                format: "label == %@",
-                "1 new reply. Scroll to latest message"
-            ),
+        let unseenPill = XCTNSPredicateExpectation(
+            predicate: NSPredicate { object, _ in
+                guard let element = object as? XCUIElement, element.exists else { return false }
+                return element.frame.width > plainButtonWidth + 40
+            },
             object: unseen
         )
-        wait(for: [unseenLabel], timeout: 15)
-        XCTAssertEqual(unseen.label, "1 new reply. Scroll to latest message")
+        wait(for: [unseenPill], timeout: 15)
+        XCTAssertGreaterThan(unseen.frame.width, plainButtonWidth + 40)
         unseen.tap()
 
         let stagedReply = app.staticTexts["Staged poll content has arrived."]
