@@ -4,6 +4,7 @@ import {
   COMPANION_CONFIG_PROPOSAL_MAX_IDS,
   COMPANION_LAST_MESSAGE_PREVIEW_MAX_CHARACTERS,
   COMPANION_PROVIDER_CATALOG,
+  COMPANION_PROVIDER_SUPPLEMENTARY_MODELS,
   COMPANION_REASONING_MAX_CHARACTERS,
   COMPANION_TOOL_RUN_SCREENSHOT_MAX_CHARACTERS,
   COMPANION_TRIGGER_NAME_MAX_CHARACTERS,
@@ -38,6 +39,7 @@ import {
   sendCompanionMessageInputSchema,
   setCompanionWorkspaceShareInputSchema,
   startCompanionRuntimeInputSchema,
+  supplementCompanionProviderModels,
   updateCompanionInputSchema,
   updateCompanionMemberStateInputSchema,
 } from "../src/companions";
@@ -74,6 +76,24 @@ describe("Companion provider contracts", () => {
       expect(provider.models.length).toBeGreaterThanOrEqual(1);
       expect(provider.models.filter((model) => model.default)).toHaveLength(1);
     }
+  });
+
+  it("supplements the z.ai fallback without overriding later Pi metadata", () => {
+    const zaiFallback = COMPANION_PROVIDER_CATALOG.find((provider) => provider.id === "zai");
+    expect(zaiFallback?.models).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "glm-5.3-flash", name: "GLM 5.3 Flash" }),
+    ]));
+    expect(COMPANION_PROVIDER_SUPPLEMENTARY_MODELS.zai).toEqual([
+      { id: "glm-5.3-flash", name: "GLM 5.3 Flash" },
+    ]);
+
+    expect(supplementCompanionProviderModels("zai", [
+      { id: "glm-5.3-flash", name: "Pi GLM-5.3-Flash", input: ["text", "image"] },
+      { id: "glm-5.3", name: "GLM-5.3", default: true },
+    ])).toEqual([
+      { id: "glm-5.3-flash", name: "Pi GLM-5.3-Flash", input: ["text", "image"] },
+      { id: "glm-5.3", name: "GLM-5.3", default: true },
+    ]);
   });
 
   it("starts only native Claude/Codex subscription login and accepts one-time codes only", () => {

@@ -762,8 +762,10 @@ the same transaction, so the bytes are either scheduled for removal or the delet
 
 The Pi model catalog's `input` field is preserved through normalization. A model without image input
 support rejects image work before prompt dispatch with a stable `model_capability` error and an
-action to switch model. A bounded bundled catalog may cover Pi catalog outage. Runtime does not
-learn or globally publish capability claims from arbitrary provider errors.
+action to switch model. A bounded bundled catalog covers Pi catalog outage, and bounded curated
+supplements cover released models Pi has not published yet. Pi's same-id metadata replaces a
+supplement as soon as it appears. Runtime does not learn or globally publish capability claims from
+arbitrary provider errors.
 
 Persisted runtime errors contain exactly:
 

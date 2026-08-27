@@ -3,6 +3,7 @@ import {
   COMPANION_PROVIDER_CATALOG,
   companionModelIdSchema,
   companionModelInputSchema,
+  supplementCompanionProviderModels,
   type CompanionProviderDefinition,
 } from "@companion/contracts";
 
@@ -29,6 +30,7 @@ const piModelSchema = z.object({
   name: z.string().trim().min(1).max(200),
   input: z.array(companionModelInputSchema).max(2).optional(),
 }).passthrough();
+const piModelsSchema = z.record(piModelSchema);
 
 type CatalogModels = CompanionProviderDefinition["models"];
 
@@ -82,17 +84,20 @@ function bundledModels(providerId: string): CatalogModels {
   return provider?.models.map((model) => ({ ...model })) ?? [];
 }
 
-function normalizePiModels(providerId: string, value: unknown): CatalogModels {
-  const parsed = z.record(piModelSchema).parse(value);
+function normalizePiModels(
+  providerId: string,
+  parsed: z.output<typeof piModelsSchema>,
+): CatalogModels {
   const models = Object.entries(parsed).map(([key, model]) => {
     if (key !== model.id) {
       throw new Error(`pi.dev model key ${key} does not match id ${model.id}`);
     }
-    return {
+    const normalized: CatalogModels[number] = {
       id: model.id,
       name: model.name,
-      ...(model.input === undefined ? {} : { input: [...model.input] }),
     };
+    if (model.input !== undefined) normalized.input = [...model.input];
+    return normalized;
   });
   if (models.length === 0) throw new Error(`pi.dev returned no models for ${providerId}`);
 
@@ -118,7 +123,7 @@ async function fetchProviderModels(
     },
   );
   if (!response.ok) throw new Error(`pi.dev responded ${response.status} for ${piProviderId}`);
-  return normalizePiModels(providerId, await response.json());
+  return normalizePiModels(providerId, piModelsSchema.parse(await response.json()));
 }
 
 /**
@@ -160,7 +165,10 @@ export async function getCompanionProviderCatalog(
       name: provider.name,
       auth_methods: [...provider.auth_methods],
       description: provider.description,
-      models: models?.length ? models.map((model) => ({ ...model })) : bundledModels(provider.id),
+      models: supplementCompanionProviderModels(
+        provider.id,
+        models?.length ? models : bundledModels(provider.id),
+      ),
     };
   }));
 }

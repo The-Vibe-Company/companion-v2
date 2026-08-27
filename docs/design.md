@@ -249,7 +249,8 @@ acknowledgement, and settlement crash boundaries.
 
 Pi catalog normalization preserves the model `input` capabilities. Image work sent to a text-only
 model fails explicitly with a stable capability error. Capability data comes from Pi's catalog or a
-bounded bundled fallback; there is no global learned capability table.
+bounded bundled fallback, plus bounded curated supplements for released models Pi has not published
+yet. Pi's same-id entry wins as soon as it appears; there is no global learned capability table.
 
 ## Resources and credentials
 
