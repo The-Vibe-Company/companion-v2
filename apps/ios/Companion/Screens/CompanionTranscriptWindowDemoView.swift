@@ -232,7 +232,7 @@ private enum CompanionTranscriptWindowDemoFixtures {
         return ChatServices(
             thread: { companionID in
                 if companionID == fixtureCompanion.id, let stagedFixture {
-                    return await stagedFixture.nextThread()
+                    return stagedFixture.nextThread()
                 }
                 return fixtureThread
             },
@@ -251,7 +251,8 @@ private enum CompanionTranscriptWindowDemoFixtures {
     }
 }
 
-private actor DemoStagedThreadFixture {
+@MainActor
+private final class DemoStagedThreadFixture {
     private let initial: CompanionThread
     private var pollCount = 0
 
