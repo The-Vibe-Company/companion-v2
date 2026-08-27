@@ -23,6 +23,52 @@ private final class RoutineHistoryMockURLProtocol: URLProtocol, @unchecked Senda
     override func stopLoading() {}
 }
 
+private struct RoutineRunDetailFixtureEnvelope: Encodable {
+    let run: CompanionRoutineRunDetail
+}
+
+private let routineRunSummaryFixture = CompanionRoutineRunSummary(
+    runID: "33333333-3333-4333-8333-333333333333",
+    companionID: "11111111-1111-4111-8111-111111111111",
+    routine: CompanionRoutineIdentitySnapshot(
+        id: "22222222-2222-4222-8222-222222222222",
+        name: "Morning brief"
+    ),
+    status: .succeeded,
+    outcome: .surfaced,
+    surfaceMode: .notify,
+    mainEntryEventID: "routine-return:1",
+    relayTurnID: nil,
+    createdAt: "2026-08-27T09:00:00.000Z",
+    startedAt: "2026-08-27T09:00:01.000Z",
+    settledAt: "2026-08-27T09:00:05.000Z",
+    error: nil
+)
+
+private let routineRunDetailFixture = CompanionRoutineRunDetail(
+    runID: routineRunSummaryFixture.runID,
+    companionID: routineRunSummaryFixture.companionID,
+    routine: routineRunSummaryFixture.routine,
+    status: routineRunSummaryFixture.status,
+    outcome: routineRunSummaryFixture.outcome,
+    surfaceMode: routineRunSummaryFixture.surfaceMode,
+    mainEntryEventID: routineRunSummaryFixture.mainEntryEventID,
+    relayTurnID: routineRunSummaryFixture.relayTurnID,
+    createdAt: routineRunSummaryFixture.createdAt,
+    startedAt: routineRunSummaryFixture.startedAt,
+    settledAt: routineRunSummaryFixture.settledAt,
+    error: routineRunSummaryFixture.error,
+    internalEntries: [CompanionRoutineRunEntry(
+        eventID: "routine:assistant:1",
+        ordinal: 0,
+        role: "assistant",
+        content: "Checked the deployment.",
+        reasoning: "Compared release notes.",
+        createdAt: "2026-08-27T09:00:02.000Z"
+    )],
+    nextEntryCursor: 0
+)
+
 @Test
 func requestsAndDecodesRoutineHistoryUsingTheSharedContract() async throws {
     let configuration = URLSessionConfiguration.ephemeral
@@ -46,7 +92,11 @@ func requestsAndDecodesRoutineHistoryUsingTheSharedContract() async throws {
                 httpVersion: nil,
                 headerFields: nil
             ))
-            return (response, Data(#"{"runs":[{"run_id":"33333333-3333-4333-8333-333333333333","companion_id":"11111111-1111-4111-8111-111111111111","routine":{"id":"22222222-2222-4222-8222-222222222222","name":"Morning brief"},"status":"succeeded","outcome":"surfaced","surface_mode":"notify","main_entry_event_id":"routine-return:1","relay_turn_id":null,"created_at":"2026-08-27T09:00:00.000Z","started_at":"2026-08-27T09:00:01.000Z","settled_at":"2026-08-27T09:00:05.000Z","error":null}],"next_cursor":null}"#.utf8))
+            let payload = CompanionRoutineRunList(
+                runs: [routineRunSummaryFixture],
+                nextCursor: nil
+            )
+            return (response, try JSONEncoder().encode(payload))
         }
 
         if components.percentEncodedPath == "/v1/companions/companion%20id/routine-runs/run%20id" {
@@ -61,7 +111,8 @@ func requestsAndDecodesRoutineHistoryUsingTheSharedContract() async throws {
                 httpVersion: nil,
                 headerFields: nil
             ))
-            return (response, Data(#"{"run":{"run_id":"33333333-3333-4333-8333-333333333333","companion_id":"11111111-1111-4111-8111-111111111111","routine":{"id":"22222222-2222-4222-8222-222222222222","name":"Morning brief"},"status":"succeeded","outcome":"surfaced","surface_mode":"notify","main_entry_event_id":"routine-return:1","relay_turn_id":null,"created_at":"2026-08-27T09:00:00.000Z","started_at":"2026-08-27T09:00:01.000Z","settled_at":"2026-08-27T09:00:05.000Z","error":null,"internal_entries":[{"event_id":"routine:assistant:1","ordinal":0,"role":"assistant","content":"Checked the deployment.","reasoning":"Compared release notes.","tool":null,"decision":null,"created_at":"2026-08-27T09:00:02.000Z"}],"next_entry_cursor":0}}}"#.utf8))
+            let payload = RoutineRunDetailFixtureEnvelope(run: routineRunDetailFixture)
+            return (response, try JSONEncoder().encode(payload))
         }
 
         Issue.record("Unexpected routine history route: \(url.absoluteString)")
