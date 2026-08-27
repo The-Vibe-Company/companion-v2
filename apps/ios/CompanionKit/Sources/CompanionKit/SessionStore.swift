@@ -75,6 +75,7 @@ public final class SessionStore {
     private let encoder = JSONEncoder()
     private var restored = false
     private var notificationInstallationID: UUID?
+    private var persistedSession: Session?
 
     public init(
         apiURL: URL,
@@ -121,6 +122,7 @@ public final class SessionStore {
             phase = .signedOut
             return
         }
+        persistedSession = stored
         await client.setAuthority(stored)
         publish(stored)
         do {
@@ -444,6 +446,19 @@ public final class SessionStore {
         }
     }
 
+    /// Returns one in-memory desktop handoff for an already-running Companion Box. The URL is
+    /// intentionally not cached in the session snapshot.
+    public func openCompanionDesktop(companionID: String) async throws -> CompanionDesktop {
+        do {
+            let desktop = try await client.openCompanionDesktop(companionID: companionID)
+            await persistRollingAuthority()
+            return desktop
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
     public func restartCompanion(
         companionID: String,
         target: CompanionRuntimeRestartTarget,
@@ -734,21 +749,27 @@ public final class SessionStore {
     }
 
     private func publish(_ session: Session) {
-        phase = session.needsOnboarding ? .onboarding(session) : .active(session)
+        let nextPhase = session.needsOnboarding ? Phase.onboarding(session) : .active(session)
+        guard phase != nextPhase else { return }
+        phase = nextPhase
     }
 
     private func persist(_ session: Session) throws {
         try storage.save(encoder.encode(session))
+        persistedSession = session
     }
 
     private func persistRollingAuthority() async {
         guard let authority = await client.currentAuthority() else { return }
-        try? persist(authority)
+        if persistedSession != authority {
+            try? persist(authority)
+        }
         publish(authority)
     }
 
     private func clearLocalSession() async {
         try? storage.remove()
+        persistedSession = nil
         await client.setAuthority(nil)
         bootstrapError = nil
         phase = .signedOut

@@ -918,10 +918,11 @@ idempotent calls retain per-call exec fallback; possibly-started broker writes o
 resolution rules above. This changes how runtime operates the Box, not what any member-facing read
 does—control-plane reads remain PostgreSQL-only, never wake a Box, and keep the same polling cadence.
 
-### iOS app
+### Native Apple clients
 
-The SwiftUI client in `apps/ios` targets iOS 26 and later; Android is not supported. It is a full
-first-party client over the existing `/v1` API rather than a separate or reduced mobile API. It reuses
+The SwiftUI client in `apps/ios` targets iOS 26 and later, and the SwiftUI client in `apps/macos`
+targets macOS 14 and later; Android is not supported. Both are full first-party clients over the
+existing `/v1` API rather than separate or reduced platform APIs. They reuse
 the existing Better Auth cookie session: email login captures `set-cookie`, while Google login uses
 Better Auth's authorization proxy and the system browser before adopting the returned cookie into
 Keychain-backed session state. A new Google account completes onboarding by joining a
@@ -935,7 +936,7 @@ brokered OAuth routes, and retains custom HTTP or command MCP connections. Skill
 triggers, sharing, settings, and the remaining control-plane workflows continue migrating to this
 same client without mobile-only APIs.
 
-The new iOS app does not send `client_surface: native_mobile`; omitting that optional field selects
+Neither native app sends `client_surface: native_mobile`; omitting that optional field selects
 the API's existing full first-party contract. The discriminator remains accepted temporarily for
 compatibility with already-installed Expo builds and durable historical rows, but it is not an iOS
 product boundary and must not constrain the migration roadmap.
@@ -944,6 +945,11 @@ Member settings include the same IANA timezone profile field as web. The picker 
 `TimeZone.current.identifier` when the server value is null, remains overridable, and writes through
 `PUT /v1/users/me`; Companion routine and trigger screens read the value returned by
 `GET /v1/auth/whoami`. No mobile-only endpoint or timezone header exists.
+
+The macOS client adapts the shared roster, thread, settings, and polling state into a native split
+view with keyboard navigation. Owner/Editor desktop access presents a freshly minted handoff in a
+dedicated `WKWebView` window. The URL is held in memory only and reminted for reconnect; opening the
+window cannot wake Box, while Viewer access remains PostgreSQL-only.
 
 After an active session is restored, the app requests alert/sound permission and registers its
 current APNs token through the shared cookie-authenticated API. The installation UUID is stable per

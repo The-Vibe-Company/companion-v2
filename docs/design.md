@@ -40,7 +40,7 @@ ownership/ACL. Forced RLS is defense in depth, not a substitute for service auth
 
 The global `profiles` row carries the member's optional IANA timezone because it is personal data
 shared across organizations and Companions. `GET /v1/auth/whoami` exposes it and `PUT /v1/users/me`
-updates it for both web and native iOS. It is never supplied as a client-surface or message header.
+updates it for web and both native Apple clients. It is never supplied as a client-surface or message header.
 
 Organization skills are member-wide. Personal skills, personal labels, personal Skill Database
 realms, and member MCP accounts are creator-only with no Owner/Admin override. Cross-tenant access
@@ -383,7 +383,7 @@ attempt; the companion read model carries the same ACK-gated fact as `runtime.re
 surfaces animate a working Companion without a thread read. Viewer/list/thread/status reads remain
 PostgreSQL-only.
 
-Personal settings on web and native iOS offer a searchable IANA timezone picker initialized from
+Personal settings on web and the native Apple clients offer a searchable IANA timezone picker initialized from
 the browser or device zone when no value has been saved. The same stored value drives routine
 creation and all routine-next-fire and trigger-last-fire presentation. Routine rows retain and show
 their own cron timezone as server truth while absolute activity instants are formatted for the
@@ -404,6 +404,12 @@ keeps a warm Box unavailable during a cross-actor restage. Each authenticated re
 atomically consumed through a narrow `SECURITY DEFINER` function and retained in PostgreSQL until
 its signature window expires, so replicas and restarted processes share one replay boundary;
 neither process persists or logs the URL.
+
+The native macOS client in `apps/macos` reuses `CompanionKit` and the same complete `/v1` contract.
+Its roster and chat use a macOS `NavigationSplitView`, platform toolbars, menus, hover/focus states,
+and keyboard commands rather than scaling the iOS navigation stack. Computer use opens the same
+fresh Lux desktop handoff in a dedicated `WKWebView` window; the secret-bearing URL remains
+memory-only, each reconnect remints it, and Viewer or asleep-Box states expose no desktop control.
 
 Sending is the sole normal wake path. There is no Wake button or first-keystroke prewarm. Successful
 Pi acceptance refreshes Box TTL to six hours. Automatic recovery may recycle Pi only. Full Box
