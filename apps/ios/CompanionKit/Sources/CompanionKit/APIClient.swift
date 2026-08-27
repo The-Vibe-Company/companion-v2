@@ -32,6 +32,22 @@ final class NoRedirectURLSessionDelegate: NSObject, URLSessionTaskDelegate, @unc
     }
 }
 
+struct APIClientRedirectDelegateFactory: @unchecked Sendable {
+    private let builder: (Bool) -> URLSessionTaskDelegate?
+
+    init(builder: @escaping (Bool) -> URLSessionTaskDelegate?) {
+        self.builder = builder
+    }
+
+    func make(followRedirects: Bool) -> URLSessionTaskDelegate? {
+        builder(followRedirects)
+    }
+
+    static let production = Self { followRedirects in
+        followRedirects ? nil : NoRedirectURLSessionDelegate()
+    }
+}
+
 public struct APIError: Error, LocalizedError, Equatable, Sendable {
     public let status: Int
     public let code: String?
@@ -124,6 +140,7 @@ public actor APIClient {
 
     private let baseURL: URL
     private let session: URLSession
+    private let redirectDelegateFactory: APIClientRedirectDelegateFactory
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
     private var authority: Session?
@@ -135,6 +152,26 @@ public actor APIClient {
 
     public init(baseURL: URL, session: URLSession? = nil) {
         self.baseURL = baseURL
+        self.redirectDelegateFactory = .production
+        if let session {
+            self.session = session
+        } else {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.httpShouldSetCookies = false
+            configuration.httpCookieAcceptPolicy = .never
+            configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+            configuration.timeoutIntervalForRequest = 30
+            self.session = URLSession(configuration: configuration)
+        }
+    }
+
+    init(
+        baseURL: URL,
+        session: URLSession? = nil,
+        redirectDelegateFactory: APIClientRedirectDelegateFactory
+    ) {
+        self.baseURL = baseURL
+        self.redirectDelegateFactory = redirectDelegateFactory
         if let session {
             self.session = session
         } else {
@@ -1047,9 +1084,7 @@ public actor APIClient {
                     delegate: delegate
                 )
             } else {
-                let redirectDelegate: URLSessionTaskDelegate? = followRedirects
-                    ? nil
-                    : NoRedirectURLSessionDelegate()
+                let redirectDelegate = redirectDelegateFactory.make(followRedirects: followRedirects)
                 (data, response) = try await session.data(for: request, delegate: redirectDelegate)
             }
         } catch {

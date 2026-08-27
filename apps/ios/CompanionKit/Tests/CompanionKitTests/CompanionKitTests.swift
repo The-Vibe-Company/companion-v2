@@ -49,8 +49,6 @@ private final class PluginOAuthRedirectMockURLProtocol: URLProtocol, @unchecked 
     nonisolated(unsafe) static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
     nonisolated(unsafe) static var authorizationURL = "https://mcp.linear.app/authorize?state=signed-state&redirect_uri=https%3A%2F%2Fthecompanion.sh%2Fv1%2Fcompanion-plugins%2Foauth%2Fcallback"
     nonisolated(unsafe) static var redirectLocation = ""
-    nonisolated(unsafe) static var redirectEvents = 0
-    nonisolated(unsafe) static var redirectStatusCodes: [Int] = []
     nonisolated(unsafe) static var unexpectedRedirectRequests = 0
 
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -60,18 +58,6 @@ private final class PluginOAuthRedirectMockURLProtocol: URLProtocol, @unchecked 
         do {
             let handler = try #require(Self.handler)
             let (response, data) = try handler(request)
-            if response.statusCode == 303,
-               let location = response.value(forHTTPHeaderField: "Location"),
-               let redirectedURL = URL(string: location, relativeTo: request.url)?.absoluteURL {
-                Self.redirectEvents += 1
-                Self.redirectStatusCodes.append(response.statusCode)
-                client?.urlProtocol(
-                    self,
-                    wasRedirectedTo: URLRequest(url: redirectedURL),
-                    redirectResponse: response
-                )
-                return
-            }
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: data)
             client?.urlProtocolDidFinishLoading(self)
@@ -81,6 +67,24 @@ private final class PluginOAuthRedirectMockURLProtocol: URLProtocol, @unchecked 
     }
 
     override func stopLoading() {}
+}
+
+private final class RedirectDelegateFactoryRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var decisions: [Bool] = []
+
+    func record(followRedirects: Bool) {
+        lock.lock()
+        decisions.append(followRedirects)
+        lock.unlock()
+    }
+
+    func snapshot() -> [Bool] {
+        lock.lock()
+        let snapshot = decisions
+        lock.unlock()
+        return snapshot
+    }
 }
 
 private final class RuntimeManagementMockURLProtocol: URLProtocol, @unchecked Sendable {
@@ -2776,8 +2780,6 @@ func validatesCompanionPluginOAuthRedirectBeforeReturning() async throws {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [PluginOAuthRedirectMockURLProtocol.self]
     PluginOAuthRedirectMockURLProtocol.redirectLocation = ""
-    PluginOAuthRedirectMockURLProtocol.redirectEvents = 0
-    PluginOAuthRedirectMockURLProtocol.redirectStatusCodes = []
     PluginOAuthRedirectMockURLProtocol.unexpectedRedirectRequests = 0
     PluginOAuthRedirectMockURLProtocol.handler = { request in
         let requestURL = try #require(request.url)
@@ -2821,14 +2823,17 @@ func validatesCompanionPluginOAuthRedirectBeforeReturning() async throws {
         PluginOAuthRedirectMockURLProtocol.handler = nil
         PluginOAuthRedirectMockURLProtocol.authorizationURL = "https://mcp.linear.app/authorize?state=signed-state&redirect_uri=https%3A%2F%2Fthecompanion.sh%2Fv1%2Fcompanion-plugins%2Foauth%2Fcallback"
         PluginOAuthRedirectMockURLProtocol.redirectLocation = ""
-        PluginOAuthRedirectMockURLProtocol.redirectEvents = 0
-        PluginOAuthRedirectMockURLProtocol.redirectStatusCodes = []
         PluginOAuthRedirectMockURLProtocol.unexpectedRedirectRequests = 0
     }
 
+    let redirectRecorder = RedirectDelegateFactoryRecorder()
     let client = APIClient(
         baseURL: URL(string: "http://127.0.0.1:3001")!,
-        session: URLSession(configuration: configuration)
+        session: URLSession(configuration: configuration),
+        redirectDelegateFactory: APIClientRedirectDelegateFactory { followRedirects in
+            redirectRecorder.record(followRedirects: followRedirects)
+            return nil
+        }
     )
     await client.setAuthority(Session(
         cookie: "better-auth.session_token=session",
@@ -2919,8 +2924,8 @@ func validatesCompanionPluginOAuthRedirectBeforeReturning() async throws {
             try await client.completeCompanionPluginOAuth(callbackURL: customCallbackURL)
         }
     }
-    #expect(PluginOAuthRedirectMockURLProtocol.redirectEvents == cases.count + customLocations.count + 1)
-    #expect(PluginOAuthRedirectMockURLProtocol.redirectStatusCodes.allSatisfy { $0 == 303 })
+    let redirectDecisions = redirectRecorder.snapshot()
+    #expect(redirectDecisions.filter { !$0 }.count == cases.count + customLocations.count + 1)
     #expect(PluginOAuthRedirectMockURLProtocol.unexpectedRedirectRequests == 0)
 }
 

@@ -282,6 +282,9 @@ test("external iOS links and OAuth stay browser-owned and callback-scoped", () =
   assert.match(kitSessionStore, /cancelGoogleSignIn\(expectedNativeState: String\)/);
   assert.match(kitClient, /companionPluginOAuthState/);
   assert.match(kitClient, /redirect_uri/);
+  assert.match(kitClient, /APIClientRedirectDelegateFactory/);
+  assert.match(kitClient, /redirectDelegateFactory/);
+  assert.match(kitClient, /make\(followRedirects: followRedirects\)/);
   assert.match(kitClient, /NoRedirectURLSessionDelegate/);
   assert.match(kitClient, /followRedirects: false/);
   assert.match(kitClient, /response\.statusCode == 303/);
@@ -297,8 +300,10 @@ test("external iOS links and OAuth stay browser-owned and callback-scoped", () =
   assert.match(kitTests, /validatesCompanionPluginOAuthRedirectBeforeReturning/);
   assert.match(kitTests, /refusesCompanionPluginOAuthRedirects/);
   assert.match(kitTests, /willPerformHTTPRedirection/);
-  assert.match(kitTests, /wasRedirectedTo:/);
-  assert.match(kitTests, /redirectEvents/);
+  assert.match(kitTests, /RedirectDelegateFactoryRecorder/);
+  assert.match(kitTests, /redirectDelegateFactory:/);
+  assert.doesNotMatch(kitTests, /wasRedirectedTo:/);
+  assert.doesNotMatch(kitTests, /redirectEvents/);
   assert.match(kitTests, /cancelGoogleSignIn\(expectedNativeState: authorization\.nativeState\)/);
   assert.match(kitTests, /oauth_error=duplicate_label/);
   assert.match(kitTests, /oauth\.example/);
