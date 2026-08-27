@@ -262,7 +262,9 @@ private final class DemoStagedThreadFixture {
 
     func nextThread() -> CompanionThread {
         pollCount += 1
-        guard pollCount >= 2 else { return initial }
+        // Keep the first silent poll unchanged so the UI test can deliberately leave the tail
+        // before the next four-second poll delivers the staged revision.
+        guard pollCount >= 3 else { return initial }
 
         let encoded = try! JSONEncoder().encode(initial)
         var payload = try! JSONSerialization.jsonObject(with: encoded) as! [String: Any]

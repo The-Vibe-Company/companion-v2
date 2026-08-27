@@ -730,15 +730,16 @@ final class CompanionUITests: XCTestCase {
         app.launch()
 
         let latest = app.descendants(matching: .any)["chat.entry.long-120"]
-        XCTAssertTrue(latest.waitForExistence(timeout: 5))
+        XCTAssertTrue(latest.waitForExistence(timeout: 12))
         app.swipeDown()
 
         let unseen = app.buttons["chat.scroll-to-bottom"]
+        XCTAssertTrue(unseen.waitForExistence(timeout: 4))
         let unseenLabel = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "value == %@", "1 new reply"),
             object: unseen
         )
-        wait(for: [unseenLabel], timeout: 8)
+        wait(for: [unseenLabel], timeout: 10)
         XCTAssertEqual(unseen.value as? String, "1 new reply")
         unseen.tap()
 
