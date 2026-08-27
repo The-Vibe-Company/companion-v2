@@ -284,6 +284,8 @@ test("native chat reading restoration stays covered at the behavior layer", () =
   const companionKitTests = read(
     "apps/ios/CompanionKit/Tests/CompanionKitTests/CompanionKitTests.swift",
   );
+  const uiTests = read("apps/ios/CompanionUITests/CompanionUITests.swift");
+  const ci = read(".github/workflows/ci.yml");
 
   assert.match(roster, /CompanionChatReadingPositionStore\(\)/);
   assert.match(roster, /readingPosition: chatReadingPositions\.position\(for: companionID\)/);
@@ -292,14 +294,67 @@ test("native chat reading restoration stays covered at the behavior layer", () =
   assert.match(chat, /\.onScrollTargetVisibilityChange\(/);
   assert.match(chat, /isRestoringReadingPosition \? 0 : 1/);
   assert.match(chat, /previousThread != nil/);
+  assert.match(chat, /CompanionScrollCoordinator/);
+  assert.match(chat, /scrollCoordinator\.takePendingRequest\(\)/);
+  assert.match(chat, /\.onScrollPhaseChange/);
+  assert.match(chat, /scrollCoordinator\.beginUserInteraction/);
+  assert.match(chat, /newPhase == \.interacting[\s\S]*scrollCoordinator\.observeGeometry/);
+  assert.match(chat, /\.defaultScrollAnchor\(\.bottom, for: \.initialOffset\)/);
+  assert.doesNotMatch(chat, /\.defaultScrollAnchor\(\.bottom\)\s*/);
+  assert.match(chat, /\.id\(transcriptScrollIdentity\)/);
+  const acceptedThread = chat.indexOf("threadProjection.update(next)");
+  const observedTail = chat.indexOf("let tailChanged = observeActualTail", acceptedThread);
+  assert.notEqual(acceptedThread, -1);
+  assert.ok(observedTail > acceptedThread);
+  assert.match(chat, /let renderedScrollRevision = scrollContentRevision/);
+  const scrollRevisionObserver = chat.indexOf(".task(id: renderedScrollRevision)");
+  const deferredScrollDelivery = chat.indexOf("await Task.yield()", scrollRevisionObserver);
+  const consumedScrollRequest = chat.indexOf(
+    "scrollCoordinator.takePendingRequest()",
+    scrollRevisionObserver,
+  );
+  assert.notEqual(scrollRevisionObserver, -1);
+  assert.ok(deferredScrollDelivery > scrollRevisionObserver);
+  assert.ok(consumedScrollRequest > deferredScrollDelivery);
+  assert.match(
+    chat.slice(deferredScrollDelivery, consumedScrollRequest),
+    /renderedScrollRevision == scrollContentRevision/,
+  );
+  const lazyTranscriptTargets = chat.indexOf(".scrollTargetLayout()");
+  const eagerBottomTarget = chat.indexOf('.id("bottom")', lazyTranscriptTargets);
+  assert.notEqual(lazyTranscriptTargets, -1);
+  assert.ok(eagerBottomTarget > lazyTranscriptTargets);
+  assert.doesNotMatch(chat, /BottomDestinationLayoutSignal|markInitialBottomReady/);
+  assert.equal(chat.match(/scrollCoordinator\.takePendingRequest\(\)/g)?.length, 1);
+  assert.match(chat, /batches=\\\(scrollCoordinator\.issuedRequestBatchCount\)/);
+  assert.match(uiTests, /Scroll diagnostics:/);
+  const scrollOwner = chat.indexOf("private func performScroll");
+  assert.notEqual(scrollOwner, -1);
+  assert.doesNotMatch(chat.slice(0, scrollOwner), /proxy\.scrollTo\(/);
+  assert.match(chat.slice(scrollOwner), /proxy\.scrollTo\(/);
+  assert.match(chat, /ScrollViewReader/);
+  assert.doesNotMatch(chat, /transcriptScrollPosition|\.scrollPosition\(/);
+  assert.match(chat.slice(scrollOwner), /let targetID = bottomScrollTargetID/);
+  assert.doesNotMatch(chat.slice(scrollOwner), /proxy\.scrollTo\("bottom"/);
+  assert.match(chat, /return entries\.last\?\.id \?\? "bottom"/);
   assert.doesNotMatch(chat, /requestScroll\(to: \.bottom\)/);
   assert.match(coordination, /func position\(for companionID: String\)/);
   assert.match(coordination, /public mutating func restore\(/);
+  assert.match(coordination, /public struct CompanionScrollCoordinator/);
+  assert.match(coordination, /case followingTail/);
+  assert.match(coordination, /case userReading/);
+  assert.match(coordination, /case \.initial:\s*break/);
+  assert.match(coordination, /issuedRequestBatchCount/);
+  assert.match(uiTests, /testTranscriptWindowDemoRestoresReadingPositionAfterCompanionSwitch/);
+  assert.match(uiTests, /testTranscriptWindowDemoStaysAtLatestAcrossPollInterval/);
   assert.match(companionKitTests, /func chatReadingPositionsRemainIsolatedByCompanion\(\)/);
   assert.match(
     companionKitTests,
     /func transcriptWindowRestorationKeepsSavedAnchorExposedAfterTailGrowth\(\)/,
   );
+  assert.match(ci, /xcodebuild build/);
+  assert.doesNotMatch(ci, /-only-testing:CompanionUITests/);
+  assert.match(read("apps/ios/README.md"), /four-second poll/);
 });
 
 test("the project is synchronized, shared, and backed by CompanionKit", () => {
@@ -483,7 +538,10 @@ test("the staged reply fixture is armed only after the UI reader leaves the tail
   assert.match(chatView, /unseenTracker = nextUnseenTracker/);
   assert.match(chatView, /unseenCount = nextUnseenCount/);
   assert.match(chatView, /let readerWasNearBottom = isNearBottom/);
-  assert.match(chatView, /isNearBottom: readerWasNearBottom/);
+  assert.match(chatView, /let readerIsNearBottom = isNearBottom/);
+  assert.match(chatView, /isNearBottom: readerIsNearBottom/);
+  assert.match(chatView, /completedReveal\.followsTail, isNearBottom, !loadingEarlier/);
+  assert.match(chatView, /source: \.poll,\s+animated: false/);
 });
 
 test("GitHub Actions never installs or invokes XcodeBuildMCP", () => {

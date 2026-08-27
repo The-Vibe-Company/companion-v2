@@ -1727,6 +1727,218 @@ func transcriptWindowResetStartsDisclosureOver() {
     #expect(window.visibleRange == (30..<80))
 }
 
+private func makeScrollTestEntry(
+    eventID: String,
+    ordinal: Int,
+    content: String
+) -> TranscriptEntry {
+    let data = Data("""
+    {
+      "event_id":"\(eventID)",
+      "ordinal":\(ordinal),
+      "role":"assistant",
+      "content":"\(content)",
+      "queued":false,
+      "attachments":[],
+      "created_at":"2026-08-27T12:00:00.000Z"
+    }
+    """.utf8)
+    return try! JSONDecoder().decode(TranscriptEntry.self, from: data)
+}
+
+private func makeScrollTestThread(queuedCount: Int) -> CompanionThread {
+    let data = Data("""
+    {
+      "companion_id":"c96ab360-00f3-4497-a51a-51442db8add1",
+      "viewer_id":"owner-1",
+      "read_only":false,
+      "can_send":true,
+      "entries":[
+        {"event_id":"queued","ordinal":99,"role":"user","content":"Later","queued":true,"created_at":"2026-08-27T12:02:00.000Z"},
+        {"event_id":"tail","ordinal":12,"role":"assistant","content":"Tail","queued":false,"created_at":"2026-08-27T12:01:00.000Z"},
+        {"event_id":"before-tail","ordinal":11,"role":"user","content":"Before","queued":false,"created_at":"2026-08-27T12:00:00.000Z"}
+      ],
+      "active_turn":null,
+      "queued_count":\(queuedCount),
+      "interrupted_turn":null
+    }
+    """.utf8)
+    return try! JSONDecoder().decode(CompanionThread.self, from: data)
+}
+
+@Test
+func scrollTailSnapshotOnlyTracksSortedVisibleTranscriptAndInterruptedPresentation() {
+    let first = CompanionScrollTailSnapshot(thread: makeScrollTestThread(queuedCount: 1))
+    let refreshed = CompanionScrollTailSnapshot(thread: makeScrollTestThread(queuedCount: 4))
+
+    #expect(first.lastEntry?.eventID == "tail")
+    #expect(first == refreshed)
+}
+
+@Test
+func scrollCoordinatorKeepsLongThreadInitialAndStablePollsBounded() {
+    var coordinator = CompanionScrollCoordinator()
+    let initialTail = CompanionScrollTailSnapshot(
+        lastEntry: makeScrollTestEntry(
+            eventID: "long-120",
+            ordinal: 120,
+            content: "Long-thread message 120"
+        )
+    )
+
+    let initialChanged = coordinator.observeTail(initialTail, source: .initial)
+    #expect(initialChanged)
+    #expect(coordinator.pendingRequest == nil)
+    #expect(coordinator.issuedRequestBatchCount == 0)
+
+    // Initial placement is declarative layout state, so geometry has no outstanding imperative
+    // request to reinterpret while the long transcript is first being placed.
+    _ = coordinator.observeGeometry(bottomDistance: 0, threshold: 80)
+    #expect(coordinator.followState == .followingTail)
+    #expect(!coordinator.isProgrammaticBottomScrollOutstanding)
+
+    // Four-second polls with the same visible tail, including status/window refreshes, are no-ops.
+    for _ in 0..<4 {
+        let stableChanged = coordinator.observeTail(initialTail, source: .poll)
+        let stableRequest = coordinator.takePendingRequest()
+        #expect(!stableChanged)
+        #expect(stableRequest == nil)
+    }
+    #expect(coordinator.issuedRequestBatchCount == 0)
+}
+
+@Test
+func scrollCoordinatorScrollsOnceForEachRealTailRevisionAndIgnoresDuplicates() {
+    var coordinator = CompanionScrollCoordinator()
+    let firstTail = CompanionScrollTailSnapshot(
+        lastEntry: makeScrollTestEntry(eventID: "message-1", ordinal: 1, content: "One")
+    )
+    let secondTail = CompanionScrollTailSnapshot(
+        lastEntry: makeScrollTestEntry(eventID: "message-2", ordinal: 2, content: "Two")
+    )
+
+    _ = coordinator.observeTail(firstTail, source: .initial)
+    _ = coordinator.takePendingRequest()
+    _ = coordinator.observeGeometry(bottomDistance: 0, threshold: 80)
+
+    let secondChanged = coordinator.observeTail(secondTail, source: .poll)
+    #expect(secondChanged)
+    #expect(coordinator.pendingRequest?.source == .poll)
+    #expect(coordinator.pendingRequest?.animated == false)
+    _ = coordinator.takePendingRequest()
+    _ = coordinator.observeGeometry(bottomDistance: 0, threshold: 80)
+    let duplicateChanged = coordinator.observeTail(secondTail, source: .poll)
+    let duplicateRequest = coordinator.takePendingRequest()
+    #expect(!duplicateChanged)
+    #expect(duplicateRequest == nil)
+    #expect(coordinator.issuedRequestBatchCount == 1)
+}
+
+@Test
+func scrollCoordinatorDoesNotLoseARealTailWhenPriorBottomGeometryIsUnchanged() {
+    var coordinator = CompanionScrollCoordinator()
+    let firstTail = CompanionScrollTailSnapshot(
+        lastEntry: makeScrollTestEntry(eventID: "message-1", ordinal: 1, content: "One")
+    )
+    let secondTail = CompanionScrollTailSnapshot(
+        lastEntry: makeScrollTestEntry(eventID: "message-2", ordinal: 2, content: "Two")
+    )
+
+    _ = coordinator.observeTail(firstTail, source: .initial)
+    coordinator.requestBottom(source: .userLatest, animated: false)
+    _ = coordinator.takePendingRequest()
+    #expect(coordinator.isProgrammaticBottomScrollOutstanding)
+
+    // An already-bottom viewport is allowed to emit no geometry callback for the first request.
+    // That guard protects geometry interpretation only; it must not swallow real reply content.
+    let secondChanged = coordinator.observeTail(secondTail, source: .poll)
+    let secondRequest = coordinator.takePendingRequest()
+    #expect(secondChanged)
+    #expect(secondRequest?.source == .poll)
+    #expect(coordinator.issuedRequestBatchCount == 2)
+}
+
+@Test
+func scrollCoordinatorDoesNotAutoFollowWhenReaderIsAwayFromTail() {
+    let firstTail = CompanionScrollTailSnapshot(
+        lastEntry: makeScrollTestEntry(eventID: "message-1", ordinal: 1, content: "One")
+    )
+    let secondTail = CompanionScrollTailSnapshot(
+        lastEntry: makeScrollTestEntry(eventID: "message-2", ordinal: 2, content: "Two")
+    )
+    var coordinator = CompanionScrollCoordinator(
+        followState: .userReading,
+        lastActualTailSnapshot: firstTail
+    )
+
+    let changed = coordinator.observeTail(secondTail, source: .poll)
+    #expect(changed)
+    #expect(coordinator.followState == .userReading)
+    #expect(coordinator.pendingRequest == nil)
+    #expect(coordinator.issuedRequestBatchCount == 0)
+}
+
+@Test
+func scrollCoordinatorCoalescesRestorationAndLoadEarlierByPriority() {
+    var coordinator = CompanionScrollCoordinator()
+
+    coordinator.requestBottom(source: .initial, animated: false)
+    coordinator.requestEntry("older-anchor", source: .loadEarlier)
+    coordinator.requestEntry("saved-anchor", source: .restoration)
+    coordinator.requestEntry("newer-older-anchor", source: .loadEarlier)
+
+    #expect(
+        coordinator.pendingRequest == CompanionScrollRequest(
+            destination: .entry("saved-anchor"),
+            source: .restoration,
+            animated: false
+        )
+    )
+    let coalescedRequest = coordinator.takePendingRequest()
+    #expect(coalescedRequest?.destination == .entry("saved-anchor"))
+    #expect(coordinator.issuedRequestBatchCount == 1)
+}
+
+@Test
+func scrollCoordinatorProtectsUserIntentAndReduceMotionSemantics() {
+    var coordinator = CompanionScrollCoordinator(followState: .userReading)
+
+    coordinator.requestBottom(source: .userLatest, animated: false)
+    #expect(coordinator.followState == .followingTail)
+    let latestRequest = coordinator.takePendingRequest()
+    #expect(latestRequest?.animated == false)
+
+    // Intermediate geometry cannot reinterpret the programmatic request as user scrolling.
+    let intermediateChanged = coordinator.observeGeometry(bottomDistance: 480, threshold: 80)
+    #expect(!intermediateChanged)
+    #expect(coordinator.followState == .followingTail)
+    let settledChanged = coordinator.observeGeometry(bottomDistance: 0, threshold: 80)
+    #expect(!settledChanged)
+    #expect(!coordinator.isProgrammaticBottomScrollOutstanding)
+
+    let readerMoved = coordinator.observeGeometry(bottomDistance: 480, threshold: 80)
+    #expect(readerMoved)
+    #expect(coordinator.followState == .userReading)
+}
+
+@Test
+func scrollCoordinatorLetsUserInteractionInterruptProgrammaticFollow() {
+    var coordinator = CompanionScrollCoordinator(followState: .userReading)
+
+    coordinator.requestBottom(source: .userLatest, animated: true)
+    _ = coordinator.takePendingRequest()
+    #expect(coordinator.isProgrammaticBottomScrollOutstanding)
+
+    let interactionChanged = coordinator.beginUserInteraction(
+        bottomDistance: 480,
+        threshold: 80
+    )
+    #expect(interactionChanged)
+    #expect(coordinator.followState == .userReading)
+    #expect(!coordinator.isProgrammaticBottomScrollOutstanding)
+    #expect(coordinator.pendingRequest == nil)
+}
+
 @Test
 func transcriptPollDiffSkipsIdenticalLongPollsAndKeepsAppendWorkBounded() throws {
     func entry(_ eventID: String, ordinal: Int, content: String = "Reply") -> TranscriptEntry {

@@ -152,10 +152,17 @@ Combine `-companion-roster-demo -companion-notification-demo` to inject a versio
 and verify deferred navigation to Luna's chat without contacting APNs.
 
 Native chat layout regressions use the deterministic transcript-window demo for focused local and
-manual UI verification. Apple Quality's iOS path stays below five minutes by running only the
+manual UI verification. Apple Quality's iOS path stays below five minutes by running the
 `CompanionKit` behavior tests and compiling the complete app for a generic iOS Simulator
 destination without booting one or invoking XCUITests. Its separate conditional skill path keeps
 the Darwin-only private-transport guard.
+The poll-stability assertion launches that fixture, observes the latest entry across one real
+four-second poll, and verifies that the latest entry remains hittable without a scroll-to-bottom
+overlay. Initial placement is the loaded scroll view's role-scoped bottom layout anchor; it is not
+an imperative request and does not apply again when poll, markdown, composer, or safe-area changes
+resize the content. Every later scroll decision is delegated to the shared
+`CompanionScrollCoordinator`, so repeated unchanged snapshots do not compete with the rendered
+viewport.
 Linux quality still protects the keyboard-dismissal gesture mechanics without launching the app;
 the rendered fixture remains local and manual. It focuses the composer, taps a message, verifies
 the keyboard disappears, and then opens a tool card to prove message controls still receive their
