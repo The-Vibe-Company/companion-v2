@@ -50,6 +50,9 @@ WITH runtime_role AS (
     ('public.companion_runtime_get_config_catalog(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)'),
     ('public.companion_runtime_get_attempt_terminal_projection(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)'),
     ('public.companion_runtime_project_event_batch(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,bigint,text,jsonb,bigint,timestamp with time zone,integer,integer,integer)'),
+    ('public.companion_runtime_get_routine_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)'),
+    ('public.companion_runtime_prepare_routine_run(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,boolean)'),
+    ('public.companion_runtime_project_event_batch_v2(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,bigint,text,jsonb,bigint,timestamp with time zone,integer,integer,integer)'),
     ('public.companion_runtime_register_duplicate_cleanups(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text[])'),
     ('public.companion_runtime_checkpoint_duplicate_cleanup(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text,bigint,public.companion_duplicate_cleanup_status,text)'),
     ('public.companion_runtime_mint_hub_token(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)'),
@@ -97,6 +100,8 @@ WITH runtime_role AS (
       'companion_runtime_duplicate_cleanups',
       'companion_runtime_event_projections',
       'companion_runtime_desktop_requests',
+      'companion_main_pi_compactions',
+      'companion_routine_context_substrates',
       'companion_mcp_broker_tokens',
       'companion_message_attachments'
     ]::text[])
@@ -189,7 +194,7 @@ export async function verifyRuntimeDatabaseRole(
     || profile.ownsDatabaseOrSchema !== false
     || profile.ownsRelations !== false
     || profile.ownsFunctionsOrTypes !== false
-    || profile.protectedRelationCount !== 12
+    || profile.protectedRelationCount !== 14
     || profile.hasPublicRelationPrivileges !== false
     || profile.requiredFunctionsReady !== true
     || profile.ownsRequiredFunctions !== false

@@ -533,6 +533,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
             'companion_turn_attempts', 'companion_operations', 'companion_decision_deliveries',
             'companion_runtime_leases', 'companion_runtime_duplicate_cleanups',
             'companion_runtime_event_projections', 'companion_runtime_desktop_requests',
+            'companion_main_pi_compactions', 'companion_routine_context_substrates',
             'companion_message_attachments', 'companion_routines', 'companion_mcp_broker_tokens',
             'companion_images'
           ]) protected(table_name)
@@ -553,6 +554,9 @@ describe("Companion runtime executor PostgreSQL surface", () => {
             'public.companion_runtime_authorize_desktop(uuid,uuid,text)',
             'public.companion_runtime_consume_desktop_request(text,bigint,integer)',
             'public.companion_runtime_project_event_batch(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,bigint,text,jsonb,bigint,timestamp with time zone,integer,integer,integer)',
+            'public.companion_runtime_get_routine_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)',
+            'public.companion_runtime_prepare_routine_run(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,boolean)',
+            'public.companion_runtime_project_event_batch_v2(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,bigint,text,jsonb,bigint,timestamp with time zone,integer,integer,integer)',
             'public.companion_runtime_record_attempt_outputs(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,jsonb,timestamp with time zone)',
             'public.companion_runtime_defer_delete(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)',
             'public.companion_runtime_image_request(text,text)',
@@ -571,13 +575,16 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           ${runtimeRole}, 'public.companion_runtime_guard_duplicate_cleanup()', 'EXECUTE'
         ) as "helperCallable"
     `;
-    expect(acl).toEqual({ privateTableReads: 0, callableFunctions: 24, helperCallable: false });
+    expect(acl).toEqual({ privateTableReads: 0, callableFunctions: 27, helperCallable: false });
     await expect(asRuntime((tx) => tx`select * from companion_turn_attempts`))
       .rejects.toThrow(/permission denied/i);
 
     const runtimeOnlySignatures = [
       "public.companion_runtime_record_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,public.companion_client_surface,timestamp with time zone,text,text)",
       "public.companion_runtime_publish_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text)",
+      "public.companion_runtime_get_routine_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)",
+      "public.companion_runtime_prepare_routine_run(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,boolean)",
+      "public.companion_runtime_project_event_batch_v2(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,bigint,text,jsonb,bigint,timestamp with time zone,integer,integer,integer)",
       "public.companion_runtime_claim_work(text,integer,integer,bigint,integer,integer)",
       "public.companion_runtime_defer_delete(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)",
       "public.companion_runtime_image_request(text,text)",
@@ -4973,6 +4980,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         checkpointSequence: 1n,
         eventCursor: 1n,
         hasVisibleOutput: true,
+        routineReturned: false,
       });
       const [durable] = await sql<Array<{ cursor: string; content: string }>>`
         select attempt.event_cursor::text as cursor, entry.content
