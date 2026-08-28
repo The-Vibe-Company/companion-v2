@@ -94,6 +94,13 @@ private struct TranscriptKeyboardDismissGesture: UIGestureRecognizerRepresentabl
 
         func gestureRecognizer(
             _ gestureRecognizer: UIGestureRecognizer,
+            shouldRequireFailureOf otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            otherGestureRecognizer is UIScreenEdgePanGestureRecognizer
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
             shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
         ) -> Bool {
             true
@@ -332,10 +339,6 @@ struct ChatView: View {
                             )
                         }
                     )
-                    .simultaneousGesture(
-                        DragGesture(minimumDistance: 2)
-                            .onChanged { _ in stopFollowingTailForReveal() }
-                    )
                     .onScrollGeometryChange(for: CGFloat.self) { geometry in
                         max(0, geometry.contentSize.height - geometry.visibleRect.maxY)
                     } action: { _, bottomDistance in
@@ -362,6 +365,7 @@ struct ChatView: View {
                             geometry.contentSize.height - geometry.visibleRect.maxY
                         )
                         let stateChanged = if newPhase == .interacting {
+                            stopFollowingTailForReveal()
                             scrollCoordinator.beginUserInteraction(
                                 bottomDistance: Double(bottomDistance),
                                 threshold: Double(bottomProximityThreshold)

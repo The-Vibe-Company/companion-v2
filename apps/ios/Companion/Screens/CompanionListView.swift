@@ -965,6 +965,9 @@ private final class CompanionRosterDemoState {
 @MainActor
 private enum CompanionRosterDemoFixtures {
     static let companionID = "c96ab360-00f3-4497-a51a-51442db8add1"
+    static let usesLongThread = ProcessInfo.processInfo.environment[
+        "COMPANION_ROSTER_DEMO_LONG_THREAD"
+    ] == "1"
 
     static let section: CompanionSection = decode(#"""
     {
@@ -1024,7 +1027,7 @@ private enum CompanionRosterDemoFixtures {
 
     static func chatServices(access: CompanionAccess) -> ChatServices {
         let currentCompanion = companion(access: access)
-        let currentThread: CompanionThread = decode(#"""
+        let baseThread: CompanionThread = decode(#"""
         {
           "companion_id":"c96ab360-00f3-4497-a51a-51442db8add1",
           "viewer_id":"demo-user",
@@ -1061,6 +1064,7 @@ private enum CompanionRosterDemoFixtures {
           "interrupted_turn":null
         }
         """#)
+        let currentThread = usesLongThread ? longThread(from: baseThread) : baseThread
         let desktop: CompanionDesktop = decode(#"""
         {
           "desktop_url":null,
@@ -1080,6 +1084,32 @@ private enum CompanionRosterDemoFixtures {
             listProviders: { providers },
             openDesktop: { _ in desktop }
         )
+    }
+
+    private static func longThread(from baseThread: CompanionThread) -> CompanionThread {
+        let encoded = try! JSONEncoder().encode(baseThread)
+        var payload = try! JSONSerialization.jsonObject(with: encoded) as! [String: Any]
+        payload["entries"] = (1...36).map { index in
+            let isAssistant = index.isMultiple(of: 2)
+            return [
+                "event_id": "roster-long-\(index)",
+                "ordinal": index,
+                "role": isAssistant ? "assistant" : "user",
+                "content": "Navigation regression message \(index). Keep the thread long enough to verify a pop while reading earlier messages.",
+                "author_id": isAssistant ? NSNull() : "demo-user" as Any,
+                "author_name": isAssistant ? NSNull() : "Demo" as Any,
+                "decision": NSNull(),
+                "tool": NSNull(),
+                "queued": false,
+                "attachments": [Any](),
+                "created_at": String(
+                    format: "2026-08-28T10:%02d:00.000Z",
+                    index
+                ),
+            ] as [String: Any]
+        }
+        let data = try! JSONSerialization.data(withJSONObject: payload)
+        return try! JSONDecoder().decode(CompanionThread.self, from: data)
     }
 
     private static var providers: CompanionProvidersResponse {
