@@ -58,6 +58,7 @@ describe("Companion provider contracts", () => {
   it("bounds owner sections and requires exact, unique reorder membership", () => {
     expect(createCompanionSectionInputSchema.parse({ name: "  Work  " })).toEqual({ name: "Work" });
     expect(assignCompanionSectionInputSchema.parse({ section_id: null })).toEqual({ section_id: null });
+    expect(() => assignCompanionSectionInputSchema.parse({})).toThrow();
     expect(() => reorderCompanionSectionsInputSchema.parse({
       section_ids: [
         "11111111-1111-4111-8111-111111111111",

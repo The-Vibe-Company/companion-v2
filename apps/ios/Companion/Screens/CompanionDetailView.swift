@@ -2,23 +2,36 @@ import SwiftUI
 import CompanionKit
 import UIKit
 
-struct CompanionSettingsView: View {
+struct CompanionDetailView: View {
     @Environment(SessionStore.self) private var sessionStore
     @Environment(NotificationCoordinator.self) private var notifications
     @Environment(\.dismiss) private var dismiss
 
     let companion: CompanionSummary
     let onSaved: (CompanionSummary) -> Void
+    /// Replaces the detail route with the existing chat route. The roster owns this replacement
+    /// so opening chat from details never creates a second chat/detail cycle on the stack.
+    let onOpenChat: () -> Void
     let onDeletionStarted: (CompanionSummary, UUID) -> Void
     let onDeletionAccepted: (String, CompanionOperationSummary) -> Void
     let onDeletionFailed: (CompanionSummary, UUID, Error) -> Void
-    private let services: CompanionSettingsServices?
+    private let services: CompanionDetailServices?
 
     @State private var model: CompanionBotDetailSheetModel
     @State private var editingTitle = false
     @State private var showingCharacterPicker = false
     @State private var showingInstructions = false
     @State private var showingNewRoutine = false
+    @State private var providers: CompanionProvidersResponse?
+    @State private var providerID: String
+    @State private var modelID: String
+    @State private var loadingProviders = true
+    @State private var savingModel = false
+    @State private var deleting = false
+    @State private var confirmingDelete = false
+    @State private var showingProviders = false
+    @State private var deleteRequestID: UUID?
+    @State private var success: String?
     @State private var routinesLoading = true
     @State private var savingIdentity = false
     @State private var savingNotifications = false
@@ -30,18 +43,22 @@ struct CompanionSettingsView: View {
     init(
         companion: CompanionSummary,
         onSaved: @escaping (CompanionSummary) -> Void,
+        onOpenChat: @escaping () -> Void = {},
         onDeletionStarted: @escaping (CompanionSummary, UUID) -> Void = { _, _ in },
         onDeletionAccepted: @escaping (String, CompanionOperationSummary) -> Void,
         onDeletionFailed: @escaping (CompanionSummary, UUID, Error) -> Void = { _, _, _ in },
-        services: CompanionSettingsServices? = nil
+        services: CompanionDetailServices? = nil
     ) {
         self.companion = companion
         self.onSaved = onSaved
+        self.onOpenChat = onOpenChat
         self.onDeletionStarted = onDeletionStarted
         self.onDeletionAccepted = onDeletionAccepted
         self.onDeletionFailed = onDeletionFailed
         self.services = services
         _model = State(initialValue: CompanionBotDetailSheetModel(companion: companion))
+        _providerID = State(initialValue: companion.runtime.providerIDs.first ?? "")
+        _modelID = State(initialValue: companion.modelID ?? "")
         _notificationsEnabled = AppStorage(
             wrappedValue: !companion.muted,
             CompanionPreferenceKeys.notificationPrefix + companion.id
@@ -56,16 +73,27 @@ struct CompanionSettingsView: View {
                         title: "Bot details",
                         leadingStyle: .back,
                         leadingAction: { dismiss() }
-                    )
+                    ) {
+                        Button("Open chat", systemImage: "bubble.left.and.bubble.right") {
+                            onOpenChat()
+                        }
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(CompanionIOSTheme.actionBlue)
+                        .frame(minHeight: 44)
+                        .accessibilityIdentifier("companion.details.open-chat")
+                    }
 
                     characterHero
                     titleCard
                     if let error { CompanionErrorNotice(message: error) }
+                    if let success { CompanionSuccessNotice(message: success) }
                     characterSection
                     instructionsCard
+                    intelligenceSection
                     routinesSection
+                    resourceSections
                     notificationsCard
-                    legacySettingsCard
+                    if canDelete { deletionSection }
 
                     if !canEdit {
                         Text("You have read-only access to this Bot.")
@@ -86,12 +114,19 @@ struct CompanionSettingsView: View {
         .presentationDragIndicator(.visible)
         .task(id: companion.id) {
             synchronizeNotificationPreference(with: companion)
+            await loadProviders()
             await loadRoutines()
         }
         .onChange(of: companion) { _, updated in
+            let preservesProviderDraft = changedProviderOrModel
             model = CompanionBotDetailSheetModel(companion: updated, routines: model.routines)
+            if !preservesProviderDraft {
+                providerID = updated.runtime.providerIDs.first ?? providerID
+                modelID = updated.modelID ?? modelID
+            }
             synchronizeNotificationPreference(with: updated)
         }
+        .onChange(of: providerID) { _, _ in selectDefaultModel() }
         .onChange(of: titleFocused) { _, focused in
             if !focused, editingTitle { Task { await saveIdentity() } }
         }
@@ -124,6 +159,21 @@ struct CompanionSettingsView: View {
                 showingNewRoutine = false
                 Task { await loadRoutines() }
             }
+        }
+        .sheet(isPresented: $showingProviders, onDismiss: { Task { await loadProviders() } }) {
+            ProviderManagementView()
+        }
+        .confirmationDialog(
+            "Delete \(model.companion.name)?",
+            isPresented: $confirmingDelete,
+            titleVisibility: .visible
+        ) {
+            Button("Delete Companion", role: .destructive) {
+                Task { await deleteCompanion() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Its Box, thread, and Companion record will be permanently deleted. This cannot be undone.")
         }
     }
 
@@ -220,6 +270,135 @@ struct CompanionSettingsView: View {
         }
     }
 
+    private var intelligenceSection: some View {
+        CompanionSheetSection("Intelligence") {
+            CompanionSheetCard {
+                if loadingProviders && providers == nil {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("Loading model providers…")
+                            .font(.system(size: 15))
+                            .foregroundStyle(CompanionIOSTheme.textSecondary)
+                    }
+                    .padding(16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                } else if connectedProviders.isEmpty {
+                    CompanionSheetValueRow(
+                        title: "No connected model provider",
+                        detail: "Connect a provider to choose the model this Companion uses.",
+                        symbol: "cpu",
+                        showsChevron: false
+                    )
+                    if canEdit && providers?.canManage == true {
+                        CompanionSheetSeparator()
+                        Button("Open providers", systemImage: "cpu") {
+                            showingProviders = true
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+                        .padding(.horizontal, 16)
+                    }
+                    CompanionSheetSeparator()
+                    Button("Try again", systemImage: "arrow.clockwise") {
+                        Task { await loadProviders() }
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+                    .padding(.horizontal, 16)
+                } else {
+                    Picker("Model provider", selection: $providerID) {
+                        ForEach(connectedProviders) { provider in
+                            Text(provider.name).tag(provider.id)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .frame(minHeight: 56)
+                    .disabled(!canEdit || savingModel)
+                    .accessibilityIdentifier("companion.details.provider")
+
+                    if let selectedProvider {
+                        CompanionSheetSeparator()
+                        Picker("Model", selection: $modelID) {
+                            ForEach(selectedProvider.models) { model in
+                                Text(model.name).tag(model.id)
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .frame(minHeight: 56)
+                        .disabled(!canEdit || savingModel)
+                        .accessibilityIdentifier("companion.details.model")
+                    }
+
+                    if canEdit {
+                        CompanionSheetSeparator()
+                        HStack(spacing: 12) {
+                            Button(savingModel ? "Saving…" : "Save provider and model") {
+                                Task { await saveProviderAndModel() }
+                            }
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(CompanionIOSTheme.primaryCTAText)
+                            .padding(.horizontal, 14)
+                            .frame(minHeight: 44)
+                            .background(CompanionIOSTheme.primaryCTA, in: Capsule())
+                            .disabled(!canSaveProviderAndModel)
+                            .accessibilityIdentifier("companion.details.provider.save")
+
+                            if providers?.canManage == true {
+                                Button("Manage providers", systemImage: "slider.horizontal.3") {
+                                    showingProviders = true
+                                }
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(CompanionIOSTheme.actionBlue)
+                                .frame(minHeight: 44)
+                            }
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 16)
+                    }
+                }
+            }
+            Text("Provider and model changes are applied between turns. Saving never wakes an asleep Box.")
+                .font(.system(size: 15))
+                .foregroundStyle(CompanionIOSTheme.textSecondary)
+                .padding(.horizontal, 4)
+        }
+    }
+
+    private var resourceSections: some View {
+        CompanionResourceSections(
+            companion: model.companion,
+            hasUnsavedSettings: changedProviderOrModel,
+            onCompanionUpdated: { updated in apply(updated) },
+            services: resourceServices
+        )
+        .padding(.top, 2)
+    }
+
+    private var deletionSection: some View {
+        CompanionSheetSection("Delete Companion") {
+            CompanionSheetCard {
+                Button(deleteLabel, systemImage: "trash", role: .destructive) {
+                    confirmingDelete = true
+                }
+                .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+                .padding(.horizontal, 16)
+                .disabled(deleting || deletionActive)
+                .accessibilityIdentifier("companion.details.delete")
+
+                if let message = model.companion.deletionOperation?.error?.message {
+                    Text(message)
+                        .font(.system(size: 14))
+                        .foregroundStyle(CompanionIOSTheme.danger)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 14)
+                }
+            }
+            Text("Permanently deletes its Box and transcript. This cannot be undone.")
+                .font(.system(size: 15))
+                .foregroundStyle(CompanionIOSTheme.textSecondary)
+                .padding(.horizontal, 4)
+        }
+    }
+
     private var routinesSection: some View {
         CompanionSheetSection("Routines") {
             CompanionSheetCard {
@@ -309,27 +488,54 @@ struct CompanionSettingsView: View {
         }
     }
 
-    private var legacySettingsCard: some View {
-        CompanionSheetCard {
-            NavigationLink {
-                CompanionLegacySettingsView(
-                    companion: model.companion,
-                    onSaved: { updated in apply(updated) },
-                    onDeletionStarted: onDeletionStarted,
-                    onDeletionAccepted: onDeletionAccepted,
-                    onDeletionFailed: onDeletionFailed,
-                    services: services
-                )
-            } label: {
-                CompanionSheetValueRow(
-                    title: "Companion settings",
-                    detail: "Provider, model, resources, and deletion",
-                    symbol: "gearshape"
-                )
-            }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("companion.details.settings")
+    private var connectedProviders: [CompanionProviderDefinition] {
+        providers?.connectedDefinitions ?? []
+    }
+
+    private var selectedProvider: CompanionProviderDefinition? {
+        connectedProviders.first(where: { $0.id == providerID })
+    }
+
+    private var changedProviderOrModel: Bool {
+        providerID != model.companion.runtime.providerIDs.first
+            || modelID != model.companion.modelID
+    }
+
+    private var canSaveProviderAndModel: Bool {
+        canEdit
+            && !savingModel
+            && changedProviderOrModel
+            && selectedProvider?.models.contains(where: { $0.id == modelID }) == true
+    }
+
+    private var deletionActive: Bool {
+        model.companion.deletionOperation?.isActive == true
+    }
+
+    private var deleteLabel: String {
+        if deleting { return "Deleting…" }
+        if deleteRequestID != nil { return "Retry Delete" }
+        guard let operation = model.companion.deletionOperation else { return "Delete Companion" }
+        if operation.isActive { return "Deletion requested" }
+        if operation.status == .failed || operation.status == .interrupted || operation.status == .cancelled {
+            return "Retry Delete"
         }
+        return "Delete Companion"
+    }
+
+    private var resourceServices: CompanionResourceSectionsServices? {
+        guard let services else { return nil }
+        return CompanionResourceSectionsServices(
+            load: services.connectedResources,
+            listPlugins: services.listPlugins,
+            updatePluginSelection: services.updatePluginSelection,
+            loadCompanion: services.loadCompanion,
+            restart: services.restart,
+            createTrigger: services.createTrigger,
+            updateTrigger: services.updateTrigger,
+            deleteTrigger: services.deleteTrigger,
+            rotateTriggerSecret: services.rotateTriggerSecret
+        )
     }
 
     private var notificationBinding: Binding<Bool> {
@@ -390,10 +596,110 @@ struct CompanionSettingsView: View {
     }
 
     private var canEdit: Bool { model.companion.access.canEditCompanionSettings }
+    private var canDelete: Bool { model.companion.access.canDeleteCompanion }
     private var defaultIcon: CompanionSummary.Icon { .init(shape: 1, mouth: 0, accessory: 0, color: 2) }
     private var instructionPreview: String {
         let value = model.companion.persona?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return value.isEmpty ? "Add a persona and working style" : value
+    }
+
+    private func loadProviders() async {
+        loadingProviders = true
+        do {
+            let response: CompanionProvidersResponse
+            if let services {
+                response = try await services.listProviders()
+            } else {
+                response = try await sessionStore.listCompanionProviders()
+            }
+            providers = response
+            if providerID.isEmpty {
+                providerID = response.connectedDefinitions.first?.id ?? ""
+            }
+            selectDefaultModel()
+            error = nil
+        } catch {
+            self.error = companionDisplayMessage(
+                error,
+                fallback: "Model providers are temporarily unavailable."
+            )
+        }
+        loadingProviders = false
+    }
+
+    private func selectDefaultModel() {
+        guard let selectedProvider else {
+            modelID = ""
+            return
+        }
+        if !selectedProvider.models.contains(where: { $0.id == modelID }) {
+            modelID = selectedProvider.defaultModelID ?? ""
+        }
+    }
+
+    private func saveProviderAndModel() async {
+        guard canSaveProviderAndModel else { return }
+        savingModel = true
+        error = nil
+        do {
+            let input = UpdateCompanionInput(
+                name: model.normalizedName,
+                persona: model.companion.persona,
+                providerID: providerID,
+                modelID: modelID,
+                icon: model.icon
+            )
+            let updated: CompanionSummary
+            if let services {
+                updated = try await services.updateCompanion(model.companion.id, input)
+            } else {
+                updated = try await sessionStore.updateCompanion(
+                    companionID: model.companion.id,
+                    input: input
+                )
+            }
+            apply(updated)
+            success = "Provider and model saved."
+        } catch {
+            self.error = companionDisplayMessage(
+                error,
+                fallback: "Provider and model could not be saved."
+            )
+        }
+        savingModel = false
+    }
+
+    private func deleteCompanion() async {
+        guard canDelete, !deleting else { return }
+        deleting = true
+        error = nil
+        let requestID = deleteRequestID ?? UUID()
+        deleteRequestID = requestID
+        onDeletionStarted(model.companion, requestID)
+        do {
+            let operation: CompanionOperationSummary
+            if let services {
+                operation = try await services.deleteCompanion(model.companion.id, requestID)
+            } else {
+                operation = try await sessionStore.deleteCompanion(
+                    companionID: model.companion.id,
+                    requestID: requestID
+                )
+            }
+            deleteRequestID = nil
+            onDeletionAccepted(model.companion.id, operation)
+        } catch {
+            onDeletionFailed(model.companion, requestID, error)
+            if let apiError = error as? APIError, apiError.status == 0 {
+                self.error = "The deletion response was not received. Retry Delete safely reuses the same request."
+            } else {
+                self.error = companionDisplayMessage(
+                    error,
+                    fallback: "This Companion could not be deleted."
+                )
+            }
+        }
+        deleting = false
     }
 
     private func loadRoutines() async {
@@ -445,8 +751,13 @@ struct CompanionSettingsView: View {
     }
 
     private func apply(_ updated: CompanionSummary, forceNotificationSync: Bool = false) {
+        let preservesProviderDraft = changedProviderOrModel
         let reconciled = updated.preservingListProjection(from: model.companion)
         model = CompanionBotDetailSheetModel(companion: reconciled, routines: model.routines)
+        if !preservesProviderDraft {
+            providerID = reconciled.runtime.providerIDs.first ?? providerID
+            modelID = reconciled.modelID ?? modelID
+        }
         synchronizeNotificationPreference(with: reconciled, whileSaving: forceNotificationSync)
         onSaved(reconciled)
     }
@@ -540,6 +851,7 @@ private struct CompanionCharacterControls: View {
                     }
                 }
                 .scrollIndicators(.hidden)
+                .accessibilityIdentifier("companion.details.character.colors")
             }
             .padding(16)
 
@@ -577,6 +889,7 @@ private struct CompanionCharacterControls: View {
                     }
                 }
                 .scrollIndicators(.hidden)
+                .accessibilityIdentifier("companion.details.character.shapes")
             }
             .padding(16)
         }
@@ -657,7 +970,7 @@ private struct CompanionRoutineDetailSheet: View {
     let companionID: String
     let routine: CompanionRoutine
     let canEdit: Bool
-    let services: CompanionSettingsServices?
+    let services: CompanionDetailServices?
     let onUpdated: (CompanionRoutine) -> Void
 
     @State private var showingEditor = false
@@ -871,7 +1184,7 @@ private struct CompanionRoutineRunSheet: View {
     @Environment(\.dismiss) private var dismiss
     let companionID: String
     let run: CompanionRoutineRunSummary
-    let services: CompanionSettingsServices?
+    let services: CompanionDetailServices?
     let memberTimezone: String
     @State private var store: CompanionRoutineRunDetailStore?
 

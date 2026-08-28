@@ -573,6 +573,18 @@ public struct CompanionSectionAssignmentInput: Codable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case sectionID = "section_id"
     }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sectionID = try container.decodeIfPresent(String.self, forKey: .sectionID)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        // An explicit JSON null is the API's unassign operation. Synthesized Codable would
+        // omit this optional key when sectionID is nil, which is a different request shape.
+        try container.encode(sectionID, forKey: .sectionID)
+    }
 }
 
 public struct CompanionSectionReorderInput: Codable, Equatable, Sendable {

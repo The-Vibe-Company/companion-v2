@@ -7,7 +7,7 @@ This document is the single source of truth for the Companion iOS redesign. It c
 ## Part I — Foundations
 
 ### 1. Philosophy
-1. **Few screens.** The whole product is: one home list, one chat, three sheets (settings, plugins, bot detail), one computer view. No tab bar, no hamburger menu, no dashboard.
+1. **Few screens.** The whole product is: one home list, one chat, one bot details page, supporting management sheets, and one computer view. No tab bar, no hamburger menu, no dashboard.
 2. **The chat is the product.** Everything happens in conversation: tasks, approvals, plugin connects, file delivery. A routine is born from conversation, not from a form.
 3. **Quiet chrome, loud identity.** Surfaces are neutral (white / light gray / true black). The ONLY color is each bot's character mark. Actions use black (primary) or system blue (secondary); system green appears only in native toggles and success checks.
 4. **Bots are characters.** Every bot has a mark: a solid colored shape with two small white eyes. The mark is the avatar everywhere — list, chat, notifications, detail header.
@@ -28,7 +28,7 @@ A mark is a solid shape in one palette color with two small white eyes (two roun
 - Palette (11) — iOS system colors: black #000000, brown #A2845E, red #FF3B30, orange #FF9500, yellow #FFCC00, green #34C759, teal #30B0C7, blue #007AFF, purple #AF52DE, pink #FF2D55, gray #8E8E93.
 - Shapes (8) — circle, blob (organic pebble), squircle, capsule, triangle, hexagon, flower/cloud, drop. These map to icon_shape 0-7.
 - No mouth, no accessory. icon_mouth / icon_accessory stay in the schema but are NEVER rendered. Rendering is shape + color + eyes only.
-- Sizes: 36pt (list rows), 20pt (chat header pill, inline), 64-80pt (detail header, pinned grid), 96pt (creation preview).
+- Sizes: 36pt (list rows), 20pt (chat header pill, inline), 64-80pt (detail header), 96pt (creation preview).
 - One SwiftUI CharacterMark view, vector-drawn, used by every surface and by the APNs avatar renderer.
 
 ### 5. Radii, spacing, depth, motion
@@ -37,18 +37,21 @@ Radii: bubbles & cards 18; inner cards 12; chips & pills = capsule. Header actio
 ## Part II — Components (Wave A scope: HOME only; chat/sheets/computer are later waves)
 
 ### 6. Home
-- Header: owner avatar photo (44pt clipped circle, left) with no border or ring — bare search and + icons (right), each retaining a 44pt hit area with no visible circle or outline. + opens New Bot creation. Chat header computer and overflow actions use the same bare-icon treatment.
-- Sections: collapsible. Header row = section name + chevron, text.secondary. A section with <=3 bots renders as a PINNED GRID: horizontal row of 64-80pt marks with labels underneath. Otherwise standard rows. Unassigned is the default section at the bottom.
+- Header: owner avatar photo (44pt clipped circle, left) with no border or ring — bare search and + icons (right), each retaining a 44pt hit area with no visible circle or outline. + opens New Bot creation. The chat header keeps only back, the tappable Companion pill, and the bare computer action.
+- Sections: collapsible. Header row = section name + chevron, text.secondary. Every section uses standard rows with a 36pt mark, title, one-line preview, timestamp, and unread dot. Unassigned is the default section at the bottom.
 - Row: mark 36pt — title 17 semibold — preview one line 15 regular secondary — trailing timestamp (hierarchical: 8:41 AM today, Yesterday, weekday, 8/19) — blue unread dot 6pt right-aligned when unread. No hairline between rows.
 - Swipe actions: trailing Move to (section picker), mute, delete.
-- Long-press: context menu — Duplicate (copy with suffix, opens detail), Edit character, Move to, Delete.
+- Long-press: context menu — Duplicate (copy with suffix, opens detail), Move to, Delete. Detail has no context-menu shortcut; activate the Companion row or mark itself.
 - Creation sheet (New Bot): name field, shape row (8 shapes, tap to select), color row (11 swatches), title optional. Two taps and a name — done. No wizard.
 
 ## Part III — Wave A user journeys
 - J1 First launch: onboarding (white canvas, floating marks, title, one line, black pill Sign in) -> home empty state (Create your first companion + black +) -> creation sheet -> chat opens, composer focused. No plugin setup, no wizard.
-- J5 Organize sections: swipe row -> Move to -> pick section or New Section (name it). Section header tap = collapse. Small sections auto-render as pinned grid. Deleting a section moves its bots to Unassigned (never deletes bots).
+- J5 Organize sections: swipe row -> Move to -> pick section or New Section (name it). Section header tap = collapse. Every section keeps the same readable list-row treatment. Deleting a section moves its bots to Unassigned (never deletes bots).
 - J7 Duplicate: home long-press -> Duplicate -> copy opens in detail (name suffix), same character editable.
 - J8 Appearance: Settings sheet Appearance row -> segmented System / Black -> instant switch (marks stay colored; canvas/cards invert). (The settings sheet restyle itself is Wave C; only wire the appearance value storage/picker row if trivial.)
+
+### Navigation contract
+The roster is the entry point for every Companion: a row opens the same details page. The chat header is a centered CharacterMark-and-name pill that opens that page too. Details presents character, name, instructions, provider/model, routines and run history, notifications, Skills, plugins and selected MCP accounts, triggers, runtime controls, and Owner-only deletion as peer cards in one scroll. Its explicit Open chat action replaces the detail route, preserving a single chat/details cycle. Member settings remains reachable only from the account avatar; there are no separate connected-resources or legacy Companion-settings destinations. The root NavigationStack installs the native interactive pop plus a supplemental leading-edge capture once, so pushed chat, details, computer, and history surfaces share guarded back behavior without intercepting horizontal content scrolling.
 
 ## Part IV — Adaptation rules
 Mapping: Bot=Companion; Character (shape+color)=icon_shape 0-7 + icon_color 0-10 (exact match already; drop mouth/accessory from rendering); Sections=companion_sections (NEW backend entity needed); Duplicate=existing server-side duplicate, surfaced in context menu.

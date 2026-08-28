@@ -2,23 +2,18 @@ import SwiftUI
 import CompanionKit
 import UIKit
 
+/// Resource sections embedded in the single Companion details page.
 @MainActor
-struct CompanionConnectedResourcesServices {
+struct CompanionResourceSectionsServices {
     let load: () async throws -> CompanionConnectedResources
     let listPlugins: () async throws -> [CompanionPluginAccount]
     let updatePluginSelection: ([String]) async throws -> CompanionSummary
     let loadCompanion: () async throws -> CompanionSummary
     let restart: (CompanionRuntimeRestartTarget, UUID) async throws -> CompanionOperationSummary
-    let createRoutine: ((CreateCompanionRoutineInput) async throws -> CompanionRoutine)?
-    let updateRoutine: ((String, UpdateCompanionRoutineInput) async throws -> CompanionRoutine)?
-    let deleteRoutine: ((String) async throws -> Void)?
     let createTrigger: ((CreateCompanionTriggerInput) async throws -> CompanionTrigger)?
     let updateTrigger: ((String, UpdateCompanionTriggerInput) async throws -> CompanionTrigger)?
     let deleteTrigger: ((String) async throws -> Void)?
     let rotateTriggerSecret: ((String) async throws -> CompanionTrigger)?
-    let saveMemberTimezone: ((String) async throws -> String)?
-    let listRoutineRuns: ((String, Int, String?) async throws -> CompanionRoutineRunList)?
-    let readRoutineRun: ((String, Int, Int?) async throws -> CompanionRoutineRunDetail)?
 
     init(
         load: @escaping () async throws -> CompanionConnectedResources,
@@ -26,41 +21,29 @@ struct CompanionConnectedResourcesServices {
         updatePluginSelection: @escaping ([String]) async throws -> CompanionSummary,
         loadCompanion: @escaping () async throws -> CompanionSummary,
         restart: @escaping (CompanionRuntimeRestartTarget, UUID) async throws -> CompanionOperationSummary,
-        createRoutine: ((CreateCompanionRoutineInput) async throws -> CompanionRoutine)? = nil,
-        updateRoutine: ((String, UpdateCompanionRoutineInput) async throws -> CompanionRoutine)? = nil,
-        deleteRoutine: ((String) async throws -> Void)? = nil,
         createTrigger: ((CreateCompanionTriggerInput) async throws -> CompanionTrigger)? = nil,
         updateTrigger: ((String, UpdateCompanionTriggerInput) async throws -> CompanionTrigger)? = nil,
         deleteTrigger: ((String) async throws -> Void)? = nil,
-        rotateTriggerSecret: ((String) async throws -> CompanionTrigger)? = nil,
-        saveMemberTimezone: ((String) async throws -> String)? = nil,
-        listRoutineRuns: ((String, Int, String?) async throws -> CompanionRoutineRunList)? = nil,
-        readRoutineRun: ((String, Int, Int?) async throws -> CompanionRoutineRunDetail)? = nil
+        rotateTriggerSecret: ((String) async throws -> CompanionTrigger)? = nil
     ) {
         self.load = load
         self.listPlugins = listPlugins
         self.updatePluginSelection = updatePluginSelection
         self.loadCompanion = loadCompanion
         self.restart = restart
-        self.createRoutine = createRoutine
-        self.updateRoutine = updateRoutine
-        self.deleteRoutine = deleteRoutine
         self.createTrigger = createTrigger
         self.updateTrigger = updateTrigger
         self.deleteTrigger = deleteTrigger
         self.rotateTriggerSecret = rotateTriggerSecret
-        self.saveMemberTimezone = saveMemberTimezone
-        self.listRoutineRuns = listRoutineRuns
-        self.readRoutineRun = readRoutineRun
     }
 }
 
-struct CompanionConnectedResourcesView: View {
+struct CompanionResourceSections: View {
     @Environment(SessionStore.self) private var sessionStore
     let companion: CompanionSummary
     let hasUnsavedSettings: Bool
     let onCompanionUpdated: (CompanionSummary) -> Void
-    private let services: CompanionConnectedResourcesServices?
+    private let services: CompanionResourceSectionsServices?
     @State private var currentCompanion: CompanionSummary
     @State private var resources: CompanionConnectedResources?
     @State private var plugins: [CompanionPluginAccount] = []
@@ -77,11 +60,8 @@ struct CompanionConnectedResourcesView: View {
     @State private var acceptedOperation: CompanionOperationSummary?
     @State private var resourceActionError: String?
     @State private var busyResourceID: String?
-    @State private var routineToDelete: CompanionRoutine?
     @State private var triggerToDelete: CompanionTrigger?
-    @State private var editingRoutine: CompanionRoutine?
     @State private var editingTrigger: CompanionTrigger?
-    @State private var showingNewRoutine = false
     @State private var showingNewTrigger = false
     @State private var confirmingRotateTriggerID: String?
 
@@ -89,7 +69,7 @@ struct CompanionConnectedResourcesView: View {
         companion: CompanionSummary,
         hasUnsavedSettings: Bool = false,
         onCompanionUpdated: @escaping (CompanionSummary) -> Void = { _ in },
-        services: CompanionConnectedResourcesServices? = nil
+        services: CompanionResourceSectionsServices? = nil
     ) {
         self.companion = companion
         self.hasUnsavedSettings = hasUnsavedSettings
@@ -100,19 +80,15 @@ struct CompanionConnectedResourcesView: View {
     }
 
     var body: some View {
-        CompanionBackdrop {
-            Group {
-                if loading, resources == nil {
-                    loadingState
-                } else if let error, resources == nil {
-                    errorState(error)
-                } else if let resources {
-                    resourceList(resources)
-                }
+        Group {
+            if loading, resources == nil {
+                loadingState
+            } else if let error, resources == nil {
+                errorState(error)
+            } else if let resources {
+                resourceList(resources)
             }
         }
-        .navigationTitle("Connected resources")
-        .navigationBarTitleDisplayMode(.inline)
         .tint(visualTheme.accent)
         .task(id: companion.id) { await load() }
         .task(id: runtimePollingID) { await pollRuntimeWhileNeeded() }
@@ -163,22 +139,6 @@ struct CompanionConnectedResourcesView: View {
                 .tint(visualTheme.accent)
         }
         .confirmationDialog(
-            "Delete this routine?",
-            isPresented: Binding(
-                get: { routineToDelete != nil },
-                set: { if !$0 { routineToDelete = nil } }
-            ),
-            titleVisibility: .visible,
-            presenting: routineToDelete
-        ) { routine in
-            Button("Delete \(routine.name)", role: .destructive) {
-                Task { await deleteRoutine(routine) }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: { _ in
-            Text("This removes the scheduled prompt from the Companion.")
-        }
-        .confirmationDialog(
             "Delete this trigger?",
             isPresented: Binding(
                 get: { triggerToDelete != nil },
@@ -193,33 +153,6 @@ struct CompanionConnectedResourcesView: View {
             Button("Cancel", role: .cancel) {}
         } message: { _ in
             Text("Existing webhook requests will stop being accepted.")
-        }
-        .sheet(isPresented: $showingNewRoutine) {
-            CompanionRoutineEditorView(
-                memberTimezone: effectiveMemberTimezone,
-                memberTimezoneWasUnset: sessionStore.memberTimezone == nil,
-                saveMemberTimezone: { try await saveMemberTimezone($0) },
-                create: { try await createRoutine($0) },
-                update: { id, input in try await updateRoutine(id: id, input: input) }
-            ) {
-                showingNewRoutine = false
-                Task { await load() }
-            }
-            .tint(visualTheme.accent)
-        }
-        .sheet(item: $editingRoutine) { routine in
-            CompanionRoutineEditorView(
-                initial: routine,
-                memberTimezone: effectiveMemberTimezone,
-                memberTimezoneWasUnset: false,
-                saveMemberTimezone: { try await saveMemberTimezone($0) },
-                create: { try await createRoutine($0) },
-                update: { id, input in try await updateRoutine(id: id, input: input) }
-            ) {
-                editingRoutine = nil
-                Task { await load() }
-            }
-            .tint(visualTheme.accent)
         }
         .sheet(isPresented: $showingNewTrigger) {
             CompanionTriggerEditorView(
@@ -242,13 +175,11 @@ struct CompanionConnectedResourcesView: View {
             }
             .tint(visualTheme.accent)
         }
-        .accessibilityIdentifier("companion.resources")
+        .accessibilityIdentifier("companion.details.resources")
     }
 
     private func resourceList(_ resources: CompanionConnectedResources) -> some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 22) {
-                header
+        LazyVStack(alignment: .leading, spacing: 22) {
                 if let error {
                     CompanionErrorNotice(message: error)
                 }
@@ -267,7 +198,7 @@ struct CompanionConnectedResourcesView: View {
                         emptyRow(
                             title: "No Skills connected",
                             detail: "Attached Skills will appear here.",
-                            identifier: "companion.resources.skills.empty"
+                            identifier: "companion.details.skills.empty"
                         )
                     } else {
                         ForEach(Array(resources.skills.enumerated()), id: \.element.id) { index, skill in
@@ -292,7 +223,7 @@ struct CompanionConnectedResourcesView: View {
                             detail: canManagePlugins
                                 ? "Add one of your connected accounts to make its tools available."
                                 : "No attached plugin accounts are available to you.",
-                            identifier: "companion.resources.plugins.empty"
+                            identifier: "companion.details.plugins.empty"
                         )
                     } else {
                         ForEach(Array(attachedPlugins.enumerated()), id: \.element.id) { index, plugin in
@@ -312,7 +243,7 @@ struct CompanionConnectedResourcesView: View {
                         .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                         .padding(.horizontal, 16)
                         .disabled(mutatingPluginID != nil || operationActive)
-                        .accessibilityIdentifier("companion.resources.plugins.add")
+                        .accessibilityIdentifier("companion.details.plugins.add")
                     } else if currentCompanion.access == .editor {
                         resourceDivider
                         Text("Only the Companion Owner can change plugin attachments. This protects private accounts already attached by other members.")
@@ -320,26 +251,7 @@ struct CompanionConnectedResourcesView: View {
                             .foregroundStyle(Color.companionMuted)
                             .fixedSize(horizontal: false, vertical: true)
                             .padding(16)
-                            .accessibilityIdentifier("companion.resources.plugins.owner-only")
-                    }
-                }
-
-                resourceSection(
-                    title: "Routines",
-                    symbol: "clock",
-                    count: resources.routines.count
-                ) {
-                    if resources.routines.isEmpty {
-                        emptyRow(
-                            title: "No routines connected",
-                            detail: "Scheduled prompts will appear here.",
-                            identifier: "companion.resources.routines.empty"
-                        )
-                    } else {
-                        ForEach(Array(resources.routines.enumerated()), id: \.element.id) { index, routine in
-                            if index > 0 { resourceDivider }
-                            routineRow(routine)
-                        }
+                            .accessibilityIdentifier("companion.details.plugins.owner-only")
                     }
                 }
 
@@ -352,7 +264,7 @@ struct CompanionConnectedResourcesView: View {
                         emptyRow(
                             title: "No triggers connected",
                             detail: "Webhook prompts will appear here.",
-                            identifier: "companion.resources.triggers.empty"
+                            identifier: "companion.details.triggers.empty"
                         )
                     } else {
                         ForEach(Array(resources.triggers.enumerated()), id: \.element.id) { index, trigger in
@@ -364,33 +276,7 @@ struct CompanionConnectedResourcesView: View {
 
                 runtimeSection
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 14)
-            .padding(.bottom, 30)
-        }
-        .refreshable { await load() }
-        .scrollIndicators(.hidden)
-    }
-
-    private var header: some View {
-        HStack(alignment: .center, spacing: 13) {
-            CompanionAvatar(name: currentCompanion.name, icon: currentCompanion.icon, size: 64, state: .still)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(currentCompanion.name)
-                    .font(.headline)
-                    .foregroundStyle(Color.companionInk)
-                Text("Resources available when this Companion works.")
-                    .font(.subheadline)
-                    .foregroundStyle(Color.companionMuted)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text("Times shown in \(effectiveMemberTimezone).")
-                    .font(.caption)
-                    .foregroundStyle(Color.companionMuted)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .accessibilityElement(children: .combine)
+            .padding(.bottom, 2)
     }
 
     private func resourceSection<Content: View>(
@@ -399,24 +285,14 @@ struct CompanionConnectedResourcesView: View {
         count: Int,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
+        CompanionSheetCard {
+            VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 9) {
                 Label(title, systemImage: symbol)
                     .font(.headline)
                     .foregroundStyle(Color.companionInk)
                 Spacer()
-                if canEditResources, title == "Routines" {
-                    Button {
-                        showingNewRoutine = true
-                    } label: {
-                        Image(systemName: "plus")
-                            .font(.body.weight(.semibold))
-                            .frame(width: 32, height: 32)
-                    }
-                    .buttonStyle(.borderless)
-                    .accessibilityLabel("Add a routine")
-                    .accessibilityIdentifier("companion.resources.routines.add")
-                } else if canEditResources, title == "Triggers" {
+                if canEditResources, title == "Triggers" {
                     Button {
                         showingNewTrigger = true
                     } label: {
@@ -426,7 +302,7 @@ struct CompanionConnectedResourcesView: View {
                     }
                     .buttonStyle(.borderless)
                     .accessibilityLabel("Add a trigger")
-                    .accessibilityIdentifier("companion.resources.triggers.add")
+                    .accessibilityIdentifier("companion.details.triggers.add")
                 }
                 Text("\(count)")
                     .font(.caption.monospacedDigit().weight(.semibold))
@@ -440,9 +316,9 @@ struct CompanionConnectedResourcesView: View {
             Divider()
                 .overlay(Color.companionDivider)
 
-            content()
+                content()
+            }
         }
-        .companionMaterial(radius: 12)
     }
 
     private func skillRow(_ skill: CompanionSkillSummary) -> some View {
@@ -468,7 +344,7 @@ struct CompanionConnectedResourcesView: View {
         .padding(16)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(skill.displayName). \(skill.description.isEmpty ? "No description provided." : skill.description). Enabled")
-        .accessibilityIdentifier("companion.resources.skill.\(skill.id)")
+        .accessibilityIdentifier("companion.details.skill.\(skill.id)")
     }
 
     private func hiddenSkillsRow(count: Int) -> some View {
@@ -480,22 +356,35 @@ struct CompanionConnectedResourcesView: View {
         .foregroundStyle(Color.companionMuted)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
-        .accessibilityIdentifier("companion.resources.skills.hidden")
+        .accessibilityIdentifier("companion.details.skills.hidden")
     }
 
     private func pluginRow(_ plugin: CompanionPluginAccount) -> some View {
         HStack(alignment: .center, spacing: 12) {
             PluginMark(provider: plugin.provider, size: 38)
             VStack(alignment: .leading, spacing: 4) {
-                Text(plugin.label)
+                Text(pluginProviderName(plugin.provider))
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(Color.companionInk)
-                Text(pluginProviderName(plugin.provider))
-                    .font(.footnote)
+                HStack(spacing: 5) {
+                    Text(plugin.label)
+                    Image(systemName: plugin.connected ? "checkmark" : "exclamationmark")
+                        .foregroundStyle(plugin.connected ? CompanionIOSTheme.toggleGreen : CompanionIOSTheme.danger)
+                }
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(CompanionIOSTheme.textPrimary)
+                .padding(.horizontal, 10)
+                .frame(height: 30)
+                .background(CompanionIOSTheme.chip, in: Capsule())
+                .accessibilityLabel(
+                    plugin.connected ? "\(plugin.label), attached" : "\(plugin.label), connection unavailable"
+                )
+                .accessibilityIdentifier("companion.details.plugin-account.\(plugin.id)")
+                Text(plugin.connected ? "Available to this Companion" : "Reconnect this account from Plugins")
+                    .font(.caption)
                     .foregroundStyle(Color.companionMuted)
             }
             Spacer(minLength: 8)
-            statusBadge(plugin.connected ? .active : .error, activeLabel: "Attached")
             if canManagePlugins {
                 Button("Detach") {
                     Task { await setPlugin(plugin, attached: false) }
@@ -504,12 +393,12 @@ struct CompanionConnectedResourcesView: View {
                 .frame(minWidth: 44, minHeight: 44)
                 .disabled(mutatingPluginID != nil || operationActive)
                 .accessibilityLabel("Detach \(pluginProviderName(plugin.provider)) account \(plugin.label)")
-                .accessibilityIdentifier("companion.resources.plugin.detach.\(plugin.id)")
+                .accessibilityIdentifier("companion.details.plugin.detach.\(plugin.id)")
             }
         }
         .padding(16)
         .accessibilityElement(children: canManagePlugins ? .contain : .combine)
-        .accessibilityIdentifier("companion.resources.plugin.\(plugin.id)")
+        .accessibilityIdentifier("companion.details.plugin.\(plugin.id)")
     }
 
     private func unavailablePluginsRow(count: Int) -> some View {
@@ -521,105 +410,7 @@ struct CompanionConnectedResourcesView: View {
         .foregroundStyle(Color.companionMuted)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
-        .accessibilityIdentifier("companion.resources.plugins.hidden")
-    }
-
-    private func routineRow(_ routine: CompanionRoutine) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            NavigationLink {
-                CompanionRoutineHistoryView(
-                    companionID: currentCompanion.id,
-                    target: CompanionRoutineHistoryTarget(
-                        routineID: routine.id,
-                        runID: nil,
-                        name: routine.name
-                    ),
-                    services: routineHistoryServices
-                )
-            } label: {
-                HStack(alignment: .top, spacing: 12) {
-                    routineDetails(routine)
-                    Spacer(minLength: 8)
-                    statusBadge(routine.status)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("\(routineAccessibilityLabel(routine)). Open run history")
-            .accessibilityHint("Shows this routine's persisted runs and internal transcripts")
-            if canEditResources {
-                if busyResourceID == routine.id {
-                    ProgressView()
-                        .controlSize(.small)
-                        .accessibilityLabel("Updating routine \(routine.name)")
-                } else {
-                    Menu {
-                        Button(routine.enabled ? "Turn off" : "Turn on") {
-                            Task { await toggleRoutine(routine) }
-                        }
-                        Button("Edit", systemImage: "pencil") {
-                            editingRoutine = routine
-                        }
-                        Button("Delete", systemImage: "trash", role: .destructive) {
-                            routineToDelete = routine
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
-                            .font(.body.weight(.semibold))
-                            .frame(width: 32, height: 32)
-                    }
-                    .buttonStyle(.borderless)
-                    .accessibilityLabel("Actions for routine \(routine.name)")
-                    .accessibilityIdentifier("companion.resources.routine-actions.\(routine.id)")
-                }
-            }
-        }
-        .padding(16)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("companion.resources.routine.\(routine.id)")
-    }
-
-    private func routineDetails(_ routine: CompanionRoutine) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(routine.name)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Color.companionInk)
-            Text(routine.scheduleDescription)
-                .font(.footnote.weight(.medium))
-                .foregroundStyle(Color.companionInk.opacity(0.82))
-            HStack(spacing: 7) {
-                Text(routine.cron)
-                    .font(.caption.monospaced())
-                Text("·")
-                Text(routine.timezone)
-                    .font(.caption)
-            }
-            .foregroundStyle(Color.companionMuted)
-            .fixedSize(horizontal: false, vertical: true)
-            if let nextFire = MemberTimezone.formatInstant(
-                routine.nextFireAt,
-                in: effectiveMemberTimezone
-            ) {
-                Text("Next \(nextFire) · \(effectiveMemberTimezone)")
-                    .font(.caption)
-                    .foregroundStyle(Color.companionMuted)
-            }
-            if let lastFire = MemberTimezone.formatInstant(
-                routine.lastFiredAt,
-                in: effectiveMemberTimezone
-            ) {
-                Text("Last fired \(lastFire) · \(effectiveMemberTimezone)")
-                    .font(.caption)
-                    .foregroundStyle(Color.companionMuted)
-            }
-            if let message = routine.lastErrorMessage {
-                Text(message)
-                    .font(.caption)
-                    .foregroundStyle(Color.companionDanger)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
+        .accessibilityIdentifier("companion.details.plugins.hidden")
     }
 
     private func triggerRow(_ trigger: CompanionTrigger) -> some View {
@@ -665,7 +456,7 @@ struct CompanionConnectedResourcesView: View {
                 }
                 .buttonStyle(.borderless)
                 .accessibilityLabel("Copy webhook URL for \(trigger.name)")
-                .accessibilityIdentifier("companion.resources.trigger-copy.\(trigger.id)")
+                .accessibilityIdentifier("companion.details.trigger-copy.\(trigger.id)")
             }
             if canEditResources {
                 if busyResourceID == trigger.id {
@@ -705,7 +496,7 @@ struct CompanionConnectedResourcesView: View {
                     }
                     .buttonStyle(.borderless)
                     .accessibilityLabel("Actions for trigger \(trigger.name)")
-                    .accessibilityIdentifier("companion.resources.trigger-actions.\(trigger.id)")
+                    .accessibilityIdentifier("companion.details.trigger-actions.\(trigger.id)")
                 }
             }
         }
@@ -714,7 +505,7 @@ struct CompanionConnectedResourcesView: View {
         .accessibilityLabel(
             triggerAccessibilityLabel(trigger)
         )
-        .accessibilityIdentifier("companion.resources.trigger.\(trigger.id)")
+        .accessibilityIdentifier("companion.details.trigger.\(trigger.id)")
     }
 
     private var runtimeSection: some View {
@@ -737,7 +528,7 @@ struct CompanionConnectedResourcesView: View {
                     .font(.footnote)
                     .foregroundStyle(runtimeMessageColor)
                     .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("companion.resources.runtime.status")
+                    .accessibilityIdentifier("companion.details.runtime.status")
 
                 if canEdit {
                     Button("Restart Companion", systemImage: "arrow.clockwise") {
@@ -746,7 +537,7 @@ struct CompanionConnectedResourcesView: View {
                     .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                     .disabled(runtimeControlsDisabled)
                     .accessibilityHint("Restarts the agent process while keeping the server online")
-                    .accessibilityIdentifier("companion.resources.restart.companion")
+                    .accessibilityIdentifier("companion.details.restart.companion")
 
                     Button("Restart server", systemImage: "server.rack") {
                         restartTarget = .box
@@ -754,18 +545,19 @@ struct CompanionConnectedResourcesView: View {
                     .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                     .disabled(runtimeControlsDisabled)
                     .accessibilityHint("Restarts the full Box and interrupts active work")
-                    .accessibilityIdentifier("companion.resources.restart.server")
+                    .accessibilityIdentifier("companion.details.restart.server")
                 } else {
                     Text("You have read-only access. An Owner or Editor can restart this Companion.")
                         .font(.caption)
                         .foregroundStyle(Color.companionMuted)
                         .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityIdentifier("companion.resources.runtime.read-only")
+                        .accessibilityIdentifier("companion.details.runtime.read-only")
                 }
             }
             .padding(16)
         }
-        .companionMaterial(radius: 12)
+        .background(CompanionIOSTheme.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
     private func statusBadge(
@@ -794,18 +586,6 @@ struct CompanionConnectedResourcesView: View {
         case .disabled: .companionMuted
         case .error: .companionDanger
         }
-    }
-
-    private func routineAccessibilityLabel(_ routine: CompanionRoutine) -> String {
-        var parts = [routine.name, routine.scheduleDescription, routine.timezone]
-        if let next = MemberTimezone.formatInstant(routine.nextFireAt, in: effectiveMemberTimezone) {
-            parts.append("Next \(next) in \(effectiveMemberTimezone)")
-        }
-        if let last = MemberTimezone.formatInstant(routine.lastFiredAt, in: effectiveMemberTimezone) {
-            parts.append("Last fired \(last) in \(effectiveMemberTimezone)")
-        }
-        parts.append(routine.status.label)
-        return parts.joined(separator: ". ")
     }
 
     private func triggerAccessibilityLabel(_ trigger: CompanionTrigger) -> String {
@@ -839,31 +619,28 @@ struct CompanionConnectedResourcesView: View {
     }
 
     private var loadingState: some View {
-        ScrollView {
-            VStack(spacing: 22) {
-                ForEach(0..<3, id: \.self) { _ in
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Connected resources")
-                            .font(.headline)
-                        Text("Resource name")
-                        Text("Resource details available here")
-                            .font(.footnote)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(16)
-                    .companionMaterial(radius: 12)
+        VStack(spacing: 22) {
+            ForEach(0..<3, id: \.self) { _ in
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Companion details")
+                        .font(.headline)
+                    Text("Loading section")
+                    Text("Details are loading")
+                        .font(.footnote)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(16)
+                .background(CompanionIOSTheme.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
-            .padding(16)
-            .redacted(reason: .placeholder)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Loading connected resources")
         }
+        .redacted(reason: .placeholder)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Loading Companion details")
     }
 
     private func errorState(_ message: String) -> some View {
         ContentUnavailableView {
-            Label("Resources unavailable", systemImage: "exclamationmark.triangle")
+            Label("Companion details unavailable", systemImage: "exclamationmark.triangle")
         } description: {
             Text(message)
         } actions: {
@@ -1025,75 +802,6 @@ struct CompanionConnectedResourcesView: View {
         sessionStore.memberTimezone ?? MemberTimezone.deviceIdentifier
     }
 
-    private var routineHistoryServices: CompanionRoutineHistoryServices? {
-        guard let services else { return nil }
-        return CompanionRoutineHistoryServices(
-            listRuns: services.listRoutineRuns,
-            readRun: services.readRoutineRun
-        )
-    }
-
-    private func saveMemberTimezone(_ identifier: String) async throws -> String {
-        if let save = services?.saveMemberTimezone {
-            return try await save(identifier)
-        }
-        let profile = try await sessionStore.updateUserProfile(timezone: identifier)
-        return profile.timezone ?? identifier
-    }
-
-    private func createRoutine(_ input: CreateCompanionRoutineInput) async throws -> CompanionRoutine {
-        guard canEditResources else { throw APIError(status: 403, code: "forbidden", message: "You cannot edit this Companion.") }
-        if let create = services?.createRoutine { return try await create(input) }
-        return try await sessionStore.createCompanionRoutine(companionID: companion.id, input: input)
-    }
-
-    private func updateRoutine(
-        id: String,
-        input: UpdateCompanionRoutineInput
-    ) async throws -> CompanionRoutine {
-        guard canEditResources else { throw APIError(status: 403, code: "forbidden", message: "You cannot edit this Companion.") }
-        if let update = services?.updateRoutine { return try await update(id, input) }
-        return try await sessionStore.updateCompanionRoutine(
-            companionID: companion.id,
-            routineID: id,
-            input: input
-        )
-    }
-
-    private func deleteRoutine(_ routine: CompanionRoutine) async {
-        guard canEditResources, busyResourceID == nil else { return }
-        busyResourceID = routine.id
-        resourceActionError = nil
-        routineToDelete = nil
-        do {
-            if let delete = services?.deleteRoutine {
-                try await delete(routine.id)
-            } else {
-                try await sessionStore.deleteCompanionRoutine(companionID: companion.id, routineID: routine.id)
-            }
-            await load()
-        } catch {
-            resourceActionError = companionDisplayMessage(error, fallback: "The routine could not be deleted.")
-        }
-        busyResourceID = nil
-    }
-
-    private func toggleRoutine(_ routine: CompanionRoutine) async {
-        guard canEditResources, busyResourceID == nil else { return }
-        busyResourceID = routine.id
-        resourceActionError = nil
-        do {
-            _ = try await updateRoutine(
-                id: routine.id,
-                input: UpdateCompanionRoutineInput(enabled: !routine.enabled)
-            )
-            await load()
-        } catch {
-            resourceActionError = companionDisplayMessage(error, fallback: "The routine could not be updated.")
-        }
-        busyResourceID = nil
-    }
-
     private func createTrigger(_ input: CreateCompanionTriggerInput) async throws -> CompanionTrigger {
         guard canEditResources else { throw APIError(status: 403, code: "forbidden", message: "You cannot edit this Companion.") }
         if let create = services?.createTrigger { return try await create(input) }
@@ -1192,7 +900,7 @@ struct CompanionConnectedResourcesView: View {
             await refreshRuntime()
         } catch {
             guard !Task.isCancelled, generation == loadGeneration else { return }
-            self.error = "Connected resources could not be refreshed. Check your connection and try again."
+            self.error = "Companion details could not be refreshed. Check your connection and try again."
         }
         if generation == loadGeneration { loading = false }
     }
@@ -1316,27 +1024,10 @@ struct CompanionConnectedResourcesView: View {
 }
 
 #if DEBUG
-struct CompanionConnectedResourcesDemoView: View {
-    var body: some View {
-        NavigationStack {
-            CompanionConnectedResourcesView(
-                companion: CompanionConnectedResourcesDemoFixtures.companion,
-                services: .init(
-                    load: { CompanionConnectedResourcesDemoFixtures.resources },
-                    listPlugins: { CompanionConnectedResourcesDemoFixtures.plugins },
-                    updatePluginSelection: { _ in CompanionConnectedResourcesDemoFixtures.companion },
-                    loadCompanion: { CompanionConnectedResourcesDemoFixtures.companion },
-                    restart: { target, _ in CompanionConnectedResourcesDemoFixtures.restartOperation(target) }
-                )
-            )
-        }
-    }
-}
-
 @MainActor
-enum CompanionConnectedResourcesDemoFixtures {
+enum CompanionResourceDemoFixtures {
     static var companion: CompanionSummary {
-        let selectedSkillIDs = ProcessInfo.processInfo.environment["COMPANION_RESOURCES_DEMO_EMPTY"] == "skills"
+        let selectedSkillIDs = ProcessInfo.processInfo.environment["COMPANION_DETAIL_DEMO_EMPTY"] == "skills"
             ? "[]"
             : #"["11111111-1111-4111-8111-111111111111","22222222-2222-4222-8222-222222222222"]"#
         return decode(#"""
@@ -1358,7 +1049,7 @@ enum CompanionConnectedResourcesDemoFixtures {
     }
 
     static var resources: CompanionConnectedResources {
-        let emptySection = ProcessInfo.processInfo.environment["COMPANION_RESOURCES_DEMO_EMPTY"]
+        let emptySection = ProcessInfo.processInfo.environment["COMPANION_DETAIL_DEMO_EMPTY"]
         return CompanionConnectedResources(
             skills: emptySection == "skills" ? [] : [decode(#"""
             {

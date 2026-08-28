@@ -19,38 +19,36 @@ white eyes. Mouth and accessory indexes remain transport-compatible but are not 
 selectable. Creation asks only for a name, optional title, shape, and color, then opens the chat.
 
 The native roster groups Companions into collapsible, owner-scoped sections and keeps Unassigned at
-the bottom. Groups with at most three Companions render as a large-mark pinned grid; larger groups
-use flat 36pt-mark rows with one-line previews, hierarchical timestamps, and unread dots. Native
+the bottom. Every section uses flat 36pt-mark rows with a title, one-line preview, hierarchical
+timestamp, and unread dot; there is no automatic grid threshold. Native
 Move to/New Section flows use the shared section API. Deleting a section only unassigns its members.
-Long press exposes Duplicate, Edit character, Move to, and Delete; trailing swipe exposes Move,
+Long press exposes Duplicate, Move to, and Delete; trailing swipe exposes Move,
 member-private notification mute, and owner-only delete.
 
 The native roster can request Owner-only durable deletion. A confirmed deletion removes the Companion from the
 local roster immediately while the durable request runs; request failure restores the row, and a
-later roster poll may honestly reintroduce a Companion the control plane still returns. Essential
-settings cover the Companion icon, name, instructions, provider, and model. Identity opens as a
-dedicated pushed editor for Owner and Editor, and both creation and editing show the same shape and
-color character picker; Viewer access remains read-only. Opening a thread advances that member's unread watermark, so
-there is no separate Mark as read command; Mark as unread remains available through the existing
-member-state endpoint. The current list contract projects unread as a Boolean, so native iOS shows
-one accessible unread indicator rather than inventing an exact message count.
-Connected resources now lives inside those settings as one child management page. It retains the
-native Skills, routines, and triggers status views, lists the member's attached MCP plugin accounts
-by provider and label, and lets the Companion Owner attach or detach already-connected accounts.
-Each routine row also opens its newest-first durable run history, including status, outcome,
-timestamps, bounded internal transcript pages, and safe errors. A routine-origin chat entry is a
-compact clickable marker instead of a prompt bubble; it opens that exact run, while surfaced
-`relay` and `notify` outputs remain ordinary main-thread history. These reads use the shared bounded
-API, remain available to Viewers, and never wake Box or Pi.
-The existing projection returns only the viewing member's private account ids, so Editor attachment
-changes stay read-only in native iOS rather than risk dropping an Owner's hidden selection. Detach
-is the existing `selected_mcp_account_ids` replacement update: it removes the account from this
-Companion without disabling or deleting the underlying Plugins connection. The same page queues the
-existing Pi-only restart as **Restart Companion** and the existing full-Box restart as **Restart
-server**; both are confirmed, idempotent lifecycle intents whose PostgreSQL-projected
-queued/stopping/starting/completed state is polled without contacting Box or Pi. Viewer sees the
-page read-only, including redacted unavailable plugin selections, and never receives mutation or
-restart controls. The
+later roster poll may honestly reintroduce a Companion the control plane still returns. Each roster
+row opens the Companion's one details page directly. That page owns the character,
+name, instructions, provider and model, routines and run history, notifications, Skills, plugins,
+selected MCP accounts, triggers, runtime restart controls, and Owner-only deletion. The chat header
+pill opens the same page, while its explicit **Open chat** action replaces the detail route so chat
+and detail do not accumulate duplicate cycles. Identity editing keeps the shared shape and color
+character picker; Viewer access remains read-only. Opening a thread advances that member's unread
+watermark, so there is no separate Mark as read command; Mark as unread remains available through
+the existing member-state endpoint. The current list contract projects unread as a Boolean, so
+native iOS shows one accessible unread indicator rather than inventing an exact message count.
+The existing projection returns only the viewing member's private account ids. Owner-only MCP
+attachment changes use the existing `selected_mcp_account_ids` replacement update and never disable
+or delete the underlying Plugins connection; Editors and Viewers retain the documented read-only
+rules. Routine rows open newest-first durable run history, including status, outcome, timestamps,
+bounded internal transcript pages, and safe errors. A routine-origin chat entry is a compact
+clickable marker instead of a prompt bubble; it opens that exact run, while surfaced `relay` and
+`notify` outputs remain ordinary main-thread history. These reads use the shared bounded API,
+remain available to Viewers, and never wake Box or Pi. The details page queues the existing Pi-only
+restart as **Restart Companion** and the existing full-Box restart as **Restart server**; both are
+confirmed, idempotent lifecycle intents whose PostgreSQL-projected queued/stopping/starting/completed
+state is polled without contacting Box or Pi. Viewer sees the page read-only, including redacted
+unavailable plugin selections, and never receives mutation or restart controls. The
 native thread renders every durable decision request. Owner and Editor can answer `ask_user`,
 approve or deny configuration, routine, and trigger proposals, and handle historical shell/file
 requests without leaving iOS. An interrupted turn is equally explicit: Owner and Editor can retry
@@ -162,12 +160,12 @@ testing does not prove the production profile, entitlement, or AASA association.
 The Debug-only `-companion-appearance-demo`, `-companion-plugins-multi-account-demo`, `-glass-chat-demo`, `-glass-chat-thinking-demo`, `-companion-queued-demo`, `-markdown-table-demo`,
 `-glass-management-demo`, `-glass-management-demo-plugins`,
 `-companion-icon-demo`, `-companion-create-demo`, `-companion-decision-demo`, `-companion-interruption-demo`,
-`-companion-transcript-window-demo`, `-companion-resources-demo`,
-`-companion-settings-demo`, and
+`-companion-transcript-window-demo`,
+`-companion-detail-demo`, and
 `-companion-roster-demo` launch arguments
 open deterministic showcases without requiring a server or account. Add `-companion-reduce-motion`
-alongside `-companion-icon-demo` to force the gallery's Reduce Motion path. The settings demo accepts
-`COMPANION_SETTINGS_DEMO_ACCESS=owner|editor|viewer` for deterministic role and deletion UI tests.
+alongside `-companion-icon-demo` to force the gallery's Reduce Motion path. The detail demo accepts
+`COMPANION_DETAIL_DEMO_ACCESS=owner|editor|viewer` for deterministic role and deletion UI tests.
 The creation demo supplies deterministic provider and create responses so the shared identity icon gallery
 can be exercised without an account or server.
 The appearance demo persists through the same System / Black preference as Settings and shows a
@@ -192,8 +190,8 @@ The queued-message demo accepts `COMPANION_QUEUED_DEMO_ACCESS=owner|editor|viewe
 The roster demo accepts the equivalent `COMPANION_ROSTER_DEMO_ACCESS` value and simulates immediate
 removal, restoration after a lost first deletion response, and a same-key `202` retry. These
 arguments are excluded from Release behavior.
-The resources demo accepts `COMPANION_RESOURCES_DEMO_EMPTY=skills|routines|triggers` to show one
-section's deterministic empty state.
+The detail demo accepts `COMPANION_DETAIL_DEMO_EMPTY=skills|triggers` to show one absorbed resource
+card's deterministic empty state.
 Combine `-glass-chat-demo -glass-chat-thinking-demo` to keep the composer-adjacent thinking status
 visible and connect its tap target to the demo reply's collapsed reasoning disclosure.
 Combine `-companion-roster-demo -companion-notification-demo` to inject a version-1 response payload

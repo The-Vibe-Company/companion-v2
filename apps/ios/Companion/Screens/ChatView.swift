@@ -131,8 +131,11 @@ struct ChatView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dismiss) private var dismiss
     let companion: CompanionSummary
-    let onSettings: () -> Void
-    let onPlugins: () -> Void
+    let onDetails: () -> Void
+    /// Opens the shared Plugins surface for a decision card that requests a connection.
+    /// This is intentionally separate from the chat header, whose only destinations are the
+    /// detail pill and the computer action.
+    let onOpenPlugins: () -> Void
     let onReadingPositionChange: (CompanionChatReadingPosition) -> Void
     private let readingPosition: CompanionChatReadingPosition?
     private let services: ChatServices?
@@ -172,17 +175,17 @@ struct ChatView: View {
     init(
         companion: CompanionSummary,
         readingPosition: CompanionChatReadingPosition? = nil,
-        onPlugins: @escaping () -> Void = {},
+        onOpenPlugins: @escaping () -> Void = {},
         services: ChatServices? = nil,
         onReadingPositionChange: @escaping (CompanionChatReadingPosition) -> Void = { _ in },
-        onSettings: @escaping () -> Void
+        onDetails: @escaping () -> Void
     ) {
         self.companion = companion
         self.readingPosition = readingPosition
-        self.onPlugins = onPlugins
+        self.onOpenPlugins = onOpenPlugins
         self.services = services
         self.onReadingPositionChange = onReadingPositionChange
-        self.onSettings = onSettings
+        self.onDetails = onDetails
         _currentCompanion = State(initialValue: companion)
         _pendingReadingPosition = State(initialValue: readingPosition)
         _scrollCoordinator = State(
@@ -248,7 +251,7 @@ struct ChatView: View {
                                                     eventID: entry.eventID
                                                 )
                                             },
-                                            onOpenPlugins: onPlugins,
+                                            onOpenPlugins: onOpenPlugins,
                                             onReasoningExpansionChange: { isExpanded in
                                                 setReasoningExpanded(isExpanded, for: entry.eventID)
                                             },
@@ -443,7 +446,6 @@ struct ChatView: View {
             }
         }
         .navigationBarBackButtonHidden(true)
-        .companionNavigationSwipeBackEnabled()
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(CompanionIOSTheme.canvas, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
@@ -451,7 +453,6 @@ struct ChatView: View {
         .navigationDestination(isPresented: $showingComputer) {
             CompanionComputerView(
                 companion: currentCompanion,
-                onSettings: onSettings,
                 openDesktop: services?.openDesktop
             )
         }
@@ -520,7 +521,7 @@ struct ChatView: View {
         }
 
         ToolbarItem(placement: .principal) {
-            Button(action: onSettings) {
+            Button(action: onDetails) {
                 HStack(spacing: 8) {
                     CharacterMark(
                         name: currentCompanion.name,
@@ -543,11 +544,6 @@ struct ChatView: View {
         }
 
         ToolbarItemGroup(placement: .topBarTrailing) {
-            CompanionStatusBadge(
-                runtime: currentCompanion.runtime,
-                compact: true
-            )
-
             if currentCompanion.access != .viewer {
                 chatHeaderButton(
                     systemImage: "desktopcomputer",
@@ -561,18 +557,6 @@ struct ChatView: View {
                         : "Send a message to start the Companion first."
                 )
             }
-
-            Menu {
-                Button("Companion details", systemImage: "info.circle", action: onSettings)
-                Button("Plugins", systemImage: "puzzlepiece.extension", action: onPlugins)
-            } label: {
-                Image(systemName: "ellipsis")
-                    .frame(width: 44, height: 44)
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(CompanionIOSTheme.textPrimary)
-            .accessibilityLabel("Chat actions")
-            .accessibilityIdentifier("chat.actions")
         }
     }
 

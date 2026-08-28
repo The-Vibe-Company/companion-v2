@@ -11,8 +11,16 @@ func sectionStoreOrdersGroupsAndKeepsUnassignedLast() throws {
     let groups = store.groups(companions: companions)
 
     #expect(groups.map(\.name) == ["Work", "Personal", "Unassigned"])
-    #expect(groups[0].usesPinnedGrid)
+    #expect(groups[0].companions.map(\.name) == ["Luna"])
     #expect(groups[2].companions.map(\.name) == ["Orbit"])
+}
+
+@Test
+func unassigningACompanionEncodesAnExplicitNullSectionID() throws {
+    let data = try JSONEncoder().encode(CompanionSectionAssignmentInput(sectionID: nil))
+    let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+    #expect(object["section_id"] is NSNull)
 }
 
 @Test

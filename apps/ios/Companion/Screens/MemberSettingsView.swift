@@ -68,6 +68,7 @@ struct MemberSettingsView: View {
                 }
             }
         }
+        .companionNavigationSwipeBackEnabled()
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
         .onChange(of: automaticReview) { _, _ in selectionFeedback() }

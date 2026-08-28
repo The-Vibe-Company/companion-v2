@@ -19,12 +19,12 @@ struct CompanionTranscriptWindowDemoView: View {
             ChatView(
                 companion: selectedCompanion,
                 readingPosition: readingPositions.position(for: companionID),
-                onPlugins: {},
+                onOpenPlugins: {},
                 services: services,
                 onReadingPositionChange: { position in
                     readingPositions.record(position, for: companionID)
                 },
-                onSettings: {}
+                onDetails: {}
             )
             .id(companionID)
             .toolbar {
