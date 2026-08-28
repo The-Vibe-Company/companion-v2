@@ -270,6 +270,36 @@ export const companionIconPatchSchema = z.object({
 );
 export type CompanionIconPatch = z.infer<typeof companionIconPatchSchema>;
 
+export const COMPANION_SECTION_NAME_MAX_CHARACTERS = 80;
+
+export const companionSectionSchema = z.object({
+  id: z.string().uuid(),
+  org_id: z.string().uuid(),
+  owner_id: z.string(),
+  name: z.string().trim().min(1).max(COMPANION_SECTION_NAME_MAX_CHARACTERS),
+  position: z.number().int().nonnegative(),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime(),
+}).strict();
+export type CompanionSection = z.infer<typeof companionSectionSchema>;
+
+export const createCompanionSectionInputSchema = z.object({
+  name: z.string().trim().min(1).max(COMPANION_SECTION_NAME_MAX_CHARACTERS),
+}).strict();
+
+export const updateCompanionSectionInputSchema = createCompanionSectionInputSchema;
+
+export const reorderCompanionSectionsInputSchema = z.object({
+  section_ids: z.array(z.string().uuid()).max(100).refine(
+    (ids) => new Set(ids).size === ids.length,
+    "section_ids must not contain duplicates",
+  ),
+}).strict();
+
+export const assignCompanionSectionInputSchema = z.object({
+  section_id: z.string().uuid().nullable(),
+}).strict();
+
 /** Exact Skills Hub skill ids a Companion may stage onto its Box. Empty = no library skills. */
 export const companionSelectedSkillIdsSchema = z.array(z.string().uuid()).max(100);
 
@@ -560,6 +590,8 @@ export const companionSchema = z.object({
    */
   selected_mcp_account_ids: companionSelectedMcpAccountIdsSchema,
   owner_id: z.string(),
+  /** Owner-managed roster grouping. Null is the built-in Unassigned section. */
+  section_id: z.string().uuid().nullable().optional(),
   access: companionAccessSchema,
   /**
    * Member-private list flags (THE-351). Pin/hide/unread belong to the reader, so Viewer and Owner
@@ -567,6 +599,8 @@ export const companionSchema = z.object({
    */
   pinned: z.boolean(),
   hidden: z.boolean(),
+  /** Optional during rolling deploys; current servers always project a concrete Boolean. */
+  muted: z.boolean().optional(),
   unread: z.boolean(),
   /**
    * Newest chat line, or null when the thread is empty. Read paths project it; a mutation answers
@@ -1618,14 +1652,17 @@ export type CreateCompanionInput = z.infer<typeof createCompanionInputSchema>;
 /**
  * Per-member Companions list preferences. Omitting a field leaves it unchanged. `unread: true`
  * marks the thread unread; `unread: false` clears the badge the same way opening the thread does.
+ * Muting suppresses future push-notification deliveries for this member and Companion.
  */
 export const updateCompanionMemberStateInputSchema = z.object({
   pinned: z.boolean().optional(),
   hidden: z.boolean().optional(),
+  muted: z.boolean().optional(),
   unread: z.boolean().optional(),
 }).strict().refine(
-  (body) => body.pinned !== undefined || body.hidden !== undefined || body.unread !== undefined,
-  { message: "at least one of pinned, hidden, or unread is required" },
+  (body) => body.pinned !== undefined || body.hidden !== undefined
+    || body.muted !== undefined || body.unread !== undefined,
+  { message: "at least one of pinned, hidden, muted, or unread is required" },
 );
 export type UpdateCompanionMemberStateInput = z.infer<typeof updateCompanionMemberStateInputSchema>;
 

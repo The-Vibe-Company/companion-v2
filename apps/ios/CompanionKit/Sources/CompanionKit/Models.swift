@@ -14,6 +14,7 @@ public struct WhoAmI: Codable, Equatable, Sendable {
     public let userID: String
     public let email: String
     public let name: String?
+    public let avatarURL: String?
     public let timezone: String?
     public let org: WorkspaceIdentity?
     public let onboarded: Bool
@@ -23,6 +24,7 @@ public struct WhoAmI: Codable, Equatable, Sendable {
         case userID = "userId"
         case email
         case name
+        case avatarURL = "avatarUrl"
         case timezone
         case org
         case onboarded
@@ -33,6 +35,7 @@ public struct WhoAmI: Codable, Equatable, Sendable {
         userID: String,
         email: String,
         name: String?,
+        avatarURL: String? = nil,
         org: WorkspaceIdentity?,
         onboarded: Bool,
         needsOnboarding: Bool,
@@ -41,6 +44,7 @@ public struct WhoAmI: Codable, Equatable, Sendable {
         self.userID = userID
         self.email = email
         self.name = name
+        self.avatarURL = avatarURL
         self.org = org
         self.onboarded = onboarded
         self.needsOnboarding = needsOnboarding
@@ -58,12 +62,20 @@ public struct Session: Codable, Equatable, Sendable {
         public let id: String
         public let email: String
         public let name: String?
+        public let avatarURL: String?
         public let timezone: String?
 
-        public init(id: String, email: String, name: String?, timezone: String? = nil) {
+        public init(
+            id: String,
+            email: String,
+            name: String?,
+            avatarURL: String? = nil,
+            timezone: String? = nil
+        ) {
             self.id = id
             self.email = email
             self.name = name
+            self.avatarURL = avatarURL
             self.timezone = timezone
         }
     }
@@ -84,6 +96,7 @@ public struct Session: Codable, Equatable, Sendable {
                 id: identity.userID,
                 email: identity.email,
                 name: identity.name,
+                avatarURL: identity.avatarURL,
                 timezone: identity.timezone
             )
         )
@@ -338,9 +351,11 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
     public let selectedSkillIDs: [String]
     public let selectedMCPAccountIDs: [String]
     public let icon: Icon?
+    public let sectionID: String?
     public let access: CompanionAccess
     public let pinned: Bool
     public let hidden: Bool
+    public let muted: Bool
     public let unread: Bool
     public let lastMessage: LastMessage?
     public let runtime: Runtime
@@ -411,9 +426,11 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
         case selectedSkillIDs = "selected_skill_ids"
         case selectedMCPAccountIDs = "selected_mcp_account_ids"
         case icon
+        case sectionID = "section_id"
         case access
         case pinned
         case hidden
+        case muted
         case unread
         case lastMessage = "last_message"
         case runtime
@@ -428,9 +445,11 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
         selectedSkillIDs = try container.decodeIfPresent([String].self, forKey: .selectedSkillIDs) ?? []
         selectedMCPAccountIDs = try container.decodeIfPresent([String].self, forKey: .selectedMCPAccountIDs) ?? []
         icon = try container.decodeIfPresent(Icon.self, forKey: .icon)
+        sectionID = try container.decodeIfPresent(String.self, forKey: .sectionID)
         access = try container.decodeIfPresent(CompanionAccess.self, forKey: .access) ?? .viewer
         pinned = try container.decodeIfPresent(Bool.self, forKey: .pinned) ?? false
         hidden = try container.decodeIfPresent(Bool.self, forKey: .hidden) ?? false
+        muted = try container.decodeIfPresent(Bool.self, forKey: .muted) ?? false
         unread = try container.decodeIfPresent(Bool.self, forKey: .unread) ?? false
         lastMessage = try container.decodeIfPresent(LastMessage.self, forKey: .lastMessage)
         runtime = try container.decode(Runtime.self, forKey: .runtime)
@@ -450,9 +469,11 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
             selectedSkillIDs: selectedSkillIDs,
             selectedMCPAccountIDs: selectedMCPAccountIDs,
             icon: icon,
+            sectionID: sectionID,
             access: access,
             pinned: pinned,
             hidden: hidden,
+            muted: muted,
             unread: unread,
             lastMessage: lastMessage ?? previous.lastMessage,
             runtime: runtime
@@ -472,9 +493,11 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
             selectedSkillIDs: selectedSkillIDs,
             selectedMCPAccountIDs: selectedMCPAccountIDs,
             icon: icon,
+            sectionID: sectionID,
             access: access,
             pinned: pinned,
             hidden: hidden,
+            muted: muted,
             unread: unread,
             lastMessage: lastMessage,
             runtime: parentRuntimeIsStale ? previous.runtime : runtime
@@ -489,9 +512,11 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
         selectedSkillIDs: [String],
         selectedMCPAccountIDs: [String],
         icon: Icon?,
+        sectionID: String?,
         access: CompanionAccess,
         pinned: Bool,
         hidden: Bool,
+        muted: Bool,
         unread: Bool,
         lastMessage: LastMessage?,
         runtime: Runtime
@@ -503,23 +528,78 @@ public struct CompanionSummary: Codable, Identifiable, Hashable, Sendable {
         self.selectedSkillIDs = selectedSkillIDs
         self.selectedMCPAccountIDs = selectedMCPAccountIDs
         self.icon = icon
+        self.sectionID = sectionID
         self.access = access
         self.pinned = pinned
         self.hidden = hidden
+        self.muted = muted
         self.unread = unread
         self.lastMessage = lastMessage
         self.runtime = runtime
     }
 }
 
+public struct CompanionSection: Codable, Identifiable, Hashable, Sendable {
+    public let id: String
+    public let orgID: String
+    public let ownerID: String
+    public let name: String
+    public let position: Int
+    public let createdAt: String
+    public let updatedAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case orgID = "org_id"
+        case ownerID = "owner_id"
+        case name
+        case position
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+}
+
+public struct CompanionSectionNameInput: Codable, Equatable, Sendable {
+    public let name: String
+
+    public init(name: String) { self.name = name }
+}
+
+public struct CompanionSectionAssignmentInput: Codable, Equatable, Sendable {
+    public let sectionID: String?
+
+    public init(sectionID: String?) { self.sectionID = sectionID }
+
+    enum CodingKeys: String, CodingKey {
+        case sectionID = "section_id"
+    }
+}
+
+public struct CompanionSectionReorderInput: Codable, Equatable, Sendable {
+    public let sectionIDs: [String]
+
+    public init(sectionIDs: [String]) { self.sectionIDs = sectionIDs }
+
+    enum CodingKeys: String, CodingKey {
+        case sectionIDs = "section_ids"
+    }
+}
+
 public struct CompanionMemberStatePatch: Codable, Equatable, Sendable {
     public let pinned: Bool?
     public let hidden: Bool?
+    public let muted: Bool?
     public let unread: Bool?
 
-    public init(pinned: Bool? = nil, hidden: Bool? = nil, unread: Bool? = nil) {
+    public init(
+        pinned: Bool? = nil,
+        hidden: Bool? = nil,
+        muted: Bool? = nil,
+        unread: Bool? = nil
+    ) {
         self.pinned = pinned
         self.hidden = hidden
+        self.muted = muted
         self.unread = unread
     }
 }

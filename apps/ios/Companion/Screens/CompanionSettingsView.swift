@@ -153,7 +153,7 @@ struct CompanionSettingsView: View {
                 CompanionAvatar(
                     name: currentCompanion.name,
                     icon: currentCompanion.icon,
-                    size: 66,
+                    size: 64,
                     state: .still
                 )
                 .accessibilityHidden(true)

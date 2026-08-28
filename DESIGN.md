@@ -188,6 +188,10 @@ theme and user-selectable accent presets are available (see Colors). CSS custom 
 styling extend those tokens in `auth.css`, `skills.css`, `onboarding.css`, `org.css`, `settings.css`, and
 `upload.css`.
 
+Native iOS has its own approved source of truth in `docs/ios-design.md`. Its Grok Bot-derived
+character marks, neutral surfaces, navigation, and user journeys intentionally do not inherit this
+web theme.
+
 ## Colors
 
 Companion uses restrained tinted neutrals and a **signal yellow** accent by default. Every neutral is slightly

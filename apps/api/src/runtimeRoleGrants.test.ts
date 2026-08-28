@@ -147,6 +147,13 @@ describe("Skills Hub runtime-role grants", () => {
       "companion_api_set_initial_provider(uuid,uuid,text,text)",
       "companion_api_set_workspace_access(uuid,uuid,public.companion_share_role)",
       "companion_api_update_member_state(uuid,uuid,boolean,boolean,boolean)",
+      "companion_api_update_member_state_v2(uuid,uuid,boolean,boolean,boolean,boolean)",
+      "companion_api_list_sections(uuid)",
+      "companion_api_create_section(uuid,text)",
+      "companion_api_update_section(uuid,uuid,text)",
+      "companion_api_delete_section(uuid,uuid)",
+      "companion_api_reorder_sections(uuid,jsonb)",
+      "companion_api_assign_section(uuid,uuid,uuid)",
       "companion_api_mark_thread_read(uuid,uuid)",
       "companion_api_enqueue_turn(uuid,uuid,uuid,text,public.companion_client_surface)",
       "companion_api_read_runtime(uuid,uuid)",
@@ -300,6 +307,8 @@ describe("Skills Hub runtime-role grants", () => {
     for (const table of workerForbiddenTables) {
       expect(declarations).toContain(`'public.${table}'::regclass`);
     }
+    expect(sql).toContain("to_regclass('public.companion_sections') IS NOT NULL");
+    expect(sql.match(/'public\.companion_sections'::regclass/g)).toHaveLength(2);
 
     const restrictionBlock = sql.slice(
       sql.indexOf("FOREACH protected_table IN ARRAY api_capability_managed_tables"),

@@ -1,3 +1,5 @@
+import Foundation
+
 public struct CompanionRosterState: Sendable {
     private struct OptimisticRemoval: Sendable {
         let companion: CompanionSummary
@@ -116,5 +118,91 @@ public struct CompanionRosterSections: Equatable, Sendable {
         self.pinned = pinned
         self.unpinned = unpinned
         self.hidden = hidden
+    }
+}
+
+public struct CompanionHomeSection: Identifiable, Equatable, Sendable {
+    public let id: String
+    public let name: String
+    public let ownerID: String?
+    public let companions: [CompanionSummary]
+    public let isUnassigned: Bool
+    public let isCollapsed: Bool
+
+    public var usesPinnedGrid: Bool { !companions.isEmpty && companions.count <= 3 }
+}
+
+public enum CompanionSectionCompatibility {
+    /// Sections were added after the base roster endpoint. A newer client can still render the
+    /// unassigned roster while a rolling or self-hosted deployment serves the older API shape.
+    public static func fallback(for error: any Error) throws -> [CompanionSection] {
+        if let apiError = error as? APIError, apiError.status == 404 {
+            return []
+        }
+        throw error
+    }
+}
+
+public struct CompanionSectionStore: Sendable {
+    public private(set) var sections: [CompanionSection]
+    public private(set) var collapsedSectionIDs: Set<String>
+
+    public init(
+        sections: [CompanionSection] = [],
+        collapsedSectionIDs: Set<String> = []
+    ) {
+        self.sections = sections
+        self.collapsedSectionIDs = collapsedSectionIDs
+    }
+
+    public mutating func reconcile(with sections: [CompanionSection]) {
+        self.sections = sections.sorted {
+            if $0.position != $1.position { return $0.position < $1.position }
+            return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+        collapsedSectionIDs.formIntersection(Set(sections.map(\.id)).union(["unassigned"]))
+    }
+
+    public mutating func toggleCollapsed(sectionID: String) {
+        if !collapsedSectionIDs.insert(sectionID).inserted {
+            collapsedSectionIDs.remove(sectionID)
+        }
+    }
+
+    public mutating func remove(sectionID: String) {
+        sections.removeAll { $0.id == sectionID }
+        collapsedSectionIDs.remove(sectionID)
+    }
+
+    public func groups(companions: [CompanionSummary]) -> [CompanionHomeSection] {
+        let visible = companions.filter { !$0.hidden }
+        let knownIDs = Set(sections.map(\.id))
+        var groups = sections.compactMap { section -> CompanionHomeSection? in
+            let members = visible.filter { $0.sectionID == section.id }
+            guard !members.isEmpty else { return nil }
+            return CompanionHomeSection(
+                id: section.id,
+                name: section.name,
+                ownerID: section.ownerID,
+                companions: members,
+                isUnassigned: false,
+                isCollapsed: collapsedSectionIDs.contains(section.id)
+            )
+        }
+        let unassigned = visible.filter { companion in
+            guard let sectionID = companion.sectionID else { return true }
+            return !knownIDs.contains(sectionID)
+        }
+        if !unassigned.isEmpty {
+            groups.append(CompanionHomeSection(
+                id: "unassigned",
+                name: "Unassigned",
+                ownerID: nil,
+                companions: unassigned,
+                isUnassigned: true,
+                isCollapsed: collapsedSectionIDs.contains("unassigned")
+            ))
+        }
+        return groups
     }
 }

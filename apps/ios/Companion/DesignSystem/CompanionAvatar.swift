@@ -7,8 +7,8 @@ enum CompanionAvatarState: Equatable {
     case still
 }
 
-/// Native rendering of the web Companion icon catalog. Artwork stays in the web SVG's canonical
-/// 64 × 68 coordinate space so every client renders the same silhouette, face, accessory, and crop.
+/// Compatibility wrapper for existing call sites. Wave A renders only the approved character mark:
+/// shape, palette color, and two white eyes. Mouth and accessory indexes remain transport-only.
 struct CompanionAvatar: View {
     let name: String
     var icon: CompanionSummary.Icon?
@@ -16,50 +16,8 @@ struct CompanionAvatar: View {
     var state: CompanionAvatarState = .idle
     var reduceMotionOverride: Bool? = nil
 
-    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
-    @State private var animationStart = Date()
-
-    private var reduceMotion: Bool {
-        reduceMotionOverride ?? systemReduceMotion
-    }
-
-    private var configuration: CompanionAvatarConfiguration {
-        CompanionAvatarConfiguration(icon: icon)
-    }
-
     var body: some View {
-        Group {
-            if reduceMotion || state == .still {
-                artwork(at: nil)
-            } else {
-                TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
-                    artwork(at: timeline.date.timeIntervalSince(animationStart))
-                }
-            }
-        }
-        .frame(width: size, height: size)
-        .clipped()
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(name), Companion")
-        .onChange(of: state) {
-            animationStart = .now
-        }
-        .onChange(of: reduceMotion) {
-            if !reduceMotion { animationStart = .now }
-        }
-    }
-
-    private func artwork(at timestamp: TimeInterval?) -> some View {
-        let motion = CompanionAvatarMotion.frame(for: state, timestamp: timestamp)
-        return Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: true) { context, canvasSize in
-            CompanionAvatarRenderer.draw(
-                configuration: configuration,
-                state: state,
-                motion: motion,
-                in: canvasSize,
-                context: &context
-            )
-        }
+        CharacterMark(name: name, icon: icon, size: size)
     }
 }
 

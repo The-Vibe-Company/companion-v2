@@ -83,6 +83,20 @@ the earliest source expiry, and stores value-free provenance. Callers cannot cho
 organizations, PATs cannot mint child PATs, and a target-bound token requires the matching declared
 target. Possession remains bearer authority until expiry or revocation.
 
+## Companion roster organization
+
+`companion_sections` stores owner-scoped, org-scoped roster groups with a unique normalized name
+and explicit position. `companions.section_id` is nullable: null is the built-in Unassigned group.
+Only the immutable Companion Owner may create, rename, reorder, delete, or assign their sections;
+workspace Admin has no override. Deleting a section atomically clears its members' `section_id` and
+never deletes a Companion or changes a runtime revision. Read projections expose a section to the
+owner and to members who can already read at least one Companion in it.
+
+The existing member-private roster state also carries `muted`. Muting deletes that member's queued
+APNs deliveries for the Companion and prevents future enqueue until unmuted. It does not alter
+unread state, thread contents, another member's preference, or Box/Pi state. Both section and mute
+writes remain behind actor-scoped `SECURITY DEFINER` capabilities; Agent Auth has no access.
+
 ## Runtime v2 write model
 
 Runtime state is explicit and durable:
@@ -121,7 +135,7 @@ and notification claim/settlement functions.
 
 Companion terminal transitions and new pending decisions fan out durable APNs deliveries inside the
 same PostgreSQL transaction. Only active iOS installations belonging to the turn's durable author
-are selected. The API registers or removes the current member's installation but never contacts
+are selected, unless that author has muted this Companion. The API registers or removes the current member's installation but never contacts
 Apple; runtime only settles turns and never formats or sends a push. The worker revalidates current
 membership and Companion access while claiming, leases each delivery, and sends it over persistent
 HTTP/2 with an Apple ES256 provider token. Deliveries expire after 24 hours. Success deletes the

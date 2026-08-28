@@ -183,8 +183,8 @@ explicitly recoverable interruption even after the browser, API, or one runtime 
 ## Explicit exclusions
 
 - Generic Projects and skill runs, multi-Bot orchestration, Bot-to-Bot handoffs, group Bot chats,
-  proactive jobs, Companion voice conversation/runtime audio, and a new navigation or visual
-  language. Native iOS dictation may transiently convert microphone audio into editable composer
+  proactive jobs, and Companion voice conversation/runtime audio. Native iOS follows the approved
+  `docs/ios-design.md` navigation and visual language. Native iOS dictation may transiently convert microphone audio into editable composer
   text without creating a turn, attachment, or Box/Pi capability. It is globally deployment-gated;
   clients omit the microphone when the API reports that its server-side Google key is absent.
 - A file library, file versioning, or any artifact surface outside a thread. Chat files themselves

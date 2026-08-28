@@ -63,7 +63,7 @@ struct CompanionIdentityEditorView: View {
     private var identityCard: some View {
         CompanionManagementCard("Identity") {
             HStack(spacing: 16) {
-                CompanionAvatar(name: displayName, icon: icon, size: 82, state: .still)
+                CompanionAvatar(name: displayName, icon: icon, size: 80, state: .still)
                     .accessibilityLabel("Preview for \(displayName)")
 
                 VStack(alignment: .leading, spacing: 3) {
@@ -114,8 +114,9 @@ struct CompanionIdentityEditorView: View {
                 }
             }
 
-            CompanionIconGallery(
+            CharacterPicker(
                 selection: $icon,
+                defaultSelection: companion.icon ?? .init(shape: 1, mouth: 1, accessory: 1, color: 2),
                 accessibilityIdentifierPrefix: "companion.identity.icon"
             )
             .disabled(saving)

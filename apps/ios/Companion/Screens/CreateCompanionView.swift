@@ -16,6 +16,7 @@ struct CreateCompanionView: View {
     private let services: CreateCompanionServices?
 
     @State private var name = ""
+    @State private var title = ""
     @State private var icon = CompanionSummary.Icon(shape: 6, mouth: 1, accessory: 6, color: 2)
     @State private var providers: CompanionProvidersResponse?
     @State private var plugins: [CompanionPluginAccount] = []
@@ -27,6 +28,9 @@ struct CreateCompanionView: View {
     @State private var error: String?
     @State private var showingProviders = false
     @State private var showingPlugins = false
+    @FocusState private var focusedField: Field?
+
+    private enum Field { case name, title }
 
     init(
         services: CreateCompanionServices? = nil,
@@ -38,37 +42,55 @@ struct CreateCompanionView: View {
 
     var body: some View {
         NavigationStack {
-            CompanionBackdrop {
+            CompanionIOSTheme.canvas
+                .ignoresSafeArea()
+                .overlay {
                 ScrollView {
-                    VStack(spacing: 14) {
-                        CompanionManagementHeader(
-                            eyebrow: "New teammate",
-                            title: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Create a Companion" : name,
-                            detail: "Choose a look, an intelligence, and the tools this durable teammate can use.",
-                            symbol: "sparkles"
-                        )
+                    VStack(spacing: 24) {
+                        CharacterMark(name: displayName, icon: icon, size: 96)
+                            .padding(.top, 12)
 
                         if let error { CompanionErrorNotice(message: error) }
 
-                        identityCard
-                        iconCard
+                        VStack(spacing: 12) {
+                            TextField("Name", text: $name)
+                                .textInputAutocapitalization(.words)
+                                .autocorrectionDisabled()
+                                .font(.system(size: 17, weight: .semibold))
+                                .padding(.horizontal, 16)
+                                .frame(height: 52)
+                                .background(CompanionIOSTheme.card, in: RoundedRectangle(cornerRadius: 18))
+                                .focused($focusedField, equals: .name)
+                                .accessibilityIdentifier("companion.create.name")
 
-                        if loading && providers == nil {
-                            ProgressView("Loading workspace…")
-                                .padding(28)
-                                .frame(maxWidth: .infinity)
-                                .companionGlass(radius: 22)
-                        } else {
-                            providerCard
-                            pluginCard
+                            TextField("Title (optional)", text: $title)
+                                .font(.system(size: 16))
+                                .padding(.horizontal, 16)
+                                .frame(height: 52)
+                                .background(CompanionIOSTheme.card, in: RoundedRectangle(cornerRadius: 18))
+                                .focused($focusedField, equals: .title)
+                                .accessibilityIdentifier("companion.create.title")
+                        }
+
+                        CharacterPicker(
+                            selection: $icon,
+                            accessibilityIdentifierPrefix: "companion.create.icon"
+                        )
+
+                        if loading {
+                            ProgressView("Preparing workspace…")
+                        } else if connectedProviders.isEmpty {
+                            Button("Connect a model provider") { showingProviders = true }
+                                .buttonStyle(.borderedProminent)
+                                .tint(CompanionIOSTheme.primaryCTA)
                         }
                     }
                     .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
+                    .padding(.bottom, 24)
                 }
                 .scrollIndicators(.hidden)
-            }
-            .navigationTitle("New Companion")
+                }
+            .navigationTitle("New Bot")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -86,6 +108,7 @@ struct CreateCompanionView: View {
                 PluginManagementView()
             }
             .task { await loadWorkspace() }
+            .task { focusedField = .name }
             .onChange(of: providerID) { selectDefaultModel() }
         }
     }
@@ -128,7 +151,7 @@ struct CreateCompanionView: View {
                 }
             }
 
-            CompanionIconGallery(
+            CharacterPicker(
                 selection: $icon,
                 accessibilityIdentifierPrefix: "companion.create.icon"
             )
@@ -400,6 +423,9 @@ struct CreateCompanionView: View {
         error = nil
         let input = CreateCompanionInput(
             name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+            persona: title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? nil
+                : title.trimmingCharacters(in: .whitespacesAndNewlines),
             providerID: providerID,
             modelID: modelID,
             selectedMCPAccountIDs: selectedPluginIDs.sorted(),

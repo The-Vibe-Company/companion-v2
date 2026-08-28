@@ -1,9 +1,14 @@
 import SwiftUI
 import CompanionKit
+import UIKit
 
 @MainActor
 struct CompanionListServices {
     let listCompanions: () async throws -> [CompanionSummary]
+    let listSections: () async throws -> [CompanionSection]
+    let createSection: (String) async throws -> CompanionSection
+    let deleteSection: (String) async throws -> Void
+    let assignSection: (String, String?) async throws -> CompanionSummary
     let deleteCompanion: (String, UUID) async throws -> CompanionOperationSummary
     let updateMemberState: (String, CompanionMemberStatePatch) async throws -> CompanionSummary
     let duplicateCompanion: (String) async throws -> CompanionSummary
@@ -17,6 +22,7 @@ struct CompanionListView: View {
     private let services: CompanionListServices?
     @State private var path: [CompanionRoute] = []
     @State private var rosterState = CompanionRosterState()
+    @State private var sectionStore = CompanionSectionStore()
     @State private var query = ""
     @State private var loading = true
     @State private var error: String?
@@ -29,7 +35,12 @@ struct CompanionListView: View {
     @State private var deleteRequestIDs: [String: UUID] = [:]
     @State private var deletingCompanionIDs: Set<String> = []
     @State private var rosterActionCompanionIDs: Set<String> = []
-    @State private var showingHidden = false
+    @State private var showingSearch = false
+    @State private var companionToMove: CompanionSummary?
+    @State private var pendingNewSectionCompanion: CompanionSummary?
+    @State private var sectionToDelete: CompanionSection?
+    @State private var showingNewSection = false
+    @State private var newSectionName = ""
     @State private var rosterNotice: String?
     @State private var rosterActionError: String?
     @State private var chatReadingPositions = CompanionChatReadingPositionStore()
@@ -41,7 +52,9 @@ struct CompanionListView: View {
 
     var body: some View {
         NavigationStack(path: $path) {
-            CompanionBackdrop {
+            CompanionIOSTheme.canvas
+                .ignoresSafeArea()
+                .overlay {
                 Group {
                     if loading && companions.isEmpty {
                         loadingState
@@ -53,21 +66,19 @@ struct CompanionListView: View {
                         roster
                     }
                 }
-            }
-            .navigationTitle("Companions")
-            .navigationBarTitleDisplayMode(.large)
+                }
+            .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(for: CompanionRoute.self) { route in
                 destination(for: route)
             }
-            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search Companions")
+            .searchable(
+                text: $query,
+                isPresented: $showingSearch,
+                placement: .navigationBarDrawer(displayMode: .always),
+                prompt: "Search Companions"
+            )
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("New Companion", systemImage: "plus") {
-                        showingCreateCompanion = true
-                    }
-                    .accessibilityHint("Opens Companion creation")
-                }
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .topBarLeading) {
                     Menu {
                         Text(session.user.email)
                         Divider()
@@ -85,18 +96,27 @@ struct CompanionListView: View {
                             Task { await sessionStore.signOut() }
                         }
                     } label: {
-                        Image(systemName: "person.crop.circle")
+                        AccountAvatar(user: session.user)
                     }
                     .accessibilityLabel("Account for \(session.user.email)")
                     .accessibilityIdentifier("account.menu")
+                }
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    circleToolbarButton("Search", systemImage: "magnifyingglass") {
+                        showingSearch = true
+                    }
+                    circleToolbarButton("New Bot", systemImage: "plus") {
+                        showingCreateCompanion = true
+                    }
                 }
             }
             .sheet(isPresented: $showingCreateCompanion) {
                 CreateCompanionView { companion in
                     rosterState.prepend(companion)
+                    path = [.chat(companion.id)]
                     Task { await reload(silently: true) }
                 }
-                .tint(Color.companionAccent)
+                .tint(CompanionIOSTheme.actionBlue)
             }
             .sheet(isPresented: $showingProviders) {
                 ProviderManagementView()
@@ -126,6 +146,48 @@ struct CompanionListView: View {
             } message: { _ in
                 Text("Its Box, thread, and Companion record will be permanently deleted. This cannot be undone.")
             }
+            .confirmationDialog(
+                "Move \(companionToMove?.name ?? "Companion") to",
+                isPresented: Binding(
+                    get: { companionToMove != nil },
+                    set: { if !$0 { companionToMove = nil } }
+                ),
+                titleVisibility: .visible,
+                presenting: companionToMove
+            ) { companion in
+                ForEach(ownedSections) { section in
+                    Button(section.name) { Task { await move(companion, to: section.id) } }
+                }
+                Button("Unassigned") { Task { await move(companion, to: nil) } }
+                Button("New Section") {
+                    pendingNewSectionCompanion = companion
+                    newSectionName = ""
+                    showingNewSection = true
+                }
+                Button("Cancel", role: .cancel) {}
+            }
+            .alert("New Section", isPresented: $showingNewSection) {
+                TextField("Section name", text: $newSectionName)
+                Button("Create") { Task { await createSectionAndMove() } }
+                    .disabled(newSectionName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("The Companion will move into the new section.")
+            }
+            .confirmationDialog(
+                "Delete \(sectionToDelete?.name ?? "section")?",
+                isPresented: Binding(
+                    get: { sectionToDelete != nil },
+                    set: { if !$0 { sectionToDelete = nil } }
+                ),
+                titleVisibility: .visible,
+                presenting: sectionToDelete
+            ) { section in
+                Button("Delete Section", role: .destructive) { Task { await deleteSection(section) } }
+                Button("Cancel", role: .cancel) {}
+            } message: { _ in
+                Text("Companions in this section will move to Unassigned.")
+            }
             .task(id: session.orgID) {
                 await reload()
                 while !Task.isCancelled {
@@ -137,7 +199,7 @@ struct CompanionListView: View {
             .onChange(of: notifications.pendingDestination) { _, _ in
                 openPendingNotificationIfPossible()
             }
-            .tint(Color.companionInk)
+            .tint(CompanionIOSTheme.textPrimary)
         }
     }
 
@@ -155,56 +217,18 @@ struct CompanionListView: View {
                     .rosterListRow()
             }
 
-            HStack {
-                Text("Your durable conversations")
-                    .font(.subheadline)
-                    .foregroundStyle(Color.companionMuted)
-                Spacer()
-                Text("\(visibleCompanions.count)")
-                    .font(.caption.monospacedDigit().weight(.semibold))
-                    .foregroundStyle(Color.companionMuted)
-            }
-            .rosterListRow(verticalInset: 4)
-
-            if !filteredSections.pinned.isEmpty {
+            ForEach(homeSections) { section in
                 Section {
-                    ForEach(filteredSections.pinned) { companionRow($0) }
-                } header: {
-                    rosterSectionHeader("Pinned", count: filteredSections.pinned.count)
-                }
-            }
-
-            if !filteredSections.unpinned.isEmpty {
-                Section {
-                    ForEach(filteredSections.unpinned) { companionRow($0) }
-                } header: {
-                    rosterSectionHeader("Companions", count: filteredSections.unpinned.count)
-                }
-            }
-
-            if !filteredSections.hidden.isEmpty {
-                Section {
-                    if showingHidden || !query.isEmpty {
-                        ForEach(filteredSections.hidden) { companionRow($0) }
-                    }
-                } header: {
-                    Button {
-                        withRosterAnimation { showingHidden.toggle() }
-                    } label: {
-                        HStack(spacing: 6) {
-                            Text("Hidden")
-                            Text("\(filteredSections.hidden.count)")
-                                .monospacedDigit()
-                            Spacer()
-                            Image(systemName: (showingHidden || !query.isEmpty) ? "chevron.down" : "chevron.right")
-                                .font(.caption.weight(.semibold))
+                    if !section.isCollapsed || !query.isEmpty {
+                        if section.usesPinnedGrid && query.isEmpty {
+                            pinnedGrid(section.companions)
+                                .rosterListRow(verticalInset: 8)
+                        } else {
+                            ForEach(section.companions) { companionRow($0) }
                         }
-                        .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
-                    .disabled(!query.isEmpty)
-                    .accessibilityLabel("Hidden Companions, \(filteredSections.hidden.count)")
-                    .accessibilityValue((showingHidden || !query.isEmpty) ? "Expanded" : "Collapsed")
+                } header: {
+                    sectionHeader(section)
                 }
             }
         }
@@ -223,7 +247,6 @@ struct CompanionListView: View {
                 .foregroundStyle(Color.companionMuted)
         }
         .padding(28)
-        .companionGlass(radius: 24)
     }
 
     private func errorState(_ message: String) -> some View {
@@ -241,37 +264,33 @@ struct CompanionListView: View {
     private var emptyState: some View {
         ContentUnavailableView {
             Label(
-                query.isEmpty ? "No Companions yet" : "No matches",
+                query.isEmpty ? "Create your first companion" : "No matches",
                 systemImage: "bubble.left.and.bubble.right"
             )
         } description: {
-            Text(query.isEmpty ? "Create a Companion in your workspace to begin a durable conversation." : "Try a different name or message.")
+            Text(query.isEmpty ? "Give your new companion a name and character to begin." : "Try a different name or message.")
         } actions: {
             if query.isEmpty {
-                Button("Create a Companion", systemImage: "plus") {
+                Button("Create", systemImage: "plus") {
                     showingCreateCompanion = true
                 }
-                .buttonStyle(.glassProminent)
+                .buttonStyle(.borderedProminent)
+                .tint(CompanionIOSTheme.primaryCTA)
             }
         }
         .padding(24)
     }
 
-    private var filteredSections: CompanionRosterSections {
-        let sections = rosterState.sections
-        return CompanionRosterSections(
-            pinned: sections.pinned.filter(matchesSearch),
-            unpinned: sections.unpinned.filter(matchesSearch),
-            hidden: sections.hidden.filter(matchesSearch)
-        )
-    }
-
-    private var visibleCompanions: [CompanionSummary] {
-        filteredSections.pinned + filteredSections.unpinned
-    }
-
     private var matchingCompanions: [CompanionSummary] {
-        visibleCompanions + filteredSections.hidden
+        companions.filter(matchesSearch)
+    }
+
+    private var homeSections: [CompanionHomeSection] {
+        sectionStore.groups(companions: matchingCompanions)
+    }
+
+    private var ownedSections: [CompanionSection] {
+        sectionStore.sections.filter { $0.ownerID == session.user.id }
     }
 
     private func matchesSearch(_ companion: CompanionSummary) -> Bool {
@@ -281,14 +300,68 @@ struct CompanionListView: View {
             || (companion.persona?.localizedStandardContains(query) ?? false)
     }
 
-    private func rosterSectionHeader(_ title: String, count: Int) -> some View {
-        HStack(spacing: 6) {
-            Text(title)
-            Text("\(count)")
-                .monospacedDigit()
+    private func circleToolbarButton(
+        _ label: String,
+        systemImage: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 16, weight: .semibold))
+                .frame(width: 44, height: 44)
+                .background(CompanionIOSTheme.innerBubble, in: Circle())
+                .overlay { Circle().stroke(CompanionIOSTheme.separator, lineWidth: 1) }
         }
+        .accessibilityLabel(label)
+    }
+
+    private func sectionHeader(_ section: CompanionHomeSection) -> some View {
+        Button {
+            withRosterAnimation { sectionStore.toggleCollapsed(sectionID: section.id) }
+        } label: {
+            HStack(spacing: 7) {
+                Text(section.name)
+                    .font(.system(size: 13))
+                Image(systemName: section.isCollapsed ? "chevron.right" : "chevron.down")
+                    .font(.system(size: 11, weight: .semibold))
+                Spacer()
+            }
+            .foregroundStyle(CompanionIOSTheme.textSecondary)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
         .textCase(nil)
-        .accessibilityElement(children: .combine)
+        .contextMenu {
+            if !section.isUnassigned,
+               let model = sectionStore.sections.first(where: { $0.id == section.id }),
+               model.ownerID == session.user.id {
+                Button("Delete Section", systemImage: "trash", role: .destructive) {
+                    sectionToDelete = model
+                }
+            }
+        }
+    }
+
+    private func pinnedGrid(_ companions: [CompanionSummary]) -> some View {
+        ScrollView(.horizontal) {
+            LazyHStack(spacing: 24) {
+                ForEach(companions) { companion in
+                    NavigationLink(value: CompanionRoute.chat(companion.id)) {
+                        VStack(spacing: 7) {
+                            CharacterMark(name: companion.name, icon: companion.icon, size: 80)
+                            Text(companion.name)
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(CompanionIOSTheme.textPrimary)
+                                .lineLimit(1)
+                        }
+                        .frame(width: 86)
+                    }
+                    .buttonStyle(.plain)
+                    .contextMenu { companionContextMenu(for: companion, busy: false) }
+                }
+            }
+        }
+        .scrollIndicators(.hidden)
     }
 
     @ViewBuilder
@@ -305,13 +378,16 @@ struct CompanionListView: View {
         .disabled(busy)
         .accessibilityIdentifier("companion.row.\(companion.id)")
         .contextMenu { companionContextMenu(for: companion, busy: busy) }
-        .swipeActions(edge: .leading, allowsFullSwipe: false) {
-            Button("Settings", systemImage: "gearshape") {
-                path.append(.settings(companion.id))
-            }
-            .tint(Color.companionInk)
-        }
         .swipeActions(edge: .trailing) {
+            if companion.access.canDeleteCompanion {
+                Button("Move to", systemImage: "folder") { companionToMove = companion }
+                    .tint(CompanionIOSTheme.actionBlue)
+            }
+            Button(companion.muted ? "Unmute" : "Mute",
+                   systemImage: companion.muted ? "bell" : "bell.slash") {
+                Task { await updateMemberState(companion, patch: .init(muted: !companion.muted)) }
+            }
+                .tint(.gray)
             if canRequestDeletion(of: companion), !busy {
                 Button("Delete", systemImage: "trash", role: .destructive) {
                     companionToDelete = companion
@@ -320,25 +396,16 @@ struct CompanionListView: View {
         }
         .accessibilityActions {
             Button("Settings") { path.append(.settings(companion.id)) }
-            if companion.hidden {
-                Button("Unhide") {
-                    Task { await updateMemberState(companion, patch: .init(hidden: false)) }
+            Button(companion.pinned ? "Unpin" : "Pin") {
+                Task { await updateMemberState(companion, patch: .init(pinned: !companion.pinned)) }
+            }
+            if !companion.unread {
+                Button("Mark as unread") {
+                    Task { await updateMemberState(companion, patch: .init(unread: true)) }
                 }
-            } else {
-                Button(companion.pinned ? "Unpin" : "Pin") {
-                    Task { await updateMemberState(companion, patch: .init(pinned: !companion.pinned)) }
-                }
-                if !companion.unread {
-                    Button("Mark as unread") {
-                        Task { await updateMemberState(companion, patch: .init(unread: true)) }
-                    }
-                }
-                if companion.access.canDeleteCompanion {
-                    Button("Duplicate") { Task { await duplicate(companion) } }
-                }
-                Button("Hide") {
-                    Task { await updateMemberState(companion, patch: .init(hidden: true)) }
-                }
+            }
+            if companion.access.canDeleteCompanion {
+                Button("Duplicate") { Task { await duplicate(companion) } }
             }
             if canRequestDeletion(of: companion), !busy {
                 Button("Delete") { companionToDelete = companion }
@@ -349,40 +416,20 @@ struct CompanionListView: View {
 
     @ViewBuilder
     private func companionContextMenu(for companion: CompanionSummary, busy: Bool) -> some View {
-        Button("Settings", systemImage: "gearshape") {
-            path.append(.settings(companion.id))
-        }
-
-        if companion.hidden {
-            Button("Unhide", systemImage: "eye") {
-                Task { await updateMemberState(companion, patch: .init(hidden: false)) }
-            }
-            .disabled(busy)
-        } else {
-            Button(companion.pinned ? "Unpin" : "Pin", systemImage: companion.pinned ? "pin.slash" : "pin") {
-                Task { await updateMemberState(companion, patch: .init(pinned: !companion.pinned)) }
-            }
-            .disabled(busy)
-
-            if !companion.unread {
-                Button("Mark as unread", systemImage: "envelope.badge") {
-                    Task { await updateMemberState(companion, patch: .init(unread: true)) }
-                }
-                .disabled(busy)
-            }
-
-            if companion.access.canDeleteCompanion {
-                Button("Duplicate", systemImage: "plus.square.on.square") {
-                    Task { await duplicate(companion) }
-                }
-                .disabled(busy)
-            }
-
-            Button("Hide", systemImage: "eye.slash") {
-                Task { await updateMemberState(companion, patch: .init(hidden: true)) }
+        if companion.access.canDeleteCompanion {
+            Button("Duplicate", systemImage: "plus.square.on.square") {
+                Task { await duplicate(companion) }
             }
             .disabled(busy)
         }
+
+        Button("Edit character", systemImage: "paintpalette") {
+            path.append(.identity(companion.id))
+        }
+        .disabled(companion.access == .viewer || busy)
+
+        Button("Move to", systemImage: "folder") { companionToMove = companion }
+            .disabled(!companion.access.canDeleteCompanion || busy)
 
         if companion.access.canDeleteCompanion {
             Divider()
@@ -407,13 +454,25 @@ struct CompanionListView: View {
         if !silently { loading = true }
         do {
             let next: [CompanionSummary]
+            let nextSections: [CompanionSection]
             if let services {
                 next = try await services.listCompanions()
+                do {
+                    nextSections = try await services.listSections()
+                } catch {
+                    nextSections = try CompanionSectionCompatibility.fallback(for: error)
+                }
             } else {
                 next = try await sessionStore.listCompanions()
+                do {
+                    nextSections = try await sessionStore.listCompanionSections()
+                } catch {
+                    nextSections = try CompanionSectionCompatibility.fallback(for: error)
+                }
             }
             guard generation == reloadGeneration else { return }
             rosterState.reconcile(with: next)
+            sectionStore.reconcile(with: nextSections)
             let nextIDs = Set(next.map(\.id))
             let reconciledDeletionIDs = Set(next.compactMap { companion in
                 companion.deletionOperation == nil ? nil : companion.id
@@ -479,6 +538,8 @@ struct CompanionListView: View {
                     onDeletionAccepted: deletionAccepted,
                     onDeletionFailed: deletionFailed
                 )
+            case .identity:
+                CompanionIdentityEditorView(companion: companion, onSaved: replace)
             }
         } else {
             ContentUnavailableView(
@@ -543,6 +604,7 @@ struct CompanionListView: View {
             withRosterAnimation { rosterState.prepend(duplicate) }
             rosterNotice = "\(duplicate.name) created."
             AccessibilityNotification.Announcement("\(duplicate.name) created.").post()
+            path = [.identity(duplicate.id)]
             await reload(silently: true)
         } catch {
             rosterActionError = companionDisplayMessage(
@@ -562,8 +624,69 @@ struct CompanionListView: View {
         if let pinned = patch.pinned {
             return pinned ? "\(companion.name) pinned." : "\(companion.name) unpinned."
         }
+        if let muted = patch.muted {
+            return muted ? "\(companion.name) muted." : "\(companion.name) unmuted."
+        }
         if patch.unread == true { return "\(companion.name) marked as unread." }
         return "\(companion.name) updated."
+    }
+
+    private func move(_ companion: CompanionSummary, to sectionID: String?) async {
+        companionToMove = nil
+        do {
+            let updated: CompanionSummary
+            if let services {
+                updated = try await services.assignSection(companion.id, sectionID)
+            } else {
+                updated = try await sessionStore.assignCompanionSection(
+                    companionID: companion.id,
+                    sectionID: sectionID
+                )
+            }
+            rosterState.replace(updated)
+            let sectionName = sectionID.flatMap { id in
+                sectionStore.sections.first(where: { $0.id == id })?.name
+            }
+            rosterNotice = sectionName.map { "\(companion.name) moved to \($0)." }
+                ?? "\(companion.name) moved to Unassigned."
+        } catch {
+            rosterActionError = companionDisplayMessage(error, fallback: "This Companion could not be moved.")
+        }
+    }
+
+    private func createSectionAndMove() async {
+        guard let companion = pendingNewSectionCompanion else { return }
+        pendingNewSectionCompanion = nil
+        let name = newSectionName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        do {
+            let section: CompanionSection
+            if let services {
+                section = try await services.createSection(name)
+            } else {
+                section = try await sessionStore.createCompanionSection(name: name)
+            }
+            sectionStore.reconcile(with: sectionStore.sections + [section])
+            await move(companion, to: section.id)
+        } catch {
+            rosterActionError = companionDisplayMessage(error, fallback: "The section could not be created.")
+        }
+    }
+
+    private func deleteSection(_ section: CompanionSection) async {
+        sectionToDelete = nil
+        do {
+            if let services {
+                try await services.deleteSection(section.id)
+            } else {
+                try await sessionStore.deleteCompanionSection(sectionID: section.id)
+            }
+            sectionStore.remove(sectionID: section.id)
+            await reload(silently: true)
+            rosterNotice = "\(section.name) deleted. Its Companions are Unassigned."
+        } catch {
+            rosterActionError = companionDisplayMessage(error, fallback: "The section could not be deleted.")
+        }
     }
 
     private func withRosterAnimation(_ updates: () -> Void) {
@@ -728,6 +851,46 @@ struct CompanionListView: View {
     }
 }
 
+private struct AccountAvatar: View {
+    @Environment(SessionStore.self) private var sessionStore
+    let user: Session.User
+    @State private var image: UIImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Circle()
+                    .fill(Color(.secondarySystemBackground))
+                    .overlay {
+                        Text(initials)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(Color.primary)
+                    }
+            }
+        }
+        .frame(width: 44, height: 44)
+        .clipShape(Circle())
+        .overlay { Circle().stroke(CompanionIOSTheme.separator, lineWidth: 1) }
+        .task(id: user.avatarURL) {
+            guard let avatarURL = user.avatarURL,
+                  let data = try? await sessionStore.userAvatarData(at: avatarURL),
+                  let loaded = UIImage(data: data) else { return }
+            image = loaded
+        }
+    }
+
+    private var initials: String {
+        let source = user.name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = (source?.isEmpty == false ? source! : user.email)
+            .split(whereSeparator: { $0 == " " || $0 == "@" || $0 == "." })
+        return parts.prefix(2).compactMap(\.first).map(String.init).joined().uppercased()
+    }
+}
+
 #if DEBUG
 struct CompanionRosterDemoView: View {
     @State private var demoState = CompanionRosterDemoState()
@@ -746,6 +909,10 @@ struct CompanionRosterDemoView: View {
                 listCompanions: {
                     [CompanionRosterDemoFixtures.companion(access: access)]
                 },
+                listSections: { [CompanionRosterDemoFixtures.section] },
+                createSection: { _ in CompanionRosterDemoFixtures.section },
+                deleteSection: { _ in },
+                assignSection: { _, _ in CompanionRosterDemoFixtures.companion(access: access) },
                 deleteCompanion: { companionID, requestID in
                     try demoState.delete(companionID: companionID, requestID: requestID)
                 },
@@ -791,6 +958,18 @@ private final class CompanionRosterDemoState {
 @MainActor
 private enum CompanionRosterDemoFixtures {
     static let companionID = "c96ab360-00f3-4497-a51a-51442db8add1"
+
+    static let section: CompanionSection = decode(#"""
+    {
+      "id":"1c6759e2-58d2-4b0e-8f99-6cd73175f85a",
+      "org_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "owner_id":"demo-user",
+      "name":"Favorites",
+      "position":0,
+      "created_at":"2026-08-27T00:00:00Z",
+      "updated_at":"2026-08-27T00:00:00Z"
+    }
+    """#)
 
     static let session = Session(
         cookie: "demo-session",
@@ -855,10 +1034,11 @@ private extension View {
 private enum CompanionRoute: Hashable {
     case chat(String)
     case settings(String)
+    case identity(String)
 
     var companionID: String {
         switch self {
-        case .chat(let id), .settings(let id): return id
+        case .chat(let id), .settings(let id), .identity(let id): return id
         }
     }
 }
@@ -868,49 +1048,38 @@ private struct CompanionRow: View {
     let deletionOperation: CompanionOperationSummary?
 
     var body: some View {
-        HStack(spacing: 14) {
-            ZStack(alignment: .bottomTrailing) {
-                CompanionAvatar(
-                    name: companion.name,
-                    icon: companion.icon,
-                    size: 52,
-                    state: companion.runtime.replying ? .thinking : .idle
-                )
-                Circle()
-                    .fill(statusColor)
-                    .frame(width: 13, height: 13)
-                    .overlay { Circle().stroke(Color.white.opacity(0.92), lineWidth: 2) }
-            }
+        HStack(spacing: 12) {
+            CharacterMark(name: companion.name, icon: companion.icon, size: 36)
 
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(companion.name)
-                        .font(.headline)
-                        .foregroundStyle(Color.companionInk)
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(CompanionIOSTheme.textPrimary)
                         .lineLimit(1)
                     Spacer(minLength: 8)
                     Text(timeLabel)
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(Color.companionMuted)
+                        .font(.system(size: 13))
+                        .foregroundStyle(CompanionIOSTheme.textSecondary)
                 }
 
                 HStack(alignment: .center, spacing: 8) {
                     Text(preview)
-                        .font(.subheadline)
-                        .foregroundStyle(companion.unread ? Color.companionInk : Color.companionMuted)
-                        .fontWeight(companion.unread ? .medium : .regular)
-                        .lineLimit(2)
+                        .font(.system(size: 15))
+                        .foregroundStyle(CompanionIOSTheme.textSecondary)
+                        .lineLimit(1)
                     Spacer(minLength: 4)
                     if companion.unread {
-                        CompanionUnreadBadge(count: 1, tint: visualTheme.accent)
+                        Circle()
+                            .fill(CompanionIOSTheme.actionBlue)
+                            .frame(width: 6, height: 6)
+                            .accessibilityLabel("Unread")
                     }
                 }
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 13)
-        .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .companionGlass(radius: 22, interactive: true)
+        .padding(.vertical, 6)
+        .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(companion.name), \(statusLabel), \(preview)\(companion.unread ? ", unread" : "")")
     }
@@ -952,10 +1121,26 @@ private struct CompanionRow: View {
 
     private var timeLabel: String {
         guard let value = companion.lastMessage?.createdAt,
-              let date = ISO8601DateFormatter().date(from: value) else { return statusLabel.capitalized }
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .short
-        return formatter.localizedString(for: date, relativeTo: .now)
+              let date = Self.parseDate(value) else { return "" }
+        let calendar = Calendar.current
+        if calendar.isDateInToday(date) {
+            return date.formatted(date: .omitted, time: .shortened)
+        }
+        if calendar.isDateInYesterday(date) { return "Yesterday" }
+        if let days = calendar.dateComponents(
+            [.day],
+            from: calendar.startOfDay(for: date),
+            to: calendar.startOfDay(for: .now)
+        ).day, days >= 0, days < 7 {
+            return date.formatted(.dateTime.weekday(.wide))
+        }
+        return date.formatted(.dateTime.month(.defaultDigits).day())
+    }
+
+    private static func parseDate(_ value: String) -> Date? {
+        let precise = ISO8601DateFormatter()
+        precise.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return precise.date(from: value) ?? ISO8601DateFormatter().date(from: value)
     }
 }
 

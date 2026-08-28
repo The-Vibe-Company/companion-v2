@@ -22,6 +22,7 @@ const OPERATION_ID = "55555555-5555-4555-8555-555555555555";
 const ORG_ID = "66666666-6666-4666-8666-666666666666";
 const INSTALLATION_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const TRIGGER_ID = "99999999-9999-4999-8999-999999999999";
+const SECTION_ID = "77777777-7777-4777-8777-777777777777";
 const TRIGGER_SECRET = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const NOW = "2026-08-17T00:00:00.000Z";
 
@@ -74,6 +75,12 @@ const coreMocks = {
   issueCompanionMcpAccessToken: vi.fn<typeof coreModule.issueCompanionMcpAccessToken>(),
   registerCompanionNotificationDevice: vi.fn<typeof coreModule.registerCompanionNotificationDevice>(),
   unregisterCompanionNotificationDevice: vi.fn<typeof coreModule.unregisterCompanionNotificationDevice>(),
+  listCompanionSections: vi.fn<typeof coreModule.listCompanionSections>(),
+  createCompanionSection: vi.fn<typeof coreModule.createCompanionSection>(),
+  updateCompanionSection: vi.fn<typeof coreModule.updateCompanionSection>(),
+  deleteCompanionSection: vi.fn<typeof coreModule.deleteCompanionSection>(),
+  reorderCompanionSections: vi.fn<typeof coreModule.reorderCompanionSections>(),
+  assignCompanionSection: vi.fn<typeof coreModule.assignCompanionSection>(),
 };
 
 const desktopMocks = {
@@ -116,6 +123,7 @@ const companion = {
   access: "owner" as const,
   pinned: false,
   hidden: false,
+  muted: false,
   unread: false,
   last_message: null,
   runtime: {
@@ -138,6 +146,16 @@ const companion = {
     last_stopped_at: null,
     latest_operation: null,
   },
+  created_at: NOW,
+  updated_at: NOW,
+};
+
+const section = {
+  id: SECTION_ID,
+  org_id: ORG_ID,
+  owner_id: owner.id,
+  name: "Work",
+  position: 0,
   created_at: NOW,
   updated_at: NOW,
 };
@@ -291,6 +309,12 @@ describe("Companions Runtime v2 API", () => {
       return Response.json({ ok: false, error: message }, { status });
     });
     coreMocks.listCompanionsV2.mockResolvedValue([companion]);
+    coreMocks.listCompanionSections.mockResolvedValue([section]);
+    coreMocks.createCompanionSection.mockResolvedValue(section);
+    coreMocks.updateCompanionSection.mockResolvedValue(section);
+    coreMocks.deleteCompanionSection.mockResolvedValue(2);
+    coreMocks.reorderCompanionSections.mockResolvedValue([section]);
+    coreMocks.assignCompanionSection.mockResolvedValue({ ...companion, section_id: SECTION_ID });
     coreMocks.getCompanionV2.mockResolvedValue(companion);
     coreMocks.readCompanionThreadV2.mockResolvedValue(thread);
     coreMocks.createCompanionV2.mockResolvedValue(companion);
@@ -385,6 +409,49 @@ describe("Companions Runtime v2 API", () => {
       orgId: ORG_ID,
       installationId: INSTALLATION_ID,
     }));
+  });
+
+  it("routes section CRUD, exact reorder, and Companion assignment through tenant capabilities", async () => {
+    const app = appWithRoutes();
+    const listed = await app.request("/v1/companion-sections");
+    expect(listed.status).toBe(200);
+    expect(await listed.json()).toEqual({ sections: [section] });
+
+    const created = await app.request(jsonPost("/v1/companion-sections", { name: "Work" }));
+    expect(created.status).toBe(201);
+    expect(coreMocks.createCompanionSection).toHaveBeenCalledWith(expect.objectContaining({
+      orgId: ORG_ID,
+      name: "Work",
+    }));
+
+    const reordered = await app.request(jsonPut("/v1/companion-sections/reorder", {
+      section_ids: [SECTION_ID],
+    }));
+    expect(reordered.status).toBe(200);
+    expect(coreMocks.reorderCompanionSections).toHaveBeenCalledWith(expect.objectContaining({
+      sectionIds: [SECTION_ID],
+    }));
+
+    const assigned = await app.request(jsonPut(`/v1/companions/${COMPANION_ID}/section`, {
+      section_id: SECTION_ID,
+    }));
+    expect(assigned.status).toBe(200);
+    expect(coreMocks.assignCompanionSection).toHaveBeenCalledWith(expect.objectContaining({
+      companionId: COMPANION_ID,
+      sectionId: SECTION_ID,
+    }));
+
+    const deleted = await app.request(`/v1/companion-sections/${SECTION_ID}`, { method: "DELETE" });
+    expect(deleted.status).toBe(200);
+    expect(await deleted.json()).toEqual({ ok: true, unassigned_count: 2 });
+  });
+
+  it("rejects malformed and duplicate section reorder ids before database access", async () => {
+    const response = await appWithRoutes().request(jsonPut("/v1/companion-sections/reorder", {
+      section_ids: [SECTION_ID, SECTION_ID],
+    }));
+    expect(response.status).toBe(400);
+    expect(coreMocks.reorderCompanionSections).not.toHaveBeenCalled();
   });
 
   it("rejects invalid tokens and mismatched APNs targets", async () => {
@@ -998,7 +1065,7 @@ describe("Companions Runtime v2 API", () => {
       app.request(`/v1/companions/${COMPANION_ID}/member-state`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ pinned: true }),
+        body: JSON.stringify({ muted: true }),
       }),
       app.request(`/v1/companions/${COMPANION_ID}/provider`, {
         method: "PUT",
@@ -1018,6 +1085,9 @@ describe("Companions Runtime v2 API", () => {
       patch: { persona: "Updated" },
     }));
     expect(coreMocks.updateCompanionMemberStateV2).toHaveBeenCalledOnce();
+    expect(coreMocks.updateCompanionMemberStateV2).toHaveBeenCalledWith(expect.objectContaining({
+      patch: { muted: true },
+    }));
     expect(coreMocks.setCompanionProviderV2).toHaveBeenCalledOnce();
     expect(coreMocks.setCompanionWorkspaceShareV2).toHaveBeenCalledOnce();
   });

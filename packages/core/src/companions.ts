@@ -313,9 +313,10 @@ export async function loadCompanionLastMessages(
 function toCompanion(
   row: CompanionRow,
   access: CompanionAccess,
-  member: { pinned: boolean; hidden: boolean; unread: boolean } = {
+  member: { pinned: boolean; hidden: boolean; muted: boolean; unread: boolean } = {
     pinned: false,
     hidden: false,
+    muted: false,
     unread: false,
   },
   lastMessage: CompanionLastMessage | null = null,
@@ -340,9 +341,11 @@ function toCompanion(
       ? row.selectedMcpAccountIds
       : [],
     owner_id: row.ownerId,
+    section_id: row.sectionId,
     access,
     pinned: member.pinned,
     hidden: member.hidden,
+    muted: member.muted,
     unread: member.unread,
     last_message: lastMessage,
     // Runtime v2 overlays this desired-state-only projection with the authorized PostgreSQL
@@ -377,19 +380,21 @@ type MemberStateRow = {
   companionId: string;
   pinnedAt: Date | null;
   hidden: boolean;
+  muted: boolean;
   lastReadOrdinal: number | null;
 };
 
 function memberFlags(
   state: MemberStateRow | undefined,
   highestOrdinal: number | null,
-): { pinned: boolean; hidden: boolean; unread: boolean } {
+): { pinned: boolean; hidden: boolean; muted: boolean; unread: boolean } {
   const lastRead = state?.lastReadOrdinal ?? -1;
   const highest = highestOrdinal ?? -1;
   // oxlint-disable-next-line anti-slop/no-known-value-widening -- legacy pattern predating the incremental anti-slop gate
   return {
     pinned: state?.pinnedAt != null,
     hidden: state?.hidden === true,
+    muted: state?.muted === true,
     unread: highest > lastRead,
   };
 }
@@ -424,6 +429,7 @@ async function loadMemberStates(
       companionId: schema.companionMemberState.companionId,
       pinnedAt: schema.companionMemberState.pinnedAt,
       hidden: schema.companionMemberState.hidden,
+      muted: schema.companionMemberState.muted,
       lastReadOrdinal: schema.companionMemberState.lastReadOrdinal,
     })
     .from(schema.companionMemberState)
