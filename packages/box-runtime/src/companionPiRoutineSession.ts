@@ -14,6 +14,12 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3
 export interface CompanionPiRoutineSessionPaths {
   runId: string;
   root: string;
+  /** A sibling advisory-lock file shared by start, launch, and terminate commands. */
+  lock: string;
+  /** A sibling cancellation tombstone that survives removal of the run root. */
+  cancelMarker: string;
+  /** Reservation written during prepare and required verbatim by the later launch command. */
+  reservation: string;
   socket: string;
   journal: string;
   dispatchLedger: string;
@@ -35,6 +41,9 @@ export function companionPiRoutineSessionPaths(runId: string): CompanionPiRoutin
   return {
     runId: normalizedRunId,
     root,
+    lock: `${COMPANION_PI_ROUTINE_ROOT_PATH}/${normalizedRunId}.lock`,
+    cancelMarker: `${COMPANION_PI_ROUTINE_ROOT_PATH}/${normalizedRunId}.cancelled`,
+    reservation: `${root}/state/invocation-reservation`,
     socket: `${root}/state/pi-broker.sock`,
     journal: `${root}/events`,
     dispatchLedger: `${root}/state/dispatch-ledger.json`,

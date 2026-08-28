@@ -564,7 +564,13 @@ function signalProcessGroup(processGroupId: number | undefined, signal: NodeJS.S
     process.kill(-processGroupId, signal);
   } catch (error) {
     const parsed = errnoSchema.safeParse(error);
-    if (!parsed.success || parsed.data.code !== "ESRCH") throw error;
+    // macOS returns EPERM when the detached group contains only its already-dead zombie leader;
+    // there is no signalable descendant left, which is equivalent to ESRCH for fixture cleanup.
+    const alreadyStopped = parsed.success && (
+      parsed.data.code === "ESRCH"
+      || (process.platform === "darwin" && parsed.data.code === "EPERM")
+    );
+    if (!alreadyStopped) throw error;
   }
 }
 

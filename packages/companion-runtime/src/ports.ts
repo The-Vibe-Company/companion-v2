@@ -112,6 +112,8 @@ export interface RuntimePiRoutineSessionControl {
     runId: string;
     /** Owner persona used by box-runtime to compose the run-only operating brief. */
     persona: string | null;
+    /** Invocation identity persisted in dispatch_write_intent before this run root is launched. */
+    expectedInvocationId: string;
     signal: AbortSignal;
   }): Promise<{ state: "idle"; invocationId: string }>;
   state(input: {
@@ -158,6 +160,8 @@ export interface RuntimePiRoutineSessionControl {
   terminate(input: {
     boxId: string;
     runId: string;
+    /** Cancellation identity used to avoid terminating a newer retry on the same run path. */
+    expectedInvocationId: string;
     signal: AbortSignal;
   }): Promise<void>;
 }

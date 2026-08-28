@@ -967,6 +967,13 @@
       "when": 1791652000000,
       "tag": "0137_companion_routine_isolation",
       "breakpoints": true
+    },
+    {
+      "idx": 138,
+      "version": "7",
+      "when": 1791738400000,
+      "tag": "0138_companion_routine_cancel_identity",
+      "breakpoints": true
     }
   ]
 }

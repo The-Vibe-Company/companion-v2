@@ -201,6 +201,11 @@ protocol-1 replicas during the OAuth-gateway rollout. The current claimer takes 
 `restart_pi`, settings operation, or implicit settings claim to its staging boundary whenever the
 new staged-expiry ledger is absent. The takeover therefore restages and recycles Pi once instead of
 publishing an expiry for an old invocation or synthesizing start operations indefinitely.
+Migration 0138 advances the same protocol to version 3. Runtime stages the routine prompt inputs,
+persists a `dispatch-v2` invocation reservation, and only then starts the isolated broker. The Box
+start and terminate commands share a run-scoped advisory lock, exact reservation, and cancellation
+tombstone, so a takeover can adopt the same broker while an old queued launch cannot appear after a
+proven termination. Protocol-2 replicas receive no new claims during this rollout.
 
 The golden runtime image precompiles Jiti's source-hashed Pi extension cache under the Companion's
 persistent `~/.companion/runtime/tmp`; `/tmp` is not used because Box discards it on archive. Pi
@@ -492,7 +497,9 @@ queued follow-up, an interrupted turn, or an active turn that has not yet writte
 settles `cancelled` immediately. An active turn that may already be on Pi records
 `cancel_requested_at` and stays active until the executor that holds the lease aborts Pi and
 settles; remaining queued turns then run. Cancel does not claim that prior effects were rolled
-back.
+back. For an isolated routine, the cancellation denial preserves only the attempt-bound Pi
+invocation needed by runtime to abort and terminate that run-scoped process across lease takeover;
+the main Companion Pi identity is never used as a routine-session fallback.
 
 ## Decisions and deadlines
 
@@ -632,6 +639,12 @@ launches the same Pi binary with the same tools and configuration in a run-scope
 The main Pi session remains idle and receives neither the routine prompt nor its private transcript.
 This is session isolation inside the one Companion runtime, not a second harness, Box, or concurrent
 runtime owner.
+
+The isolated invocation is pinned separately from the main Pi identity at dispatch write intent.
+Runtime validates that pinned value for broker reads, durable projection, terminal acknowledgement,
+and explicit cancellation. If preparation fails before a prompt can have reached Pi, runtime
+terminates the run-scoped process; once dispatch may be ambiguous, it preserves the fail-closed
+Retry/Cancel boundary instead of guessing or replaying.
 
 Before Box contact, each run also pins the content-addressed main-conversation background specified
 in [Routine Pi context substrate](routine-pi-context-substrate.md). The latest valid main-Pi

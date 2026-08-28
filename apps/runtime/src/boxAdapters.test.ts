@@ -712,9 +712,10 @@ describe("runtime Box/Pi port adapters", () => {
 
   it("addresses every routine Pi operation by run id and exposes terminal teardown", async () => {
     const runId = "11111111-1111-4111-8111-111111111111";
-    const startRoutineSession = vi.fn(async () => ({ state: "idle" as const, invocationId: "routine:invocation" }));
+    const routineInvocationId = `routine:${runId}:dispatch-v2:invocation`;
+    const startRoutineSession = vi.fn(async () => ({ state: "idle" as const, invocationId: routineInvocationId }));
     const routineSessionState = vi.fn(async () => ({
-      invocationId: "routine:invocation",
+      invocationId: routineInvocationId,
       layoutMarker: "layout-current",
       activeAttemptId: null,
       tailCursor: 0,
@@ -732,7 +733,7 @@ describe("runtime Box/Pi port adapters", () => {
     const dispatchRoutinePrompt = vi.fn(async () => ({
       outcome: "accepted" as const,
       attemptId: "attempt-1",
-      invocationId: "routine:invocation",
+      invocationId: routineInvocationId,
       initialCursor: 0,
     }));
     const readRoutineEvents = vi.fn(async () => ({
@@ -742,7 +743,7 @@ describe("runtime Box/Pi port adapters", () => {
     const dispatchRoutineAbort = vi.fn(async () => ({
       outcome: "accepted" as const,
       attemptId: "attempt-1",
-      invocationId: "routine:invocation",
+      invocationId: routineInvocationId,
     }));
     const terminateRoutineSession = vi.fn(async () => undefined);
     const pi = createRuntimePiControl({
@@ -764,19 +765,20 @@ describe("runtime Box/Pi port adapters", () => {
       boxId: "bx_23456789",
       runId,
       persona: "Routine persona",
+      expectedInvocationId: routineInvocationId,
       signal,
     })).resolves.toEqual({
       state: "idle",
-      invocationId: "routine:invocation",
+      invocationId: routineInvocationId,
     });
     await expect(routine!.state({ boxId: "bx_23456789", runId, signal }))
-      .resolves.toMatchObject({ invocationId: "routine:invocation" });
+      .resolves.toMatchObject({ invocationId: routineInvocationId });
     await expect(routine!.prompt({
       boxId: "bx_23456789",
       runId,
       commandId: "command-1",
       attemptId: "attempt-1",
-      expectedInvocationId: "routine:invocation",
+      expectedInvocationId: routineInvocationId,
       message: "routine prompt",
       signal,
     })).resolves.toMatchObject({ outcome: "accepted", initialCursor: 0n });
@@ -786,12 +788,18 @@ describe("runtime Box/Pi port adapters", () => {
     await expect(routine!.abort({
       boxId: "bx_23456789", runId, commandId: "command-abort", attemptId: "attempt-1", signal,
     })).resolves.toMatchObject({ outcome: "accepted" });
-    await expect(routine!.terminate({ boxId: "bx_23456789", runId, signal })).resolves.toBeUndefined();
+    await expect(routine!.terminate({
+      boxId: "bx_23456789",
+      runId,
+      expectedInvocationId: routineInvocationId,
+      signal,
+    })).resolves.toBeUndefined();
 
     expect(startRoutineSession).toHaveBeenCalledWith({
       boxId: "bx_23456789",
       runId,
       persona: "Routine persona",
+      expectedInvocationId: routineInvocationId,
       signal,
     });
     expect(routineSessionState).toHaveBeenCalledWith({ boxId: "bx_23456789", runId, signal });
@@ -803,6 +811,11 @@ describe("runtime Box/Pi port adapters", () => {
     expect(dispatchRoutineAbort).toHaveBeenCalledWith(expect.objectContaining({
       boxId: "bx_23456789", runId, requestId: "command-abort", signal,
     }));
-    expect(terminateRoutineSession).toHaveBeenCalledWith({ boxId: "bx_23456789", runId, signal });
+    expect(terminateRoutineSession).toHaveBeenCalledWith({
+      boxId: "bx_23456789",
+      runId,
+      expectedInvocationId: routineInvocationId,
+      signal,
+    });
   });
 });

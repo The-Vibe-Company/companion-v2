@@ -15,7 +15,11 @@ import {
   validatePiJournalRead,
   type PiBrokerCounters,
 } from "./piEvents";
-import type { RuntimeEngineDependencies, StagedRuntimeAttachment } from "./ports";
+import type {
+  BrokerPromptWriteOutcome,
+  RuntimeEngineDependencies,
+  StagedRuntimeAttachment,
+} from "./ports";
 import type { RuntimeVisibleTextRedactor } from "./projectionRedaction";
 import { isCompanionAttachmentImage } from "@companion/contracts";
 import { retryIdempotentLifecycle } from "./retry";
@@ -319,13 +323,36 @@ function isolatedRoutinePrompt(
     + promptTextWithContext(material, attachments);
 }
 
-async function terminateRoutineSession(context: AttemptContext, runId: string): Promise<void> {
+async function terminateRoutineSession(
+  context: AttemptContext,
+  runId: string,
+  expectedInvocationId: string,
+): Promise<void> {
   await context.session.external(async (signal) =>
     await requiredRoutineSession(context).terminate({
       boxId: requiredRuntime(context).boxId,
       runId,
+      expectedInvocationId,
       signal,
     }));
+}
+
+function requiredRoutineInvocationId(authorizationValue: RuntimeAuthorization): string {
+  if (!authorizationValue.commandPiInvocationId) {
+    throw new RuntimeInvariantError({
+      code: "pi_event_binding_missing",
+      message: "The accepted routine Pi invocation or event cursor is unavailable.",
+      action: "retry",
+    });
+  }
+  return authorizationValue.commandPiInvocationId;
+}
+
+function isRoutineInvocationMismatch(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const value = error as { code?: unknown; stableCode?: unknown };
+  return value.code === "routine_session_invocation_mismatch"
+    || value.stableCode === "routine_session_invocation_mismatch";
 }
 
 async function ackRoutineEvents(
@@ -362,6 +389,7 @@ async function finishIsolatedDurableTerminal(
   runId: string,
   authorizationAtTerminal: RuntimeAuthorization,
 ): Promise<RuntimeWorkDisposition> {
+  const routineInvocationId = requiredRoutineInvocationId(authorizationAtTerminal);
   const terminal = await context.session.fencedMutation(async () =>
     await context.deps.store.getAttemptTerminalProjection(context.session.fence));
   if (
@@ -387,7 +415,7 @@ async function finishIsolatedDurableTerminal(
         runId,
         signal,
       }));
-    if (state.invocationId === authorizationAtTerminal.piInvocationId) {
+    if (state.invocationId === routineInvocationId) {
       await ackRoutineEvents(context, runId, terminal.eventCursor);
     }
   } catch (error) {
@@ -399,7 +427,7 @@ async function finishIsolatedDurableTerminal(
       attemptId: context.claim.workId,
     });
   }
-  await terminateRoutineSession(context, runId);
+  await terminateRoutineSession(context, runId, routineInvocationId);
   return terminal.checkpoint === "process_exited"
     ? {
       kind: "settle",
@@ -426,13 +454,14 @@ async function consumeIsolatedRoutine(
   const routine = requiredRoutineSession(context);
   for (;;) {
     const auth = await context.session.reauthorize();
-    if (!auth.piInvocationId || auth.eventCursor === null) {
+    if (auth.eventCursor === null) {
       throw new RuntimeInvariantError({
         code: "pi_event_binding_missing",
         message: "The accepted routine Pi invocation or event cursor is unavailable.",
         action: "retry",
       });
     }
+    const routineInvocationId = requiredRoutineInvocationId(auth);
     if (auth.workCheckpoint === "agent_settled" || auth.workCheckpoint === "process_exited") {
       return await finishIsolatedDurableTerminal(context, runId, auth);
     }
@@ -440,7 +469,7 @@ async function consumeIsolatedRoutine(
     const state = await context.session.external(async (signal) =>
       await routine.state({ boxId: requiredRuntime(context).boxId, runId, signal }));
     validateBrokerCounters(state.counters);
-    if (state.invocationId !== auth.piInvocationId) {
+    if (state.invocationId !== routineInvocationId) {
       throw new RuntimeInvariantError({
         code: "pi_invocation_changed",
         message: "The routine Pi session changed while the run was active.",
@@ -465,7 +494,7 @@ async function consumeIsolatedRoutine(
       value: raw,
       after: auth.eventCursor,
       attemptId: context.claim.workId,
-      invocationId: auth.piInvocationId,
+      invocationId: routineInvocationId,
     });
     if (page.nextCursor === auth.eventCursor) {
       const pollInterval = context.deps.eventPollIntervalMs;
@@ -488,7 +517,7 @@ async function consumeIsolatedRoutine(
         store: context.deps.store,
         fence: context.session.fence,
         expectedSequence,
-        piInvocationId: auth.piInvocationId!,
+        piInvocationId: routineInvocationId,
         projections: classified.projections,
         throughCursor: classified.throughCursor,
         ...(classified.activity ? { activityAt: context.deps.clock.now() } : {}),
@@ -513,7 +542,7 @@ async function consumeIsolatedRoutine(
     // Commit the return and its main-thread effects before acknowledging the private broker page.
     await ackRoutineEvents(context, runId, classified.throughCursor);
     if (projected.routineReturned) {
-      await terminateRoutineSession(context, runId);
+      await terminateRoutineSession(context, runId, routineInvocationId);
       return runtimeSucceeded;
     }
     if (classified.processExit || classified.settled) continue;
@@ -541,6 +570,65 @@ async function consumeAcceptedIsolatedRoutine(
       },
     };
   }
+}
+
+function rejectedRoutineDisposition(): RuntimeWorkDisposition {
+  return {
+    kind: "settle",
+    settlement: {
+      terminalStatus: "failed",
+      error: safeRuntimeError({
+        code: "pi_prompt_rejected",
+        message: "The routine Pi session rejected the prompt before accepting it.",
+        action: "retry",
+      }),
+    },
+  };
+}
+
+async function interruptAmbiguousRoutine(
+  context: AttemptContext,
+  commandId: string,
+): Promise<never> {
+  await checkpointDispatchAmbiguous(context, commandId);
+  throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
+}
+
+/** Prove the run stopped before marking a write intent as a definite non-acceptance. */
+async function terminateAndRejectRoutine(
+  context: AttemptContext,
+  runId: string,
+  invocationId: string,
+  commandId: string,
+): Promise<void> {
+  try {
+    await terminateRoutineSession(context, runId, invocationId);
+  } catch (error) {
+    if (mustAbandonRuntimeExecution(error)) throw error;
+    context.deps.log?.warn({
+      ts: context.deps.clock.now().toISOString(),
+      event: "runtime.routine_session.pre_accept_cleanup_failed",
+      companionId: context.claim.companionId,
+      attemptId: context.claim.workId,
+    });
+    await interruptAmbiguousRoutine(context, commandId);
+  }
+  await checkpointDispatchRejected(context, commandId);
+}
+
+/** A rejected checkpoint already proves no prompt acceptance; only process cleanup remains. */
+async function settleRejectedRoutine(
+  context: AttemptContext,
+  runId: string,
+  invocationId: string,
+): Promise<RuntimeWorkDisposition> {
+  try {
+    await terminateRoutineSession(context, runId, invocationId);
+  } catch (error) {
+    if (mustAbandonRuntimeExecution(error)) throw error;
+    throw new AmbiguousExternalEffectError("routine_termination_ambiguous");
+  }
+  return rejectedRoutineDisposition();
 }
 
 async function handleIsolatedRoutineAttempt(
@@ -583,13 +671,112 @@ async function handleIsolatedRoutineAttempt(
   ) {
     return await consumeAcceptedIsolatedRoutine(context, materialValue, redact);
   }
-  const started = await context.session.external(async (signal) =>
-    await routine.start({
-      boxId: runtime.boxId,
+  if (
+    authorizationBeforeStart.workCheckpoint === "dispatch_accepted"
+    || authorizationBeforeStart.workCheckpoint === "running"
+    || authorizationBeforeStart.workCheckpoint === "event_projected"
+    || authorizationBeforeStart.workCheckpoint === "needs_input"
+  ) {
+    // A takeover must observe the existing run-scoped broker; it must never launch a replacement
+    // process for an already accepted attempt.
+    return await consumeAcceptedIsolatedRoutine(context, materialValue, redact);
+  }
+  if (authorizationBeforeStart.workCheckpoint === "dispatch_ambiguous") {
+    throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
+  }
+  if (authorizationBeforeStart.workCheckpoint === "dispatch_rejected") {
+    return await settleRejectedRoutine(
+      context,
       runId,
-      persona: authorization(context).persona,
-      signal,
-    }));
+      requiredRoutineInvocationId(authorizationBeforeStart),
+    );
+  }
+  if (
+    authorizationBeforeStart.workCheckpoint !== "starting"
+    && authorizationBeforeStart.workCheckpoint !== "dispatch_write_intent"
+  ) {
+    throw new RuntimeInvariantError({
+      code: "attempt_checkpoint_invalid",
+      message: "The routine attempt reached an unsupported checkpoint.",
+      action: "none",
+    });
+  }
+  const reservedFromStarting = authorizationBeforeStart.workCheckpoint === "starting";
+  const recoveringWrite = authorizationBeforeStart.workCheckpoint === "dispatch_write_intent";
+  const commandId = recoveringWrite
+    ? authorizationBeforeStart.commandId
+    : reservedFromStarting ? context.deps.idFactory.uuid() : null;
+  const routineInvocationId = recoveringWrite
+    ? authorizationBeforeStart.commandPiInvocationId
+    : commandId ? `routine:${runId}:dispatch-v2:${commandId}` : null;
+  // Protocol-v3 write intents carry the reservation format introduced with dispatch-v2. They may
+  // safely re-enter Box start with the exact persisted identity: Box's reservation/ledger makes a
+  // same-id start an idempotent resolver. Legacy write intents are state-only and must never launch
+  // a broker whose original start cannot be proven.
+  const recoverableVersionedWrite = recoveringWrite
+    && routineInvocationId !== null
+    && routineInvocationId.startsWith(`routine:${runId}:dispatch-v2:`);
+  const launchReserved = reservedFromStarting || recoverableVersionedWrite;
+
+  // Stage files and compose the exact prompt before creating the run root. The write intent is the
+  // durable handoff that makes a cancellation during start observable to the executor and takeover.
+  if (!commandId || !routineInvocationId) {
+    // A persisted write intent without its command identity is already ambiguous. Do not contact
+    // Box from this executor; an explicit retry/cancel remains the only safe resolution.
+    throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
+  }
+  const staged = recoveringWrite
+    ? stagedAttachmentProjection(materialValue)
+    : await stageAttachments(context, materialValue);
+  let promptText: string;
+  try {
+    promptText = isolatedRoutinePrompt(materialValue, staged);
+  } catch (error) {
+    if (recoveringWrite) await interruptAmbiguousRoutine(context, commandId);
+    throw error;
+  }
+  if (reservedFromStarting) {
+    await context.session.checkpoint({
+      nextCheckpoint: "dispatch_write_intent",
+      commandId,
+      piInvocationId: routineInvocationId,
+    });
+  }
+
+  // The isolated broker is launched only after its command and invocation identity are durable.
+  // This lets the cancellation denial route below stop a run that is still starting, while a
+  // generic fence/handoff still abandons without contacting Box.
+  if (launchReserved) {
+    let started: Awaited<ReturnType<typeof routine.start>>;
+    try {
+      started = await context.session.external(async (signal) =>
+        await routine.start({
+          boxId: runtime.boxId,
+          runId,
+          persona: authorization(context).persona,
+          expectedInvocationId: routineInvocationId,
+          signal,
+        }));
+    } catch (error) {
+      if (mustAbandonRuntimeExecution(error)) throw error;
+      // A takeover may be reconciling a prompt that reached an earlier broker. It never tears that
+      // root down merely because start could not prove its state. The executor that created this
+      // reservation knows no prompt call preceded start and can close it after exact termination.
+      if (!reservedFromStarting || isRoutineInvocationMismatch(error)) {
+        await interruptAmbiguousRoutine(context, commandId);
+      }
+      await terminateAndRejectRoutine(
+        context,
+        runId,
+        routineInvocationId,
+        commandId,
+      );
+      throw error;
+    }
+    if (started.invocationId !== routineInvocationId) {
+      await interruptAmbiguousRoutine(context, commandId);
+    }
+  }
 
   for (;;) {
     const auth = await context.session.reauthorize();
@@ -605,20 +792,13 @@ async function handleIsolatedRoutineAttempt(
       throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
     }
     if (auth.workCheckpoint === "dispatch_rejected") {
-      await terminateRoutineSession(context, runId);
-      return {
-        kind: "settle",
-        settlement: {
-          terminalStatus: "failed",
-          error: safeRuntimeError({
-            code: "pi_prompt_rejected",
-            message: "The routine Pi session rejected the prompt before accepting it.",
-            action: "retry",
-          }),
-        },
-      };
+      return await settleRejectedRoutine(
+        context,
+        runId,
+        requiredRoutineInvocationId(auth),
+      );
     }
-    if (auth.workCheckpoint !== "starting" && auth.workCheckpoint !== "dispatch_write_intent") {
+    if (auth.workCheckpoint !== "dispatch_write_intent") {
       throw new RuntimeInvariantError({
         code: "attempt_checkpoint_invalid",
         message: "The routine attempt reached an unsupported checkpoint.",
@@ -626,69 +806,77 @@ async function handleIsolatedRoutineAttempt(
       });
     }
 
-    const state = await context.session.external(async (signal) =>
-      await routine.state({ boxId: runtime.boxId, runId, signal }));
-    const capabilities = modelInputCapabilities(state.modelInput);
-    requireModelInputCapability(capabilities, "text");
-    if (attachmentsIncludeImage(materialValue.attachments)) {
-      requireModelInputCapability(capabilities, "image");
-    }
-    const recoveringWrite = auth.workCheckpoint === "dispatch_write_intent";
-    if (
-      state.invocationId !== started.invocationId
-      || (recoveringWrite && auth.commandPiInvocationId !== state.invocationId)
-      || (!recoveringWrite && (
-        state.activeAttemptId !== null || state.tailCursor !== state.acknowledgedCursor
-      ))
-      || (recoveringWrite && state.activeAttemptId !== null
-        && state.activeAttemptId !== context.claim.workId)
-    ) {
-      throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
-    }
-    const staged = recoveringWrite
-      ? stagedAttachmentProjection(materialValue)
-      : await stageAttachments(context, materialValue);
-    const promptText = isolatedRoutinePrompt(materialValue, staged);
-    const commandId = recoveringWrite ? auth.commandId : context.deps.idFactory.uuid();
-    if (!commandId) throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
-    if (!recoveringWrite) {
-      await context.session.checkpoint({
-        nextCheckpoint: "dispatch_write_intent",
-        commandId,
-        piInvocationId: state.invocationId,
-      });
-    }
-    let outcome;
-    let providerCallStarted = false;
+    let state: Awaited<ReturnType<typeof routine.state>>;
     try {
-      outcome = await context.session.external(async (signal) => {
-        providerCallStarted = true;
-        return await routine.prompt({
-          boxId: runtime.boxId,
-          runId,
-          commandId,
-          attemptId: context.claim.workId,
-          expectedInvocationId: state.invocationId,
-          message: promptText,
-          signal,
-        });
-      });
+      state = await context.session.external(async (signal) =>
+        await routine.state({ boxId: runtime.boxId, runId, signal }));
     } catch (error) {
-      if (!providerCallStarted || mustAbandonRuntimeExecution(error)) throw error;
-      await checkpointDispatchAmbiguous(context, commandId);
-      throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
+      if (mustAbandonRuntimeExecution(error)) throw error;
+      if (!reservedFromStarting) await interruptAmbiguousRoutine(context, commandId);
+      await terminateAndRejectRoutine(context, runId, routineInvocationId, commandId);
+      throw error;
     }
+    if (state.invocationId !== routineInvocationId) {
+      await interruptAmbiguousRoutine(context, commandId);
+    }
+    const hasActiveAttempt = state.activeAttemptId !== null;
+    const hasUnacknowledgedEvents = state.tailCursor !== state.acknowledgedCursor;
+    const priorPromptEvidence = hasActiveAttempt || hasUnacknowledgedEvents;
+    if (hasActiveAttempt && state.activeAttemptId !== context.claim.workId) {
+      await interruptAmbiguousRoutine(context, commandId);
+    }
+    try {
+      const capabilities = modelInputCapabilities(state.modelInput);
+      requireModelInputCapability(capabilities, "text");
+      if (attachmentsIncludeImage(materialValue.attachments)) {
+        requireModelInputCapability(capabilities, "image");
+      }
+    } catch (error) {
+      if (!reservedFromStarting || priorPromptEvidence) {
+        await interruptAmbiguousRoutine(context, commandId);
+      }
+      await terminateAndRejectRoutine(context, runId, routineInvocationId, commandId);
+      throw error;
+    }
+    if (
+      auth.commandId !== commandId
+      || auth.commandPiInvocationId !== routineInvocationId
+    ) await interruptAmbiguousRoutine(context, commandId);
+
+    const outcome = await (async (): Promise<BrokerPromptWriteOutcome> => {
+      let providerCallStarted = false;
+      try {
+        return await context.session.external(async (signal) => {
+          providerCallStarted = true;
+          return await routine.prompt({
+            boxId: runtime.boxId,
+            runId,
+            commandId,
+            attemptId: context.claim.workId,
+            expectedInvocationId: state.invocationId,
+            message: promptText,
+            signal,
+          });
+        });
+      } catch (error) {
+        if (mustAbandonRuntimeExecution(error)) throw error;
+        if (!providerCallStarted && reservedFromStarting && !priorPromptEvidence) {
+          await terminateAndRejectRoutine(context, runId, routineInvocationId, commandId);
+          throw error;
+        }
+        return await interruptAmbiguousRoutine(context, commandId);
+      }
+    })();
     if (outcome.outcome === "ambiguous") {
-      await checkpointDispatchAmbiguous(context, commandId);
-      throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
+      return await interruptAmbiguousRoutine(context, commandId);
     }
     if (outcome.outcome === "rejected") {
-      await context.session.checkpoint({ nextCheckpoint: "dispatch_rejected", commandId });
-      continue;
+      if (priorPromptEvidence) await interruptAmbiguousRoutine(context, commandId);
+      await terminateAndRejectRoutine(context, runId, routineInvocationId, commandId);
+      return rejectedRoutineDisposition();
     }
     if (outcome.invocationId !== state.invocationId || outcome.initialCursor < state.tailCursor) {
-      await checkpointDispatchAmbiguous(context, commandId);
-      throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
+      await interruptAmbiguousRoutine(context, commandId);
     }
     const acceptedAt = context.deps.clock.now();
     await context.session.checkpoint({
@@ -1354,5 +1542,25 @@ async function checkpointDispatchAmbiguous(
     // The prompt may already be on Pi. If even the ambiguity checkpoint cannot be classified,
     // abandon this executor and let takeover inspect durable state; never settle it as replay-safe.
     throw new RuntimeStoreIndeterminateError();
+  }
+}
+
+/**
+ * Close a durable write intent only after runtime has proved that no prompt was accepted. A
+ * failed CAS/response is itself uncertain, so callers must surface interruption rather than leave
+ * PostgreSQL in `write_intent` and ask the settlement function to guess.
+ */
+async function checkpointDispatchRejected(
+  context: AttemptContext,
+  commandId: string,
+): Promise<void> {
+  try {
+    await context.session.checkpoint({
+      nextCheckpoint: "dispatch_rejected",
+      commandId,
+    });
+  } catch (error) {
+    if (mustAbandonRuntimeExecution(error)) throw error;
+    throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
   }
 }

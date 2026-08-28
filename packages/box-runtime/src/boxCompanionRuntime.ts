@@ -1041,6 +1041,8 @@ export interface CompanionBoxRuntimeV2 {
     runId: string;
     /** Owner persona used to compose the routine-only operating brief in the run root. */
     persona: string | null;
+    /** Durable invocation identity selected before runtime launches the run root. */
+    expectedInvocationId: string;
     signal?: AbortSignal;
   }): Promise<{ state: "idle"; invocationId: string }>;
   /** Read state from an isolated routine broker addressed by its durable run id. */
@@ -1086,6 +1088,8 @@ export interface CompanionBoxRuntimeV2 {
   terminateRoutineSession(input: {
     boxId: string;
     runId: string;
+    /** Exact attempt identity; legacy routine identities remain valid for rolling takeover. */
+    expectedInvocationId: string;
     signal?: AbortSignal;
   }): Promise<void>;
   /** Reset the provider's idle clock after Pi accepts one durable attempt. */
@@ -1131,6 +1135,71 @@ function routinePathsForRun(runId: string): CompanionPiRoutineSessionPaths {
   }
 }
 
+function validateRoutineInvocationId(
+  paths: CompanionPiRoutineSessionPaths,
+  invocationId: string,
+  requireDispatchV2: boolean,
+): string {
+  const prefix = `routine:${paths.runId}:`;
+  const versionedPrefix = `${prefix}dispatch-v2:`;
+  if (
+    invocationId.length < prefix.length + 1
+    || invocationId.length > 256
+    || !invocationId.startsWith(prefix)
+    || (requireDispatchV2 && !invocationId.startsWith(versionedPrefix))
+    || !/^[A-Za-z0-9._:-]+$/.test(invocationId)
+  ) {
+    throw new BoxRuntimeProviderError(
+      "Routine invocation id is invalid",
+      400,
+      "routine_invocation_id_invalid",
+      "routine_invocation_id_invalid",
+    );
+  }
+  return invocationId;
+}
+
+/**
+ * Shell shared by every run-root mutation. Box commands are separate HTTP requests, so a lock
+ * held by `prepare` cannot cover a later launch request. Each mutation acquires this sibling lock
+ * and checks the cancellation tombstone while holding it; that closes the window in which a
+ * cancellation could remove a prepared root and a racing launch could recreate the broker.
+ */
+function routineLockFunctions(paths: CompanionPiRoutineSessionPaths): string {
+  return `routine_lock="$HOME/${paths.lock}"
+routine_cancel_marker="$HOME/${paths.cancelMarker}"
+mkdir -p "$(dirname "$routine_lock")"
+chmod 700 "$(dirname "$routine_lock")"
+if ! command -v flock >/dev/null 2>&1; then
+  echo 'routine-pi-session lock provider is unavailable' >&2
+  exit 1
+fi
+exec 9>"$routine_lock"
+chmod 600 "$routine_lock"
+acquire_routine_lock() {
+  if ! flock -w 20 9; then
+    echo 'routine-pi-session lock could not be acquired' >&2
+    return 1
+  fi
+}
+`;
+}
+
+function routineCancelMarkerCheck(expectedInvocationId: string): string {
+  const expected = shellQuote(expectedInvocationId);
+  return `if [ -s "$routine_cancel_marker" ]; then
+  cancel_invocation="$(head -n 1 "$routine_cancel_marker" 2>/dev/null || true)"
+  if [ "$cancel_invocation" = "legacy" ] || [ "$cancel_invocation" = "pending" ] || [ "$cancel_invocation" = ${expected} ]; then
+    printf '%s\\n' routine-pi-session-cancelled
+    exit 1
+  fi
+  # A completed cancellation for an older command may be replaced only while this run lock is
+  # held, and only when the old root is absent. A live/ambiguous root is handled by the ownership
+  # checks below and is never erased here.
+fi
+`;
+}
+
 function routineInvocationFromOutput(output: string): string | null {
   for (const line of output.split(/[\r\n]+/).reverse()) {
     const match = /^routine-pi-session-(?:ready|already-running) ([A-Za-z0-9._:-]{1,256})$/.exec(
@@ -1142,7 +1211,11 @@ function routineInvocationFromOutput(output: string): string | null {
 }
 
 /** Prepare a run root by copying staged, credential-free material from the main layout. */
-function routinePrepareCommand(paths: CompanionPiRoutineSessionPaths): string {
+function routinePrepareCommand(
+  paths: CompanionPiRoutineSessionPaths,
+  invocationId: string,
+): string {
+  const invocation = shellQuote(invocationId);
   const stateFiles = [
     "config-catalog.json",
     "instructions.txt",
@@ -1160,7 +1233,12 @@ umask 077
 routine_root="$HOME/${paths.root}"
 pid_file="$HOME/${paths.pid}"
 invocation_file="$HOME/${paths.invocation}"
+reservation_file="$HOME/${paths.reservation}"
 broker_script="$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}"
+expected_invocation=${invocation}
+${routineLockFunctions(paths)}
+acquire_routine_lock
+${routineCancelMarkerCheck(invocationId)}
 routine_pid_owned() {
   local candidate="$1"
   [[ "$candidate" =~ ^[0-9]+$ ]] || return 1
@@ -1203,20 +1281,34 @@ if routine_root_has_process; then
   echo 'routine-pi-session run root is still owned by a process' >&2
   exit 1
 fi
+if [ -e "$routine_root" ] || [ -L "$routine_root" ]; then
+  # A dead root may contain a dispatch ledger or journal whose ownership cannot be proven. Keep it
+  # for explicit reconciliation; never erase evidence merely because this executor is a takeover.
+  printf '%s\\n' routine-pi-session-root-ambiguous
+  echo 'routine-pi-session root exists without a live process' >&2
+  exit 1
+fi
+if [ -s "$routine_cancel_marker" ]; then
+  # The marker was for an older, fully terminated command. The new invocation owns a fresh empty
+  # root and may replace only this stale marker while holding the shared lock.
+  rm -f "$routine_cancel_marker"
+fi
+root_created=1
 cleanup_failed_prepare() {
   local status="$?"
   trap - ERR
-  rm -rf "$routine_root" || true
+  if [ "$root_created" = 1 ]; then rm -rf "$routine_root" || true; fi
   exit "$status"
 }
 trap cleanup_failed_prepare ERR
-rm -rf "$routine_root"
 mkdir -p "$routine_root/state" "$routine_root/events" "$routine_root/sessions" "$routine_root/logs" "$routine_root/memory" "$routine_root/tmp" "$routine_root/outbox" "$routine_root/pi" "$routine_root/pi/extensions" "$routine_root/tools"
 cp -a "$HOME/.companion/pi/." "$routine_root/pi/"
 if [ -d "$HOME/.companion/runtime/skills" ]; then cp -a "$HOME/.companion/runtime/skills" "$routine_root/skills"; fi
 if [ -d "$HOME/.companion/tools" ]; then cp -a "$HOME/.companion/tools/." "$routine_root/tools/"; fi
 ${copies}
 chmod 700 "$routine_root" "$routine_root/state" "$routine_root/events" "$routine_root/sessions" "$routine_root/logs" "$routine_root/memory" "$routine_root/tmp" "$routine_root/outbox" "$routine_root/pi" "$routine_root/pi/extensions" "$routine_root/tools"
+printf '%s\\n' "$expected_invocation" > "$reservation_file"
+chmod 600 "$reservation_file"
 trap - ERR
 printf '%s\\n' routine-pi-session-prepared
 `;
@@ -1236,7 +1328,12 @@ journal="$HOME/${paths.journal}"
 ledger="$HOME/${paths.dispatchLedger}"
 pid_file="$HOME/${paths.pid}"
 invocation_file="$HOME/${paths.invocation}"
+reservation_file="$HOME/${paths.reservation}"
 broker_script="$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}"
+expected_invocation=${invocation}
+${routineLockFunctions(paths)}
+acquire_routine_lock
+${routineCancelMarkerCheck(invocationId)}
 routine_root_has_process() {
   local proc_env candidate
   for proc_env in /proc/[0-9]*/environ; do
@@ -1256,6 +1353,34 @@ signal_routine_root_processes() {
     kill -s "$requested_signal" "\${candidate##*/}" 2>/dev/null || true
   done
 }
+if [ ! -d "$routine_root" ]; then
+  echo 'routine-pi-session prepared root is unavailable' >&2
+  exit 1
+fi
+if [ ! -s "$reservation_file" ] || [ "$(head -n 1 "$reservation_file" 2>/dev/null || true)" != "$expected_invocation" ]; then
+  echo 'routine-pi-session invocation reservation does not match' >&2
+  exit 1
+fi
+if routine_root_has_process; then
+  if [ -s "$invocation_file" ] && [ "$(head -n 1 "$invocation_file" 2>/dev/null || true)" = "$expected_invocation" ]; then
+    printf 'routine-pi-session-already-running %s\\n' ${invocation}
+    exit 0
+  fi
+  echo 'routine-pi-session run root is owned by a different invocation' >&2
+  exit 1
+fi
+if [ -s "$invocation_file" ]; then
+  existing_invocation="$(head -n 1 "$invocation_file" 2>/dev/null || true)"
+  if [ "$existing_invocation" != "$expected_invocation" ]; then
+    echo 'routine-pi-session run root has a different invocation marker' >&2
+  else
+    echo 'routine-pi-session run root has a dead invocation' >&2
+  fi
+  exit 1
+fi
+# Never remove a cancellation marker from launch. Terminate deliberately publishes its tombstone
+# before waiting for this lock so a cancellation can interrupt a launch already in progress. Only
+# prepare may replace a stale marker, before it creates the invocation reservation.
 stop_routine_processes() {
   kill -TERM "$pid" 2>/dev/null || true
   kill -TERM -- -"$pid" 2>/dev/null || true
@@ -1322,17 +1447,43 @@ export COMPANION_PI_DISPATCH_LEDGER_PATH="$ledger"
 if [ -s "$routine_root/state/pi-layout.version" ]; then
   export PI_BROKER_LAYOUT_MARKER="$(cat "$routine_root/state/pi-layout.version")"
 fi
+# The cancellation marker may be published while this launch request is staging files. Check it
+# again immediately before spawning; the readiness-loop check below handles a marker published
+# after the child has been created.
+if [ -s "$routine_cancel_marker" ]; then
+  cancel_invocation="$(head -n 1 "$routine_cancel_marker" 2>/dev/null || true)"
+  if [ "$cancel_invocation" = "legacy" ] || [ "$cancel_invocation" = "pending" ] || [ "$cancel_invocation" = "$expected_invocation" ]; then
+    printf '%s\\n' routine-pi-session-cancelled
+    exit 1
+  fi
+  echo 'routine-pi-session has a cancellation marker for a different invocation' >&2
+  exit 1
+fi
 printf '%s\\n' ${invocation} > "$invocation_file"
 chmod 600 "$invocation_file"
 if command -v setsid >/dev/null 2>&1; then
-  nohup setsid "$node_bin" "$broker_script" </dev/null >"$routine_root/logs/broker.stderr.log" 2>&1 &
+  # The detached broker must not inherit fd 9: an inherited descriptor would retain this advisory
+  # lock for the whole Pi session and prevent terminate from ever acquiring it.
+  nohup setsid "$node_bin" "$broker_script" 9>&- </dev/null >"$routine_root/logs/broker.stderr.log" 2>&1 &
 else
-  nohup "$node_bin" "$broker_script" </dev/null >"$routine_root/logs/broker.stderr.log" 2>&1 &
+  nohup "$node_bin" "$broker_script" 9>&- </dev/null >"$routine_root/logs/broker.stderr.log" 2>&1 &
 fi
 pid="$!"
 printf '%s\\n' "$pid" > "$pid_file"
 chmod 600 "$pid_file"
 for _ in $(seq 1 ${PI_ROUTINE_READY_PROBES}); do
+  if [ -s "$routine_cancel_marker" ]; then
+    cancel_invocation="$(head -n 1 "$routine_cancel_marker" 2>/dev/null || true)"
+    if [ "$cancel_invocation" = "legacy" ] || [ "$cancel_invocation" = "pending" ] || [ "$cancel_invocation" = "$expected_invocation" ]; then
+      if ! stop_routine_processes; then
+        echo 'routine-pi-session could not be stopped after cancellation' >&2
+        exit 1
+      fi
+      rm -rf "$routine_root"
+      printf '%s\\n' routine-pi-session-cancelled
+      exit 1
+    fi
+  fi
   if [ -S "$socket" ] && [ "$(stat -c '%a' "$socket" 2>/dev/null || true)" = 600 ]; then
     printf 'routine-pi-session-ready %s\\n' ${invocation}
     exit 0
@@ -1359,12 +1510,21 @@ exit 1
 }
 
 /** Stop only the process whose environment proves ownership of this exact run root. */
-function routineTerminateCommand(paths: CompanionPiRoutineSessionPaths): string {
+function routineTerminateCommand(
+  paths: CompanionPiRoutineSessionPaths,
+  expectedInvocationId: string,
+): string {
+  const expected = shellQuote(expectedInvocationId);
   return `set -euo pipefail
+umask 077
 routine_root="$HOME/${paths.root}"
 socket="$HOME/${paths.socket}"
 pid_file="$HOME/${paths.pid}"
+invocation_file="$HOME/${paths.invocation}"
+reservation_file="$HOME/${paths.reservation}"
 broker_script="$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}"
+expected_invocation=${expected}
+${routineLockFunctions(paths)}
 routine_pid_owned() {
   local candidate="$1"
   [[ "$candidate" =~ ^[0-9]+$ ]] || return 1
@@ -1384,6 +1544,56 @@ routine_root_has_process() {
   done
   return 1
 }
+if [ -s "$reservation_file" ]; then
+  reserved_invocation="$(head -n 1 "$reservation_file" 2>/dev/null || true)"
+  if [ "$reserved_invocation" != "$expected_invocation" ]; then
+    echo 'routine-pi-session invocation reservation does not match' >&2
+    exit 1
+  fi
+fi
+if [ -s "$invocation_file" ]; then
+  current_invocation="$(head -n 1 "$invocation_file" 2>/dev/null || true)"
+  if [ "$current_invocation" != "$expected_invocation" ]; then
+    echo 'routine-pi-session run root belongs to a different invocation' >&2
+    exit 1
+  fi
+fi
+if routine_root_has_process && [ ! -s "$invocation_file" ]; then
+  echo 'routine-pi-session invocation marker is unavailable' >&2
+  exit 1
+fi
+# Publish cancellation before signaling anything. A racing launch acquires this same lock and
+# observes the tombstone before it can create a detached broker. The marker lives beside the root,
+# because the root itself is removed after a proven termination.
+mkdir -p "$(dirname "$routine_cancel_marker")"
+cancel_marker_tmp="${paths.cancelMarker}.$$"
+cancel_marker_tmp="$HOME/$cancel_marker_tmp"
+trap 'rm -f "$cancel_marker_tmp"' EXIT
+printf '%s\\n' "$expected_invocation" > "$cancel_marker_tmp"
+chmod 600 "$cancel_marker_tmp"
+mv -f "$cancel_marker_tmp" "$routine_cancel_marker"
+acquire_routine_lock
+if [ -s "$reservation_file" ]; then
+  reserved_invocation="$(head -n 1 "$reservation_file" 2>/dev/null || true)"
+  if [ "$reserved_invocation" != "$expected_invocation" ]; then
+    if [ "$(head -n 1 "$routine_cancel_marker" 2>/dev/null || true)" = "$expected_invocation" ]; then rm -f "$routine_cancel_marker"; fi
+    echo 'routine-pi-session invocation reservation changed while cancelling' >&2
+    exit 1
+  fi
+fi
+if [ -s "$invocation_file" ]; then
+  current_invocation="$(head -n 1 "$invocation_file" 2>/dev/null || true)"
+  if [ "$current_invocation" != "$expected_invocation" ]; then
+    if [ "$(head -n 1 "$routine_cancel_marker" 2>/dev/null || true)" = "$expected_invocation" ]; then rm -f "$routine_cancel_marker"; fi
+    echo 'routine-pi-session run root belongs to a different invocation' >&2
+    exit 1
+  fi
+fi
+if routine_root_has_process && [ ! -s "$invocation_file" ]; then
+  if [ "$(head -n 1 "$routine_cancel_marker" 2>/dev/null || true)" = "$expected_invocation" ]; then rm -f "$routine_cancel_marker"; fi
+  echo 'routine-pi-session invocation marker is unavailable' >&2
+  exit 1
+fi
 signal_routine_root_processes() {
   local requested_signal="$1" proc_env candidate
   for proc_env in /proc/[0-9]*/environ; do
@@ -4977,12 +5187,18 @@ done`,
     boxId: string;
     runId: string;
     persona: string | null;
+    expectedInvocationId: string;
     signal?: AbortSignal;
   }): Promise<{ state: "idle"; invocationId: string }> {
     const paths = routinePathsForRun(input.runId);
+    const invocationId = validateRoutineInvocationId(
+      paths,
+      input.expectedInvocationId,
+      true,
+    );
     const prepared = await this.#command(
       input.boxId,
-      routinePrepareCommand(paths),
+      routinePrepareCommand(paths, invocationId),
       60,
       input.signal,
     );
@@ -4991,7 +5207,33 @@ done`,
     // root and broker command. As with the launch readiness marker below, Box can still report exit 1
     // because the detached broker remains alive, so the marker is authoritative over the envelope.
     const existingInvocation = routineInvocationFromOutput(prepared.stdout);
-    if (existingInvocation) return { state: "idle", invocationId: existingInvocation };
+    if (existingInvocation) {
+      if (existingInvocation !== invocationId) {
+        throw new BoxRuntimeProviderError(
+          "Routine Pi session belongs to a different invocation",
+          409,
+          "routine_session_invocation_mismatch",
+          "routine_session_invocation_mismatch",
+        );
+      }
+      return { state: "idle", invocationId: existingInvocation };
+    }
+    if (prepared.stdout.split(/[\r\n]+/).includes("routine-pi-session-cancelled")) {
+      throw new BoxRuntimeProviderError(
+        "Routine Pi session was cancelled before launch",
+        409,
+        "routine_session_cancelled",
+        "routine_session_cancelled",
+      );
+    }
+    if (prepared.stdout.split(/[\r\n]+/).includes("routine-pi-session-root-ambiguous")) {
+      throw new BoxRuntimeProviderError(
+        "Routine Pi session has an existing root whose ownership is ambiguous",
+        409,
+        "routine_session_root_ambiguous",
+        "routine_session_root_ambiguous",
+      );
+    }
     if (!prepared.success) {
       const prepareError = new BoxRuntimeProviderError(
         `Routine Pi session failed to prepare${commandFailureDetail(prepared)}`,
@@ -4999,7 +5241,11 @@ done`,
         "routine_session_prepare_failed",
       );
       try {
-        await this.terminateRoutineSession({ boxId: input.boxId, runId: input.runId });
+        await this.terminateRoutineSession({
+          boxId: input.boxId,
+          runId: input.runId,
+          expectedInvocationId: invocationId,
+        });
       } catch {
         throw new BoxRuntimeProviderError(
           "Routine Pi session failed to clean up after incomplete preparation",
@@ -5038,7 +5284,6 @@ done`,
         );
       }
 
-      const invocationId = `routine:${paths.runId}:${randomUUID()}`;
       const started = await this.#command(
         input.boxId,
         routineLaunchCommand(paths, invocationId),
@@ -5070,7 +5315,11 @@ done`,
       try {
         // Use an independent cleanup call: the originating request signal may be why staging
         // failed, but copied Pi/session material must not remain and an ambiguous launch must stop.
-        await this.terminateRoutineSession({ boxId: input.boxId, runId: input.runId });
+        await this.terminateRoutineSession({
+          boxId: input.boxId,
+          runId: input.runId,
+          expectedInvocationId: invocationId,
+        });
       } catch {
         throw new BoxRuntimeProviderError(
           "Routine Pi session failed to clean up after an incomplete start",
@@ -5293,12 +5542,18 @@ done`,
   async terminateRoutineSession(input: {
     boxId: string;
     runId: string;
+    expectedInvocationId: string;
     signal?: AbortSignal;
   }): Promise<void> {
     const paths = routinePathsForRun(input.runId);
+    const expectedInvocationId = validateRoutineInvocationId(
+      paths,
+      input.expectedInvocationId,
+      false,
+    );
     const terminated = await this.#command(
       input.boxId,
-      routineTerminateCommand(paths),
+      routineTerminateCommand(paths, expectedInvocationId),
       30,
       input.signal,
     );

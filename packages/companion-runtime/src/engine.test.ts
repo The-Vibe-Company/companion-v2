@@ -921,15 +921,27 @@ describe("RuntimeEngine attempts", () => {
 
   it("runs a routine in its private Pi session and commits the first terminal return", async () => {
     const claim = attemptClaim();
+    const mainInvocationId = "main-pi";
+    const routineInvocationId = `routine:${TURN_ID}:dispatch-v2:${COMMAND_ID}`;
     const store = new MemoryRuntimeStore({
-      authorization: attemptAuthorization(claim),
+      authorization: attemptAuthorization(claim, { piInvocationId: mainInvocationId }),
       material: attemptMaterial({
         routineId: ROUTINE_SNAPSHOT_ID,
         routineName: "conductor-progress-check",
       }),
     });
     const ports = fakePorts(store);
-    const routineInvocationId = `routine:${TURN_ID}:invocation`;
+    const brokerState = ports.pi.brokerState;
+    ports.pi.brokerState = async (input) => ({
+      ...await brokerState(input),
+      invocationId: mainInvocationId,
+    });
+    const projectedInvocationIds: string[] = [];
+    const projectEventBatch = ports.eventProjector.projectEventBatch;
+    ports.eventProjector.projectEventBatch = async (input) => {
+      projectedInvocationIds.push(input.piInvocationId);
+      return await projectEventBatch(input);
+    };
     ports.routineEventReads.push({
       events: [{
         sequence: 1,
@@ -964,9 +976,294 @@ describe("RuntimeEngine attempts", () => {
       mode: "notify",
       message: "The build is green.",
     }));
+    expect(store.authorization.piInvocationId).toBe(mainInvocationId);
+    expect(store.authorization.commandPiInvocationId).toBe(routineInvocationId);
+    expect(projectedInvocationIds).toEqual([routineInvocationId]);
     expect(ports.log.indexOf("project")).toBeLessThan(ports.log.indexOf("routine-ack"));
     expect(ports.log.indexOf("routine-ack")).toBeLessThan(ports.log.indexOf("routine-terminate"));
     expect(ports.routineTerminates).toEqual([TURN_ID]);
+  });
+
+  it("fails closed when the isolated routine broker reports a replacement invocation", async () => {
+    const claim = attemptClaim({
+      checkpoint: "dispatch_accepted",
+      checkpointSequence: 1n,
+      attemptStatus: "running",
+      turnStatus: "running",
+      dispatchState: "accepted",
+    });
+    const mainInvocationId = "main-pi";
+    const routineInvocationId = `routine:${TURN_ID}:dispatch-v2:invocation`;
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(claim, {
+        piInvocationId: mainInvocationId,
+        commandPiInvocationId: routineInvocationId,
+        eventCursor: 0n,
+      }),
+      material: attemptMaterial({
+        routineId: ROUTINE_SNAPSHOT_ID,
+        routineName: "replacement-check",
+        routineIsolated: true,
+      }),
+    });
+    const ports = fakePorts(store);
+    const mainBrokerState = ports.pi.brokerState;
+    ports.pi.brokerState = async (input) => ({
+      ...await mainBrokerState(input),
+      invocationId: mainInvocationId,
+      activeAttemptId: null,
+      tailCursor: 0n,
+      acknowledgedCursor: 0n,
+    });
+    const routineState = ports.pi.routineSession!.state;
+    ports.pi.routineSession!.state = async (input) => ({
+      ...await routineState(input),
+      invocationId: `routine:${TURN_ID}:dispatch-v2:replacement`,
+    });
+    const projectEventBatch = vi.fn(ports.eventProjector.projectEventBatch);
+    ports.eventProjector.projectEventBatch = projectEventBatch;
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("interrupted");
+    expect(store.settlements).toEqual([expect.objectContaining({
+      terminalStatus: "interrupted",
+      error: expect.objectContaining({ code: "pi_invocation_changed" }),
+    })]);
+    expect(projectEventBatch).not.toHaveBeenCalled();
+    expect(ports.routineTerminates).toHaveLength(0);
+  });
+
+  it("terminates a started routine when pre-acceptance capability validation fails", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(claim, { piInvocationId: "main-pi" }),
+      material: attemptMaterial({
+        routineId: ROUTINE_SNAPSHOT_ID,
+        routineName: "capability-check",
+      }),
+    });
+    const ports = fakePorts(store);
+    const routineState = ports.pi.routineSession!.state;
+    ports.pi.routineSession!.state = async (input) => ({
+      ...await routineState(input),
+      modelInput: ["image"],
+    });
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("failed");
+    expect(store.settlements).toEqual([expect.objectContaining({
+      terminalStatus: "failed",
+      error: expect.objectContaining({ code: "model_text_input_unsupported" }),
+    })]);
+    expect(store.checkpoints.map((checkpoint) => checkpoint.nextCheckpoint))
+      .not.toContain("dispatch_accepted");
+    expect(store.checkpoints.map((checkpoint) => checkpoint.nextCheckpoint)).toEqual([
+      "dispatch_write_intent",
+      "dispatch_rejected",
+    ]);
+    expect(ports.routinePromptCalls).toHaveLength(0);
+    expect(ports.routineTerminates).toEqual([TURN_ID]);
+  });
+
+  it("interrupts a pre-prompt failure when routine termination cannot be proven", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(claim, { piInvocationId: "main-pi" }),
+      material: attemptMaterial({
+        routineId: ROUTINE_SNAPSHOT_ID,
+        routineName: "cleanup-failure",
+      }),
+    });
+    const ports = fakePorts(store);
+    ports.pi.routineSession!.state = async () => {
+      throw new Error("state unavailable");
+    };
+    ports.pi.routineSession!.terminate = async () => {
+      throw new Error("process may still be running");
+    };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("interrupted");
+    expect(store.checkpoints.map((checkpoint) => checkpoint.nextCheckpoint)).toEqual([
+      "dispatch_write_intent",
+      "dispatch_ambiguous",
+    ]);
+    expect(store.settlements[0]).toMatchObject({
+      terminalStatus: "interrupted",
+      error: { code: "prompt_dispatch_ambiguous" },
+    });
+  });
+
+  it("recovers a versioned write intent by adopting the same reserved routine invocation", async () => {
+    const claim = attemptClaim({ checkpoint: "dispatch_write_intent", checkpointSequence: 1n });
+    const invocationId = `routine:${TURN_ID}:dispatch-v2:${COMMAND_ID}`;
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(claim, {
+        commandId: COMMAND_ID,
+        commandPiInvocationId: invocationId,
+        piInvocationId: "main-pi",
+      }),
+      material: attemptMaterial({
+        routineId: ROUTINE_SNAPSHOT_ID,
+        routineName: "takeover-start",
+        routineIsolated: true,
+      }),
+    });
+    const ports = fakePorts(store);
+    ports.routineEventReads.push({
+      events: [{
+        sequence: 1,
+        invocationId,
+        attemptId: ATTEMPT_ID,
+        kind: "pi_event",
+        event: { type: "agent_settled" },
+      }],
+      nextCursor: 1,
+      acknowledgedCursor: 0,
+      hasMore: false,
+    });
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(ports.routineStarts).toEqual([TURN_ID]);
+    expect(ports.routinePromptCalls).toHaveLength(1);
+    expect(store.checkpoints.filter((checkpoint) => checkpoint.nextCheckpoint === "dispatch_write_intent"))
+      .toHaveLength(0);
+  });
+
+  it("does not relaunch a legacy write intent when its routine broker is absent", async () => {
+    const claim = attemptClaim({ checkpoint: "dispatch_write_intent", checkpointSequence: 1n });
+    const invocationId = `routine:${TURN_ID}:legacy-invocation`;
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(claim, {
+        commandId: COMMAND_ID,
+        commandPiInvocationId: invocationId,
+        piInvocationId: "main-pi",
+      }),
+      material: attemptMaterial({
+        routineId: ROUTINE_SNAPSHOT_ID,
+        routineName: "legacy-takeover",
+        routineIsolated: true,
+      }),
+    });
+    const ports = fakePorts(store);
+    ports.pi.routineSession!.state = async () => {
+      throw new Error("routine root absent");
+    };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("interrupted");
+    expect(ports.routineStarts).toHaveLength(0);
+    expect(ports.routineTerminates).toHaveLength(0);
+    expect(store.checkpoints.at(-1)?.nextCheckpoint).toBe("dispatch_ambiguous");
+  });
+
+  it("keeps a recovered active routine ambiguous when its duplicate prompt is rejected", async () => {
+    const claim = attemptClaim({ checkpoint: "dispatch_write_intent", checkpointSequence: 1n });
+    const invocationId = `routine:${TURN_ID}:dispatch-v2:${COMMAND_ID}`;
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(claim, {
+        commandId: COMMAND_ID,
+        commandPiInvocationId: invocationId,
+        piInvocationId: "main-pi",
+      }),
+      material: attemptMaterial({
+        routineId: ROUTINE_SNAPSHOT_ID,
+        routineName: "active-takeover",
+        routineIsolated: true,
+      }),
+    });
+    const ports = fakePorts(store);
+    const routineState = ports.pi.routineSession!.state;
+    ports.pi.routineSession!.state = async (input) => ({
+      ...await routineState(input),
+      activeAttemptId: ATTEMPT_ID,
+      tailCursor: 1n,
+      acknowledgedCursor: 0n,
+    });
+    ports.pi.routineSession!.prompt = async () => ({
+      outcome: "rejected",
+      code: "attempt_active",
+    });
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("interrupted");
+    expect(store.checkpoints.at(-1)?.nextCheckpoint).toBe("dispatch_ambiguous");
+    expect(ports.routineTerminates).toHaveLength(0);
+  });
+
+  it("cancels a reserved routine before Box start without aborting the main Pi", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(claim, { piInvocationId: "main-pi" }),
+      material: attemptMaterial({
+        routineId: ROUTINE_SNAPSHOT_ID,
+        routineName: "cancel-before-start",
+      }),
+    });
+    const checkpoint = store.checkpoint.bind(store);
+    store.checkpoint = async (fence, input) => {
+      const sequence = await checkpoint(fence, input);
+      if (input.nextCheckpoint === "dispatch_write_intent") {
+        store.authorization.authorized = false;
+        store.authorization.denialCode = "turn_cancel_requested";
+      }
+      return sequence;
+    };
+    const ports = fakePorts(store);
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("cancelled");
+    expect(ports.routineStarts).toHaveLength(0);
+    expect(ports.routineTerminates).toEqual([TURN_ID]);
+    expect(ports.abortCalls).toHaveLength(0);
+  });
+
+  it("cancels a routine during startup through its isolated session", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(claim, { piInvocationId: "main-pi" }),
+      material: attemptMaterial({
+        routineId: ROUTINE_SNAPSHOT_ID,
+        routineName: "cancel-during-start",
+      }),
+    });
+    const ports = fakePorts(store);
+    const start = ports.pi.routineSession!.start;
+    ports.pi.routineSession!.start = async (input) => {
+      const started = await start(input);
+      // Model the API cancel committing its request while routine.start is in flight. The next
+      // authorization is denied with the already-persisted routine dispatch identity.
+      store.authorization.authorized = false;
+      store.authorization.denialCode = "turn_cancel_requested";
+      return started;
+    };
+    const routineAbort = vi.fn(ports.pi.routineSession!.abort);
+    ports.pi.routineSession!.abort = routineAbort;
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("cancelled");
+    expect(store.settlements).toEqual([{ terminalStatus: "cancelled" }]);
+    expect(store.checkpoints[0]).toMatchObject({
+      nextCheckpoint: "dispatch_write_intent",
+      commandId: COMMAND_ID,
+      piInvocationId: `routine:${TURN_ID}:dispatch-v2:${COMMAND_ID}`,
+    });
+    expect(routineAbort).toHaveBeenCalledWith(expect.objectContaining({
+      boxId: BOX_ID,
+      runId: TURN_ID,
+      attemptId: ATTEMPT_ID,
+    }));
+    expect(ports.routineTerminates).toEqual([TURN_ID]);
+    expect(ports.abortCalls).toHaveLength(0);
   });
 
   it("interrupts an isolated routine when its process cannot be proven stopped after return", async () => {
@@ -983,7 +1280,7 @@ describe("RuntimeEngine attempts", () => {
     ports.routineEventReads.push({
       events: [{
         sequence: 1,
-        invocationId: `routine:${TURN_ID}:invocation`,
+        invocationId: `routine:${TURN_ID}:dispatch-v2:${COMMAND_ID}`,
         attemptId: ATTEMPT_ID,
         kind: "pi_event",
         event: {
@@ -1031,7 +1328,7 @@ describe("RuntimeEngine attempts", () => {
     ports.routineEventReads.push({
       events: [{
         sequence: 1,
-        invocationId: `routine:${TURN_ID}:invocation`,
+        invocationId: `routine:${TURN_ID}:dispatch-v2:${COMMAND_ID}`,
         attemptId: ATTEMPT_ID,
         kind: "pi_event",
         event: { type: "agent_settled" },
@@ -1051,12 +1348,12 @@ describe("RuntimeEngine attempts", () => {
 
   it("reconstructs the pinned routine prompt byte-for-byte on dispatch takeover", async () => {
     const claim = attemptClaim({ checkpoint: "dispatch_write_intent" });
-    const invocationId = `routine:${TURN_ID}:invocation`;
+    const invocationId = `routine:${TURN_ID}:dispatch-v2:invocation`;
     const store = new MemoryRuntimeStore({
       authorization: attemptAuthorization(claim, {
         commandId: COMMAND_ID,
         commandPiInvocationId: invocationId,
-        piInvocationId: invocationId,
+        piInvocationId: "main-pi",
         eventCursor: 0n,
       }),
       material: attemptMaterial({
@@ -1593,7 +1890,8 @@ describe("RuntimeEngine attempts", () => {
       dispatchState: "accepted",
       attemptStatus: "running",
       turnStatus: "running",
-      piInvocationId: `routine:${TURN_ID}:invocation`,
+      piInvocationId: "main-pi",
+      commandPiInvocationId: `routine:${TURN_ID}:dispatch-v2:invocation`,
     });
     const store = new MemoryRuntimeStore({ authorization: denied });
     const ports = fakePorts(store);
@@ -1621,7 +1919,8 @@ describe("RuntimeEngine attempts", () => {
       dispatchState: "accepted",
       attemptStatus: "running",
       turnStatus: "running",
-      piInvocationId: `routine:${TURN_ID}:invocation`,
+      piInvocationId: "main-pi",
+      commandPiInvocationId: `routine:${TURN_ID}:dispatch-v2:invocation`,
     });
     const store = new MemoryRuntimeStore({ authorization: denied });
     const ports = fakePorts(store);

@@ -316,7 +316,7 @@ async function claimWork(): Promise<Claim> {
       runtime_generation::text as "runtimeGeneration"
     from public.companion_runtime_claim_work(${executorId}, 1, 30, (
       select gate_epoch from public.companion_runtime_gate_status()
-    ), 2, 1)
+    ), 3, 1)
   `);
   if (!rows[0]) throw new Error("expected one Runtime v2 claim");
   return rows[0];
@@ -2481,7 +2481,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     }
   });
 
-  it("quarantines old material claimers while the broker-aware executor can claim the work", async () => {
+  it("quarantines old material claimers while the routine-safe executor can claim the work", async () => {
     if (!sql) throw new Error("runtime executor database is not initialized");
     let companionId = "";
     try {
@@ -2512,6 +2512,13 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         ), 1, 1)
       `);
       expect(protocolOneClaims).toEqual([]);
+      const protocolTwoClaims = await asRuntime((tx) => tx<Array<{ workId: string }>>`
+        select work_id::text as "workId"
+        from public.companion_runtime_claim_work(${executorId}, 1, 30, (
+          select gate_epoch from public.companion_runtime_gate_status()
+        ), 2, 1)
+      `);
+      expect(protocolTwoClaims).toEqual([]);
       const [unclaimed] = await sql<Array<{ workKind: string | null; workId: string | null }>>`
         select work_kind::text as "workKind", work_id::text as "workId"
         from companion_runtime_leases where companion_id = ${companionId}::uuid
@@ -3727,7 +3734,8 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       expect(claimed.workId).toBe(fixture.attemptId);
       const lease = claimed;
       const acceptedCommandId = randomUUID();
-      const acceptedPiInvocationId = "pi-invocation-write-intent";
+      const runtimePiInvocationId = `pi-${fixture.attemptId}`;
+      const acceptedPiInvocationId = `routine:${fixture.turnId}:invocation`;
       await sql`
         update companion_turn_attempts set
           command_id = ${acceptedCommandId}::uuid,
@@ -3737,9 +3745,11 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       const [resolvableAttempt] = await asRuntime((tx) => tx<Array<{
         commandId: string | null;
         commandPiInvocationId: string | null;
+        runtimePiInvocationId: string | null;
       }>>`
         select command_id::text as "commandId",
-               command_pi_invocation_id as "commandPiInvocationId"
+               command_pi_invocation_id as "commandPiInvocationId",
+               pi_invocation_id as "runtimePiInvocationId"
         from public.companion_runtime_renew_and_authorize_v2(
           ${lease.orgId}::uuid, ${lease.companionId}::uuid,
           ${lease.claimToken}::uuid, ${lease.claimEpoch}::bigint,
@@ -3750,6 +3760,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       expect(resolvableAttempt).toEqual({
         commandId: acceptedCommandId,
         commandPiInvocationId: acceptedPiInvocationId,
+        runtimePiInvocationId,
       });
 
       const [stopped] = await asApi({
@@ -3794,9 +3805,12 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         authorized: boolean;
         commandId: string | null;
         commandPiInvocationId: string | null;
+        denialCode: string | null;
+        runtimePiInvocationId: string | null;
       }>>`
-        select authorized, command_id::text as "commandId",
-               command_pi_invocation_id as "commandPiInvocationId"
+        select authorized, denial_code as "denialCode", command_id::text as "commandId",
+               command_pi_invocation_id as "commandPiInvocationId",
+               pi_invocation_id as "runtimePiInvocationId"
         from public.companion_runtime_renew_and_authorize_v2(
           ${lease.orgId}::uuid, ${lease.companionId}::uuid,
           ${lease.claimToken}::uuid, ${lease.claimEpoch}::bigint,
@@ -3806,8 +3820,10 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       `);
       expect(resolvedCancellation).toEqual({
         authorized: false,
+        denialCode: "turn_cancel_requested",
         commandId: null,
-        commandPiInvocationId: null,
+        commandPiInvocationId: acceptedPiInvocationId,
+        runtimePiInvocationId,
       });
     } finally {
       if (claimed) await release(claimed);

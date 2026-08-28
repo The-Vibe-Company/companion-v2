@@ -253,6 +253,11 @@ and provider material under a run-scoped session directory and broker socket. Th
 idle and never receives the routine prompt. PostgreSQL, rather than the ephemeral Box session
 directory, is the durable routine-history authority.
 
+The runtime instance and the run-scoped broker intentionally have different Pi invocation
+identities. A routine attempt pins its broker identity with the dispatch write intent and uses that
+attempt-bound value for event reads, projection, terminal acknowledgement, and cancellation. The
+main-instance identity remains reserved for ordinary Companion broker operations.
+
 That run-scoped Pi receives one routine-only terminal tool. Its first accepted call is the run's
 return value and immediately shuts down that Pi process. `notify` commits one visible Companion
 entry to the main thread and no turn; `relay` commits the same kind of visible entry and an
@@ -404,6 +409,10 @@ also stop claiming during the OAuth-gateway rollout. The current claimer repairs
 post-staging operation or settings checkpoint that has no staged-expiry ledger, then restages under
 the new fence. This prevents a rolling deploy from either publishing an unproven snapshot or
 repeating proof-less start operations.
+Migration 0138 advances that material protocol to version 3 before routine dispatch begins. A
+routine attempt now persists a versioned invocation reservation before Box start; protocol-2
+replicas receive no new claims and therefore cannot resume that write intent with the former
+generate-on-start behavior. Existing leases may still finish through the unchanged fenced APIs.
 Projection
 redaction uses every string leaf of the validated plaintext material in memory plus generic
 credential patterns. Tool projections retain an opaque hashed call id and disclose a redacted,
