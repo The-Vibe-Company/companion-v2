@@ -118,7 +118,7 @@ test("full-screen native backdrops stay neutral in every state", () => {
   );
 });
 
-test("chat content stays neutral while Companion accents remain on actions and identity", () => {
+test("chat uses the approved two-sided bubbles and morphing composer", () => {
   const chat = read("apps/ios/Companion/Screens/ChatView.swift");
   const composer = read("apps/ios/Companion/Screens/ChatComposer.swift");
   const bubble = chat.slice(
@@ -137,14 +137,32 @@ test("chat content stays neutral while Companion accents remain on actions and i
     queuedDemo.indexOf(".padding(16)"),
   );
 
-  assert.match(bubble, /\.companionMaterial\(radius: 18\)/);
   assert.match(
     bubble,
-    /MarkdownMessageView\([\s\S]{0,120}?document: markdown,[\s\S]{0,120}?accent: \.companionInk/,
+    /\.background\(bubbleColor, in: RoundedRectangle\(cornerRadius: 18, style: \.continuous\)\)/,
+  );
+  assert.match(bubble, /kind == \.mine \? CompanionIOSTheme\.userBubble/);
+  assert.match(bubble, /CompanionIOSTheme\.botBubble/);
+  assert.match(
+    bubble,
+    /MarkdownMessageView\([\s\S]{0,120}?document: markdown,[\s\S]{0,120}?accent: primaryTextColor/,
   );
   assert.doesNotMatch(bubble, /var accent\b|accent\.opacity|visualTheme\.accent|tint:/);
   assert.doesNotMatch(chat, /\.toolbar \{ headerToolbar \}\s*\.tint\(visualTheme\.accent\)/);
-  assert.match(composer, /\.buttonStyle\(\.glassProminent\)\s*\.buttonBorderShape\(\.circle\)\s*\.tint\(accent\)/);
+  assert.match(composer, /TextField\("Ask \\\(companionName\)"/);
+  assert.match(composer, /TextField\("Ask \\\(companionName\)"[\s\S]{0,180}?\.font\(\.body\)/);
+  assert.match(composer, /private var composerAvailabilityContent: some View/);
+  assert.match(composer, /private var attachmentErrorMessage: some View/);
+  assert.match(composer, /private var inputBar: some View/);
+  assert.doesNotMatch(composer, /transcription\.liveTranscript/);
+  assert.match(bubble, /Text\(streamingDelta\)[\s\S]{0,100}?\.font\(\.body\)/);
+  assert.match(composer, /else if showsSendButton \|\| !transcriptionAvailable/);
+  assert.match(composer, /\.background\(CompanionIOSTheme\.primaryCTA, in: Circle\(\)\)/);
+  assert.match(chat, /CharacterMark\([\s\S]{0,220}?size: 20/);
+  assert.match(
+    chat,
+    /CompanionStatusBadge\([\s\S]{0,120}?runtime: currentCompanion\.runtime,[\s\S]{0,80}?compact: true/,
+  );
   assert.doesNotMatch(decisionCard, /pending \? accent\.opacity/);
   assert.doesNotMatch(glassDemoBubbles, /accent:|tint:/);
   assert.doesNotMatch(queuedDemoBubbles, /accent:|tint:/);
@@ -152,6 +170,28 @@ test("chat content stays neutral while Companion accents remain on actions and i
     glassChatDemo,
     /\.navigationBarTitleDisplayMode\(\.inline\)\s*\.tint\(visualTheme\.accent\)/,
   );
+});
+
+test("computer view is immersive and keeps the desktop handoff ephemeral", () => {
+  const computer = read("apps/ios/Companion/Screens/CompanionComputerView.swift");
+
+  assert.match(computer, /Color\.black\.ignoresSafeArea\(\)/);
+  assert.match(computer, /configuration\.websiteDataStore = \.nonPersistent\(\)/);
+  assert.match(computer, /guard companion\.access != \.viewer else/);
+  assert.match(computer, /\.onDisappear \{ desktop = nil \}/);
+  assert.match(computer, /\.aspectRatio\(16 \/ 10, contentMode: \.fit\)/);
+  assert.doesNotMatch(computer, /UserDefaults|FileManager|print\(|Logger|os_log/);
+  assert.match(computer, /onFailure: \{ message in[\s\S]{0,120}?desktop = nil[\s\S]{0,80}?loading = false/);
+});
+
+test("document previews cancel with their view and surface retryable errors", () => {
+  const attachments = read("apps/ios/Companion/Screens/ChatAttachmentViews.swift");
+
+  assert.match(attachments, /@State private var previewTask: Task<Void, Never>\?/);
+  assert.match(attachments, /\.onDisappear \{[\s\S]{0,100}?previewTask\?\.cancel\(\)[\s\S]{0,120}?removePreviewFile\(\)/);
+  assert.match(attachments, /try Task\.checkCancellation\(\)/);
+  assert.match(attachments, /\.alert\([\s\S]{0,180}?Couldn’t Open File[\s\S]{0,500}?Button\("Try Again"\)/);
+  assert.doesNotMatch(attachments, /catch \{\s*return\s*\}/);
 });
 
 test("long-thread composer and poll work stay behind narrow invalidation boundaries", () => {
@@ -209,6 +249,22 @@ test("native message interactions stay accessible without simulator CI", () => {
   assert.match(interactions, /\.textSelection\(\.enabled\)/);
 
   assert.match(markdown, /\.frame\(minWidth: 44, minHeight: 44\)/);
+  const thinkingDisclosure = chat.slice(
+    chat.indexOf("struct CompanionThinkingDisclosure"),
+    chat.indexOf("struct CompanionThinkingStatus"),
+  );
+  const thinkingStatus = chat.slice(
+    chat.indexOf("struct CompanionThinkingStatus"),
+    chat.indexOf("private struct TranscriptRowInput"),
+  );
+  assert.match(
+    thinkingDisclosure,
+    /\.background\(CompanionIOSTheme\.chip, in: Capsule\(\)\)[\s\S]{0,100}?\.frame\(minHeight: 44\)/,
+  );
+  assert.match(
+    thinkingStatus,
+    /Button\(action: onTap\)[\s\S]{0,180}?\.frame\(minHeight: 44, alignment: \.leading\)/,
+  );
   assert.match(markdown, /UIPasteboard\.general\.string = code/);
   assert.match(markdown, /\.sensoryFeedback\(\.success, trigger: copyFeedbackTrigger\)/);
   assert.match(markdown, /accessibilityReduceMotion/);
@@ -611,9 +667,10 @@ test("voice transcription keeps the global key server-side and delegates Apple c
   const ci = read(".github/workflows/ci.yml");
 
   assert.match(composer, /accessibilityIdentifier\("chat\.transcription\.toggle"\)/);
-  assert.match(composer, /if transcriptionAvailable \{/);
+  assert.match(composer, /if transcription\.isBusy \{/);
+  assert.match(composer, /else if showsSendButton \|\| !transcriptionAvailable/);
   assert.match(composer, /onChange\(of: transcriptionAvailable\)/);
-  assert.match(composer, /frame\(width: 46, height: 46\)/);
+  assert.match(composer, /frame\(width: 44, height: 44\)/);
   assert.match(routes, /COMPANION_GEMINI_TRANSCRIPTION_API_KEY\?\.trim\(\)/);
   assert.match(routes, /transcription_available: transcriptionAvailable/);
   assert.match(envExample, /^COMPANION_GEMINI_TRANSCRIPTION_API_KEY=$/m);

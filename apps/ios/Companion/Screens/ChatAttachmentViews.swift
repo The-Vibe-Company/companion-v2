@@ -1,5 +1,6 @@
 import CompanionKit
 import ImageIO
+import QuickLook
 import SwiftUI
 import UIKit
 
@@ -37,11 +38,11 @@ struct ComposerAttachmentStrip: View {
         ZStack(alignment: .topTrailing) {
             LocalAttachmentImage(data: attachment.data, maximumPixelSize: 160)
                 .frame(width: 64, height: 64)
-                .background(Color.companionSurfaceRaised)
+                .background(CompanionIOSTheme.card)
                 .clipShape(.rect(cornerRadius: 10))
                 .overlay {
                     RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color.companionDivider, lineWidth: 1)
+                        .stroke(CompanionIOSTheme.separator, lineWidth: 1)
                 }
                 .accessibilityLabel(attachment.filename)
 
@@ -55,14 +56,14 @@ struct ComposerAttachmentStrip: View {
     private func documentChip(_ attachment: CompanionMessageAttachment) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "doc")
-                .foregroundStyle(Color.companionMuted)
+                .foregroundStyle(CompanionIOSTheme.textSecondary)
             VStack(alignment: .leading, spacing: 1) {
                 Text(attachment.filename)
                     .font(.caption.weight(.medium))
                     .lineLimit(1)
                 Text(attachmentSizeLabel(attachment.byteSize))
                     .font(.caption2.monospacedDigit())
-                    .foregroundStyle(Color.companionMuted)
+                    .foregroundStyle(CompanionIOSTheme.textSecondary)
             }
             removeButton(attachment)
         }
@@ -80,8 +81,8 @@ struct ComposerAttachmentStrip: View {
             Image(systemName: "xmark")
                 .font(.caption2.weight(.bold))
                 .frame(width: 24, height: 24)
-                .background(Color.companionCanvas, in: Circle())
-                .overlay { Circle().stroke(Color.companionDivider, lineWidth: 1) }
+                .background(CompanionIOSTheme.canvas, in: Circle())
+                .overlay { Circle().stroke(CompanionIOSTheme.separator, lineWidth: 1) }
                 .frame(width: 44, height: 44)
                 .contentShape(.circle)
         }
@@ -100,15 +101,19 @@ struct LocalMessageAttachmentList: View {
                     LocalAttachmentImage(data: attachment.data, maximumPixelSize: 640)
                         .frame(minHeight: 112, maxHeight: 220)
                         .frame(maxWidth: .infinity)
-                        .background(Color.companionSurfaceRaised)
+                        .background(CompanionIOSTheme.card)
                         .clipShape(.rect(cornerRadius: 10))
                         .overlay {
                             RoundedRectangle(cornerRadius: 10)
-                                .stroke(Color.companionDivider, lineWidth: 1)
+                                .stroke(CompanionIOSTheme.separator, lineWidth: 1)
                         }
                         .accessibilityLabel(attachment.filename)
                 } else {
-                    AttachmentDocumentChip(filename: attachment.filename, byteSize: attachment.byteSize)
+                    AttachmentDocumentCard(
+                        filename: attachment.filename,
+                        byteSize: attachment.byteSize,
+                        subtitle: "Attachment"
+                    )
                 }
             }
         }
@@ -116,8 +121,14 @@ struct LocalMessageAttachmentList: View {
 }
 
 struct TranscriptAttachmentList: View {
+    @Environment(SessionStore.self) private var sessionStore
     let companionID: String
     let attachments: [CompanionAttachment]
+    @State private var previewURL: URL?
+    @State private var openingAttachmentID: String?
+    @State private var previewTask: Task<Void, Never>?
+    @State private var failedAttachment: CompanionAttachment?
+    @State private var previewErrorMessage: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -125,33 +136,147 @@ struct TranscriptAttachmentList: View {
                 if attachment.contentType.isImage {
                     RemoteAttachmentImage(companionID: companionID, attachment: attachment)
                 } else {
-                    AttachmentDocumentChip(filename: attachment.filename, byteSize: attachment.byteSize)
+                    Button {
+                        startOpening(attachment)
+                    } label: {
+                        AttachmentDocumentCard(
+                            filename: attachment.filename,
+                            byteSize: attachment.byteSize,
+                            subtitle: "Companion",
+                            loading: openingAttachmentID == attachment.id
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(openingAttachmentID != nil)
+                    .accessibilityHint("Opens a file preview")
+                    .accessibilityIdentifier("attachment.open.\(attachment.id)")
                 }
             }
         }
+        .quickLookPreview($previewURL)
+        .alert(
+            "Couldn’t Open File",
+            isPresented: Binding(
+                get: { previewErrorMessage != nil },
+                set: { presented in
+                    if !presented {
+                        previewErrorMessage = nil
+                        failedAttachment = nil
+                    }
+                }
+            )
+        ) {
+            if let failedAttachment {
+                Button("Try Again") { startOpening(failedAttachment) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(previewErrorMessage ?? "The attachment could not be opened.")
+        }
+        .onDisappear {
+            previewTask?.cancel()
+            previewTask = nil
+            removePreviewFile()
+        }
+    }
+
+    @MainActor
+    private func startOpening(_ attachment: CompanionAttachment) {
+        previewTask?.cancel()
+        previewErrorMessage = nil
+        failedAttachment = nil
+        previewTask = Task { await open(attachment) }
+    }
+
+    @MainActor
+    private func open(_ attachment: CompanionAttachment) async {
+        openingAttachmentID = attachment.id
+        defer { openingAttachmentID = nil }
+        var previewDirectory: URL?
+        do {
+            let data = try await sessionStore.attachmentData(
+                companionID: companionID,
+                attachmentID: attachment.id
+            )
+            try Task.checkCancellation()
+            removePreviewFile()
+            let safeName = URL(fileURLWithPath: attachment.filename).lastPathComponent
+            let directory = FileManager.default.temporaryDirectory.appending(
+                path: "companion-preview-\(UUID().uuidString)",
+                directoryHint: .isDirectory
+            )
+            previewDirectory = directory
+            let url = directory.appending(path: safeName)
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+            try Task.checkCancellation()
+            try data.write(to: url, options: [.atomic, .completeFileProtection])
+            previewURL = url
+            previewDirectory = nil
+        } catch is CancellationError {
+            if let previewDirectory {
+                try? FileManager.default.removeItem(at: previewDirectory)
+            }
+            return
+        } catch {
+            if let previewDirectory {
+                try? FileManager.default.removeItem(at: previewDirectory)
+            }
+            failedAttachment = attachment
+            previewErrorMessage = companionDisplayMessage(
+                error,
+                fallback: "The attachment could not be opened."
+            )
+        }
+    }
+
+    private func removePreviewFile() {
+        guard let previewURL else { return }
+        try? FileManager.default.removeItem(at: previewURL.deletingLastPathComponent())
+        self.previewURL = nil
     }
 }
 
-private struct AttachmentDocumentChip: View {
+private struct AttachmentDocumentCard: View {
     let filename: String
     let byteSize: Int
+    let subtitle: String
+    var loading = false
 
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "doc")
-                .foregroundStyle(Color.companionMuted)
-            Text(filename)
-                .font(.caption.weight(.medium))
-                .lineLimit(1)
+        HStack(spacing: 10) {
+            Image(systemName: "doc.text.fill")
+                .font(.system(size: 18))
+                .foregroundStyle(CompanionIOSTheme.textPrimary)
+                .frame(width: 36, height: 36)
+                .background(CompanionIOSTheme.card, in: RoundedRectangle(cornerRadius: 9))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(filename)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(CompanionIOSTheme.textPrimary)
+                    .lineLimit(1)
+                Text("\(subtitle) · \(attachmentSizeLabel(byteSize))")
+                    .font(.subheadline)
+                    .foregroundStyle(CompanionIOSTheme.textSecondary)
+                    .lineLimit(1)
+            }
+
             Spacer(minLength: 4)
-            Text(attachmentSizeLabel(byteSize))
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(Color.companionMuted)
+
+            if loading {
+                ProgressView().controlSize(.small)
+            } else {
+                Image(systemName: "arrow.up.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(CompanionIOSTheme.textSecondary)
+            }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 9)
-        .frame(maxWidth: 300)
-        .companionMaterial(radius: 10)
+        .padding(10)
+        .frame(maxWidth: 320, alignment: .leading)
+        .background(CompanionIOSTheme.innerBubble, in: RoundedRectangle(cornerRadius: 12))
         .accessibilityElement(children: .combine)
     }
 }
@@ -169,7 +294,7 @@ private struct LocalAttachmentImage: View {
                     .scaledToFit()
             } else {
                 Image(systemName: "photo")
-                    .foregroundStyle(Color.companionMuted)
+                    .foregroundStyle(CompanionIOSTheme.textSecondary)
             }
         }
         .task(id: data) {
@@ -203,7 +328,7 @@ private struct RemoteAttachmentImage: View {
                         Text("Try again")
                             .font(.caption2.weight(.semibold))
                     }
-                    .foregroundStyle(Color.companionMuted)
+                    .foregroundStyle(CompanionIOSTheme.textSecondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 .buttonStyle(.plain)
@@ -211,16 +336,16 @@ private struct RemoteAttachmentImage: View {
             } else {
                 ProgressView("Loading image")
                     .font(.caption)
-                    .foregroundStyle(Color.companionMuted)
+                    .foregroundStyle(CompanionIOSTheme.textSecondary)
             }
         }
         .frame(minHeight: 112, maxHeight: 220)
         .frame(maxWidth: .infinity)
-        .background(Color.companionSurfaceRaised)
+        .background(CompanionIOSTheme.card)
         .clipShape(.rect(cornerRadius: 10))
         .overlay {
             RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.companionDivider, lineWidth: 1)
+                .stroke(CompanionIOSTheme.separator, lineWidth: 1)
         }
         .accessibilityLabel(attachment.filename)
         .task(id: loadGeneration) {

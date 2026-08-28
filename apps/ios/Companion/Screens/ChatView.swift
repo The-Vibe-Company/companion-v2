@@ -95,6 +95,7 @@ private struct TranscriptKeyboardDismissGesture: UIGestureRecognizerRepresentabl
 struct ChatView: View {
     @Environment(SessionStore.self) private var sessionStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dismiss) private var dismiss
     let companion: CompanionSummary
     let onSettings: () -> Void
     let onPlugins: () -> Void
@@ -130,6 +131,7 @@ struct ChatView: View {
     @State private var selectedToolDetail: ToolRunDetailRoute?
     @State private var inputFocusCoordinator = CompanionChatInputFocusCoordinator()
     @State private var routineHistoryTarget: CompanionRoutineHistoryTarget?
+    @State private var showingComputer = false
 
     private let bottomProximityThreshold: CGFloat = 80
 
@@ -163,12 +165,15 @@ struct ChatView: View {
         let renderedEntries = visibleEntries
         let queuedEntries = queuedEntries(in: thread)
         let renderedScrollRevision = scrollContentRevision
-        CompanionBackdrop {
+        ZStack {
+            CompanionIOSTheme.canvas
+                .ignoresSafeArea()
+
             ScrollViewReader { proxy in
                 VStack(spacing: 0) {
                     ScrollView {
                         VStack(spacing: 16) {
-                            LazyVStack(spacing: 16) {
+                            LazyVStack(spacing: 0) {
                                 if loading && thread == nil {
                                     ProgressView("Loading conversation…")
                                         .padding(.top, 80)
@@ -183,11 +188,14 @@ struct ChatView: View {
                                     }
 
                                     ForEach(Array(renderedEntries.enumerated()), id: \.element.eventID) { index, entry in
-                                        if startsNewDay(
+                                        let startsDay = startsNewDay(
                                             entry,
                                             after: index > 0 ? renderedEntries[index - 1] : nil
-                                        ) {
+                                        )
+                                        if startsDay {
                                             dayMarker(for: transcriptDate(entry.createdAt) ?? .now)
+                                                .padding(.top, index == 0 ? 0 : 8)
+                                                .padding(.bottom, 16)
                                         }
                                         TranscriptRowView(
                                             input: transcriptRowInput(for: entry),
@@ -221,6 +229,15 @@ struct ChatView: View {
                                             }
                                         )
                                         .equatable()
+                                        .padding(
+                                            .top,
+                                            startsDay
+                                                ? 0
+                                                : transcriptSpacing(
+                                                    after: index > 0 ? renderedEntries[index - 1] : nil,
+                                                    before: entry
+                                                )
+                                        )
                                         .id(entry.id)
                                     }
 
@@ -235,11 +252,13 @@ struct ChatView: View {
                                             onRetry: retryInterruptedTurn,
                                             onCancel: cancelTurn
                                         )
+                                        .padding(.top, 16)
                                         .id("interrupted-\(interruptedTurn.id)")
                                     }
 
                                     if !pendingMessages.isEmpty, pendingStartsNewDay {
                                         dayMarker(for: .now)
+                                            .padding(.vertical, 16)
                                     }
 
                                     ForEach(pendingMessages) { pending in
@@ -250,6 +269,7 @@ struct ChatView: View {
                                             retry: { retry(pending.id) },
                                             dismiss: { dismiss(pending.id) }
                                         )
+                                        .padding(.top, 16)
                                         .id("pending-\(pending.id)")
                                     }
                                 }
@@ -390,8 +410,14 @@ struct ChatView: View {
                 }
             }
         }
+        .navigationBarBackButtonHidden(true)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(CompanionIOSTheme.canvas, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
         .toolbar { headerToolbar }
+        .navigationDestination(isPresented: $showingComputer) {
+            CompanionComputerView(companion: currentCompanion, onSettings: onSettings)
+        }
         .sheet(item: $selectedToolDetail) { route in
             CompanionToolRunDetailView(tool: route.tool, timestamp: route.timestamp)
                 .presentationDetents([.large])
@@ -447,44 +473,86 @@ struct ChatView: View {
 
     @ToolbarContentBuilder
     private var headerToolbar: some ToolbarContent {
-        ToolbarItem(placement: .principal) {
-            HStack(spacing: 9) {
-                CompanionAvatar(
-                    name: currentCompanion.name,
-                    icon: currentCompanion.icon,
-                    size: 20,
-                    state: isReplying ? .thinking : .idle
-                )
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(currentCompanion.name)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Color.companionInk)
-                        .lineLimit(1)
-                    Text(statusLabel)
-                        .font(.caption2)
-                        .foregroundStyle(Color.companionMuted)
-                }
-            }
-            .accessibilityElement(children: .combine)
-        }
-
-        ToolbarItem(placement: .topBarTrailing) {
-            CompanionStatusBadge(
-                runtime: currentCompanion.runtime,
-                compact: true,
-                replyingColor: visualTheme.accent
+        ToolbarItem(placement: .topBarLeading) {
+            chatHeaderButton(
+                systemImage: "chevron.left",
+                label: "Back",
+                action: { dismiss() }
             )
         }
 
-        ToolbarItem(placement: .topBarTrailing) {
+        ToolbarItem(placement: .principal) {
             Button(action: onSettings) {
-                Image(systemName: "gearshape")
-                    .frame(width: 44, height: 44)
+                HStack(spacing: 8) {
+                    CharacterMark(
+                        name: currentCompanion.name,
+                        icon: currentCompanion.icon,
+                        size: 20
+                    )
+                    Text(currentCompanion.name)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(CompanionIOSTheme.textPrimary)
+                        .lineLimit(1)
+                }
+                .padding(.leading, 10)
+                .padding(.trailing, 14)
+                .frame(minHeight: 36)
+                .background(CompanionIOSTheme.card, in: Capsule())
             }
-            .tint(visualTheme.accent)
-            .accessibilityLabel("Settings for \(currentCompanion.name)")
-            .accessibilityIdentifier("chat.settings")
+            .buttonStyle(.plain)
+            .accessibilityLabel("Details for \(currentCompanion.name)")
+            .accessibilityIdentifier("chat.details")
         }
+
+        ToolbarItemGroup(placement: .topBarTrailing) {
+            CompanionStatusBadge(
+                runtime: currentCompanion.runtime,
+                compact: true
+            )
+
+            if currentCompanion.access != .viewer {
+                chatHeaderButton(
+                    systemImage: "desktopcomputer",
+                    label: "Open \(currentCompanion.name)'s computer",
+                    action: { showingComputer = true }
+                )
+                .disabled(currentCompanion.runtime.state != .running)
+                .accessibilityHint(
+                    currentCompanion.runtime.state == .running
+                        ? "Opens the live Box screen."
+                        : "Send a message to start the Companion first."
+                )
+            }
+
+            Menu {
+                Button("Companion details", systemImage: "info.circle", action: onSettings)
+                Button("Plugins", systemImage: "puzzlepiece.extension", action: onPlugins)
+            } label: {
+                Image(systemName: "ellipsis")
+                    .frame(width: 44, height: 44)
+                    .background(CompanionIOSTheme.card, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(CompanionIOSTheme.textPrimary)
+            .accessibilityLabel("Chat actions")
+            .accessibilityIdentifier("chat.actions")
+        }
+    }
+
+    private func chatHeaderButton(
+        systemImage: String,
+        label: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 16, weight: .semibold))
+                .frame(width: 44, height: 44)
+                .background(CompanionIOSTheme.card, in: Circle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(CompanionIOSTheme.textPrimary)
+        .accessibilityLabel(label)
     }
 
     private var loadEarlierButton: some View {
@@ -545,13 +613,28 @@ struct ChatView: View {
 
     private func dayMarker(for date: Date) -> some View {
         Text(dayLabel(for: date))
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(Color.companionMuted)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(.thinMaterial, in: Capsule())
+            .font(.caption)
+            .foregroundStyle(CompanionIOSTheme.textSecondary)
+            .frame(maxWidth: .infinity)
             .accessibilityAddTraits(.isHeader)
             .accessibilityIdentifier("chat.day-marker.\(dayLabel(for: date))")
+    }
+
+    private func transcriptSpacing(after previous: TranscriptEntry?, before current: TranscriptEntry) -> CGFloat {
+        CGFloat(
+            CompanionChatBubbleLayout.spacing(
+                after: previous.map(transcriptBubbleKind),
+                before: transcriptBubbleKind(current)
+            )
+        )
+    }
+
+    private func transcriptBubbleKind(_ entry: TranscriptEntry) -> CompanionChatBubbleKind {
+        if entry.decision != nil { return .card }
+        if entry.role == "tool" { return .tool }
+        if entry.role == "assistant" { return .assistant }
+        if entry.role == "user", entry.authorID == thread?.viewerID { return .mine }
+        return .member
     }
 
     private func unavailableState(_ message: String) -> some View {
@@ -569,13 +652,13 @@ struct ChatView: View {
 
     private var emptyState: some View {
         VStack(spacing: 18) {
-            CompanionAvatar(name: currentCompanion.name, icon: currentCompanion.icon, size: 80, state: .idle)
+            CharacterMark(name: currentCompanion.name, icon: currentCompanion.icon, size: 76)
             VStack(spacing: 6) {
                 Text("Start the conversation")
                     .font(.title3.weight(.semibold))
                 Text("Send the first message to wake \(currentCompanion.name).")
                     .font(.subheadline)
-                    .foregroundStyle(Color.companionMuted)
+                    .foregroundStyle(CompanionIOSTheme.textSecondary)
                     .multilineTextAlignment(.center)
             }
         }
@@ -737,18 +820,6 @@ struct ChatView: View {
                 source: .reasoning,
                 animated: true
             )
-        }
-    }
-
-    private var statusLabel: String {
-        if isReplying { return "Replying" }
-        switch currentCompanion.runtime.state {
-        case .running: return "Online"
-        case .provisioning: return "Starting"
-        case .stopping: return "Stopping"
-        case .error: return "Needs attention"
-        case .notCreated, .stopped: return "Asleep"
-        case .unknown: return "Unknown"
         }
     }
 
@@ -1642,29 +1713,21 @@ struct ChatMessageBubble: View {
     }
 
     private var row: some View {
-        HStack(alignment: kind == .assistant ? .top : .bottom, spacing: 9) {
-            if kind == .mine { Spacer(minLength: 54) }
-
-            if kind == .assistant {
-                CompanionAvatar(name: companionName, icon: icon, size: 20, state: .still)
-                    .accessibilityHidden(true)
-            }
-
+        ChatBubbleRowLayout(
+            alignment: CompanionChatBubbleLayout.alignment(for: layoutKind)
+        ) {
             bubble
-
-            if kind != .mine { Spacer(minLength: kind == .assistant ? 12 : 36) }
         }
-        .frame(maxWidth: .infinity)
         .companionMessageInteractionMenu(rawContent: content)
     }
 
     @ViewBuilder
     private var bubble: some View {
         let contentView = VStack(alignment: .leading, spacing: 6) {
-            if kind != .mine, let authorName {
+            if kind == .member, let authorName {
                 Text(authorName)
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(Color.companionMuted)
+                    .foregroundStyle(secondaryTextColor)
             }
 
             if kind == .assistant, let reasoning = displayReasoning {
@@ -1678,26 +1741,33 @@ struct ChatMessageBubble: View {
                 if let streamingBaseMarkdown {
                     MarkdownMessageView(
                         document: streamingBaseMarkdown,
-                        accent: .companionInk,
+                        accent: primaryTextColor,
                         allowsTextSelection: false
                     )
                 }
                 if !streamingDelta.isEmpty {
                     Text(streamingDelta)
                         .font(.body)
-                        .foregroundStyle(Color.companionInk)
+                        .foregroundStyle(primaryTextColor)
                         .lineSpacing(3)
                 }
             } else if kind == .assistant, let markdown {
-                MarkdownMessageView(
-                    document: markdown,
-                    accent: .companionInk,
-                    allowsTextSelection: false
-                )
+                if usesMarkdownLayout {
+                    MarkdownMessageView(
+                        document: markdown,
+                        accent: primaryTextColor,
+                        allowsTextSelection: false
+                    )
+                } else {
+                    Text(content)
+                        .font(.body)
+                        .foregroundStyle(primaryTextColor)
+                        .lineSpacing(3)
+                }
             } else {
                 Text(content)
                     .font(.body)
-                    .foregroundStyle(Color.companionInk)
+                    .foregroundStyle(primaryTextColor)
             }
 
             if !localAttachments.isEmpty {
@@ -1720,34 +1790,55 @@ struct ChatMessageBubble: View {
                         Text(timestamp)
                     }
                 }
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(Color.companionMuted)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(secondaryTextColor)
             }
         }
 
-        if kind == .mine {
-            contentView
-                .padding(.horizontal, 14)
-                .padding(.vertical, 11)
-                .frame(maxWidth: 340, alignment: .leading)
-                .companionMaterial(radius: 18)
-        } else if kind == .assistant {
-            contentView
-                .padding(.vertical, 3)
-                .frame(maxWidth: 680, alignment: .leading)
-        } else {
-            contentView
-                .padding(.horizontal, 14)
-                .padding(.vertical, 11)
-                .frame(maxWidth: 340, alignment: .leading)
-                .companionMaterial(radius: 18)
+        contentView
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+            .background(bubbleColor, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var layoutKind: CompanionChatBubbleKind {
+        switch kind {
+        case .mine: .mine
+        case .assistant: .assistant
+        case .member: .member
         }
+    }
+
+    private var bubbleColor: Color {
+        kind == .mine ? CompanionIOSTheme.userBubble : CompanionIOSTheme.botBubble
+    }
+
+    private var primaryTextColor: Color {
+        kind == .mine ? CompanionIOSTheme.userBubbleText : CompanionIOSTheme.textPrimary
+    }
+
+    private var secondaryTextColor: Color {
+        kind == .mine
+            ? CompanionIOSTheme.userBubbleText.opacity(0.68)
+            : CompanionIOSTheme.textSecondary
     }
 
     private var displayReasoning: String? {
         guard let reasoning else { return nil }
         guard !reasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         return reasoning
+    }
+
+    private var usesMarkdownLayout: Bool {
+        content.contains("\n")
+            || content.contains("**")
+            || content.contains("__")
+            || content.contains("`")
+            || content.contains("[")
+            || content.hasPrefix("#")
+            || content.hasPrefix("- ")
+            || content.hasPrefix("* ")
+            || content.hasPrefix("> ")
     }
 }
 
@@ -1760,24 +1851,39 @@ struct CompanionThinkingDisclosure: View {
     private var secondaryStyle: Color { Color(uiColor: .secondaryLabel) }
 
     var body: some View {
-        DisclosureGroup(isExpanded: $isExpanded) {
-            Text(reasoning)
-                .font(.footnote)
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "ellipsis")
+                    Text("Thinking")
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.caption2.weight(.semibold))
+                }
+                .font(.footnote.weight(.medium))
                 .foregroundStyle(secondaryStyle)
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.leading, 4)
-                .padding(.top, 2)
-                .accessibilityIdentifier("thinking.content")
-        } label: {
-            Text("Thinking")
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(secondaryStyle)
-                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .padding(.horizontal, 10)
+                .frame(minHeight: 32)
+                .background(CompanionIOSTheme.chip, in: Capsule())
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if isExpanded {
+                Text(reasoning)
+                    .font(.footnote)
+                    .foregroundStyle(secondaryStyle)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("thinking.content")
+                    .transition(.opacity)
+            }
         }
-        .tint(secondaryStyle)
-        .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityLabel("Thinking")
         .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
         .accessibilityHint(
@@ -1810,6 +1916,8 @@ struct CompanionThinkingStatus: View {
         if isInteractive {
             Button(action: onTap) {
                 statusContent
+                    .frame(minHeight: 44, alignment: .leading)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel(label)
@@ -1829,33 +1937,25 @@ struct CompanionThinkingStatus: View {
     }
 
     private var statusContent: some View {
-        HStack(spacing: 9) {
-            CompanionAvatar(name: companionName, icon: icon, size: 20, state: .thinking)
+        HStack(spacing: 6) {
+            Image(systemName: "ellipsis")
                 .accessibilityHidden(true)
 
-            HStack(spacing: 0) {
-                Text(companionName)
-                    .foregroundStyle(statusTextColor)
-                    .fontWeight(.semibold)
-                Text(" thinking")
-                    .foregroundStyle(Color(uiColor: .secondaryLabel))
-            }
-            .font(.subheadline)
-            .multilineTextAlignment(.leading)
-            .fixedSize(horizontal: false, vertical: true)
+            Text("\(companionName) thinking")
+                .lineLimit(1)
 
             if isInteractive {
                 Image(systemName: "chevron.up")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(accent)
+                    .font(.caption2.weight(.semibold))
                     .accessibilityHidden(true)
             }
         }
-        .frame(minHeight: 44, alignment: .leading)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 4)
-        .contentShape(.rect(cornerRadius: 16))
-        .companionGlass(radius: 16, tint: accent.opacity(0.08), interactive: isInteractive)
+        .font(.footnote.weight(.medium))
+        .foregroundStyle(CompanionIOSTheme.textSecondary)
+        .padding(.horizontal, 10)
+        .frame(minHeight: 32)
+        .background(CompanionIOSTheme.chip, in: Capsule())
+        .contentShape(Capsule())
     }
 }
 
@@ -1896,24 +1996,28 @@ private struct TranscriptRowView: View, @MainActor Equatable {
             )
             .accessibilityIdentifier("chat.routine-origin.\(input.entry.eventID)")
         } else if let decision = input.entry.decision {
-            CompanionDecisionCard(
-                decision: decision,
-                companionName: input.companionName,
-                canAct: input.canAct,
-                catalog: input.decisionCatalog,
-                accent: visualTheme.accent,
-                accentForeground: visualTheme.accentForeground,
-                onDecide: onDecide,
-                onOpenPlugins: onOpenPlugins,
-                onAnswerFocusChange: onAnswerFocusChange
-            )
+            ChatBubbleRowLayout(alignment: .leading) {
+                CompanionDecisionCard(
+                    decision: decision,
+                    companionName: input.companionName,
+                    canAct: input.canAct,
+                    catalog: input.decisionCatalog,
+                    accent: visualTheme.accent,
+                    accentForeground: visualTheme.accentForeground,
+                    onDecide: onDecide,
+                    onOpenPlugins: onOpenPlugins,
+                    onAnswerFocusChange: onAnswerFocusChange
+                )
+            }
         } else if input.entry.role == "tool", let tool = input.entry.tool {
-            CompanionToolRunCard(tool: tool, eventID: input.entry.eventID) {
-                onOpenToolDetails(ToolRunDetailRoute(
-                    id: input.entry.eventID,
-                    tool: tool,
-                    timestamp: timeLabel
-                ))
+            ChatBubbleRowLayout(alignment: .leading) {
+                CompanionToolRunCard(tool: tool, eventID: input.entry.eventID) {
+                    onOpenToolDetails(ToolRunDetailRoute(
+                        id: input.entry.eventID,
+                        tool: tool,
+                        timestamp: timeLabel
+                    ))
+                }
             }
         } else {
             ChatMessageBubble(
@@ -2007,6 +2111,44 @@ private struct CompanionRoutineOriginMarker: View {
     }
 }
 
+private struct ChatBubbleRowLayout: Layout {
+    let alignment: CompanionChatBubbleAlignment
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) -> CGSize {
+        guard let subview = subviews.first else { return .zero }
+        let availableWidth = proposal.width.map(Double.init)
+            ?? CompanionChatBubbleLayout.absoluteMaximumWidth
+        let maximumWidth = CGFloat(
+            CompanionChatBubbleLayout.maximumWidth(in: availableWidth)
+        )
+        let childSize = subview.sizeThatFits(.init(width: maximumWidth, height: proposal.height))
+        return CGSize(width: proposal.width ?? childSize.width, height: childSize.height)
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        guard let subview = subviews.first else { return }
+        let maximumWidth = CGFloat(
+            CompanionChatBubbleLayout.maximumWidth(in: Double(bounds.width))
+        )
+        let childSize = subview.sizeThatFits(.init(width: maximumWidth, height: proposal.height))
+        let x = alignment == .trailing ? bounds.maxX - childSize.width : bounds.minX
+        subview.place(
+            at: CGPoint(x: x, y: bounds.minY),
+            anchor: .topLeading,
+            proposal: .init(width: childSize.width, height: childSize.height)
+        )
+    }
+}
+
 private func parseCompanionTimestamp(_ value: String) -> Date? {
     (try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(value))
         ?? (try? Date.ISO8601FormatStyle().parse(value))
@@ -2038,7 +2180,7 @@ private struct PendingMessageView: View {
 
             if let progress = message.uploadProgress, !message.failed {
                 ProgressView(value: progress)
-                    .tint(Color.companionMuted)
+                    .tint(CompanionIOSTheme.textSecondary)
                     .frame(maxWidth: 220)
                     .accessibilityLabel("Uploading attachments")
                     .accessibilityValue(progress.formatted(.percent.precision(.fractionLength(0))))
@@ -2048,7 +2190,7 @@ private struct PendingMessageView: View {
                 VStack(alignment: .trailing, spacing: 6) {
                     Text("Delivery could not be confirmed. Retrying reuses the same request.")
                         .font(.caption2)
-                        .foregroundStyle(Color.companionDanger)
+                        .foregroundStyle(CompanionIOSTheme.danger)
                     HStack(spacing: 8) {
                         Button("Dismiss", action: dismiss)
                             .buttonStyle(.glass)
