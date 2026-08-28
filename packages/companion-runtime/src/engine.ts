@@ -252,29 +252,45 @@ export class RuntimeEngine {
     if (auth.dispatchState !== "accepted"
       && auth.dispatchState !== "write_intent"
       && auth.dispatchState !== "ambiguous") return;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 8_000);
-    try {
-      const runId = claim.turnId;
-      if (
-        runId
-        && auth.piInvocationId?.startsWith(`routine:${runId}:`)
-        && this.#deps.pi.routineSession
-      ) {
+    const runId = claim.turnId;
+    if (
+      runId
+      && auth.piInvocationId?.startsWith(`routine:${runId}:`)
+      && this.#deps.pi.routineSession
+    ) {
+      const abortController = new AbortController();
+      const abortTimer = setTimeout(() => abortController.abort(), 8_000);
+      try {
         await this.#deps.pi.routineSession.abort({
           boxId: auth.boxId,
           runId,
           commandId: this.#deps.idFactory.uuid(),
           attemptId: claim.workId,
-          signal: controller.signal,
+          signal: abortController.signal,
         });
+      } catch {
+        // Process termination is the authoritative cancellation boundary for isolated routines.
+      } finally {
+        clearTimeout(abortTimer);
+      }
+      const terminateController = new AbortController();
+      const terminateTimer = setTimeout(() => terminateController.abort(), 8_000);
+      try {
         await this.#deps.pi.routineSession.terminate({
           boxId: auth.boxId,
           runId,
-          signal: controller.signal,
+          signal: terminateController.signal,
         });
         return;
+      } catch {
+        throw new AmbiguousExternalEffectError("routine_cancel_termination_ambiguous");
+      } finally {
+        clearTimeout(terminateTimer);
       }
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8_000);
+    try {
       await this.#deps.pi.abort({
         boxId: auth.boxId,
         commandId: this.#deps.idFactory.uuid(),
@@ -282,7 +298,7 @@ export class RuntimeEngine {
         signal: controller.signal,
       });
     } catch {
-      // Stop still settles. A leftover Pi run is recovered by the next turn's idle preflight.
+      // The persistent main Pi is recovered by the next turn's idle preflight.
     } finally {
       clearTimeout(timer);
     }

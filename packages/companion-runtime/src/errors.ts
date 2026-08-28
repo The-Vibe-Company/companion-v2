@@ -8,13 +8,19 @@ export class AmbiguousExternalEffectError extends Error {
   readonly stableCode: string;
   readonly action = "retry" as const;
 
-  constructor(code: "box_create_ambiguous" | "prompt_dispatch_ambiguous" | "decision_delivery_ambiguous") {
+  constructor(code:
+    | "box_create_ambiguous"
+    | "prompt_dispatch_ambiguous"
+    | "decision_delivery_ambiguous"
+    | "routine_cancel_termination_ambiguous") {
     super(
       code === "box_create_ambiguous"
         ? "Box creation may have succeeded, so it will not be replayed automatically."
         : code === "prompt_dispatch_ambiguous"
           ? "The prompt may have reached Pi, so it will not be replayed automatically."
-          : "The decision response may have reached Pi, so it will not be replayed automatically.",
+          : code === "decision_delivery_ambiguous"
+            ? "The decision response may have reached Pi, so it will not be replayed automatically."
+            : "The isolated routine process could not be proven stopped after cancellation.",
     );
     this.name = "AmbiguousExternalEffectError";
     this.stableCode = code;

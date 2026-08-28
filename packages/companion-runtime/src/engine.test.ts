@@ -1612,6 +1612,35 @@ describe("RuntimeEngine attempts", () => {
     expect(ports.abortCalls).toHaveLength(0);
   });
 
+  it("interrupts cancellation when an isolated routine cannot be proven stopped", async () => {
+    const claim = attemptClaim();
+    const denied = attemptAuthorization(claim, {
+      authorized: false,
+      denialCode: "turn_cancel_requested",
+      workCheckpoint: "running",
+      dispatchState: "accepted",
+      attemptStatus: "running",
+      turnStatus: "running",
+      piInvocationId: `routine:${TURN_ID}:invocation`,
+    });
+    const store = new MemoryRuntimeStore({ authorization: denied });
+    const ports = fakePorts(store);
+    ports.pi.routineSession!.abort = async () => {
+      throw new Error("abort unavailable");
+    };
+    ports.pi.routineSession!.terminate = async () => {
+      throw new Error("routine process survived termination");
+    };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("interrupted");
+    expect(store.settlements).toEqual([expect.objectContaining({
+      terminalStatus: "interrupted",
+      error: expect.objectContaining({ code: "routine_cancel_termination_ambiguous" }),
+    })]);
+  });
+
   it("cancels a stop that arrives while dispatch is still unacknowledged", async () => {
     const claim = attemptClaim();
     const denied = attemptAuthorization(claim, {

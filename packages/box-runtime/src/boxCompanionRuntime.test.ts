@@ -1888,6 +1888,7 @@ describe("isolated routine Pi sessions", () => {
       .toBe(false);
     expect(commands[0]).toContain(`routine_root="$HOME/${paths.root}"`);
     expect(commands[0]).toContain('cp -a "$HOME/.companion/pi/." "$routine_root/pi/"');
+    expect(commands[0]).toContain("routine-pi-session run root is still owned by a process");
     expect(commands.at(-1)).toContain(`socket="$HOME/${paths.socket}"`);
     expect(commands.at(-1)).toContain(`broker_script="$HOME/.companion/bin/companion-pi-broker.mjs"`);
     expect(commands.at(-1)).toContain("routine-pi-session could not be stopped after readiness timeout");
@@ -1899,6 +1900,38 @@ describe("isolated routine Pi sessions", () => {
         stderr: "",
       });
     }
+  });
+
+  it("removes the copied run root when pre-launch staging fails", async () => {
+    const commands: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      if (url.endsWith("/files") && init?.method === "PUT") {
+        return response({ error: "staging unavailable" }, 500);
+      }
+      if (url.endsWith("/commands") && init?.method === "POST") {
+        const command = requiredText(parseBoxTestBody(init.body), "command");
+        commands.push(command);
+        if (command.includes("routine-pi-session-prepared")) {
+          return response(commandResult("routine-pi-session-prepared\n"));
+        }
+        if (command.includes("routine-pi-session-terminated")) {
+          return response(commandResult("routine-pi-session-terminated\n"));
+        }
+      }
+      throw new Error(`unexpected Box request: ${init?.method ?? "GET"} ${url}`);
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await expect(runtime.startRoutineSession({
+      boxId: "bx_23456789",
+      runId,
+      persona: null,
+    })).rejects.toThrow();
+
+    expect(commands).toHaveLength(2);
+    expect(commands[1]).toContain("routine-pi-session-terminated");
+    expect(commands[1]).toContain('rm -rf "$routine_root"');
   });
 
   it("terminates only the run-scoped process, proves it stopped, and removes its run root", async () => {
@@ -1918,6 +1951,8 @@ describe("isolated routine Pi sessions", () => {
     expect(commands).toHaveLength(1);
     expect(commands[0]).toContain(`pid_file="$HOME/${companionPiRoutineSessionPaths(runId).pid}"`);
     expect(commands[0]).toContain('kill -- -"$pid"');
+    expect(commands[0]).toContain("signal_routine_root_processes TERM");
+    expect(commands[0]).toContain("signal_routine_root_processes KILL");
     expect(commands[0]).toContain("routine-pi-session process survived termination");
     expect(commands[0]).toContain('rm -rf "$routine_root"');
     expect(commands[0]).not.toContain("systemctl --user");

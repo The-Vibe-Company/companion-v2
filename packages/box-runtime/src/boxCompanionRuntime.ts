@@ -1170,6 +1170,16 @@ routine_pid_owned() {
   tr '\\0' '\\n' < "/proc/$candidate/environ" 2>/dev/null | grep -Fx "COMPANION_PI_ROOT=$routine_root" >/dev/null || return 1
   tr '\\0' ' ' < "/proc/$candidate/cmdline" 2>/dev/null | grep -F "$broker_script" >/dev/null || return 1
 }
+routine_root_has_process() {
+  local proc_env candidate
+  for proc_env in /proc/[0-9]*/environ; do
+    [ -r "$proc_env" ] || continue
+    candidate="\${proc_env%/environ}"
+    tr '\\0' '\\n' < "$proc_env" 2>/dev/null | grep -Fx "COMPANION_PI_ROOT=$routine_root" >/dev/null || continue
+    kill -0 "\${candidate##*/}" 2>/dev/null && return 0
+  done
+  return 1
+}
 
 if [ -s "$pid_file" ]; then
   existing_pid="$(cat "$pid_file")"
@@ -1188,6 +1198,10 @@ if [ -s "$pid_file" ]; then
     echo 'routine-pi-session has an invalid invocation marker' >&2
     exit 1
   fi
+fi
+if routine_root_has_process; then
+  echo 'routine-pi-session run root is still owned by a process' >&2
+  exit 1
 fi
 rm -rf "$routine_root"
 mkdir -p "$routine_root/state" "$routine_root/events" "$routine_root/sessions" "$routine_root/logs" "$routine_root/memory" "$routine_root/tmp" "$routine_root/outbox" "$routine_root/pi" "$routine_root/pi/extensions" "$routine_root/tools"
@@ -1225,15 +1239,26 @@ routine_root_has_process() {
   done
   return 1
 }
+signal_routine_root_processes() {
+  local requested_signal="$1" proc_env candidate
+  for proc_env in /proc/[0-9]*/environ; do
+    [ -r "$proc_env" ] || continue
+    candidate="\${proc_env%/environ}"
+    tr '\\0' '\\n' < "$proc_env" 2>/dev/null | grep -Fx "COMPANION_PI_ROOT=$routine_root" >/dev/null || continue
+    kill -s "$requested_signal" "\${candidate##*/}" 2>/dev/null || true
+  done
+}
 stop_routine_processes() {
   kill -TERM "$pid" 2>/dev/null || true
   kill -TERM -- -"$pid" 2>/dev/null || true
+  signal_routine_root_processes TERM
   for _ in $(seq 1 50); do
     if ! routine_root_has_process; then return 0; fi
     sleep 0.1
   done
   kill -KILL -- -"$pid" 2>/dev/null || true
   kill -KILL "$pid" 2>/dev/null || true
+  signal_routine_root_processes KILL
   for _ in $(seq 1 50); do
     if ! routine_root_has_process; then return 0; fi
     sleep 0.1
@@ -1351,6 +1376,15 @@ routine_root_has_process() {
   done
   return 1
 }
+signal_routine_root_processes() {
+  local requested_signal="$1" proc_env candidate
+  for proc_env in /proc/[0-9]*/environ; do
+    [ -r "$proc_env" ] || continue
+    candidate="\${proc_env%/environ}"
+    tr '\\0' '\\n' < "$proc_env" 2>/dev/null | grep -Fx "COMPANION_PI_ROOT=$routine_root" >/dev/null || continue
+    kill -s "$requested_signal" "\${candidate##*/}" 2>/dev/null || true
+  done
+}
 if [ -s "$pid_file" ]; then
   pid="$(cat "$pid_file")"
   if kill -0 "$pid" 2>/dev/null; then
@@ -1360,6 +1394,7 @@ if [ -s "$pid_file" ]; then
     fi
     kill -- -"$pid" 2>/dev/null || true
     kill "$pid" 2>/dev/null || true
+    signal_routine_root_processes TERM
     for _ in $(seq 1 50); do
       if ! kill -0 "$pid" 2>/dev/null; then break; fi
       sleep 0.1
@@ -1367,12 +1402,27 @@ if [ -s "$pid_file" ]; then
     if routine_root_has_process; then
       kill -KILL -- -"$pid" 2>/dev/null || true
       kill -KILL "$pid" 2>/dev/null || true
+      signal_routine_root_processes KILL
       for _ in $(seq 1 50); do
         if ! routine_root_has_process; then break; fi
         sleep 0.1
       done
     fi
   fi
+fi
+if routine_root_has_process; then
+  signal_routine_root_processes TERM
+  for _ in $(seq 1 50); do
+    if ! routine_root_has_process; then break; fi
+    sleep 0.1
+  done
+fi
+if routine_root_has_process; then
+  signal_routine_root_processes KILL
+  for _ in $(seq 1 50); do
+    if ! routine_root_has_process; then break; fi
+    sleep 0.1
+  done
 fi
 if routine_root_has_process; then
   echo 'routine-pi-session process survived termination' >&2
@@ -4938,55 +4988,70 @@ done`,
     const existingInvocation = routineInvocationFromOutput(prepared.stdout);
     if (existingInvocation) return { state: "idle", invocationId: existingInvocation };
 
-    await this.#writeFile(
-      input.boxId,
-      `${paths.root}/state/instructions.txt`,
-      composedRoutineInstructions(input.persona),
-    );
+    try {
+      await this.#writeFile(
+        input.boxId,
+        `${paths.root}/state/instructions.txt`,
+        composedRoutineInstructions(input.persona),
+      );
 
-    await this.#writeFile(
-      input.boxId,
-      paths.extension,
-      COMPANION_PI_ROUTINE_SURFACE_EXTENSION_SOURCE.endsWith("\n")
-        ? COMPANION_PI_ROUTINE_SURFACE_EXTENSION_SOURCE
-        : `${COMPANION_PI_ROUTINE_SURFACE_EXTENSION_SOURCE}\n`,
-    );
-    const extensionMode = await this.#command(
-      input.boxId,
-      `set -euo pipefail; chmod 600 "$HOME/${paths.extension}"`,
-      30,
-      input.signal,
-    );
-    if (!extensionMode.success) {
-      throw new BoxRuntimeProviderError(
-        `Routine Pi surface extension failed to stage${commandFailureDetail(extensionMode)}`,
-        502,
-        "routine_surface_extension_failed",
+      await this.#writeFile(
+        input.boxId,
+        paths.extension,
+        COMPANION_PI_ROUTINE_SURFACE_EXTENSION_SOURCE.endsWith("\n")
+          ? COMPANION_PI_ROUTINE_SURFACE_EXTENSION_SOURCE
+          : `${COMPANION_PI_ROUTINE_SURFACE_EXTENSION_SOURCE}\n`,
       );
-    }
+      const extensionMode = await this.#command(
+        input.boxId,
+        `set -euo pipefail; chmod 600 "$HOME/${paths.extension}"`,
+        30,
+        input.signal,
+      );
+      if (!extensionMode.success) {
+        throw new BoxRuntimeProviderError(
+          `Routine Pi surface extension failed to stage${commandFailureDetail(extensionMode)}`,
+          502,
+          "routine_surface_extension_failed",
+        );
+      }
 
-    const invocationId = `routine:${paths.runId}:${randomUUID()}`;
-    const started = await this.#command(
-      input.boxId,
-      routineLaunchCommand(paths, invocationId),
-      PI_ROUTINE_START_TIMEOUT_SECONDS,
-      input.signal,
-    );
-    if (!started.success) {
-      throw new BoxRuntimeProviderError(
-        `Routine Pi session failed to start${commandFailureDetail(started)}`,
-        502,
-        "routine_session_start_failed",
+      const invocationId = `routine:${paths.runId}:${randomUUID()}`;
+      const started = await this.#command(
+        input.boxId,
+        routineLaunchCommand(paths, invocationId),
+        PI_ROUTINE_START_TIMEOUT_SECONDS,
+        input.signal,
       );
+      if (!started.success) {
+        throw new BoxRuntimeProviderError(
+          `Routine Pi session failed to start${commandFailureDetail(started)}`,
+          502,
+          "routine_session_start_failed",
+        );
+      }
+      if (routineInvocationFromOutput(started.stdout) !== invocationId) {
+        throw new BoxRuntimeProviderError(
+          "Routine Pi session did not return a readiness acknowledgement",
+          502,
+          "routine_session_start_ambiguous",
+        );
+      }
+      return { state: "idle" as const, invocationId };
+    } catch (error) {
+      try {
+        // Use an independent cleanup call: the originating request signal may be why staging
+        // failed, but copied Pi/session material must not remain and an ambiguous launch must stop.
+        await this.terminateRoutineSession({ boxId: input.boxId, runId: input.runId });
+      } catch {
+        throw new BoxRuntimeProviderError(
+          "Routine Pi session failed to clean up after an incomplete start",
+          502,
+          "routine_session_cleanup_failed",
+        );
+      }
+      throw error;
     }
-    if (routineInvocationFromOutput(started.stdout) !== invocationId) {
-      throw new BoxRuntimeProviderError(
-        "Routine Pi session did not return a readiness acknowledgement",
-        502,
-        "routine_session_start_ambiguous",
-      );
-    }
-    return { state: "idle", invocationId };
   }
 
   async routineSessionState(input: {
