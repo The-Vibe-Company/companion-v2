@@ -654,6 +654,19 @@ in [Routine Pi context substrate](routine-pi-context-substrate.md). The latest v
 compaction summary plus a bounded recent main-thread tail is runtime material, not a member-facing
 endpoint; the pinned id and digest make takeover reconstruct identical bytes.
 
+Routine preparation also pins the parent Companion's Box-side memory into the disposable run root.
+The main daemon keeps authoritative memory at `~/.companion/runtime/memory`; the runtime copies only
+regular `MEMORY.md` and `daily/YYYY-MM-DD.md` files into the routine's private memory directory and
+launches Pi with that copy as `PI_MEMORY_DIR`. The routine therefore receives the same long-term
+facts and daily recall that `pi-memory` injects for the main Companion, but it has no linked or
+mounted path back to the authoritative files. Any memory-tool write is confined to the disposable
+copy and disappears with the run. Its qmd collection configuration and SQLite index are run-local,
+and a run-local wrapper supplies an explicit named index so project-local qmd discovery cannot
+override them. `memory_search` therefore indexes only the pin and can neither query nor reconfigure
+the main daemon's collection. The main Pi remains the sole durable memory writer, so a routine can
+never race or corrupt the parent's `MEMORY.md` or daily logs. A takeover adopts the same prepared run
+root rather than refreshing its memory view.
+
 The routine-only `surface_to_main` tool is a terminal return, never a conversational tool:
 
 - `notify` atomically writes one visible Companion entry to main-thread history and creates no turn,
