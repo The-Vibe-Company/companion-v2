@@ -1986,7 +1986,9 @@ describe("isolated routine Pi sessions", () => {
         expectedInvocationId: invocationId,
       })).resolves.toMatchObject({ state: "idle" });
 
-      expect(preparedResult).toMatchObject({ status: 0, stderr: "" });
+      // Some Linux hosts deny reads of unrelated `/proc/*/environ` files before the shell can apply
+      // the command's stderr redirect. That benign warning must not hide the preparation exit code.
+      expect(preparedResult).toMatchObject({ status: 0 });
       const routineMemory = join(boxHome, paths.root, "memory");
       expect(readFileSync(join(routineMemory, "MEMORY.md"), "utf8")).toBe(parentMemoryBytes);
       expect(readFileSync(join(routineMemory, "daily", "2026-08-28.md"), "utf8"))
