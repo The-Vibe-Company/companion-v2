@@ -659,8 +659,9 @@ reads; recovery codes, messages, and actions remain Owner/Editor-only. The conve
 masks the fire marker itself, but a surfaced return is an ordinary visible Companion entry and
 therefore becomes normal conversation history.
 
-This target behavior is activated only after the schema/read API and both first-party history views
-are deployed. Until that cutover, `companion_api_read_thread` continues its compatibility projection:
+This behavior is activated for new runs by `COMPANION_ROUTINE_ISOLATION_ENABLED` after the
+schema/read API and both first-party history views are deployed. With that deploy gate off,
+`companion_api_read_thread` continues its compatibility projection:
 `routine {id, name}` on the originating user entry, prompt retained in `content`, first-party bubble
 hidden, and routine Pi output in the ordinary thread. Server-side partitioning replaces that
 compatibility path; client-side filtering alone is explicitly rejected because it cannot provide a
@@ -798,8 +799,8 @@ existing Box gains the current brief at its next staging (`start`, `restart_pi`,
 The full brief is the first-party contract. Only already-persisted Expo turns carrying the deprecated
 compatibility discriminator retain the narrowed historical staging behavior; new clients must not
 send that discriminator. Routines, triggers, `propose_routine`, and `propose_trigger` remain
-available in both the full contract and that compatibility path. Until the routine-isolation
-cutover, a fire is processed by the ordinary main Pi session; after cutover it remains an ordinary
+available in both the full contract and that compatibility path. A flag-off fire is processed by
+the ordinary main Pi session; a newly pinned or already-pinned isolated run remains an ordinary
 durable turn for queueing and exactly-once identity but executes in the run-scoped Pi session above.
 
 **Outputs.** The layout-14 broker creates and empties `~/outbox` inside the serialized prompt

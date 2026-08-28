@@ -52,6 +52,11 @@ export interface RuntimeStore {
     fence: LeaseFence,
     leaseSeconds: typeof RUNTIME_LEASE_SECONDS,
   ): Promise<RuntimeWorkMaterial | null>;
+  prepareRoutineRun(fence: LeaseFence, enableNewIsolation: boolean): Promise<{
+    id: string;
+    sha256: string;
+    content: string;
+  } | false | null>;
   getSkillUpdateMaterial(
     fence: LeaseFence,
     leaseSeconds: typeof RUNTIME_LEASE_SECONDS,
@@ -112,6 +117,7 @@ export interface RuntimeStore {
     checkpointSequence: bigint;
     eventCursor: bigint;
     hasVisibleOutput: boolean;
+    routineReturned: boolean;
   } | null>;
   registerDuplicateCleanups(fence: LeaseFence, boxIds: string[]): Promise<DuplicateCleanup[]>;
   checkpointDuplicateCleanup(fence: LeaseFence, input: {
@@ -374,9 +380,19 @@ function decodeMaterial(row: RuntimeSqlRow): RuntimeWorkMaterial {
     throw new RuntimeCredentialSnapshotChangedError();
   }
   const rawPrompt = row.prompt_text;
-  const prompt = rawPrompt === null ? null : stringValue(rawPrompt);
+  let prompt = rawPrompt === null ? null : stringValue(rawPrompt);
   if (rawPrompt !== null && (prompt === null || prompt.length > 1_000_000)) {
     throw new RuntimeStoreContractError();
+  }
+  const rawRelaySource = row.relay_source_content;
+  const relaySource = rawRelaySource === null ? null : stringValue(rawRelaySource);
+  if (rawRelaySource !== null && (relaySource === null || relaySource.length > 16_384)) {
+    throw new RuntimeStoreContractError();
+  }
+  if (relaySource !== null) {
+    prompt = `${prompt ?? "Respond to the surfaced routine entry."}\n\n`
+      + "--- Surfaced routine entry (main conversation) ---\n"
+      + `${relaySource}\n--- End surfaced routine entry ---`;
   }
   const requestKind = row.decision_request_kind;
   if (
@@ -424,6 +440,23 @@ function decodeMaterial(row: RuntimeSqlRow): RuntimeWorkMaterial {
       throw new RuntimeStoreContractError();
     }
   }
+  const routineId = nullableUuidText(row, "routine_snapshot_id");
+  const routineName = nullableText(row, "routine_name");
+  const routineIsolated = booleanValue(row.routine_isolated);
+  if (routineIsolated === null || (routineId === null) !== (routineName === null)) {
+    throw new RuntimeStoreContractError();
+  }
+  const contextId = nullableUuidText(row, "routine_context_id");
+  const contextSha256 = nullableText(row, "routine_context_sha256");
+  const rawContextContent = row.routine_context_content;
+  const contextContent = rawContextContent === null ? null : stringValue(rawContextContent);
+  if (
+    (contextId === null) !== (contextSha256 === null)
+    || (contextId === null) !== (contextContent === null)
+    || (contextSha256 !== null && !SHA256_PATTERN.test(contextSha256))
+    || (contextContent !== null && Buffer.byteLength(contextContent, "utf8") > 32_768)
+    || (routineIsolated && contextId === null)
+  ) throw new RuntimeStoreContractError();
   return {
     turnId: nullableUuidText(row, "turn_id"),
     attemptId: nullableUuidText(row, "attempt_id"),
@@ -431,6 +464,14 @@ function decodeMaterial(row: RuntimeSqlRow): RuntimeWorkMaterial {
     promptText: prompt,
     turnStartedAt,
     memberTimezone,
+    routineId,
+    routineName,
+    routineIsolated,
+    routineContext: contextId === null ? null : {
+      id: contextId,
+      sha256: contextSha256!,
+      content: contextContent!,
+    },
     decisionRequestKind: requestKind,
     decisionResponsePayload: decisionPayload,
     providerMaterial: objectArray(row, "provider_material"),
@@ -828,7 +869,11 @@ export class PostgresRuntimeStore implements RuntimeStore {
                material.credential_snapshot_matches, material.box_id,
                material.agent_hosted_url, material.agent_token_ciphertext,
                material.agent_observed_at, turn_context.turn_started_at,
-               turn_context.member_timezone
+               turn_context.member_timezone,
+               routine_material.routine_snapshot_id, routine_material.routine_name,
+               routine_material.routine_isolated, routine_material.routine_context_id,
+               routine_material.routine_context_sha256, routine_material.routine_context_content,
+               routine_material.relay_source_content
         FROM public.companion_runtime_get_material(
           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
           $6::text, $7::public.companion_runtime_work_kind, $8::uuid, $9::integer
@@ -837,9 +882,42 @@ export class PostgresRuntimeStore implements RuntimeStore {
           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
           $6::text, $7::public.companion_runtime_work_kind, $8::uuid, $9::integer
         ) turn_context
+        CROSS JOIN public.companion_runtime_get_routine_material(
+          $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
+          $6::text, $7::public.companion_runtime_work_kind, $8::uuid
+        ) routine_material
       `, [...fenceParameters(fence), leaseSeconds]);
       if (rows.length === 0) return null;
       return decodeMaterial(one(rows, "work material"));
+    }, true);
+  }
+
+  async prepareRoutineRun(fence: LeaseFence, enableNewIsolation: boolean): Promise<{
+    id: string;
+    sha256: string;
+    content: string;
+  } | false | null> {
+    return await mapped(async () => {
+      const rows = await this.sql.unsafe<RuntimeSqlRow[]>(`
+        SELECT isolated, context_id, context_sha256, context_content
+        FROM public.companion_runtime_prepare_routine_run(
+          $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
+          $6::text, $7::public.companion_runtime_work_kind, $8::uuid, $9::boolean
+        )
+      `, [...fenceParameters(fence), enableNewIsolation]);
+      if (rows.length === 0) return null;
+      const row = one(rows, "routine run preparation");
+      const isolated = booleanValue(row.isolated);
+      if (isolated === null) throw new RuntimeStoreContractError();
+      if (!isolated) return false;
+      const id = nullableUuidText(row, "context_id");
+      const sha256 = nullableText(row, "context_sha256");
+      const content = nullableText(row, "context_content");
+      if (
+        id === null || sha256 === null || !SHA256_PATTERN.test(sha256)
+        || content === null || Buffer.byteLength(content, "utf8") > 32_768
+      ) throw new RuntimeStoreContractError();
+      return { id, sha256, content };
     }, true);
   }
 
@@ -1068,6 +1146,7 @@ export class PostgresRuntimeStore implements RuntimeStore {
     checkpointSequence: bigint;
     eventCursor: bigint;
     hasVisibleOutput: boolean;
+    routineReturned: boolean;
   } | null> {
     return await mapped(async () => {
       const events = input.events.map((event) => ({
@@ -1077,8 +1156,8 @@ export class PostgresRuntimeStore implements RuntimeStore {
       const rows = await this.sql.unsafe<RuntimeSqlRow[]>(`
         SELECT checkpoint_sequence::text AS checkpoint_sequence,
                event_cursor::text AS event_cursor,
-               has_visible_output
-        FROM public.companion_runtime_project_event_batch(
+               has_visible_output, routine_returned
+        FROM public.companion_runtime_project_event_batch_v2(
           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
           $6::text, $7::public.companion_runtime_work_kind, $8::uuid,
           $9::bigint, $10::text, $11::jsonb, $12::bigint, $13::timestamptz,
@@ -1100,17 +1179,20 @@ export class PostgresRuntimeStore implements RuntimeStore {
       const checkpointSequence = stringValue(row.checkpoint_sequence);
       const eventCursor = stringValue(row.event_cursor);
       const hasVisibleOutput = booleanValue(row.has_visible_output);
+      const routineReturned = booleanValue(row.routine_returned);
       if (
         checkpointSequence === null
         || !/^[1-9][0-9]*$/.test(checkpointSequence)
         || eventCursor === null
         || !/^(0|[1-9][0-9]*)$/.test(eventCursor)
         || hasVisibleOutput === null
+        || routineReturned === null
       ) throw new RuntimeStoreContractError();
       return {
         checkpointSequence: BigInt(checkpointSequence),
         eventCursor: BigInt(eventCursor),
         hasVisibleOutput,
+        routineReturned,
       };
     }, true);
   }

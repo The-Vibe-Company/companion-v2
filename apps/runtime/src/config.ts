@@ -45,6 +45,8 @@ interface RuntimeServiceConfigBase {
    * daemon probe — over the direct channel with per-call fallback to exec.
    */
   directTransport: "off" | "shadow" | "on";
+  /** Additive deployment gate for isolated scheduled-routine Pi sessions. */
+  routineIsolationEnabled: boolean;
 }
 
 export type RuntimeServiceConfig = RuntimeServiceConfigBase & (
@@ -151,6 +153,10 @@ export function loadRuntimeServiceConfig(
       "COMPANION_RUNTIME_REQUIRE_IMAGE",
     ),
     directTransport: directTransportEnv(env.COMPANION_DIRECT_TRANSPORT),
+    routineIsolationEnabled: booleanEnv(
+      env.COMPANION_ROUTINE_ISOLATION_ENABLED,
+      "COMPANION_ROUTINE_ISOLATION_ENABLED",
+    ),
   };
   if (!enabled) {
     return {

@@ -535,6 +535,7 @@ type ThreadReadRow = {
   interrupted_turn: unknown;
   last_message_at: Date | string | null;
   previous_last_read_ordinal: number | string | null;
+  hidden_routine_relay_turn_ids: unknown;
 };
 
 export async function readCompanionThreadV2(input: {
@@ -544,14 +545,21 @@ export async function readCompanionThreadV2(input: {
   database: Db;
 }): Promise<CompanionThread> {
   const result = await input.database.execute(sql`
-    select * from public.companion_api_read_thread(
-      ${input.orgId}::uuid,
-      ${input.companionId}::uuid
-    )
+    select thread_read.*,
+      public.companion_api_routine_hidden_relay_turns(
+        ${input.orgId}::uuid, ${input.companionId}::uuid
+      ) as hidden_routine_relay_turn_ids
+    from public.companion_api_read_thread(
+      ${input.orgId}::uuid, ${input.companionId}::uuid
+    ) thread_read
   `);
   const [row] = rows<ThreadReadRow>(result);
   if (!row) throw new Error("companion thread projection is unavailable");
+  const hiddenRoutineRelayTurnIds = new Set(z.array(z.string().uuid()).parse(
+    row.hidden_routine_relay_turn_ids,
+  ));
   const entries = (z.array(companionTranscriptEntrySchema).parse(row.entries) as CompanionTranscriptEntry[])
+    .filter((entry) => entry.turn_id === null || !hiddenRoutineRelayTurnIds.has(entry.turn_id))
     .map((entry) => entry.routine !== null && entry.turn_id !== null
       ? { ...entry, routine: { ...entry.routine, run_id: entry.turn_id } }
       : entry);

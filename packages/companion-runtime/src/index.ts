@@ -42,6 +42,7 @@ export interface CreateRuntimeKernelInput {
   sweepIntervalMs?: number;
   eventPollIntervalMs?: number | ((input: { boxId: string }) => number);
   claimsEnabled: boolean;
+  routineIsolationEnabled?: boolean;
   log?: RuntimeProcessLog;
 }
 
@@ -72,6 +73,9 @@ export function createRuntimeKernel(input: CreateRuntimeKernelInput): RuntimeKer
     clock,
     jitter: input.jitter ?? Math.random,
     executorId: input.executorId,
+    ...(input.routineIsolationEnabled === undefined
+      ? {}
+      : { routineIsolationEnabled: input.routineIsolationEnabled }),
     ...(input.eventPollIntervalMs === undefined
       ? {}
       : { eventPollIntervalMs: input.eventPollIntervalMs }),

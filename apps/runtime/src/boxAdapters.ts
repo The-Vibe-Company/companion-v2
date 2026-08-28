@@ -297,6 +297,63 @@ export function createRuntimePiControl(options: RuntimeBoxAdapterOptions): Runti
       });
       return writeOutcome(result);
     },
+    routineSession: {
+      async start(input) {
+        input.signal.throwIfAborted();
+        return await options.runtime().startRoutineSession(input);
+      },
+      async state(input) {
+        const runtime = options.runtime();
+        return brokerState(
+          await runtime.routineSessionState(input),
+          runtime.layoutIdentity().fullMarker,
+        );
+      },
+      async prompt(input) {
+        input.signal.throwIfAborted();
+        const result = await options.runtime().dispatchRoutinePrompt({
+          boxId: input.boxId,
+          runId: input.runId,
+          attemptId: input.attemptId,
+          expectedInvocationId: input.expectedInvocationId,
+          message: input.message,
+          requestId: input.commandId,
+          signal: input.signal,
+        });
+        return promptWriteOutcome(result);
+      },
+      async read(input) {
+        return await options.runtime().readRoutineEvents({
+          boxId: input.boxId,
+          runId: input.runId,
+          after: cursorNumber(input.after),
+          signal: input.signal,
+        });
+      },
+      async ack(input) {
+        const acknowledged = await options.runtime().ackRoutineEvents({
+          boxId: input.boxId,
+          runId: input.runId,
+          through: cursorNumber(input.through),
+          signal: input.signal,
+        });
+        return BigInt(acknowledged.acknowledgedCursor);
+      },
+      async abort(input) {
+        input.signal.throwIfAborted();
+        const result = await options.runtime().dispatchRoutineAbort({
+          boxId: input.boxId,
+          runId: input.runId,
+          attemptId: input.attemptId,
+          requestId: input.commandId,
+          signal: input.signal,
+        });
+        return writeOutcome(result);
+      },
+      async terminate(input) {
+        await options.runtime().terminateRoutineSession(input);
+      },
+    },
   };
 }
 

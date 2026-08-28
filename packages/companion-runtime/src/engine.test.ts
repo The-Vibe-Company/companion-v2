@@ -3,7 +3,6 @@ import { describe, expect, it, vi } from "vitest";
 import { RuntimeEngine } from "./engine";
 import { turnContextPromptSuffix } from "./attempt";
 import type { RuntimeProcessLog } from "./logging";
-import type { RuntimePiControl } from "./ports";
 import {
   RuntimeStoreContractError,
   RuntimeStoreIndeterminateError,
@@ -15,7 +14,6 @@ import {
   COMMAND_ID,
   COMPANION_ID,
   MESSAGE_EVENT_ID,
-  ORG_ID,
   PI_INVOCATION_ID,
   TURN_ID,
   attemptAuthorization,
@@ -537,7 +535,7 @@ describe("RuntimeEngine attempts", () => {
     ports.eventReads.push(assistantAndSettlementPage());
     const project = store.projectEventBatch.bind(store);
     store.projectEventBatch = async (fence, input) => {
-      const result = await project(fence, input);
+      await project(fence, input);
       throw new RuntimeStoreIndeterminateError();
     };
 
@@ -619,7 +617,7 @@ describe("RuntimeEngine attempts", () => {
     });
     const project = store.projectEventBatch.bind(store);
     store.projectEventBatch = async (fence, input) => {
-      const result = await project(fence, input);
+      await project(fence, input);
       throw new RuntimeStoreIndeterminateError();
     };
 
@@ -918,6 +916,143 @@ describe("RuntimeEngine attempts", () => {
       terminalStatus: "failed",
       error: { code: "empty_response" },
     });
+  });
+
+  it("runs a routine in its private Pi session and commits the first terminal return", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(claim),
+      material: attemptMaterial({
+        routineId: TURN_ID,
+        routineName: "conductor-progress-check",
+      }),
+    });
+    const ports = fakePorts(store);
+    const routineInvocationId = `routine:${TURN_ID}:invocation`;
+    ports.routineEventReads.push({
+      events: [{
+        sequence: 1,
+        invocationId: routineInvocationId,
+        attemptId: ATTEMPT_ID,
+        kind: "pi_event",
+        event: {
+          type: "tool_execution_start",
+          toolName: "surface_to_main",
+          toolCallId: "return-1",
+          args: { mode: "notify", message: "The build is green." },
+        },
+      }],
+      nextCursor: 1,
+      acknowledgedCursor: 0,
+      hasMore: false,
+    });
+    const dependencies = engineDependencies({ store, ports });
+    dependencies.routineIsolationEnabled = true;
+
+    const result = await new RuntimeEngine(dependencies).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(store.routinePreparations).toBe(1);
+    expect(ports.promptCalls).toHaveLength(0);
+    expect(ports.routineStarts).toEqual([TURN_ID]);
+    expect(ports.routinePromptCalls).toHaveLength(1);
+    expect(ports.routinePromptCalls[0]?.message).toContain("Routine context substrate v1:test:1");
+    expect(ports.routinePromptCalls[0]?.message).toContain("Routine: conductor-progress-check");
+    expect(store.projected.flat()).toContainEqual(expect.objectContaining({
+      type: "routine_return",
+      call_id: "return-1",
+      mode: "notify",
+      message: "The build is green.",
+    }));
+    expect(ports.log.indexOf("project")).toBeLessThan(ports.log.indexOf("routine-ack"));
+    expect(ports.log.indexOf("routine-ack")).toBeLessThan(ports.log.indexOf("routine-terminate"));
+    expect(ports.routineTerminates).toEqual([TURN_ID]);
+  });
+
+  it("settles an isolated routine with no terminal return as successful no_output", async () => {
+    const claim = attemptClaim();
+    const context = {
+      id: "2a1d4f26-268e-4b8b-b254-24194374fb0a",
+      sha256: "d".repeat(64),
+      content: "Routine context substrate v1:test:1\n\nRecent main conversation:\n- User: status?",
+    };
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(claim),
+      material: attemptMaterial({
+        routineId: TURN_ID,
+        routineName: "silent-check",
+        routineIsolated: true,
+        routineContext: context,
+      }),
+    });
+    const ports = fakePorts(store);
+    ports.routineEventReads.push({
+      events: [{
+        sequence: 1,
+        invocationId: `routine:${TURN_ID}:invocation`,
+        attemptId: ATTEMPT_ID,
+        kind: "pi_event",
+        event: { type: "agent_settled" },
+      }],
+      nextCursor: 1,
+      acknowledgedCursor: 0,
+      hasMore: false,
+    });
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(store.routinePreparations).toBe(0);
+    expect(store.settlements).toEqual([{ terminalStatus: "succeeded" }]);
+    expect(ports.routineTerminates).toEqual([TURN_ID]);
+  });
+
+  it("reconstructs the pinned routine prompt byte-for-byte on dispatch takeover", async () => {
+    const claim = attemptClaim({ checkpoint: "dispatch_write_intent" });
+    const invocationId = `routine:${TURN_ID}:invocation`;
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(claim, {
+        commandId: COMMAND_ID,
+        commandPiInvocationId: invocationId,
+        piInvocationId: invocationId,
+        eventCursor: 0n,
+      }),
+      material: attemptMaterial({
+        routineId: TURN_ID,
+        routineName: "takeover-check",
+        routineIsolated: true,
+        routineContext: {
+          id: "2a1d4f26-268e-4b8b-b254-24194374fb0a",
+          sha256: "e".repeat(64),
+          content: "Routine context substrate v1:pinned:7\n\nRecent main conversation:\n- User: exact bytes",
+        },
+      }),
+    });
+    const ports = fakePorts(store);
+    ports.routineEventReads.push({
+      events: [{
+        sequence: 1,
+        invocationId,
+        attemptId: ATTEMPT_ID,
+        kind: "pi_event",
+        event: { type: "agent_settled" },
+      }],
+      nextCursor: 1,
+      acknowledgedCursor: 0,
+      hasMore: false,
+    });
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(store.routinePreparations).toBe(0);
+    expect(ports.routinePromptCalls).toEqual([{
+      attemptId: ATTEMPT_ID,
+      runId: TURN_ID,
+      message: "Routine context substrate v1:pinned:7\n\nRecent main conversation:\n- User: exact bytes"
+        + "\n\n--- Routine task ---\nRoutine: takeover-check\n\n"
+        + PROMPT_WITH_TURN_CONTEXT,
+    }]);
   });
 
   it("settles a page whose decision request is followed by agent_settled", async () => {
@@ -1405,6 +1540,34 @@ describe("RuntimeEngine attempts", () => {
     expect(ports.abortCalls).toEqual([{ attemptId: ATTEMPT_ID, boxId: BOX_ID }]);
     expect(store.settlements).toEqual([expect.objectContaining({ terminalStatus: "cancelled" })]);
     expect(ports.promptCalls).toHaveLength(0);
+  });
+
+  it("aborts and terminates only the isolated routine session when its run is stopped", async () => {
+    const claim = attemptClaim();
+    const denied = attemptAuthorization(claim, {
+      authorized: false,
+      denialCode: "turn_cancel_requested",
+      workCheckpoint: "running",
+      dispatchState: "accepted",
+      attemptStatus: "running",
+      turnStatus: "running",
+      piInvocationId: `routine:${TURN_ID}:invocation`,
+    });
+    const store = new MemoryRuntimeStore({ authorization: denied });
+    const ports = fakePorts(store);
+    const routineAbort = vi.fn(ports.pi.routineSession!.abort);
+    ports.pi.routineSession!.abort = routineAbort;
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("cancelled");
+    expect(routineAbort).toHaveBeenCalledWith(expect.objectContaining({
+      boxId: BOX_ID,
+      runId: TURN_ID,
+      attemptId: ATTEMPT_ID,
+    }));
+    expect(ports.routineTerminates).toEqual([TURN_ID]);
+    expect(ports.abortCalls).toHaveLength(0);
   });
 
   it("cancels a stop that arrives while dispatch is still unacknowledged", async () => {

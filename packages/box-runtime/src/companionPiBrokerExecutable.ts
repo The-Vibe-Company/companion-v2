@@ -21,13 +21,18 @@ const invocationId = requiredOpaqueId(
   process.env.COMPANION_PI_INVOCATION_ID ?? process.env.INVOCATION_ID,
   "COMPANION_PI_INVOCATION_ID",
 );
+const routineRunId = optionalRoutineRunId();
 const socketPath = optionalAbsolutePath("COMPANION_PI_SOCKET_PATH")
   ?? join(root, "state", "pi-broker.sock");
 const journalPath = optionalAbsolutePath("COMPANION_PI_JOURNAL_PATH")
   ?? join(root, "events");
 const dispatchLedgerPath = optionalAbsolutePath("COMPANION_PI_DISPATCH_LEDGER_PATH")
   ?? join(root, "state", "dispatch-ledger.json");
-const outboxPath = resolve(root, "..", "..", "outbox");
+// The main layout keeps outbox beside `.companion/runtime`; an isolated routine owns an outbox
+// inside its run root so it can never consume or clear a main-session file.
+const outboxPath = routineRunId === null
+  ? resolve(root, "..", "..", "outbox")
+  : join(root, "outbox");
 const layoutMarker = process.env.PI_BROKER_LAYOUT_MARKER;
 const maxLineBytes = optionalPositiveInteger("COMPANION_PI_MAX_LINE_BYTES")
   ?? COMPANION_PI_BROKER_MAX_LINE_BYTES;
@@ -77,7 +82,7 @@ class SpawnedPiTransport implements CompanionPiRpcTransport {
       onRecord: (record) => this.#acceptRecord(record),
       onFault: (fault) => this.#onFault(fault),
     });
-    this.#child = spawn(piBin, piArguments(root), {
+    this.#child = spawn(piBin, piArguments(root, routineRunId !== null), {
       env: environment,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -325,16 +330,12 @@ async function awaitPiState(
   }
 }
 
-function piArguments(runtimeRoot: string): string[] {
-  // Without --continue, Pi's own CLI always starts a brand-new session (SessionManager.create),
-  // even when one already exists in --session-dir. Every broker start -- including a routine
-  // Pi-only restart that never recreates the Box -- must resume the Companion's single ongoing
-  // conversation instead of silently discarding it. --continue safely falls back to a fresh
-  // session when the directory has none yet, so this is correct on a Companion's very first start
-  // too.
-  const args = [
-    "--mode", "rpc", "--session-dir", join(runtimeRoot, "sessions"), "--continue",
-  ];
+function piArguments(runtimeRoot: string, isolatedRoutine: boolean): string[] {
+  // The main daemon resumes the Companion's one ongoing conversation. A routine root is a new,
+  // disposable session by definition: passing --continue there could select an older session in
+  // that run directory after takeover, and would make the routine depend on main-session history.
+  const args = ["--mode", "rpc", "--session-dir", join(runtimeRoot, "sessions")];
+  if (!isolatedRoutine) args.push("--continue");
   const model = readOptionalText(join(runtimeRoot, "state", "model.txt"));
   if (model) args.push("--model", model);
   args.push("--no-skills");
@@ -386,6 +387,15 @@ function requiredOpaqueId(value: string | undefined, name: string): string {
     throw new Error(`${name} is invalid`);
   }
   return value;
+}
+
+function optionalRoutineRunId(): string | null {
+  const value = process.env.COMPANION_PI_ROUTINE_RUN_ID?.trim();
+  if (!value) return null;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+    throw new Error("COMPANION_PI_ROUTINE_RUN_ID is invalid");
+  }
+  return value.toLowerCase();
 }
 
 function optionalPositiveInteger(name: string): number | undefined {

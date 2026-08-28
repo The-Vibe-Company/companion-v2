@@ -1,6 +1,8 @@
 # Routine Pi context substrate
 
-Status: design recommendation; investigation only. This document does not implement the substrate.
+Status: implemented by the feature-gated routine-isolation runtime path. Migration 0137 owns the
+runtime-only compaction and content-addressed substrate tables; the durable routine turn pins the
+rendered bytes before any Box contact.
 
 ## Decision
 
@@ -211,9 +213,9 @@ Refresh is event-driven and lazy:
 
 Do not refresh on a clock. Time belongs in the per-run suffix.
 
-## Database/runtime implementation seams
+## Database/runtime implementation
 
-The later runtime cutover should:
+The runtime cutover:
 
 1. add org-scoped main-context base/snapshot tables with forced RLS, digests, bounded columns, and no
    direct process-role grants;

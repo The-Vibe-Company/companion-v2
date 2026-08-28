@@ -709,4 +709,100 @@ describe("runtime Box/Pi port adapters", () => {
       signal,
     })).rejects.toThrow(/safe integer range/);
   });
+
+  it("addresses every routine Pi operation by run id and exposes terminal teardown", async () => {
+    const runId = "11111111-1111-4111-8111-111111111111";
+    const startRoutineSession = vi.fn(async () => ({ state: "idle" as const, invocationId: "routine:invocation" }));
+    const routineSessionState = vi.fn(async () => ({
+      invocationId: "routine:invocation",
+      layoutMarker: "layout-current",
+      activeAttemptId: null,
+      tailCursor: 0,
+      acknowledgedCursor: 0,
+      counters: {
+        malformedLines: 0,
+        oversizedLines: 0,
+        unterminatedLines: 0,
+        unknownEvents: 0,
+        unboundEvents: 0,
+        orphanResponses: 0,
+      },
+      modelInput: ["text" as const],
+    }));
+    const dispatchRoutinePrompt = vi.fn(async () => ({
+      outcome: "accepted" as const,
+      attemptId: "attempt-1",
+      invocationId: "routine:invocation",
+      initialCursor: 0,
+    }));
+    const readRoutineEvents = vi.fn(async () => ({
+      events: [], nextCursor: 0, acknowledgedCursor: 0, hasMore: false,
+    }));
+    const ackRoutineEvents = vi.fn(async () => ({ acknowledgedCursor: 0 }));
+    const dispatchRoutineAbort = vi.fn(async () => ({
+      outcome: "accepted" as const,
+      attemptId: "attempt-1",
+      invocationId: "routine:invocation",
+    }));
+    const terminateRoutineSession = vi.fn(async () => undefined);
+    const pi = createRuntimePiControl({
+      lifecycle: lifecycle(),
+      runtime: () => boxRuntime({
+        startRoutineSession,
+        routineSessionState,
+        dispatchRoutinePrompt,
+        readRoutineEvents,
+        ackRoutineEvents,
+        dispatchRoutineAbort,
+        terminateRoutineSession,
+      }),
+    });
+    const routine = pi.routineSession;
+    expect(routine).toBeDefined();
+
+    await expect(routine!.start({
+      boxId: "bx_23456789",
+      runId,
+      persona: "Routine persona",
+      signal,
+    })).resolves.toEqual({
+      state: "idle",
+      invocationId: "routine:invocation",
+    });
+    await expect(routine!.state({ boxId: "bx_23456789", runId, signal }))
+      .resolves.toMatchObject({ invocationId: "routine:invocation" });
+    await expect(routine!.prompt({
+      boxId: "bx_23456789",
+      runId,
+      commandId: "command-1",
+      attemptId: "attempt-1",
+      expectedInvocationId: "routine:invocation",
+      message: "routine prompt",
+      signal,
+    })).resolves.toMatchObject({ outcome: "accepted", initialCursor: 0n });
+    await expect(routine!.read({ boxId: "bx_23456789", runId, after: 0n, signal }))
+      .resolves.toMatchObject({ nextCursor: 0 });
+    await expect(routine!.ack({ boxId: "bx_23456789", runId, through: 0n, signal })).resolves.toBe(0n);
+    await expect(routine!.abort({
+      boxId: "bx_23456789", runId, commandId: "command-abort", attemptId: "attempt-1", signal,
+    })).resolves.toMatchObject({ outcome: "accepted" });
+    await expect(routine!.terminate({ boxId: "bx_23456789", runId, signal })).resolves.toBeUndefined();
+
+    expect(startRoutineSession).toHaveBeenCalledWith({
+      boxId: "bx_23456789",
+      runId,
+      persona: "Routine persona",
+      signal,
+    });
+    expect(routineSessionState).toHaveBeenCalledWith({ boxId: "bx_23456789", runId, signal });
+    expect(dispatchRoutinePrompt).toHaveBeenCalledWith(expect.objectContaining({
+      boxId: "bx_23456789", runId, requestId: "command-1", signal,
+    }));
+    expect(readRoutineEvents).toHaveBeenCalledWith({ boxId: "bx_23456789", runId, after: 0, signal });
+    expect(ackRoutineEvents).toHaveBeenCalledWith({ boxId: "bx_23456789", runId, through: 0, signal });
+    expect(dispatchRoutineAbort).toHaveBeenCalledWith(expect.objectContaining({
+      boxId: "bx_23456789", runId, requestId: "command-abort", signal,
+    }));
+    expect(terminateRoutineSession).toHaveBeenCalledWith({ boxId: "bx_23456789", runId, signal });
+  });
 });

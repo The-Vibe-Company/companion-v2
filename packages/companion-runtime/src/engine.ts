@@ -255,6 +255,26 @@ export class RuntimeEngine {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 8_000);
     try {
+      const runId = claim.turnId;
+      if (
+        runId
+        && auth.piInvocationId?.startsWith(`routine:${runId}:`)
+        && this.#deps.pi.routineSession
+      ) {
+        await this.#deps.pi.routineSession.abort({
+          boxId: auth.boxId,
+          runId,
+          commandId: this.#deps.idFactory.uuid(),
+          attemptId: claim.workId,
+          signal: controller.signal,
+        });
+        await this.#deps.pi.routineSession.terminate({
+          boxId: auth.boxId,
+          runId,
+          signal: controller.signal,
+        });
+        return;
+      }
       await this.#deps.pi.abort({
         boxId: auth.boxId,
         commandId: this.#deps.idFactory.uuid(),

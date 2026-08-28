@@ -261,9 +261,10 @@ the private run transcript. A normal settlement without a terminal call is succe
 `no_output`. This bridge is atomic and replay-safe: a unique return row makes the first accepted
 call win, and no post-return Pi event can create another main-thread effect.
 
-The rollout is deliberately additive: first land the run/return schema and read API, then web and
-iOS history readers, and only then switch execution and the main-thread projection. Until the final
-cutover, routine-origin turns retain their existing ordinary-turn behavior. The additive read model
+The rollout is deliberately additive: the run/return schema and first-party history readers land
+before the execution switch. `COMPANION_ROUTINE_ISOLATION_ENABLED` gates new routine-run pinning per
+runtime deploy; when it is off, routine-origin turns retain their existing ordinary-turn behavior,
+while already-pinned runs always resume through isolation. The additive read model
 projects a succeeded ordinary-turn reply as a virtual `notify`: its existing final assistant entry
 is referenced as the main-thread payload and omitted from the compatibility history transcript, so
 it is neither mislabeled `no_output` nor duplicated. Client-only filtering is not an acceptable

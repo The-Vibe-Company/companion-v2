@@ -960,6 +960,13 @@
       "when": 1791565600000,
       "tag": "0136_companion_sections",
       "breakpoints": true
+    },
+    {
+      "idx": 137,
+      "version": "7",
+      "when": 1791652000000,
+      "tag": "0137_companion_routine_isolation",
+      "breakpoints": true
     }
   ]
 }

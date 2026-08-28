@@ -292,6 +292,433 @@ async function ackEvents(context: AttemptContext, through: bigint): Promise<void
   });
 }
 
+function requiredRoutineSession(context: AttemptContext) {
+  const session = context.deps.pi.routineSession;
+  if (!session) {
+    throw new RuntimeInvariantError({
+      code: "routine_session_unavailable",
+      message: "The isolated routine Pi session transport is unavailable.",
+      action: "retry",
+    });
+  }
+  return session;
+}
+
+function isolatedRoutinePrompt(
+  material: RuntimeWorkMaterial,
+  attachments: readonly StagedRuntimeAttachment[],
+): string {
+  if (!material.routineContext || !material.routineName) {
+    throw new RuntimeInvariantError({
+      code: "routine_context_unavailable",
+      message: "The pinned routine conversation context is unavailable.",
+      action: "retry",
+    });
+  }
+  return `${material.routineContext.content}\n\n--- Routine task ---\nRoutine: ${material.routineName}\n\n`
+    + promptTextWithContext(material, attachments);
+}
+
+async function terminateRoutineSession(context: AttemptContext, runId: string): Promise<void> {
+  try {
+    await context.session.external(async (signal) =>
+      await requiredRoutineSession(context).terminate({
+        boxId: requiredRuntime(context).boxId,
+        runId,
+        signal,
+      }));
+  } catch (error) {
+    if (mustAbandonRuntimeExecution(error)) throw error;
+    context.deps.log?.warn({
+      ts: context.deps.clock.now().toISOString(),
+      event: "runtime.routine_session.terminate_failed",
+      companionId: context.claim.companionId,
+      attemptId: context.claim.workId,
+    });
+  }
+}
+
+async function ackRoutineEvents(
+  context: AttemptContext,
+  runId: string,
+  through: bigint,
+): Promise<void> {
+  await retryIdempotentLifecycle({
+    call: "ack_events",
+    clock: context.deps.clock,
+    jitter: context.deps.jitter,
+    signal: context.session.signal,
+    deadlineAt: authorization(context).absoluteDeadlineAt ?? undefined,
+    operation: async () => await context.session.external(async (signal) => {
+      const acknowledged = await requiredRoutineSession(context).ack({
+        boxId: requiredRuntime(context).boxId,
+        runId,
+        through,
+        signal,
+      });
+      if (acknowledged < through) {
+        throw new RuntimeInvariantError({
+          code: "pi_broker_ack_invalid",
+          message: "The routine Pi session did not acknowledge its projected event cursor.",
+          action: "retry",
+        });
+      }
+    }),
+  });
+}
+
+async function finishIsolatedDurableTerminal(
+  context: AttemptContext,
+  runId: string,
+  authorizationAtTerminal: RuntimeAuthorization,
+): Promise<RuntimeWorkDisposition> {
+  const terminal = await context.session.fencedMutation(async () =>
+    await context.deps.store.getAttemptTerminalProjection(context.session.fence));
+  if (
+    terminal.checkpoint !== authorizationAtTerminal.workCheckpoint
+    || authorizationAtTerminal.eventCursor === null
+    || terminal.eventCursor !== authorizationAtTerminal.eventCursor
+  ) {
+    throw new RuntimeInvariantError({
+      code: "pi_terminal_projection_invalid",
+      message: "The durable routine terminal projection did not match the active attempt cursor.",
+      action: "retry",
+    });
+  }
+
+  // A takeover after projection must never launch a replacement routine Pi merely to settle the
+  // durable result. If the original process still exists, finish its broker ACK; otherwise the
+  // database projection is already the replay boundary and the first-return constraint prevents
+  // any later main-thread effect.
+  try {
+    const state = await context.session.external(async (signal) =>
+      await requiredRoutineSession(context).state({
+        boxId: requiredRuntime(context).boxId,
+        runId,
+        signal,
+      }));
+    if (state.invocationId === authorizationAtTerminal.piInvocationId) {
+      await ackRoutineEvents(context, runId, terminal.eventCursor);
+    }
+  } catch (error) {
+    if (mustAbandonRuntimeExecution(error)) throw error;
+    context.deps.log?.warn({
+      ts: context.deps.clock.now().toISOString(),
+      event: "runtime.routine_session.terminal_ack_unavailable",
+      companionId: context.claim.companionId,
+      attemptId: context.claim.workId,
+    });
+  }
+  await terminateRoutineSession(context, runId);
+  return terminal.checkpoint === "process_exited"
+    ? {
+      kind: "settle",
+      settlement: {
+        terminalStatus: "failed",
+        error: safeRuntimeError({
+          code: "pi_process_exited",
+          message: "The routine Pi session exited before completing the run.",
+          action: "retry",
+        }),
+      },
+    }
+    : runtimeSucceeded;
+}
+
+async function consumeIsolatedRoutine(
+  context: AttemptContext,
+  materialValue: RuntimeWorkMaterial,
+  redact: RuntimeVisibleTextRedactor,
+): Promise<RuntimeWorkDisposition> {
+  const runId = materialValue.routineId!;
+  const routine = requiredRoutineSession(context);
+  for (;;) {
+    const auth = await context.session.reauthorize();
+    if (!auth.piInvocationId || auth.eventCursor === null) {
+      throw new RuntimeInvariantError({
+        code: "pi_event_binding_missing",
+        message: "The accepted routine Pi invocation or event cursor is unavailable.",
+        action: "retry",
+      });
+    }
+    if (auth.workCheckpoint === "agent_settled" || auth.workCheckpoint === "process_exited") {
+      return await finishIsolatedDurableTerminal(context, runId, auth);
+    }
+
+    const state = await context.session.external(async (signal) =>
+      await routine.state({ boxId: requiredRuntime(context).boxId, runId, signal }));
+    validateBrokerCounters(state.counters);
+    if (state.invocationId !== auth.piInvocationId) {
+      throw new RuntimeInvariantError({
+        code: "pi_invocation_changed",
+        message: "The routine Pi session changed while the run was active.",
+        action: "retry",
+      });
+    }
+    if (state.activeAttemptId !== null && state.activeAttemptId !== context.claim.workId) {
+      throw new RuntimeInvariantError({
+        code: "pi_attempt_conflict",
+        message: "The routine Pi session is bound to another attempt.",
+        action: "retry",
+      });
+    }
+    const raw = await context.session.external(async (signal) =>
+      await routine.read({
+        boxId: requiredRuntime(context).boxId,
+        runId,
+        after: auth.eventCursor!,
+        signal,
+      }));
+    const page = validatePiJournalRead({
+      value: raw,
+      after: auth.eventCursor,
+      attemptId: context.claim.workId,
+      invocationId: auth.piInvocationId,
+    });
+    if (page.nextCursor === auth.eventCursor) {
+      const pollInterval = context.deps.eventPollIntervalMs;
+      await context.deps.clock.sleep(
+        typeof pollInterval === "function"
+          ? pollInterval({ boxId: requiredRuntime(context).boxId })
+          : pollInterval ?? 500,
+        context.session.signal,
+      );
+      continue;
+    }
+    const classified = classifyPiJournalPage(page, context.deps.clock.now(), redact);
+    const counters = cumulativeCounters({
+      authorization: auth,
+      broker: state.counters,
+      pageUnknown: classified.unknownEvents,
+    });
+    const projected = await context.session.adoptExternalMutation(async (expectedSequence) => {
+      const result = await context.deps.eventProjector.projectEventBatch({
+        store: context.deps.store,
+        fence: context.session.fence,
+        expectedSequence,
+        piInvocationId: auth.piInvocationId!,
+        projections: classified.projections,
+        throughCursor: classified.throughCursor,
+        ...(classified.activity ? { activityAt: context.deps.clock.now() } : {}),
+        unknownEventCount: counters.unknown,
+        malformedEventCount: counters.malformed,
+        oversizedEventCount: counters.oversized,
+      });
+      return result
+        ? {
+          sequence: result.checkpointSequence,
+          value: { eventCursor: result.eventCursor, routineReturned: result.routineReturned },
+        }
+        : null;
+    });
+    if (projected.eventCursor !== classified.throughCursor) {
+      throw new RuntimeInvariantError({
+        code: "pi_event_projection_invalid",
+        message: "The projected routine event cursor did not match its broker cursor.",
+        action: "retry",
+      });
+    }
+    // Commit the return and its main-thread effects before acknowledging the private broker page.
+    await ackRoutineEvents(context, runId, classified.throughCursor);
+    if (projected.routineReturned) {
+      await terminateRoutineSession(context, runId);
+      return runtimeSucceeded;
+    }
+    if (classified.processExit || classified.settled) continue;
+  }
+}
+
+async function consumeAcceptedIsolatedRoutine(
+  context: AttemptContext,
+  materialValue: RuntimeWorkMaterial,
+  redact: RuntimeVisibleTextRedactor,
+): Promise<RuntimeWorkDisposition> {
+  try {
+    return await consumeIsolatedRoutine(context, materialValue, redact);
+  } catch (error) {
+    if (mustAbandonRuntimeExecution(error)) throw error;
+    return {
+      kind: "settle",
+      settlement: {
+        terminalStatus: "interrupted",
+        error: safeErrorFromUnknown(error, {
+          code: "pi_event_stream_interrupted",
+          message: "The accepted routine run could not be safely reconciled with Pi events.",
+          action: "retry",
+        }),
+      },
+    };
+  }
+}
+
+async function handleIsolatedRoutineAttempt(
+  context: AttemptContext,
+  materialValue: RuntimeWorkMaterial,
+): Promise<RuntimeWorkDisposition> {
+  const routine = requiredRoutineSession(context);
+  const runId = materialValue.routineId!;
+  const redact = context.deps.projectionRedactorFactory.forMaterial({
+    orgId: context.claim.orgId,
+    material: materialValue,
+  });
+  let mainState = await brokerState(context);
+  if (!mainState.layoutCurrent) {
+    await refreshWarmCompanionLayout({
+      session: context.session,
+      deps: context.deps,
+      authorization: authorization(context),
+      restartPi: true,
+      restartPiWhenUnchanged: true,
+    });
+    mainState = await brokerState(context);
+  }
+  if (
+    !mainState.layoutCurrent
+    || mainState.activeAttemptId !== null
+    || mainState.tailCursor !== mainState.acknowledgedCursor
+  ) {
+    throw new RuntimeInvariantError({
+      code: "pi_not_idle",
+      message: "The main Pi daemon was not idle before the isolated routine run.",
+      action: "restart_pi",
+    });
+  }
+  const runtime = requiredRuntime(context);
+  const authorizationBeforeStart = await context.session.reauthorize();
+  if (
+    authorizationBeforeStart.workCheckpoint === "agent_settled"
+    || authorizationBeforeStart.workCheckpoint === "process_exited"
+  ) {
+    return await consumeAcceptedIsolatedRoutine(context, materialValue, redact);
+  }
+  const started = await context.session.external(async (signal) =>
+    await routine.start({
+      boxId: runtime.boxId,
+      runId,
+      persona: authorization(context).persona,
+      signal,
+    }));
+
+  for (;;) {
+    const auth = await context.session.reauthorize();
+    if (
+      auth.workCheckpoint === "dispatch_accepted"
+      || auth.workCheckpoint === "running"
+      || auth.workCheckpoint === "event_projected"
+      || auth.workCheckpoint === "needs_input"
+      || auth.workCheckpoint === "agent_settled"
+      || auth.workCheckpoint === "process_exited"
+    ) return await consumeAcceptedIsolatedRoutine(context, materialValue, redact);
+    if (auth.workCheckpoint === "dispatch_ambiguous") {
+      throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
+    }
+    if (auth.workCheckpoint === "dispatch_rejected") {
+      await terminateRoutineSession(context, runId);
+      return {
+        kind: "settle",
+        settlement: {
+          terminalStatus: "failed",
+          error: safeRuntimeError({
+            code: "pi_prompt_rejected",
+            message: "The routine Pi session rejected the prompt before accepting it.",
+            action: "retry",
+          }),
+        },
+      };
+    }
+    if (auth.workCheckpoint !== "starting" && auth.workCheckpoint !== "dispatch_write_intent") {
+      throw new RuntimeInvariantError({
+        code: "attempt_checkpoint_invalid",
+        message: "The routine attempt reached an unsupported checkpoint.",
+        action: "none",
+      });
+    }
+
+    const state = await context.session.external(async (signal) =>
+      await routine.state({ boxId: runtime.boxId, runId, signal }));
+    const capabilities = modelInputCapabilities(state.modelInput);
+    requireModelInputCapability(capabilities, "text");
+    if (attachmentsIncludeImage(materialValue.attachments)) {
+      requireModelInputCapability(capabilities, "image");
+    }
+    const recoveringWrite = auth.workCheckpoint === "dispatch_write_intent";
+    if (
+      state.invocationId !== started.invocationId
+      || (recoveringWrite && auth.commandPiInvocationId !== state.invocationId)
+      || (!recoveringWrite && (
+        state.activeAttemptId !== null || state.tailCursor !== state.acknowledgedCursor
+      ))
+      || (recoveringWrite && state.activeAttemptId !== null
+        && state.activeAttemptId !== context.claim.workId)
+    ) {
+      throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
+    }
+    const staged = recoveringWrite
+      ? stagedAttachmentProjection(materialValue)
+      : await stageAttachments(context, materialValue);
+    const promptText = isolatedRoutinePrompt(materialValue, staged);
+    const commandId = recoveringWrite ? auth.commandId : context.deps.idFactory.uuid();
+    if (!commandId) throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
+    if (!recoveringWrite) {
+      await context.session.checkpoint({
+        nextCheckpoint: "dispatch_write_intent",
+        commandId,
+        piInvocationId: state.invocationId,
+      });
+    }
+    let outcome;
+    let providerCallStarted = false;
+    try {
+      outcome = await context.session.external(async (signal) => {
+        providerCallStarted = true;
+        return await routine.prompt({
+          boxId: runtime.boxId,
+          runId,
+          commandId,
+          attemptId: context.claim.workId,
+          expectedInvocationId: state.invocationId,
+          message: promptText,
+          signal,
+        });
+      });
+    } catch (error) {
+      if (!providerCallStarted || mustAbandonRuntimeExecution(error)) throw error;
+      await checkpointDispatchAmbiguous(context, commandId);
+      throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
+    }
+    if (outcome.outcome === "ambiguous") {
+      await checkpointDispatchAmbiguous(context, commandId);
+      throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
+    }
+    if (outcome.outcome === "rejected") {
+      await context.session.checkpoint({ nextCheckpoint: "dispatch_rejected", commandId });
+      continue;
+    }
+    if (outcome.invocationId !== state.invocationId || outcome.initialCursor < state.tailCursor) {
+      await checkpointDispatchAmbiguous(context, commandId);
+      throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
+    }
+    const acceptedAt = context.deps.clock.now();
+    await context.session.checkpoint({
+      nextCheckpoint: "dispatch_accepted",
+      commandId,
+      piInvocationId: outcome.invocationId,
+      eventCursor: outcome.initialCursor,
+      activityAt: acceptedAt,
+    });
+    context.deps.log?.info({
+      ts: acceptedAt.toISOString(),
+      event: "runtime.routine_prompt.ack",
+      companionId: context.claim.companionId,
+      attemptId: context.claim.workId,
+      boxId: runtime.boxId,
+      invocationId: outcome.invocationId,
+      initialCursor: outcome.initialCursor.toString(),
+    });
+    await refreshWarmTtl(context);
+  }
+}
+
 function explicitNoResponse(): RuntimeWorkDisposition {
   return {
     kind: "settle",
@@ -586,6 +1013,30 @@ async function consumeAcceptedAttempt(
 }
 
 export async function handleAttempt(context: AttemptContext): Promise<RuntimeWorkDisposition> {
+  const pinnedRoutineContext = await context.session.fencedMutation(async () =>
+    await context.deps.store.prepareRoutineRun(
+      context.session.fence,
+      context.deps.routineIsolationEnabled === true,
+    ));
+  if (pinnedRoutineContext) {
+    const routineMaterial = await material(context);
+    if (
+      !routineMaterial.routineId
+      || !routineMaterial.routineName
+      || routineMaterial.turnId !== routineMaterial.routineId
+    ) {
+      throw new RuntimeInvariantError({
+        code: "routine_material_invalid",
+        message: "The routine run material is incomplete.",
+        action: "none",
+      });
+    }
+    return await handleIsolatedRoutineAttempt(context, {
+      ...routineMaterial,
+      routineIsolated: true,
+      routineContext: pinnedRoutineContext,
+    });
+  }
   let commandId: string | null = null;
   let hasVisibleOutput: boolean | null = null;
   let redact: RuntimeVisibleTextRedactor | null = null;

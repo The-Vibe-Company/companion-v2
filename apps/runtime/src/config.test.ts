@@ -41,9 +41,19 @@ describe("runtime-only configuration", () => {
       companionsEnabled: true,
       apiUrl: "http://127.0.0.1:3001",
       releaseId: "production-2026-08-17.3",
+      routineIsolationEnabled: false,
     });
     expect(config.masterKey).toHaveLength(32);
     expect(config.desktopHmacSecret).toHaveLength(32);
+  });
+
+  it("gates isolated routine execution per deployment", () => {
+    expect(loadRuntimeServiceConfig(validEnv({
+      COMPANION_ROUTINE_ISOLATION_ENABLED: "true",
+    }), { randomUuid: () => executorId }).routineIsolationEnabled).toBe(true);
+    expect(() => loadRuntimeServiceConfig(validEnv({
+      COMPANION_ROUTINE_ISOLATION_ENABLED: "sometimes",
+    }), { randomUuid: () => executorId })).toThrow(/must be true or false/);
   });
 
   it.each([
