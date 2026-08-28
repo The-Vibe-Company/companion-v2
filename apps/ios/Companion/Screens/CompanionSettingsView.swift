@@ -582,9 +582,18 @@ private enum CompanionSettingsDemoFixtures {
         )
     }
 
-    private static var routine: CompanionRoutine {
-        CompanionConnectedResourcesDemoFixtures.resources.routines[0]
+    private static let routine: CompanionRoutine = decode(#"""
+    {
+      "id":"33333333-3333-4333-8333-333333333333",
+      "name":"Weekday brief",
+      "prompt":"Summarize the weekday release status.",
+      "cron":"0 9 * * 1-5",
+      "timezone":"America/New_York",
+      "enabled":true,
+      "next_fire_at":"2026-08-27T13:00:00.000Z",
+      "last_error_message":null
     }
+    """#)
 
     private static let routineRunSummary = CompanionRoutineRunSummary(
         runID: "88888888-8888-4888-8888-888888888888",
