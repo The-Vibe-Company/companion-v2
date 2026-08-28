@@ -1562,6 +1562,38 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    func testChatLeadingEdgeSwipeWorksAfterMidScrollAcrossRepeatedPops() throws {
+        let app = launchCompanionRoster(access: "owner", longThread: true)
+        let row = app.descendants(matching: .any)["companion.row.c96ab360-00f3-4497-a51a-51442db8add1"]
+
+        for _ in 0..<2 {
+            row.tap()
+
+            let transcript = app.scrollViews.matching(
+                NSPredicate(format: "identifier == %@", "chat.transcript")
+            ).firstMatch
+            XCTAssertTrue(transcript.waitForExistence(timeout: 5))
+
+            // Begin from the middle of the conversation before exercising the leading edge.
+            transcript.swipeUp()
+            transcript.swipeUp()
+            XCTAssertTrue(app.buttons["chat.scroll-to-bottom"].waitForExistence(timeout: 2))
+
+            let chatBack = app.buttons["chat.back"]
+            XCTAssertTrue(chatBack.waitForExistence(timeout: 2))
+            swipeFromLeadingEdge(in: app)
+
+            XCTAssertTrue(chatBack.waitForNonExistence(timeout: 3))
+            let rosterTransitionSettled = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "isHittable == true"),
+                object: row
+            )
+            wait(for: [rosterTransitionSettled], timeout: 3)
+            XCTAssertTrue(row.isHittable)
+        }
+    }
+
+    @MainActor
     func testComputerSupportsLeadingEdgeSwipeAcrossConsecutivePops() throws {
         let app = launchCompanionRoster(access: "owner")
         let row = app.descendants(matching: .any)["companion.row.c96ab360-00f3-4497-a51a-51442db8add1"]
@@ -1721,11 +1753,17 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
-    private func launchCompanionRoster(access: String) -> XCUIApplication {
+    private func launchCompanionRoster(
+        access: String,
+        longThread: Bool = false
+    ) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = ["-companion-roster-demo"]
         app.launchEnvironment["COMPANION_ROSTER_DEMO_ACCESS"] = access
         app.launchEnvironment["COMPANION_API_URL"] = "http://127.0.0.1:9"
+        if longThread {
+            app.launchEnvironment["COMPANION_ROSTER_DEMO_LONG_THREAD"] = "1"
+        }
         app.launch()
 
         let row = app.descendants(matching: .any)["companion.row.c96ab360-00f3-4497-a51a-51442db8add1"]
