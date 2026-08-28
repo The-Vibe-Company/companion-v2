@@ -10,6 +10,7 @@ struct CompanionComputerView: View {
 
     let companion: CompanionSummary
     let onSettings: () -> Void
+    private let openDesktop: ((String) async throws -> CompanionDesktop)?
 
     @State private var desktop: CompanionDesktop?
     @State private var loading = true
@@ -17,6 +18,16 @@ struct CompanionComputerView: View {
     @State private var requestGeneration = 0
     @State private var reloadToken = 0
     @State private var keyboardToken = 0
+
+    init(
+        companion: CompanionSummary,
+        onSettings: @escaping () -> Void,
+        openDesktop: ((String) async throws -> CompanionDesktop)? = nil
+    ) {
+        self.companion = companion
+        self.onSettings = onSettings
+        self.openDesktop = openDesktop
+    }
 
     var body: some View {
         ZStack {
@@ -32,6 +43,7 @@ struct CompanionComputerView: View {
             .padding(.vertical, 12)
         }
         .navigationBarBackButtonHidden(true)
+        .companionNavigationSwipeBackEnabled()
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(Color.black, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
@@ -122,6 +134,7 @@ struct CompanionComputerView: View {
                 label: "Back",
                 action: { dismiss() }
             )
+            .accessibilityIdentifier("computer.back")
         }
 
         ToolbarItem(placement: .principal) {
@@ -212,7 +225,11 @@ struct CompanionComputerView: View {
         error = nil
         desktop = nil
         do {
-            desktop = try await sessionStore.openCompanionDesktop(companionID: companion.id)
+            if let openDesktop {
+                desktop = try await openDesktop(companion.id)
+            } else {
+                desktop = try await sessionStore.openCompanionDesktop(companionID: companion.id)
+            }
             if desktop?.desktopURL == nil, desktop?.provisioning != true {
                 error = "Send a message to start the Companion, then reconnect."
             }

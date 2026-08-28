@@ -13,8 +13,35 @@ struct ChatServices {
     let listSkills: () async throws -> [CompanionSkillReference]
     let listPlugins: () async throws -> [CompanionPluginAccount]
     let listProviders: () async throws -> CompanionProvidersResponse
-    let listRoutineRuns: ((String, String, Int, String?) async throws -> CompanionRoutineRunList)? = nil
-    let readRoutineRun: ((String, String, Int, Int?) async throws -> CompanionRoutineRunDetail)? = nil
+    let listRoutineRuns: ((String, String, Int, String?) async throws -> CompanionRoutineRunList)?
+    let readRoutineRun: ((String, String, Int, Int?) async throws -> CompanionRoutineRunDetail)?
+    let openDesktop: ((String) async throws -> CompanionDesktop)?
+
+    init(
+        thread: @escaping (String) async throws -> CompanionThread,
+        listCompanions: @escaping () async throws -> [CompanionSummary],
+        decide: @escaping (String, String, CompanionDecisionAction) async throws -> CompanionThread,
+        retryTurn: @escaping (String, String, UUID) async throws -> CompanionOperationSummary,
+        cancelTurn: @escaping (String, String) async throws -> CompanionThread,
+        listSkills: @escaping () async throws -> [CompanionSkillReference],
+        listPlugins: @escaping () async throws -> [CompanionPluginAccount],
+        listProviders: @escaping () async throws -> CompanionProvidersResponse,
+        listRoutineRuns: ((String, String, Int, String?) async throws -> CompanionRoutineRunList)? = nil,
+        readRoutineRun: ((String, String, Int, Int?) async throws -> CompanionRoutineRunDetail)? = nil,
+        openDesktop: ((String) async throws -> CompanionDesktop)? = nil
+    ) {
+        self.thread = thread
+        self.listCompanions = listCompanions
+        self.decide = decide
+        self.retryTurn = retryTurn
+        self.cancelTurn = cancelTurn
+        self.listSkills = listSkills
+        self.listPlugins = listPlugins
+        self.listProviders = listProviders
+        self.listRoutineRuns = listRoutineRuns
+        self.readRoutineRun = readRoutineRun
+        self.openDesktop = openDesktop
+    }
 }
 
 private struct AssistantTailReveal: Equatable, Sendable {
@@ -411,12 +438,17 @@ struct ChatView: View {
             }
         }
         .navigationBarBackButtonHidden(true)
+        .companionNavigationSwipeBackEnabled()
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(CompanionIOSTheme.canvas, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
         .toolbar { headerToolbar }
         .navigationDestination(isPresented: $showingComputer) {
-            CompanionComputerView(companion: currentCompanion, onSettings: onSettings)
+            CompanionComputerView(
+                companion: currentCompanion,
+                onSettings: onSettings,
+                openDesktop: services?.openDesktop
+            )
         }
         .sheet(item: $selectedToolDetail) { route in
             CompanionToolRunDetailView(tool: route.tool, timestamp: route.timestamp)
@@ -479,6 +511,7 @@ struct ChatView: View {
                 label: "Back",
                 action: { dismiss() }
             )
+            .accessibilityIdentifier("chat.back")
         }
 
         ToolbarItem(placement: .principal) {
