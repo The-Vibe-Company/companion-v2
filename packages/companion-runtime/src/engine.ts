@@ -48,6 +48,16 @@ const RELEASE_DENIALS = new Set([
   "settings_changed",
 ]);
 
+class RoutineCancelTerminationError extends Error {
+  readonly stableCode = "routine_cancel_termination_ambiguous";
+  readonly action = "retry" as const;
+
+  constructor() {
+    super("The isolated routine process could not be proven stopped after cancellation.");
+    this.name = "RoutineCancelTerminationError";
+  }
+}
+
 export class RuntimeEngine {
   readonly #deps: RuntimeEngineDependencies;
   readonly #sessions = new Map<string, LeaseSession>();
@@ -174,6 +184,16 @@ export class RuntimeEngine {
           }),
         }, error);
       }
+      if (error instanceof RoutineCancelTerminationError) {
+        return await this.#finishSettlement(claim, session, {
+          terminalStatus: "interrupted",
+          error: safeErrorFromUnknown(error, {
+            code: "routine_cancel_termination_ambiguous",
+            message: "The isolated routine process could not be proven stopped after cancellation.",
+            action: "retry",
+          }),
+        }, error);
+      }
       if (error instanceof RuntimeShutdownError) {
         return await this.#finishSettlement(claim, session, {
           terminalStatus: "interrupted",
@@ -283,7 +303,7 @@ export class RuntimeEngine {
         });
         return;
       } catch {
-        throw new AmbiguousExternalEffectError("routine_cancel_termination_ambiguous");
+        throw new RoutineCancelTerminationError();
       } finally {
         clearTimeout(terminateTimer);
       }
