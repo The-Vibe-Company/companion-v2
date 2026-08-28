@@ -151,6 +151,9 @@ test("chat uses the approved two-sided bubbles and morphing composer", () => {
   assert.doesNotMatch(chat, /\.toolbar \{ headerToolbar \}\s*\.tint\(visualTheme\.accent\)/);
   assert.match(composer, /TextField\("Ask \\\(companionName\)"/);
   assert.match(composer, /TextField\("Ask \\\(companionName\)"[\s\S]{0,180}?\.font\(\.body\)/);
+  assert.match(composer, /private var composerAvailabilityContent: some View/);
+  assert.match(composer, /private var attachmentErrorMessage: some View/);
+  assert.match(composer, /private var inputBar: some View/);
   assert.match(bubble, /Text\(streamingDelta\)[\s\S]{0,100}?\.font\(\.body\)/);
   assert.match(composer, /else if showsSendButton \|\| !transcriptionAvailable/);
   assert.match(composer, /\.background\(CompanionIOSTheme\.primaryCTA, in: Circle\(\)\)/);
