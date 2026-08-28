@@ -1529,6 +1529,73 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    func testChatSupportsCustomBackAndLeadingEdgeSwipeWithKeyboardOpen() throws {
+        let app = launchCompanionRoster(access: "owner")
+        let row = app.descendants(matching: .any)["companion.row.c96ab360-00f3-4497-a51a-51442db8add1"]
+
+        row.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["chat.transcript"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Luna thinking"].waitForExistence(timeout: 2))
+        let customBack = app.buttons["chat.back"]
+        XCTAssertTrue(customBack.exists)
+        XCTAssertEqual(customBack.label, "Back")
+        customBack.tap()
+        XCTAssertTrue(row.waitForExistence(timeout: 3))
+
+        row.tap()
+        let composer = app.descendants(matching: .any)["chat.composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        composer.tap()
+        composer.typeText("Preserve this draft")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 2))
+
+        swipeFromLeadingEdge(in: app)
+
+        XCTAssertTrue(customBack.waitForNonExistence(timeout: 3))
+        let rosterTransitionSettled = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isHittable == true"),
+            object: row
+        )
+        wait(for: [rosterTransitionSettled], timeout: 3)
+        XCTAssertTrue(row.isHittable)
+        XCTAssertFalse(app.keyboards.firstMatch.exists)
+    }
+
+    @MainActor
+    func testComputerSupportsLeadingEdgeSwipeAcrossConsecutivePops() throws {
+        let app = launchCompanionRoster(access: "owner")
+        let row = app.descendants(matching: .any)["companion.row.c96ab360-00f3-4497-a51a-51442db8add1"]
+        row.tap()
+
+        let computer = app.buttons["Open Luna's computer"]
+        XCTAssertTrue(computer.waitForExistence(timeout: 5))
+        computer.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["computer.view"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Preparing computer…"].waitForExistence(timeout: 2))
+        let computerBack = app.buttons["computer.back"]
+        XCTAssertEqual(computerBack.label, "Back")
+
+        swipeFromLeadingEdge(in: app)
+        XCTAssertTrue(app.descendants(matching: .any)["chat.transcript"].waitForExistence(timeout: 3))
+        XCTAssertTrue(computerBack.waitForNonExistence(timeout: 3))
+        let chatBack = app.buttons["chat.back"]
+        let chatTransitionSettled = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isHittable == true"),
+            object: chatBack
+        )
+        wait(for: [chatTransitionSettled], timeout: 3)
+        XCTAssertTrue(chatBack.isHittable)
+        swipeFromLeadingEdge(in: app)
+
+        let rosterTransitionSettled = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isHittable == true"),
+            object: row
+        )
+        wait(for: [rosterTransitionSettled], timeout: 3)
+        XCTAssertTrue(row.isHittable)
+    }
+
+    @MainActor
     func testOwnerRosterRetriesAnAmbiguousDeleteWithTheRetainedRequest() throws {
         let app = launchCompanionRoster(access: "owner")
         let row = app.descendants(matching: .any)["companion.row.c96ab360-00f3-4497-a51a-51442db8add1"]
@@ -1607,6 +1674,7 @@ final class CompanionUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["-companion-roster-demo"]
         app.launchEnvironment["COMPANION_ROSTER_DEMO_ACCESS"] = access
+        app.launchEnvironment["COMPANION_API_URL"] = "http://127.0.0.1:9"
         app.launch()
 
         let row = app.descendants(matching: .any)["companion.row.c96ab360-00f3-4497-a51a-51442db8add1"]
@@ -1640,6 +1708,13 @@ final class CompanionUITests: XCTestCase {
         let confirmation = app.sheets.buttons["Delete Companion"]
         XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
         confirmation.tap()
+    }
+
+    @MainActor
+    private func swipeFromLeadingEdge(in app: XCUIApplication) {
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.5))
+        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.82, dy: 0.5))
+        start.press(forDuration: 0.05, thenDragTo: end)
     }
 
     @MainActor

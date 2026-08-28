@@ -20,6 +20,7 @@ struct CompanionListView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let session: Session
     private let services: CompanionListServices?
+    private let chatServices: ChatServices?
     @State private var path: [CompanionRoute] = []
     @State private var rosterState = CompanionRosterState()
     @State private var sectionStore = CompanionSectionStore()
@@ -45,9 +46,14 @@ struct CompanionListView: View {
     @State private var rosterActionError: String?
     @State private var chatReadingPositions = CompanionChatReadingPositionStore()
 
-    init(session: Session, services: CompanionListServices? = nil) {
+    init(
+        session: Session,
+        services: CompanionListServices? = nil,
+        chatServices: ChatServices? = nil
+    ) {
         self.session = session
         self.services = services
+        self.chatServices = chatServices
     }
 
     var body: some View {
@@ -519,6 +525,7 @@ struct CompanionListView: View {
                     companion: companion,
                     readingPosition: chatReadingPositions.position(for: companionID),
                     onPlugins: { showingPlugins = true },
+                    services: chatServices,
                     onReadingPositionChange: { position in
                         chatReadingPositions.record(position, for: companionID)
                     },
@@ -931,7 +938,8 @@ struct CompanionRosterDemoView: View {
                         access: access
                     )
                 }
-            )
+            ),
+            chatServices: CompanionRosterDemoFixtures.chatServices(access: access)
         )
     }
 }
@@ -1011,6 +1019,83 @@ private enum CompanionRosterDemoFixtures {
           "kind":"delete",
           "status":"pending",
           "error":null
+        }
+        """#)
+    }
+
+    static func chatServices(access: CompanionAccess) -> ChatServices {
+        let currentCompanion = companion(access: access)
+        let currentThread: CompanionThread = decode(#"""
+        {
+          "companion_id":"c96ab360-00f3-4497-a51a-51442db8add1",
+          "viewer_id":"demo-user",
+          "read_only":\#(access == .viewer ? "true" : "false"),
+          "can_send":\#(access == .viewer ? "false" : "true"),
+          "entries":[],
+          "active_turn":{
+            "id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "companion_id":"c96ab360-00f3-4497-a51a-51442db8add1",
+            "client_message_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "status":"running",
+            "queue_sequence":1,
+            "latest_attempt":{
+              "id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+              "turn_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              "attempt_number":1,
+              "retry_id":null,
+              "status":"running",
+              "dispatch_state":"accepted",
+              "pi_invocation_id":"pi-demo",
+              "dispatch_accepted_at":"2026-08-28T10:00:01.000Z",
+              "error":null,
+              "started_at":"2026-08-28T10:00:00.000Z",
+              "settled_at":null
+            },
+            "replying":true,
+            "error":null,
+            "state_changed_at":"2026-08-28T10:00:00.000Z",
+            "settled_at":null,
+            "created_at":"2026-08-28T10:00:00.000Z",
+            "updated_at":"2026-08-28T10:00:00.000Z"
+          },
+          "queued_count":0,
+          "interrupted_turn":null
+        }
+        """#)
+        let desktop: CompanionDesktop = decode(#"""
+        {
+          "desktop_url":null,
+          "provisioning":true,
+          "automation":"lux",
+          "transport":null
+        }
+        """#)
+        return ChatServices(
+            thread: { _ in currentThread },
+            listCompanions: { [currentCompanion] },
+            decide: { _, _, _ in currentThread },
+            retryTurn: { _, _, _ in deleteOperation },
+            cancelTurn: { _, _ in currentThread },
+            listSkills: { [] },
+            listPlugins: { [] },
+            listProviders: { providers },
+            openDesktop: { _ in desktop }
+        )
+    }
+
+    private static var providers: CompanionProvidersResponse {
+        decode(#"""
+        {
+          "catalog":[{
+            "id":"anthropic",
+            "name":"Claude",
+            "auth_methods":["api_key"],
+            "description":"Claude models",
+            "models":[{"id":"claude-sonnet","name":"Sonnet","default":true}]
+          }],
+          "connections":[],
+          "default_provider_id":"anthropic",
+          "can_manage":true
         }
         """#)
     }
