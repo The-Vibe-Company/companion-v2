@@ -29,6 +29,14 @@ SET search_path = pg_catalog, public
 SET row_security = on
 AS $$
 BEGIN
+  -- Disable closes the materialized lease set while holding this row exclusively. Keep instance
+  -- creation behind that boundary so it cannot add either lane after disable scans the leases but
+  -- before the new gate becomes visible.
+  PERFORM 1
+  FROM public.companion_runtime_control control_row
+  WHERE control_row.id = 'runtime-v2'
+  FOR SHARE;
+
   INSERT INTO public.companion_runtime_leases(org_id, companion_id, lane)
   VALUES (NEW.org_id, NEW.companion_id, 'main'), (NEW.org_id, NEW.companion_id, 'routine')
   ON CONFLICT ON CONSTRAINT companion_runtime_leases_pkey DO NOTHING;

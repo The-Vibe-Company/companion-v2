@@ -771,6 +771,36 @@ describe("runtime lifecycle operations", () => {
     expect(store.authorization.piInvocationId).toBe("main-pi-invocation");
   });
 
+  it("retries a legacy routine through the shared main Pi process", async () => {
+    const claim = operationClaim({ operationKind: "restart_pi", turnId: TURN_ID });
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        boxId: BOX_ID,
+        boxState: "ready",
+        piState: "idle",
+        piInvocationId: "legacy-main-pi-invocation",
+      }),
+      material: attemptMaterial({
+        routineId: ROUTINE_SNAPSHOT_ID,
+        routineName: "Legacy routine",
+        routineIsolated: false,
+      }),
+    });
+    const ports = fakePorts(store);
+    let mainRestarts = 0;
+    ports.pi.restartPiDaemon = async () => {
+      mainRestarts += 1;
+      return { state: "idle", invocationId: PI_INVOCATION_ID };
+    };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(ports.routineTerminates).toEqual([]);
+    expect(mainRestarts).toBe(1);
+    expect(store.authorization.piInvocationId).toBe(PI_INVOCATION_ID);
+  });
+
   it("keeps the installed tree and completes Restart Pi when an auto-update fails", async () => {
     const claim = operationClaim({ operationKind: "restart_pi", targetSkillsRevision: 2 });
     const store = new MemoryRuntimeStore({

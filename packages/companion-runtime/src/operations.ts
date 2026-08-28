@@ -823,10 +823,7 @@ async function handleIsolatedRoutineRetry(
     });
   }
   if (material.routineId === null) return null;
-  if (!material.routineIsolated) {
-    await context.session.checkpoint({ nextCheckpoint: "pi_ready" });
-    return runtimeSucceeded;
-  }
+  if (!material.routineIsolated) return null;
   const runId = context.claim.turnId;
   const routine = context.deps.pi.routineSession;
   if (!routine) {
