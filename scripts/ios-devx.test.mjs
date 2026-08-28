@@ -90,6 +90,9 @@ test("the iOS app wires the approved OLED palette and CharacterMark notification
   const palette = read("apps/ios/CompanionKit/Sources/CompanionKit/CompanionAppearance.swift");
   const colors = read("apps/ios/Companion/DesignSystem/Colors.swift");
   const root = read("apps/ios/Companion/Navigation/RootView.swift");
+  const launchCanvas = JSON.parse(
+    read("apps/ios/Companion/Support/Assets.xcassets/LaunchCanvas.colorset/Contents.json"),
+  );
   const renderer = read(
     "apps/ios/CompanionKit/Sources/CompanionNotificationAvatar/CompanionNotificationAvatar.swift",
   );
@@ -104,6 +107,19 @@ test("the iOS app wires the approved OLED palette and CharacterMark notification
   assert.match(root, /@AppStorage\(CompanionPreferenceKeys\.appearance\)/);
   assert.match(root, /appearance\.forcesBlackPalette \? \.dark : nil/);
   assert.doesNotMatch(read("apps/ios/Companion/Support/Info.plist"), /UIUserInterfaceStyle/);
+  assert.deepEqual(
+    launchCanvas.colors.map((entry) => ({
+      appearance: entry.appearances?.[0]?.value ?? "universal",
+      components: entry.color.components,
+    })),
+    [
+      {
+        appearance: "universal",
+        components: { alpha: "1.000", blue: "0.000", green: "0.000", red: "0.000" },
+      },
+    ],
+  );
+  assert.match(read("docs/ios-design.md"), /static launch canvas is always #000000/);
   assert.match(colors, /CompanionAppearancePalette\.Black\.canvas/);
   assert.match(renderer, /CharacterMarkGeometry\.commands\(shapeIndex:/);
   assert.match(renderer, /CharacterMarkGeometry\.eyeSegments/);
@@ -111,6 +127,7 @@ test("the iOS app wires the approved OLED palette and CharacterMark notification
   assert.match(service, /CompanionNotificationMark\(apnsUserInfo:/);
   assert.match(appearanceDemo, /demo\.appearance\.gallery/);
   assert.match(root, /-companion-appearance-demo/);
+  assert.match(read("apps/ios/README.md"), /nested\s+`companion_icon` dictionary/);
 });
 
 test("the plugin add-account chip matches connected account tokens", () => {
@@ -126,6 +143,8 @@ test("the plugin add-account chip matches connected account tokens", () => {
   assert.doesNotMatch(addChip, /textSecondary/);
   assert.match(root, /PluginManagementView\(demoModel: \.linearMultiAccountDemo\)/);
   assert.match(root, /-companion-plugins-multi-account-demo/);
+  assert.match(plugins, /Button \{\s*guard !demoMode else \{ return \}\s*showingAddPlugin = true/);
+  assert.match(plugins, /private func disconnect[\s\S]{0,120}?guard !demoMode else \{ return \}/);
 });
 
 test("home and chat header chrome keeps bare 44-point actions", () => {

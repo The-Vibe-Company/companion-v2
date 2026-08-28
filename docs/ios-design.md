@@ -18,6 +18,8 @@ Light (default): canvas #FFFFFF; surface.card #F2F2F7 (settings cards, plugin ro
 
 Black (Appearance option): canvas #000000; surface.card #1C1C1E; surface.bubble.bot #1C1C1E; bubble.user #FFFFFF with text inverting to #000000; text.primary #F2F2F7; text.secondary #8E8E93; separator #38383A; cta.primary #FFFFFF with #000000 label.
 
+The static launch canvas is always #000000. iOS launch screens cannot read the app's persisted Appearance choice before SwiftUI starts, so a black launch canvas prevents a saved Black preference from flashing white on a system-light device. Once the app root renders, System follows the OS and Black remains true black.
+
 ### 3. Typography (SF Pro, system font)
 Large title 28-34 bold; Row title 17 semibold; Body 16 regular; Preview/description 15 regular secondary; Section label 13 regular secondary; Timestamp 13-14 regular secondary; Button label 15 semibold; In-chat time 12 regular secondary. No display fonts, no letter-spacing games, no uppercase labels.
 

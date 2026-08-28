@@ -99,8 +99,9 @@ production APNs. A tap waits for session and roster restoration, verifies the wo
 access, then opens the existing chat. Foreground alerts include banner, Notification Center list,
 and sound unless that chat is already open. The app deliberately uses no numeric badge.
 Reply pushes also carry the Companion's four cosmetic icon indexes and `mutable-content: 1`. The
-embedded Notification Service Extension projects `icon_shape` and `icon_color` into the same flat
-CharacterMark geometry used by the app, renders its two white eyes into a PNG locally, then
+embedded Notification Service Extension projects `shape` and `color` from the nested
+`companion_icon` dictionary into the same flat CharacterMark geometry used by the app, renders its
+two white eyes into a PNG locally, then
 uses it as the sender image for Apple's communication-notification treatment. No avatar endpoint,
 credential, or network request is involved. If intent enrichment cannot finish, the extension
 returns the same title/body with the PNG as a standard attachment; if the extension itself times

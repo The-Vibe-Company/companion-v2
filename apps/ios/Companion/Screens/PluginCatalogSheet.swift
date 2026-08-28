@@ -65,6 +65,7 @@ struct PluginManagementView: View {
                     }
 
                     Button {
+                        guard !demoMode else { return }
                         showingAddPlugin = true
                     } label: {
                         Label("Add custom MCP", systemImage: "terminal")
@@ -233,6 +234,7 @@ struct PluginManagementView: View {
                         Button("Authorize") { connect(row.item, suggestedLabel: account.label) }
                     }
                     Button("Remove", systemImage: "trash", role: .destructive) {
+                        guard !demoMode else { return }
                         pluginToDisconnect = account
                     }
                 } label: {
@@ -304,6 +306,7 @@ struct PluginManagementView: View {
     }
 
     private func disconnect(_ plugin: CompanionPluginAccount) async {
+        guard !demoMode else { return }
         do {
             try await sessionStore.deleteCompanionPlugin(accountID: plugin.id)
             success = "\(plugin.label) removed."

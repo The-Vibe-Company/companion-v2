@@ -53,6 +53,11 @@ public enum CompanionAppearancePalette {
     public static let danger: UInt32 = 0xFF3B30
     public static let warning: UInt32 = 0xFF9500
 
+    // Text variants preserve the semantic hue while meeting small-text contrast on light surfaces.
+    public static let dangerTextLight: UInt32 = 0xC21429
+    public static let successTextLight: UInt32 = 0x10733B
+    public static let warningTextLight: UInt32 = 0x955000
+
     public static let characterMarks: [UInt32] = [
         0x000000, 0xA2845E, 0xFF3B30, 0xFF9500, 0xFFCC00, 0x34C759,
         0x30B0C7, 0x007AFF, 0xAF52DE, 0xFF2D55, 0x8E8E93,

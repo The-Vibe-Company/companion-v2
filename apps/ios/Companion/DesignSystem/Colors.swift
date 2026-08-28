@@ -21,6 +21,18 @@ enum CompanionIOSTheme {
     static let toggleGreen = color(CompanionAppearancePalette.toggleGreen)
     static let danger = color(CompanionAppearancePalette.danger)
     static let warning = color(CompanionAppearancePalette.warning)
+    static let dangerText = adaptive(
+        light: CompanionAppearancePalette.dangerTextLight,
+        black: CompanionAppearancePalette.danger
+    )
+    static let successText = adaptive(
+        light: CompanionAppearancePalette.successTextLight,
+        black: CompanionAppearancePalette.toggleGreen
+    )
+    static let warningText = adaptive(
+        light: CompanionAppearancePalette.warningTextLight,
+        black: CompanionAppearancePalette.warning
+    )
 
     static let characterMarkPalette = CompanionAppearancePalette.characterMarks.map { color($0) }
 
@@ -47,9 +59,9 @@ extension Color {
     static let companionSurfaceOpaque = CompanionIOSTheme.card
     static let companionBorder = CompanionIOSTheme.separator
     static let companionDivider = CompanionIOSTheme.separator
-    static let companionDanger = CompanionIOSTheme.danger
-    static let companionSuccess = CompanionIOSTheme.toggleGreen
-    static let companionWarning = CompanionIOSTheme.warning
+    static let companionDanger = CompanionIOSTheme.dangerText
+    static let companionSuccess = CompanionIOSTheme.successText
+    static let companionWarning = CompanionIOSTheme.warningText
     static let companionAccentForeground = Color.white
 }
 

@@ -35,6 +35,9 @@ func approvedAppearancePaletteMatchesTheDesignContract() {
     #expect(CompanionAppearancePalette.Black.primaryCTA == 0xFFFFFF)
     #expect(CompanionAppearancePalette.Black.primaryCTAText == 0x000000)
     #expect(CompanionAppearancePalette.textSecondary == 0x8E8E93)
+    #expect(CompanionAppearancePalette.dangerTextLight == 0xC21429)
+    #expect(CompanionAppearancePalette.successTextLight == 0x10733B)
+    #expect(CompanionAppearancePalette.warningTextLight == 0x955000)
     #expect(CompanionAppearancePalette.characterMarks.count == 11)
 }
 
