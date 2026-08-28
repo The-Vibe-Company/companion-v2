@@ -532,6 +532,7 @@ test("the chat scroll-to-bottom control floats over the transcript", () => {
 
 test("native transcript taps dismiss the keyboard without consuming message controls", () => {
   const chat = read("apps/ios/Companion/Screens/ChatView.swift");
+  const roster = read("apps/ios/Companion/Screens/CompanionListView.swift");
   const readme = read("apps/ios/README.md");
   const transcriptDemo = read(
     "apps/ios/Companion/Screens/CompanionTranscriptWindowDemoView.swift",
@@ -551,6 +552,10 @@ test("native transcript taps dismiss the keyboard without consuming message cont
   assert.match(chat, /shouldRecognizeSimultaneouslyWith/);
   assert.match(chat, /shouldReceive touch: UITouch/);
   assert.match(chat, /current is UITextField \|\| current is UITextView/);
+  assert.match(
+    chat,
+    /shouldRequireFailureOf otherGestureRecognizer: UIGestureRecognizer[\s\S]{0,180}?otherGestureRecognizer is UIScreenEdgePanGestureRecognizer/,
+  );
   assert.match(chat, /recognizer\.delegate = context\.coordinator/);
   assert.match(chat, /\) -> Bool \{\s*true\s*\}/);
   assert.match(
@@ -565,6 +570,10 @@ test("native transcript taps dismiss the keyboard without consuming message cont
   assert.match(uiTests, /testTranscriptQuestionKeepsCardFocusedAndSubmitsAnswer/);
   assert.match(uiTests, /answerField\.typeText\("Ship the stable release"\)/);
   assert.match(uiTests, /XCTAssertEqual\(composer\.value as\? String, "Keep this draft"\)/);
+  assert.match(uiTests, /testChatLeadingEdgeSwipeWorksAfterMidScrollAcrossRepeatedPops/);
+  assert.match(roster, /COMPANION_ROSTER_DEMO_LONG_THREAD/);
+  assert.match(uiTests, /chat\.scroll-to-bottom/);
+  assert.doesNotMatch(transcript, /DragGesture/);
 });
 
 test("native chat reading restoration stays covered at the behavior layer", () => {
@@ -590,6 +599,11 @@ test("native chat reading restoration stays covered at the behavior layer", () =
   assert.match(chat, /scrollCoordinator\.takePendingRequest\(\)/);
   assert.match(chat, /\.onScrollPhaseChange/);
   assert.match(chat, /scrollCoordinator\.beginUserInteraction/);
+  const scrollPhase = chat.slice(
+    chat.indexOf(".onScrollPhaseChange"),
+    chat.indexOf(".onScrollTargetVisibilityChange", chat.indexOf(".onScrollPhaseChange")),
+  );
+  assert.match(scrollPhase, /newPhase == \.interacting[\s\S]*stopFollowingTailForReveal\(\)/);
   assert.match(chat, /newPhase == \.interacting[\s\S]*scrollCoordinator\.observeGeometry/);
   assert.match(chat, /\.defaultScrollAnchor\(\.bottom, for: \.initialOffset\)/);
   assert.doesNotMatch(chat, /\.defaultScrollAnchor\(\.bottom\)\s*/);
