@@ -1641,6 +1641,37 @@ describe("RuntimeEngine attempts", () => {
     })]);
   });
 
+  it("settles an interrupted cancellation when a running routine loses authorization", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(claim),
+      material: attemptMaterial({
+        routineId: TURN_ID,
+        routineName: "cancel-during-run",
+        routineIsolated: true,
+      }),
+    });
+    const ports = fakePorts(store);
+    const prompt = ports.pi.routineSession!.prompt;
+    ports.pi.routineSession!.prompt = async (input) => {
+      const accepted = await prompt(input);
+      store.authorization.authorized = false;
+      store.authorization.denialCode = "turn_cancel_requested";
+      return accepted;
+    };
+    ports.pi.routineSession!.terminate = async () => {
+      throw new Error("routine process survived termination");
+    };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("interrupted");
+    expect(store.settlements).toEqual([expect.objectContaining({
+      terminalStatus: "interrupted",
+      error: expect.objectContaining({ code: "routine_cancel_termination_ambiguous" }),
+    })]);
+  });
+
   it("cancels a stop that arrives while dispatch is still unacknowledged", async () => {
     const claim = attemptClaim();
     const denied = attemptAuthorization(claim, {

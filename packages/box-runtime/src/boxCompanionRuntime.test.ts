@@ -1889,6 +1889,7 @@ describe("isolated routine Pi sessions", () => {
     expect(commands[0]).toContain(`routine_root="$HOME/${paths.root}"`);
     expect(commands[0]).toContain('cp -a "$HOME/.companion/pi/." "$routine_root/pi/"');
     expect(commands[0]).toContain("routine-pi-session run root is still owned by a process");
+    expect(commands[0]).toContain("trap cleanup_failed_prepare ERR");
     expect(commands.at(-1)).toContain(`socket="$HOME/${paths.socket}"`);
     expect(commands.at(-1)).toContain(`broker_script="$HOME/.companion/bin/companion-pi-broker.mjs"`);
     expect(commands.at(-1)).toContain("routine-pi-session could not be stopped after readiness timeout");
@@ -1932,6 +1933,33 @@ describe("isolated routine Pi sessions", () => {
     expect(commands).toHaveLength(2);
     expect(commands[1]).toContain("routine-pi-session-terminated");
     expect(commands[1]).toContain('rm -rf "$routine_root"');
+  });
+
+  it("retries cleanup through the termination command when preparation fails", async () => {
+    const commands: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      if (!url.endsWith("/commands") || init?.method !== "POST") {
+        throw new Error(`unexpected Box request: ${init?.method ?? "GET"} ${url}`);
+      }
+      const command = requiredText(parseBoxTestBody(init.body), "command");
+      commands.push(command);
+      if (commands.length === 1) {
+        return response({ success: false, exitCode: 1, stdout: "", stderr: "copy failed" });
+      }
+      return response(commandResult("routine-pi-session-terminated\n"));
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await expect(runtime.startRoutineSession({
+      boxId: "bx_23456789",
+      runId,
+      persona: null,
+    })).rejects.toMatchObject({ code: "routine_session_prepare_failed" });
+
+    expect(commands).toHaveLength(2);
+    expect(commands[0]).toContain("trap cleanup_failed_prepare ERR");
+    expect(commands[1]).toContain("routine-pi-session-terminated");
   });
 
   it("terminates only the run-scoped process, proves it stopped, and removes its run root", async () => {

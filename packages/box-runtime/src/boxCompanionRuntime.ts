@@ -1203,6 +1203,13 @@ if routine_root_has_process; then
   echo 'routine-pi-session run root is still owned by a process' >&2
   exit 1
 fi
+cleanup_failed_prepare() {
+  local status="$?"
+  trap - ERR
+  rm -rf "$routine_root" || true
+  exit "$status"
+}
+trap cleanup_failed_prepare ERR
 rm -rf "$routine_root"
 mkdir -p "$routine_root/state" "$routine_root/events" "$routine_root/sessions" "$routine_root/logs" "$routine_root/memory" "$routine_root/tmp" "$routine_root/outbox" "$routine_root/pi" "$routine_root/pi/extensions" "$routine_root/tools"
 cp -a "$HOME/.companion/pi/." "$routine_root/pi/"
@@ -1210,6 +1217,7 @@ if [ -d "$HOME/.companion/runtime/skills" ]; then cp -a "$HOME/.companion/runtim
 if [ -d "$HOME/.companion/tools" ]; then cp -a "$HOME/.companion/tools/." "$routine_root/tools/"; fi
 ${copies}
 chmod 700 "$routine_root" "$routine_root/state" "$routine_root/events" "$routine_root/sessions" "$routine_root/logs" "$routine_root/memory" "$routine_root/tmp" "$routine_root/outbox" "$routine_root/pi" "$routine_root/pi/extensions" "$routine_root/tools"
+trap - ERR
 printf '%s\\n' routine-pi-session-prepared
 `;
 }
@@ -4979,11 +4987,21 @@ done`,
       input.signal,
     );
     if (!prepared.success) {
-      throw new BoxRuntimeProviderError(
+      const prepareError = new BoxRuntimeProviderError(
         `Routine Pi session failed to prepare${commandFailureDetail(prepared)}`,
         502,
         "routine_session_prepare_failed",
       );
+      try {
+        await this.terminateRoutineSession({ boxId: input.boxId, runId: input.runId });
+      } catch {
+        throw new BoxRuntimeProviderError(
+          "Routine Pi session failed to clean up after incomplete preparation",
+          502,
+          "routine_session_cleanup_failed",
+        );
+      }
+      throw prepareError;
     }
     const existingInvocation = routineInvocationFromOutput(prepared.stdout);
     if (existingInvocation) return { state: "idle", invocationId: existingInvocation };

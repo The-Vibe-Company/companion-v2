@@ -172,7 +172,21 @@ export class RuntimeEngine {
         return this.#result(claim, "fence_lost");
       }
       if (error instanceof LeaseAuthorizationDeniedError) {
-        return await this.#finishDenial(claim, session, error.denialCode, error);
+        try {
+          return await this.#finishDenial(claim, session, error.denialCode, error);
+        } catch (denialError) {
+          if (denialError instanceof RoutineCancelTerminationError) {
+            return await this.#finishSettlement(claim, session, {
+              terminalStatus: "interrupted",
+              error: safeErrorFromUnknown(denialError, {
+                code: "routine_cancel_termination_ambiguous",
+                message: "The isolated routine process could not be proven stopped after cancellation.",
+                action: "retry",
+              }),
+            }, denialError);
+          }
+          throw denialError;
+        }
       }
       if (error instanceof AmbiguousExternalEffectError) {
         return await this.#finishSettlement(claim, session, {
