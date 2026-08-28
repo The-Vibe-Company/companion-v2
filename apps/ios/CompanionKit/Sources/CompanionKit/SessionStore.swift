@@ -225,6 +225,19 @@ public final class SessionStore {
         }
     }
 
+    public func unregisterNotificationDevice(installationID: UUID) async throws {
+        do {
+            try await client.unregisterNotificationDevice(installationID: installationID)
+            if notificationInstallationID == installationID {
+                notificationInstallationID = nil
+            }
+            await persistRollingAuthority()
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
     public func listCompanions() async throws -> [CompanionSummary] {
         do {
             let companions = try await client.listCompanions()

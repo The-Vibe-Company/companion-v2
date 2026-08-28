@@ -47,6 +47,11 @@ final class NotificationCoordinator: NSObject, UNUserNotificationCenterDelegate 
         deviceToken = data.map { String(format: "%02x", $0) }.joined()
     }
 
+    func stopRemoteNotifications() {
+        UIApplication.shared.unregisterForRemoteNotifications()
+        deviceToken = nil
+    }
+
     func consume(_ destination: Destination) {
         if pendingDestination == destination { pendingDestination = nil }
     }
@@ -62,6 +67,7 @@ final class NotificationCoordinator: NSObject, UNUserNotificationCenterDelegate 
         guard let destination = Self.destination(from: notification.request.content.userInfo) else {
             return []
         }
+        guard Self.botNotificationsEnabled(for: destination.companionID) else { return [] }
         let isOpen = await MainActor.run { activeCompanionID == destination.companionID }
         return isOpen ? [] : [.banner, .list, .sound]
     }
@@ -73,6 +79,7 @@ final class NotificationCoordinator: NSObject, UNUserNotificationCenterDelegate 
         guard let destination = Self.destination(from: response.notification.request.content.userInfo) else {
             return
         }
+        guard Self.botNotificationsEnabled(for: destination.companionID) else { return }
         await MainActor.run { pendingDestination = destination }
     }
 
@@ -85,6 +92,12 @@ final class NotificationCoordinator: NSObject, UNUserNotificationCenterDelegate 
               let eventValue = userInfo["event"] as? String,
               let event = CompanionNotificationEvent(rawValue: eventValue) else { return nil }
         return Destination(orgID: orgID, companionID: companionID, event: event)
+    }
+
+    nonisolated private static func botNotificationsEnabled(for companionID: String) -> Bool {
+        let key = CompanionPreferenceKeys.notificationPrefix + companionID
+        guard UserDefaults.standard.object(forKey: key) != nil else { return true }
+        return UserDefaults.standard.bool(forKey: key)
     }
 }
 

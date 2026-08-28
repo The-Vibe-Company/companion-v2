@@ -1,7 +1,7 @@
 import SwiftUI
 import CompanionKit
 
-private struct CuratedCompanionPlugin: Identifiable, Hashable {
+struct CuratedCompanionPlugin: Identifiable, Hashable {
     let id: String
     let provider: String
     let title: String
@@ -47,7 +47,7 @@ private let curatedCompanionPlugins = [
     ),
 ]
 
-struct PluginManagementView: View {
+private struct LegacyPluginManagementView: View {
     @Environment(SessionStore.self) private var sessionStore
     @Environment(\.dismiss) private var dismiss
     @State private var plugins: [CompanionPluginAccount] = []
@@ -295,7 +295,7 @@ struct PluginManagementView: View {
     }
 }
 
-private struct ConnectCuratedPluginView: View {
+struct ConnectCuratedPluginView: View {
     @Environment(SessionStore.self) private var sessionStore
     @Environment(ExternalOAuthCoordinator.self) private var externalOAuth
     @Environment(\.dismiss) private var dismiss
@@ -551,7 +551,7 @@ private struct ConnectCuratedPluginView: View {
     }
 }
 
-private struct AddPluginView: View {
+struct AddPluginView: View {
     @Environment(SessionStore.self) private var sessionStore
     @Environment(\.dismiss) private var dismiss
     let onConnected: () -> Void
