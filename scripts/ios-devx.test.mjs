@@ -175,6 +175,33 @@ test("home and chat header chrome keeps bare 44-point actions", () => {
   assert.match(design, /Chat header computer and overflow actions use the same bare-icon treatment/);
 });
 
+test("every custom sheet back header preserves the native interactive pop gesture", () => {
+  const header = read("apps/ios/Companion/DesignSystem/SheetComponents.swift");
+  const navigation = read("apps/ios/Companion/Support/NavigationSwipeBackSupport.swift");
+  const memberSettings = read("apps/ios/Companion/Screens/MemberSettingsView.swift");
+  const botDetails = read("apps/ios/Companion/Screens/CompanionBotDetailSheet.swift");
+  const plugins = read("apps/ios/Companion/Screens/PluginCatalogSheet.swift");
+  const uiTests = read("apps/ios/CompanionUITests/CompanionUITests.swift");
+
+  assert.match(
+    header,
+    /\.companionNavigationSwipeBackEnabled\(leadingStyle == \.back\)/,
+  );
+  assert.match(
+    navigation,
+    /func companionNavigationSwipeBackEnabled\(_ enabled: Bool = true\)/,
+  );
+  assert.match(navigation, /navigationController\.viewControllers\.count > 1/);
+  assert.match(navigation, /installedNavigationController\.transitionCoordinator == nil/);
+  assert.match(memberSettings, /case \.plugins:\s*PluginManagementView\(\)/);
+  assert.match(plugins, /CompanionSheetHeader\([\s\S]{0,120}?leadingStyle: \.back/);
+  assert.match(botDetails, /CompanionSheetHeader\(title: routine\.name, leadingStyle: \.back\)/);
+  assert.match(botDetails, /CompanionSheetHeader\(title: "Routine run", leadingStyle: \.back\)/);
+  assert.match(header, /"navigation\.custom-back"/);
+  assert.match(uiTests, /testMemberSettingsCustomHeadersSupportButtonAndLeadingEdgeBack/);
+  assert.match(uiTests, /testBotDetailRoutineAndRunCustomHeadersSupportConsecutiveEdgePops/);
+});
+
 test("full-screen native backdrops stay neutral in every state", () => {
   const glassComponents = read("apps/ios/Companion/DesignSystem/GlassComponents.swift");
   const backdrop = glassComponents.slice(

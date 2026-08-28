@@ -53,6 +53,9 @@ struct CompanionSheetHeader<Trailing: View>: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(CompanionIOSTheme.textPrimary)
                 .accessibilityLabel(leadingStyle == .close ? "Close" : "Back")
+                .accessibilityIdentifier(
+                    leadingStyle == .close ? "navigation.close" : "navigation.custom-back"
+                )
 
                 Spacer(minLength: 12)
                 trailing
@@ -62,6 +65,10 @@ struct CompanionSheetHeader<Trailing: View>: View {
                 .font(.system(size: 32, weight: .bold))
                 .foregroundStyle(CompanionIOSTheme.textPrimary)
         }
+        // Hiding SwiftUI's navigation bar also disables UIKit's interactive pop gesture.
+        // Keep the native edge transition beside the custom, accessible back control on every
+        // pushed sheet-style destination; modal roots use `.close` and remain dismiss-only.
+        .companionNavigationSwipeBackEnabled(leadingStyle == .back)
     }
 }
 

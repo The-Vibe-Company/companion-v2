@@ -249,6 +249,7 @@ struct CompanionSettingsView: View {
                             routineRow(routine)
                         }
                         .buttonStyle(.plain)
+                        .accessibilityIdentifier("companion.details.routine.\(routine.id)")
                     }
                 }
 
@@ -794,6 +795,7 @@ private struct CompanionRoutineDetailSheet: View {
                                 )
                             }
                             .buttonStyle(.plain)
+                            .accessibilityIdentifier("companion.details.routine-run.\(run.runID)")
                         }
                         if store.canLoadMore {
                             CompanionSheetSeparator()
