@@ -15,6 +15,7 @@ import {
   COMPANION_ID,
   MESSAGE_EVENT_ID,
   PI_INVOCATION_ID,
+  ROUTINE_SNAPSHOT_ID,
   TURN_ID,
   attemptAuthorization,
   attemptClaim,
@@ -923,7 +924,7 @@ describe("RuntimeEngine attempts", () => {
     const store = new MemoryRuntimeStore({
       authorization: attemptAuthorization(claim),
       material: attemptMaterial({
-        routineId: TURN_ID,
+        routineId: ROUTINE_SNAPSHOT_ID,
         routineName: "conductor-progress-check",
       }),
     });
@@ -973,7 +974,7 @@ describe("RuntimeEngine attempts", () => {
     const store = new MemoryRuntimeStore({
       authorization: attemptAuthorization(claim),
       material: attemptMaterial({
-        routineId: TURN_ID,
+        routineId: ROUTINE_SNAPSHOT_ID,
         routineName: "strict-stop-check",
         routineIsolated: true,
       }),
@@ -1020,7 +1021,7 @@ describe("RuntimeEngine attempts", () => {
     const store = new MemoryRuntimeStore({
       authorization: attemptAuthorization(claim),
       material: attemptMaterial({
-        routineId: TURN_ID,
+        routineId: ROUTINE_SNAPSHOT_ID,
         routineName: "silent-check",
         routineIsolated: true,
         routineContext: context,
@@ -1059,7 +1060,7 @@ describe("RuntimeEngine attempts", () => {
         eventCursor: 0n,
       }),
       material: attemptMaterial({
-        routineId: TURN_ID,
+        routineId: ROUTINE_SNAPSHOT_ID,
         routineName: "takeover-check",
         routineIsolated: true,
         routineContext: {
@@ -1645,7 +1646,7 @@ describe("RuntimeEngine attempts", () => {
     const store = new MemoryRuntimeStore({
       authorization: attemptAuthorization(claim),
       material: attemptMaterial({
-        routineId: TURN_ID,
+        routineId: ROUTINE_SNAPSHOT_ID,
         routineName: "cancel-during-run",
         routineIsolated: true,
       }),

@@ -912,7 +912,11 @@ export class PostgresRuntimeStore implements RuntimeStore {
       if (!isolated) return false;
       const id = nullableUuidText(row, "context_id");
       const sha256 = nullableText(row, "context_sha256");
-      const content = nullableText(row, "context_content");
+      // Context substrates are intentionally structured, multiline text. `nullableText` protects
+      // short scalar fields by rejecting CR/LF, so using it here rejects every valid substrate
+      // produced by migration 0137 before the runtime can contact the Box.
+      const rawContent = row.context_content;
+      const content = rawContent === null ? null : stringValue(rawContent);
       if (
         id === null || sha256 === null || !SHA256_PATTERN.test(sha256)
         || content === null || Buffer.byteLength(content, "utf8") > 32_768

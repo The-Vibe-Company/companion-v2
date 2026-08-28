@@ -182,6 +182,31 @@ describe("PostgresRuntimeStore", () => {
     expect(sql.calls[0]?.query).toContain("public.companion_runtime_get_turn_context(");
   });
 
+  it("accepts the multiline context produced while preparing an isolated routine run", async () => {
+    const sql = new RecordingSql();
+    const contextId = "2a1d4f26-268e-4b8b-b254-24194374fb0a";
+    const content = "--- Main conversation context ---\n\n## Stable summary\nNo summary yet.\n";
+    sql.rows = [{
+      isolated: true,
+      context_id: contextId,
+      context_sha256: "d".repeat(64),
+      context_content: content,
+    }];
+    const store = new PostgresRuntimeStore(sql);
+
+    await expect(store.prepareRoutineRun({
+      ...fence,
+      workKind: "attempt",
+      workId: ATTEMPT_ID,
+    })).resolves.toEqual({
+      id: contextId,
+      sha256: "d".repeat(64),
+      content,
+    });
+
+    expect(sql.calls[0]?.query).toContain("public.companion_runtime_prepare_routine_run(");
+  });
+
   it("decodes a complete agent endpoint and refuses a partial or malformed one", async () => {
     const base = {
       turn_id: TURN_ID,

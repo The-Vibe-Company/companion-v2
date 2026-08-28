@@ -387,7 +387,7 @@ export interface RuntimeWorkMaterial {
   turnStartedAt: Date | null;
   /** Stored member IANA timezone; UTC is supplied by the database only when the profile is unset. */
   memberTimezone: string | null;
-  /** Scheduled routine identity; null for ordinary and trigger-origin turns. */
+  /** Scheduled routine snapshot identity; distinct from the turn id that identifies this run. */
   routineId: string | null;
   routineName: string | null;
   /** Once true, takeover must keep using the run-scoped session even if the deploy gate is off. */

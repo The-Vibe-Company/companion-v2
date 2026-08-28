@@ -42,6 +42,7 @@ export const CLAIM_TOKEN = "44444444-4444-4444-8444-444444444444";
 export const TURN_ID = "55555555-5555-4555-8555-555555555555";
 export const MESSAGE_EVENT_ID = "msg:66666666-6666-4666-8666-666666666666";
 export const COMMAND_ID = "77777777-7777-4777-8777-777777777777";
+export const ROUTINE_SNAPSHOT_ID = "88888888-8888-4888-8888-888888888888";
 export const BOX_ID = "bx_23456789";
 export const PI_INVOCATION_ID = "pi-invocation-1";
 export const OPERATION_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
