@@ -2,7 +2,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -2005,6 +2005,7 @@ describe("isolated routine Pi sessions", () => {
       expect(commands.at(-1)).toContain('export QMD_CONFIG_DIR="$routine_root/qmd/config"');
       expect(commands.at(-1)).toContain('export INDEX_PATH="$routine_root/qmd/index.sqlite"');
       expect(commands.at(-1)).toContain('export PATH="$routine_root/bin:');
+      expect(commands[0]).toContain('if [ -x "$routine_root/tools/bin/qmd" ]; then');
 
       const routineRoot = join(boxHome, paths.root);
       const qmd = spawnSync(join(routineRoot, "bin", "qmd"), ["collection", "list"], {
@@ -2024,6 +2025,51 @@ describe("isolated routine Pi sessions", () => {
           "",
         ].join("\n"),
       });
+    } finally {
+      rmSync(boxHome, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves qmd unavailable when its best-effort installation is absent", async () => {
+    const boxHome = mkdtempSync(join(tmpdir(), "companion-routine-no-qmd-"));
+    const paths = companionPiRoutineSessionPaths(runId);
+    let preparedResult: ReturnType<typeof spawnSync> | null = null;
+
+    mkdirSync(join(boxHome, ".companion", "pi", "extensions"), { recursive: true });
+
+    try {
+      vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+        const url = String(rawUrl);
+        const body = parseBoxTestBody(init?.body);
+        if (url.endsWith("/files") && init?.method === "PUT") return response({ ok: true });
+        if (url.endsWith("/commands") && init?.method === "POST") {
+          const command = requiredText(body, "command");
+          if (command.includes("routine-pi-session-prepared")) {
+            const result = spawnSync("bash", ["-c", command], {
+              encoding: "utf8",
+              env: { ...process.env, HOME: boxHome },
+            });
+            preparedResult = result;
+            return response(commandResult(result.stdout));
+          }
+          if (command.includes("routine-pi-session-ready")) {
+            return response(commandResult(`routine-pi-session-ready ${invocationId}\n`));
+          }
+          return response(commandResult());
+        }
+        throw new Error(`unexpected Box request: ${init?.method ?? "GET"} ${url}`);
+      }));
+      const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+      await expect(runtime.startRoutineSession({
+        boxId: "bx_23456789",
+        runId,
+        persona: null,
+        expectedInvocationId: invocationId,
+      })).resolves.toMatchObject({ state: "idle" });
+
+      expect(preparedResult).toMatchObject({ status: 0 });
+      expect(existsSync(join(boxHome, paths.root, "bin", "qmd"))).toBe(false);
     } finally {
       rmSync(boxHome, { recursive: true, force: true });
     }

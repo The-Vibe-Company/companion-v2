@@ -1322,8 +1322,11 @@ if [ -d "$HOME/.companion/runtime/skills" ]; then cp -a "$HOME/.companion/runtim
 if [ -d "$HOME/.companion/tools" ]; then cp -a "$HOME/.companion/tools/." "$routine_root/tools/"; fi
 # qmd discovers project-local configuration before its environment-selected defaults unless an
 # explicit named index is present. Put a private wrapper first on PATH so every pi-memory qmd child
-# uses the run-local config and SQLite paths even if the Box command runner starts below .qmd/.
-cat > "$routine_root/bin/qmd" <<'COMPANION_ROUTINE_QMD'
+# uses the run-local config and SQLite paths even if the Box command runner starts below .qmd/. qmd
+# is a best-effort install, so leave it absent when no executable was copied and let pi-memory fall
+# back to plain recall.
+if [ -x "$routine_root/tools/bin/qmd" ]; then
+  cat > "$routine_root/bin/qmd" <<'COMPANION_ROUTINE_QMD'
 #!/bin/sh
 set -eu
 : "\${COMPANION_PI_ROOT:?}"
@@ -1331,7 +1334,8 @@ export QMD_CONFIG_DIR="$COMPANION_PI_ROOT/qmd/config"
 export INDEX_PATH="$COMPANION_PI_ROOT/qmd/index.sqlite"
 exec "$COMPANION_PI_ROOT/tools/bin/qmd" --index companion-routine "$@"
 COMPANION_ROUTINE_QMD
-chmod 700 "$routine_root/bin/qmd"
+  chmod 700 "$routine_root/bin/qmd"
+fi
 # Pin the parent Companion's plain-Markdown memory into this disposable run root. Copying regular
 # files instead of linking the live tree gives the routine the same memory context without granting
 # any path that can mutate the main Pi's authoritative files. Run-local writes are discarded when
