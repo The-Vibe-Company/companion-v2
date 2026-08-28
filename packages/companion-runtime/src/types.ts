@@ -245,6 +245,7 @@ export interface RuntimeAuthorization {
   boxId: string | null;
   boxState: BoxObservedState | null;
   piState: PiObservedState | null;
+  /** Current main Companion Pi instance identity used for ordinary runtime broker operations. */
   piInvocationId: string | null;
   diskLayoutVersion: number | null;
   appliedSettingsRevision: bigint | null;
@@ -282,7 +283,7 @@ export interface RuntimeAuthorization {
   decisionResponseText: string | null;
   /** Persisted prompt/decision write identity, exposed so takeover can resolve broker state. */
   commandId: string | null;
-  /** Pi invocation pinned atomically with the prompt write intent. */
+  /** Isolated routine/command Pi invocation pinned atomically with the prompt write intent. */
   commandPiInvocationId: string | null;
 }
 

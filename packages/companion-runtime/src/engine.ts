@@ -289,7 +289,9 @@ export class RuntimeEngine {
     const runId = claim.turnId;
     if (
       runId
-      && auth.piInvocationId?.startsWith(`routine:${runId}:`)
+      // `piInvocationId` is the main Companion Pi. Cancellation authorization preserves the
+      // attempt-bound command identity so an isolated run is stopped without touching main Pi.
+      && auth.commandPiInvocationId?.startsWith(`routine:${runId}:`)
       && this.#deps.pi.routineSession
     ) {
       const abortController = new AbortController();
@@ -313,6 +315,7 @@ export class RuntimeEngine {
         await this.#deps.pi.routineSession.terminate({
           boxId: auth.boxId,
           runId,
+          expectedInvocationId: auth.commandPiInvocationId,
           signal: terminateController.signal,
         });
         return;

@@ -1821,6 +1821,7 @@ describe("Pi outbox maintenance", () => {
 
 describe("isolated routine Pi sessions", () => {
   const runId = "11111111-1111-4111-8111-111111111111";
+  const invocationId = `routine:${runId}:dispatch-v2:22222222-2222-4222-8222-222222222222`;
 
   it("rejects a non-UUID run id before contacting the Box", async () => {
     const fetch = vi.fn();
@@ -1831,10 +1832,25 @@ describe("isolated routine Pi sessions", () => {
       boxId: "bx_23456789",
       runId: "../main",
       persona: null,
+      expectedInvocationId: invocationId,
     })).rejects.toMatchObject({
       status: 400,
       code: "routine_run_id_invalid",
     });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unversioned start identity before contacting the Box", async () => {
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await expect(runtime.startRoutineSession({
+      boxId: "bx_23456789",
+      runId,
+      persona: null,
+      expectedInvocationId: `routine:${runId}:legacy`,
+    })).rejects.toMatchObject({ code: "routine_invocation_id_invalid" });
     expect(fetch).not.toHaveBeenCalled();
   });
 
@@ -1870,6 +1886,7 @@ describe("isolated routine Pi sessions", () => {
       boxId: "bx_23456789",
       runId,
       persona: "Routine persona.",
+      expectedInvocationId: invocationId,
     })).resolves.toMatchObject({
       state: "idle",
     });
@@ -1890,11 +1907,23 @@ describe("isolated routine Pi sessions", () => {
     expect(commands[0]).toContain('cp -a "$HOME/.companion/pi/." "$routine_root/pi/"');
     expect(commands[0]).toContain("routine-pi-session run root is still owned by a process");
     expect(commands[0]).toContain("trap cleanup_failed_prepare ERR");
-    expect(commands.at(-1)).toContain(`socket="$HOME/${paths.socket}"`);
-    expect(commands.at(-1)).toContain(`broker_script="$HOME/.companion/bin/companion-pi-broker.mjs"`);
-    expect(commands.at(-1)).toContain("routine-pi-session could not be stopped after readiness timeout");
-    expect(commands.at(-1)).toContain('rm -rf "$routine_root"');
-    expect(commands.at(-1)).not.toContain("systemctl --user");
+    expect(commands[0]).toContain("flock -w 20 9");
+    expect(commands[0]).toContain(`reservation_file="$HOME/${paths.reservation}"`);
+    expect(commands[0]).toContain('rm -f "$routine_cancel_marker"');
+    const launch = commands.at(-1)!;
+    expect(launch).toContain(`socket="$HOME/${paths.socket}"`);
+    expect(launch).toContain(`broker_script="$HOME/.companion/bin/companion-pi-broker.mjs"`);
+    expect(launch).toContain("routine-pi-session could not be stopped after readiness timeout");
+    expect(launch).toContain("# The cancellation marker may be published");
+    expect(launch).toContain('"$broker_script" 9>&- </dev/null');
+    expect(launch).toContain('rm -rf "$routine_root"');
+    expect(launch).not.toContain("systemctl --user");
+    // Terminate publishes its tombstone before waiting for the launch lock. A launch already
+    // holding that lock must observe the marker at its pre-spawn/readiness checks and must never
+    // erase it as "stale"; stale replacement belongs solely to serialized prepare above.
+    expect(launch).not.toContain('rm -f "$routine_cancel_marker"');
+    expect(launch.lastIndexOf("\nacquire_routine_lock\n"))
+      .toBeLessThan(launch.indexOf("# The cancellation marker may be published"));
     for (const command of commands) {
       expect(spawnSync("bash", ["-n"], { input: command, encoding: "utf8" })).toMatchObject({
         status: 0,
@@ -1939,6 +1968,7 @@ describe("isolated routine Pi sessions", () => {
       boxId: "bx_23456789",
       runId,
       persona: null,
+      expectedInvocationId: invocationId,
     })).resolves.toMatchObject({ state: "idle" });
 
     expect(commands).toHaveLength(3);
@@ -1947,7 +1977,7 @@ describe("isolated routine Pi sessions", () => {
   });
 
   it("recovers an already-running routine session when Box reports prepare as exit 1", async () => {
-    const invocation = `routine:${runId}:22222222-2222-4222-8222-222222222222`;
+    const invocation = invocationId;
     const commands: string[] = [];
     const files = vi.fn();
     vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
@@ -1974,12 +2004,42 @@ describe("isolated routine Pi sessions", () => {
       boxId: "bx_23456789",
       runId,
       persona: null,
+      expectedInvocationId: invocation,
     })).resolves.toEqual({ state: "idle", invocationId: invocation });
 
     expect(commands).toHaveLength(1);
     expect(commands[0]).toContain("routine-pi-session-already-running");
     expect(commands[0]).not.toContain("routine-pi-session-terminated");
     expect(files).not.toHaveBeenCalled();
+  });
+
+  it("preserves a dead routine root for explicit reconciliation", async () => {
+    const commands: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      if (!url.endsWith("/commands") || init?.method !== "POST") {
+        throw new Error(`unexpected Box request: ${init?.method ?? "GET"} ${url}`);
+      }
+      commands.push(requiredText(parseBoxTestBody(init.body), "command"));
+      return response({
+        success: false,
+        exitCode: 1,
+        stdout: "routine-pi-session-root-ambiguous\n",
+        stderr: "routine-pi-session root exists without a live process\n",
+      });
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await expect(runtime.startRoutineSession({
+      boxId: "bx_23456789",
+      runId,
+      persona: null,
+      expectedInvocationId: invocationId,
+    })).rejects.toMatchObject({ code: "routine_session_root_ambiguous" });
+
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain("routine-pi-session-root-ambiguous");
+    expect(commands[0]).not.toContain("routine-pi-session-terminated");
   });
 
   it("removes the copied run root when pre-launch staging fails", async () => {
@@ -2007,6 +2067,7 @@ describe("isolated routine Pi sessions", () => {
       boxId: "bx_23456789",
       runId,
       persona: null,
+      expectedInvocationId: invocationId,
     })).rejects.toThrow();
 
     expect(commands).toHaveLength(2);
@@ -2034,6 +2095,7 @@ describe("isolated routine Pi sessions", () => {
       boxId: "bx_23456789",
       runId,
       persona: null,
+      expectedInvocationId: invocationId,
     })).rejects.toMatchObject({ code: "routine_session_prepare_failed" });
 
     expect(commands).toHaveLength(2);
@@ -2054,13 +2116,29 @@ describe("isolated routine Pi sessions", () => {
     }));
     const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
 
-    await expect(runtime.terminateRoutineSession({ boxId: "bx_23456789", runId })).resolves.toBeUndefined();
+    await expect(runtime.terminateRoutineSession({
+      boxId: "bx_23456789",
+      runId,
+      expectedInvocationId: invocationId,
+    })).resolves.toBeUndefined();
     expect(commands).toHaveLength(1);
     expect(commands[0]).toContain(`pid_file="$HOME/${companionPiRoutineSessionPaths(runId).pid}"`);
     expect(commands[0]).toContain('kill -- -"$pid"');
     expect(commands[0]).toContain("signal_routine_root_processes TERM");
     expect(commands[0]).toContain("signal_routine_root_processes KILL");
     expect(commands[0]).toContain("routine-pi-session process survived termination");
+    const ownershipGuard = commands[0]!.indexOf(
+      'if [ ! -s "$reservation_file" ] && [ ! -s "$invocation_file" ]',
+    );
+    expect(ownershipGuard).toBeGreaterThan(-1);
+    expect(commands[0]).toContain(
+      '&& { [ -e "$routine_root" ] || [ -L "$routine_root" ]; }; then',
+    );
+    expect(ownershipGuard)
+      .toBeGreaterThan(commands[0]!.lastIndexOf("\nacquire_routine_lock\n"));
+    expect(ownershipGuard).toBeLessThan(commands[0]!.indexOf('rm -rf "$routine_root"'));
+    expect(commands[0]!.indexOf("mv -f \"$cancel_marker_tmp\" \"$routine_cancel_marker\""))
+      .toBeLessThan(commands[0]!.lastIndexOf("\nacquire_routine_lock\n"));
     expect(commands[0]).toContain('rm -rf "$routine_root"');
     expect(commands[0]).not.toContain("systemctl --user");
     expect(spawnSync("bash", ["-n"], { input: commands[0], encoding: "utf8" })).toMatchObject({

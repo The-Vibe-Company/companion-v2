@@ -357,9 +357,19 @@ export class MemoryRuntimeStore implements RuntimeStore {
     }
     if (input.commandId) this.authorization.commandId = input.commandId;
     if (input.piInvocationId) {
-      this.authorization.piInvocationId = input.piInvocationId;
-      if (input.nextCheckpoint === "dispatch_write_intent") {
-        this.authorization.commandPiInvocationId = input.piInvocationId;
+      // Routine attempts use the main runtime instance for Box authorization and keep their
+      // disposable broker identity on the attempt-bound command field. Ordinary attempts retain
+      // the historical main-instance update behavior.
+      if (this.material.routineIsolated) {
+        if (input.nextCheckpoint === "dispatch_write_intent"
+          || input.nextCheckpoint === "dispatch_accepted") {
+          this.authorization.commandPiInvocationId = input.piInvocationId;
+        }
+      } else {
+        this.authorization.piInvocationId = input.piInvocationId;
+        if (input.nextCheckpoint === "dispatch_write_intent") {
+          this.authorization.commandPiInvocationId = input.piInvocationId;
+        }
       }
     }
     if (input.eventCursor !== undefined) this.authorization.eventCursor = input.eventCursor;
@@ -719,6 +729,7 @@ export function fakePorts(store: MemoryRuntimeStore): FakePorts {
   const routinePromptCalls: FakePorts["routinePromptCalls"] = [];
   const routineStarts: string[] = [];
   const routineTerminates: string[] = [];
+  const routineInvocationIds = new Map<string, string>();
   const abortCalls: FakePorts["abortCalls"] = [];
   const decisionCalls: FakePorts["decisionCalls"] = [];
   const eventReads: unknown[] = [];
@@ -795,12 +806,15 @@ export function fakePorts(store: MemoryRuntimeStore): FakePorts {
       return { outcome: "accepted", invocationId: PI_INVOCATION_ID };
     },
     routineSession: {
-      start: async ({ runId }) => {
+      start: async ({ runId, expectedInvocationId }) => {
         routineStarts.push(runId);
-        return { state: "idle", invocationId: `routine:${runId}:invocation` };
+        const invocationId = expectedInvocationId;
+        routineInvocationIds.set(runId, invocationId);
+        return { state: "idle", invocationId };
       },
       state: async ({ runId }) => ({
-        invocationId: `routine:${runId}:invocation`,
+        invocationId: routineInvocationIds.get(runId)
+          ?? `routine:${runId}:dispatch-v2:invocation`,
         layoutMarker: "layout-current",
         activeAttemptId: store.authorization.dispatchState === "accepted" ? ATTEMPT_ID : null,
         tailCursor: store.authorization.eventCursor ?? 0n,
@@ -823,7 +837,8 @@ export function fakePorts(store: MemoryRuntimeStore): FakePorts {
         });
         return {
           outcome: "accepted",
-          invocationId: `routine:${input.runId}:invocation`,
+          invocationId: routineInvocationIds.get(input.runId)
+            ?? `routine:${input.runId}:dispatch-v2:invocation`,
           initialCursor: store.authorization.eventCursor ?? 0n,
         };
       },
@@ -839,7 +854,8 @@ export function fakePorts(store: MemoryRuntimeStore): FakePorts {
       },
       abort: async ({ runId }) => ({
         outcome: "accepted",
-        invocationId: `routine:${runId}:invocation`,
+        invocationId: routineInvocationIds.get(runId)
+          ?? `routine:${runId}:dispatch-v2:invocation`,
       }),
       terminate: async ({ runId }) => {
         log.push("routine-terminate");
