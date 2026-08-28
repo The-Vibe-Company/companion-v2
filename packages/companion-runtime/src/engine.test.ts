@@ -286,6 +286,120 @@ describe("RuntimeEngine attempts", () => {
     }));
   });
 
+  it("recycles a dirty broker once and dispatches the waiting turn on the fresh Pi", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
+    const ports = fakePorts(store);
+    const recoveredInvocationId = "recovered-pi";
+    let recycled = false;
+    const baseBrokerState = ports.pi.brokerState;
+    ports.pi.brokerState = async (input) => ({
+      ...await baseBrokerState(input),
+      invocationId: recycled ? recoveredInvocationId : PI_INVOCATION_ID,
+      activeAttemptId: recycled ? null : "cancelled-attempt",
+      tailCursor: 1n,
+      acknowledgedCursor: recycled ? 1n : 0n,
+    });
+    const restartPiDaemon = vi.fn(async () => {
+      recycled = true;
+      return { state: "idle" as const, invocationId: recoveredInvocationId };
+    });
+    ports.pi.restartPiDaemon = restartPiDaemon;
+    ports.pi.prompt = async (input) => {
+      ports.promptCalls.push({ attemptId: input.attemptId, message: input.message });
+      return { outcome: "accepted", invocationId: recoveredInvocationId, initialCursor: 1n };
+    };
+    ports.eventReads.push({
+      events: [
+        {
+          sequence: 2,
+          invocationId: recoveredInvocationId,
+          attemptId: ATTEMPT_ID,
+          kind: "pi_event",
+          event: {
+            type: "message_end",
+            message: { role: "assistant", content: [{ type: "text", text: "Recovered reply" }] },
+          },
+        },
+        {
+          sequence: 3,
+          invocationId: recoveredInvocationId,
+          attemptId: ATTEMPT_ID,
+          kind: "pi_event",
+          event: { type: "agent_settled" },
+        },
+      ],
+      nextCursor: 3,
+      acknowledgedCursor: 1,
+      hasMore: false,
+    });
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(restartPiDaemon).toHaveBeenCalledOnce();
+    expect(ports.promptCalls).toEqual([{ attemptId: ATTEMPT_ID, message: PROMPT_WITH_TURN_CONTEXT }]);
+    expect(store.checkpoints).toContainEqual(expect.objectContaining({
+      nextCheckpoint: "dispatch_accepted",
+      piInvocationId: recoveredInvocationId,
+      eventCursor: 1n,
+    }));
+  });
+
+  it("fails before dispatch when one Pi recycle does not clean the broker", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
+    const ports = fakePorts(store);
+    const baseBrokerState = ports.pi.brokerState;
+    ports.pi.brokerState = async (input) => ({
+      ...await baseBrokerState(input),
+      activeAttemptId: "cancelled-attempt",
+      tailCursor: 1n,
+      acknowledgedCursor: 0n,
+    });
+    const restartPiDaemon = vi.fn(async () => ({
+      state: "idle" as const,
+      invocationId: "still-dirty-pi",
+    }));
+    ports.pi.restartPiDaemon = restartPiDaemon;
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("failed");
+    expect(restartPiDaemon).toHaveBeenCalledOnce();
+    expect(ports.promptCalls).toHaveLength(0);
+    expect(store.settlements[0]?.error).toMatchObject({
+      code: "pi_not_idle",
+      action: "restart_pi",
+    });
+  });
+
+  it("keeps a failed dirty-broker recycle actionable without dispatching", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
+    const ports = fakePorts(store);
+    const baseBrokerState = ports.pi.brokerState;
+    ports.pi.brokerState = async (input) => ({
+      ...await baseBrokerState(input),
+      tailCursor: 1n,
+      acknowledgedCursor: 0n,
+    });
+    const restartPiDaemon = vi.fn(async () => {
+      throw new Error("synthetic Pi recycle failure");
+    });
+    ports.pi.restartPiDaemon = restartPiDaemon;
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("failed");
+    expect(restartPiDaemon).toHaveBeenCalledOnce();
+    expect(ports.promptCalls).toHaveLength(0);
+    expect(store.settlements[0]?.error).toMatchObject({
+      code: "pi_not_idle",
+      action: "restart_pi",
+    });
+  });
+
   it("dispatches against the live idle invocation after a prior overlay recycle", async () => {
     const claim = attemptClaim();
     const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });

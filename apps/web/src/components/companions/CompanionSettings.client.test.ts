@@ -78,7 +78,7 @@ const providers: CompanionProvidersResponse = {
 
 function companion(
   access: Companion["access"] = "owner",
-  runtimeState: "running" | "stopped" = "stopped",
+  runtimeState: "running" | "stopped" | "error" = "stopped",
 ): Companion {
   return {
     id: companionId,
@@ -97,7 +97,11 @@ function companion(
     runtime: {
       generation: 1,
       state: runtimeState,
-      daemon_state: runtimeState === "running" ? "running" : "stopped",
+      daemon_state: runtimeState === "running"
+        ? "running"
+        : runtimeState === "error"
+          ? "error"
+          : "stopped",
       replying: false,
       box_id: access === "viewer" ? null : "bx_23456789",
       provider_ids: ["anthropic"],
@@ -273,6 +277,34 @@ describe("CompanionSettings", () => {
     expect(onSaved).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Pi restart accepted.");
     expect(container.textContent).not.toContain("Pi restarted.");
+  });
+
+  it("keeps Pi recovery available while an existing runtime is in Error", async () => {
+    const failed = companion("editor", "error");
+    failed.runtime = {
+      ...failed.runtime,
+      last_error: "Pi was not idle with an empty broker queue before dispatch.",
+    };
+    const { container } = await mount(failed);
+
+    expect(button(container, "Restart Pi").disabled).toBe(false);
+    await click(button(container, "Restart Pi"));
+
+    expect(companionApi.restartCompanionRuntime).toHaveBeenCalledWith(
+      "org-1",
+      companionId,
+      { target: "pi" },
+      expect.stringMatching(UUID),
+    );
+  });
+
+  it("keeps restart controls unavailable for an explicitly stopped Companion", async () => {
+    const { container } = await mount(companion("owner", "stopped"));
+
+    expect(button(container, "Restart Pi").disabled).toBe(true);
+    expect(container.textContent).toContain(
+      "Send a message to start this Companion before restarting it.",
+    );
   });
 
   it("requires confirmation before queueing an explicit full Box restart", async () => {

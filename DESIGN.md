@@ -411,7 +411,8 @@ repair and submits an asynchronous restart operation. `Full Box` requires an exp
 that all work on the Box will be interrupted and is never selected or triggered automatically.
 Accepted operations show their durable pending/running state and survive navigation or reload; the
 client does not retry provider calls itself. Controls are disabled during an incompatible operation
-or while settings have unsaved changes, and Viewer sees none of them. The Owner alone sees a separate
+or while settings have unsaved changes, but an existing Box in Error keeps both explicit restart
+choices available so the error state cannot hide its own repair. Viewer sees none of them. The Owner alone sees a separate
 permanent-delete action and an explicit irreversible confirmation; Editor can save but cannot delete,
 and Viewer sees disabled read-only fields. Sending a message remains the only normal wake path: there
 is no Wake button and saving settings never wakes an asleep Box. The thread, Box chip, Plugins, Lux,

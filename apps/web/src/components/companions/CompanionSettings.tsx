@@ -153,7 +153,8 @@ export function CompanionSettings({
   onDeletedRef.current = onDeleted;
   const canEdit = companion.access === "owner" || companion.access === "editor";
   const canDelete = companion.access === "owner";
-  const online = runtimeSnapshot.state === "running" && runtimeSnapshot.daemon_state === "running";
+  const restartable = runtimeSnapshot.box_id !== null
+    && (runtimeSnapshot.state === "running" || runtimeSnapshot.state === "error");
 
   useEffect(() => {
     setRuntimeSnapshot(companion.runtime);
@@ -428,7 +429,7 @@ export function CompanionSettings({
   };
 
   const restart = async (target: RestartCompanionRuntimeInput["target"]) => {
-    if (!canEdit || changed || !online || deletionActive || pendingRestartTarget !== null) return;
+    if (!canEdit || changed || !restartable || deletionActive || pendingRestartTarget !== null) return;
     setBusy(true);
     setRestarting(target);
     setError(null);
@@ -582,7 +583,13 @@ export function CompanionSettings({
 
             <fieldset
               className="companions-settings__restart-options"
-              disabled={busy || changed || deletionActive || pendingRestartTarget !== null}
+              disabled={
+                busy
+                || changed
+                || deletionActive
+                || pendingRestartTarget !== null
+                || !restartable
+              }
               aria-describedby="restart-companion-hint"
             >
               <legend className="sr-only">Restart scope</legend>
@@ -592,7 +599,6 @@ export function CompanionSettings({
                   name="restart-target"
                   value="pi"
                   checked={restartTarget === "pi"}
-                  disabled={!online}
                   onChange={() => setRestartTarget("pi")}
                 />
                 <span>
@@ -606,7 +612,6 @@ export function CompanionSettings({
                   name="restart-target"
                   value="box"
                   checked={restartTarget === "box"}
-                  disabled={!online}
                   onChange={() => setRestartTarget("box")}
                 />
                 <span>
@@ -622,8 +627,12 @@ export function CompanionSettings({
                   ? "Companion deletion is in progress. Runtime controls are unavailable."
                   : pendingRestartTarget !== null
                     ? "The accepted restart is still running. Status refreshes every three seconds."
-                  : !online
-                    ? "This Companion must be Online before it can restart. Send a message to start it."
+                  : !restartable
+                    ? runtimeSnapshot.box_id === null
+                      || runtimeSnapshot.state === "not_created"
+                      || runtimeSnapshot.state === "stopped"
+                      ? "Send a message to start this Companion before restarting it."
+                      : "Wait for the current runtime change to finish before restarting."
                     : changed
                       ? "Save your changes before restarting."
                       : restartTarget === "pi"
@@ -638,7 +647,7 @@ export function CompanionSettings({
                   || changed
                   || deletionActive
                   || pendingRestartTarget !== null
-                  || !online
+                  || !restartable
                 }
                 onClick={() => {
                   if (restartTarget === "box") setConfirmingBoxRestart(true);

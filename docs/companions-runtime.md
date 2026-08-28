@@ -274,8 +274,11 @@ replaces only the daemon invocation. Full Box restart is never automatic and req
 Owner/Editor confirmation because it interrupts all Box work. Permanent delete is Owner-only
 cleanup, never healing.
 
-Automatic recovery may recycle Pi for a proven daemon/protocol failure. It may not invoke Full Box,
-replace a merely unhealthy Box, archive/delete to make a test pass, or discard an interrupted turn.
+Automatic recovery may recycle Pi for a proven daemon/protocol failure. Immediately before a new
+prompt write intent, this includes one recycle when the broker still reports an active attempt or an
+unacknowledged event tail left by earlier terminal work; runtime re-reads idle state before dispatch
+and otherwise fails with `restart_pi`. It may not invoke Full Box, replace a merely unhealthy Box,
+archive/delete to make a test pass, or discard or replay an interrupted turn.
 
 ## Layout 14 Pi broker
 

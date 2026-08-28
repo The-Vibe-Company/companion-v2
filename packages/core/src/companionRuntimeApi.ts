@@ -142,6 +142,9 @@ function projectedRuntimeState(
   row: RuntimeReadRow,
   latestOperation: CompanionOperation | null,
 ): Companion["runtime"]["state"] {
+  const lifecycleFailed = latestOperation?.status === "failed"
+    || latestOperation?.status === "interrupted";
+
   if (row.retirement_state === "retired") return "stopped";
   if (["requested", "pending", "blocked"].includes(row.retirement_state)) return "stopping";
 
@@ -153,22 +156,31 @@ function projectedRuntimeState(
   if (
     row.box_state === "error"
     || row.pi_state === "error"
-    || latestOperation?.status === "failed"
-    || latestOperation?.status === "interrupted"
   ) return "error";
 
   if (row.box_state === "absent") {
+    if (latestOperation?.status === "failed" || latestOperation?.status === "interrupted") {
+      return "error";
+    }
     return latestOperation?.kind === "stop" && latestOperation.status === "succeeded"
       ? "stopped"
       : "not_created";
   }
   if (row.box_state === "archived") return "stopped";
   if (row.box_state === "archiving") return "stopping";
-  if (row.box_state === "initializing" || row.box_state === "provisioning") return "provisioning";
-  if (["ready", "idle", "running"].includes(row.box_state)) {
-    return row.pi_state === "starting" || row.pi_state === "absent" ? "provisioning" : "running";
+  if (row.box_state === "initializing" || row.box_state === "provisioning") {
+    return lifecycleFailed ? "error" : "provisioning";
   }
-  return row.last_error_code ? "error" : "not_created";
+  if (["ready", "idle", "running"].includes(row.box_state)) {
+    if (row.pi_state === "starting" || row.pi_state === "absent") {
+      return lifecycleFailed ? "error" : "provisioning";
+    }
+    return "running";
+  }
+  return row.last_error_code
+      || lifecycleFailed
+    ? "error"
+    : "not_created";
 }
 
 function projectedDaemonState(row: RuntimeReadRow): Companion["runtime"]["daemon_state"] {
@@ -190,11 +202,14 @@ export function projectCompanionRuntimeV2(
   const latestOperation = parseOperation(row.latest_operation);
   const lastObservedAt = iso(row.last_observed_at) ?? companion.runtime.last_observed_at;
   const runnableBox = ["ready", "idle", "running"].includes(row.box_state);
+  const runtimeState = projectedRuntimeState(row, latestOperation);
   const operationError = latestOperation
     && ["failed", "interrupted"].includes(latestOperation.status)
     ? latestOperation.error
     : null;
-  const runtimeError = operationError?.message ?? row.last_error_message;
+  const runtimeError = runtimeState === "error"
+    ? row.last_error_message ?? operationError?.message
+    : null;
   const skillsError = row.skills_update_error_message ?? companion.runtime.skills_last_error;
   return {
     ...companion,
@@ -205,7 +220,7 @@ export function projectCompanionRuntimeV2(
     runtime: {
       ...companion.runtime,
       generation: positiveInteger(row.generation),
-      state: projectedRuntimeState(row, latestOperation),
+      state: runtimeState,
       daemon_state: projectedDaemonState(row),
       replying: row.is_replying === true,
       box_id: row.access_role === "viewer" ? null : row.box_id,
