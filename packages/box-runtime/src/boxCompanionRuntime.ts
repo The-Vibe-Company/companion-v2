@@ -4986,6 +4986,12 @@ done`,
       60,
       input.signal,
     );
+    // A retry or executor takeover can find the run-scoped broker that the previous call launched.
+    // The prepare script emits this marker only after proving that the live PID owns this exact run
+    // root and broker command. As with the launch readiness marker below, Box can still report exit 1
+    // because the detached broker remains alive, so the marker is authoritative over the envelope.
+    const existingInvocation = routineInvocationFromOutput(prepared.stdout);
+    if (existingInvocation) return { state: "idle", invocationId: existingInvocation };
     if (!prepared.success) {
       const prepareError = new BoxRuntimeProviderError(
         `Routine Pi session failed to prepare${commandFailureDetail(prepared)}`,
@@ -5003,8 +5009,6 @@ done`,
       }
       throw prepareError;
     }
-    const existingInvocation = routineInvocationFromOutput(prepared.stdout);
-    if (existingInvocation) return { state: "idle", invocationId: existingInvocation };
 
     try {
       await this.#writeFile(

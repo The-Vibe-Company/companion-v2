@@ -1946,6 +1946,42 @@ describe("isolated routine Pi sessions", () => {
     expect(commands.join("\n")).not.toContain("routine-pi-session-terminated");
   });
 
+  it("recovers an already-running routine session when Box reports prepare as exit 1", async () => {
+    const invocation = `routine:${runId}:22222222-2222-4222-8222-222222222222`;
+    const commands: string[] = [];
+    const files = vi.fn();
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      if (url.endsWith("/files")) {
+        files();
+        return response({ ok: true });
+      }
+      if (!url.endsWith("/commands") || init?.method !== "POST") {
+        throw new Error(`unexpected Box request: ${init?.method ?? "GET"} ${url}`);
+      }
+      const command = requiredText(parseBoxTestBody(init.body), "command");
+      commands.push(command);
+      return response({
+        success: false,
+        exitCode: 1,
+        stdout: `routine-pi-session-already-running ${invocation}\n`,
+        stderr: "",
+      });
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await expect(runtime.startRoutineSession({
+      boxId: "bx_23456789",
+      runId,
+      persona: null,
+    })).resolves.toEqual({ state: "idle", invocationId: invocation });
+
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain("routine-pi-session-already-running");
+    expect(commands[0]).not.toContain("routine-pi-session-terminated");
+    expect(files).not.toHaveBeenCalled();
+  });
+
   it("removes the copied run root when pre-launch staging fails", async () => {
     const commands: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
