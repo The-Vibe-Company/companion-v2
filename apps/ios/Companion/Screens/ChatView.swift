@@ -364,9 +364,10 @@ struct ChatView: View {
                             0,
                             geometry.contentSize.height - geometry.visibleRect.maxY
                         )
-                        let stateChanged = if newPhase == .interacting {
+                        let stateChanged: Bool
+                        if newPhase == .interacting {
                             stopFollowingTailForReveal()
-                            scrollCoordinator.beginUserInteraction(
+                            stateChanged = scrollCoordinator.beginUserInteraction(
                                 bottomDistance: Double(bottomDistance),
                                 threshold: Double(bottomProximityThreshold)
                             )
@@ -374,7 +375,7 @@ struct ChatView: View {
                             // The role-scoped initial anchor can coalesce geometry callbacks during
                             // a fast swipe. Phase geometry is the authoritative clamped position,
                             // including for transcripts too short to move at all.
-                            scrollCoordinator.observeGeometry(
+                            stateChanged = scrollCoordinator.observeGeometry(
                                 bottomDistance: Double(bottomDistance),
                                 threshold: Double(bottomProximityThreshold)
                             )
