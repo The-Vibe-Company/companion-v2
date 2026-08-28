@@ -230,6 +230,46 @@ async function brokerState(context: AttemptContext): Promise<{
   return { ...state, counters, modelInput: capabilities };
 }
 
+type MainBrokerState = Awaited<ReturnType<typeof brokerState>>;
+
+function mainBrokerIsIdle(state: MainBrokerState): boolean {
+  return Boolean(state.invocationId)
+    && state.activeAttemptId === null
+    && state.tailCursor === state.acknowledgedCursor;
+}
+
+/**
+ * A cancelled or crashed attempt can leave evidence owned by the previous Pi invocation. A fresh
+ * invocation retires that predecessor's unacknowledged journal tail, so recycle Pi once before a
+ * new dispatch instead of failing every later turn behind an operator-only repair action.
+ */
+async function repairMainBrokerBeforeDispatch(
+  context: AttemptContext,
+  state: MainBrokerState,
+): Promise<MainBrokerState> {
+  if (state.layoutCurrent && mainBrokerIsIdle(state)) return state;
+  try {
+    await refreshWarmCompanionLayout({
+      session: context.session,
+      deps: context.deps,
+      authorization: authorization(context),
+      restartPi: true,
+      // The disk may already be current while the live broker still owns stale attempt state.
+      restartPiWhenUnchanged: true,
+    });
+  } catch (error) {
+    if (mustAbandonRuntimeExecution(error)) throw error;
+    throw new RuntimeInvariantError({
+      code: state.layoutCurrent ? "pi_not_idle" : "pi_layout_stale",
+      message: state.layoutCurrent
+        ? "Pi was not idle with an empty broker queue before dispatch."
+        : "Pi did not report the current runtime layout after refresh.",
+      action: "restart_pi",
+    });
+  }
+  return await brokerState(context);
+}
+
 async function refreshWarmTtl(context: AttemptContext): Promise<void> {
   try {
     await retryIdempotentLifecycle({
@@ -641,21 +681,10 @@ async function handleIsolatedRoutineAttempt(
     orgId: context.claim.orgId,
     material: materialValue,
   });
-  let mainState = await brokerState(context);
-  if (!mainState.layoutCurrent) {
-    await refreshWarmCompanionLayout({
-      session: context.session,
-      deps: context.deps,
-      authorization: authorization(context),
-      restartPi: true,
-      restartPiWhenUnchanged: true,
-    });
-    mainState = await brokerState(context);
-  }
+  const mainState = await repairMainBrokerBeforeDispatch(context, await brokerState(context));
   if (
     !mainState.layoutCurrent
-    || mainState.activeAttemptId !== null
-    || mainState.tailCursor !== mainState.acknowledgedCursor
+    || !mainBrokerIsIdle(mainState)
   ) {
     throw new RuntimeInvariantError({
       code: "pi_not_idle",
@@ -1226,25 +1255,13 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
           orgId: context.claim.orgId,
           material: workMaterial,
         });
-        let state = await brokerState(context);
+        const state = await repairMainBrokerBeforeDispatch(context, await brokerState(context));
         if (!state.layoutCurrent) {
-          await refreshWarmCompanionLayout({
-            session: context.session,
-            deps: context.deps,
-            authorization: authorization(context),
-            restartPi: true,
-            // `state` is the running broker's startup marker. If disk was updated by an executor
-            // that died before recycle, refresh returns `none` but this stale process still must go.
-            restartPiWhenUnchanged: true,
+          throw new RuntimeInvariantError({
+            code: "pi_layout_stale",
+            message: "Pi did not report the current runtime layout after refresh.",
+            action: "restart_pi",
           });
-          state = await brokerState(context);
-          if (!state.layoutCurrent) {
-            throw new RuntimeInvariantError({
-              code: "pi_layout_stale",
-              message: "Pi did not report the current runtime layout after refresh.",
-              action: "restart_pi",
-            });
-          }
         }
         const runtime = requiredRuntime(context);
         requireModelInputCapability(state.modelInput, "text");
@@ -1256,11 +1273,7 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
         }
         // Overlay refresh recycles Pi in place. Bind to the live idle daemon: the stored instance
         // id can lag a health recycle or a restart that succeeded before this checkpoint.
-        if (
-          !state.invocationId
-          || state.activeAttemptId !== null
-          || state.tailCursor !== state.acknowledgedCursor
-        ) {
+        if (!mainBrokerIsIdle(state)) {
           throw new RuntimeInvariantError({
             code: "pi_not_idle",
             message: "Pi was not idle with an empty broker queue before dispatch.",

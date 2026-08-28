@@ -534,6 +534,9 @@ memory-only, each reconnect remints it, and Viewer or asleep-Box states expose n
 Sending is the sole normal wake path. There is no Wake button or first-keystroke prewarm. Successful
 Pi acceptance refreshes Box TTL to six hours. Automatic recovery may recycle Pi only. Full Box
 restart requires explicit confirmation, and permanent delete is cleanup rather than healing.
+Before a new prompt write intent, a stale active-attempt binding or unacknowledged broker tail causes
+one Pi-only recycle and a fresh idle proof; failure to obtain that proof remains an actionable
+`restart_pi` error and no prompt is dispatched.
 
 ## Legacy purge and rollout
 

@@ -254,4 +254,93 @@ describe("Runtime v2 Companion projection", () => {
       },
     });
   });
+
+  it("keeps a healthy observed runtime online after an older lifecycle failure", () => {
+    const failed = operation({
+      kind: "restart_pi",
+      status: "failed",
+      error: {
+        code: "runtime_execution_failed",
+        message: "Runtime execution failed.",
+        action: "restart_pi",
+      },
+      settled_at: "2026-08-16T00:03:00+00:00",
+    });
+
+    const projected = projectCompanionRuntimeV2(companion, runtime({
+      box_id: "bx_23456789",
+      box_state: "idle",
+      pi_state: "idle",
+      pi_invocation_id: "pi-healthy",
+      last_error_code: null,
+      last_error_message: null,
+      latest_operation: failed,
+    }));
+
+    expect(projected.runtime).toMatchObject({
+      state: "running",
+      daemon_state: "running",
+      last_error: null,
+      latest_operation: {
+        kind: "restart_pi",
+        status: "failed",
+        error: { message: "Runtime execution failed." },
+      },
+    });
+  });
+
+  it.each([
+    {
+      name: "a Box still provisioning",
+      projection: { box_state: "provisioning", pi_state: "absent" } as const,
+    },
+    {
+      name: "a ready Box whose Pi never started",
+      projection: { box_state: "ready", pi_state: "absent" } as const,
+    },
+  ])("surfaces a failed lifecycle operation over $name", ({ projection }) => {
+    const projected = projectCompanionRuntimeV2(companion, runtime({
+      box_id: "bx_23456789",
+      ...projection,
+      latest_operation: operation({
+        status: "failed",
+        error: {
+          code: "runtime_execution_failed",
+          message: "Runtime execution failed.",
+          action: "restart_pi",
+        },
+        settled_at: "2026-08-16T00:03:00+00:00",
+      }),
+    }));
+
+    expect(projected.runtime).toMatchObject({
+      state: "error",
+      last_error: "Runtime execution failed.",
+      latest_operation: { status: "failed" },
+    });
+  });
+
+  it("prefers the current instance error over an older operation failure", () => {
+    const projected = projectCompanionRuntimeV2(companion, runtime({
+      box_id: "bx_23456789",
+      box_state: "ready",
+      pi_state: "error",
+      last_error_code: "pi_crash_loop",
+      last_error_message: "Pi could not stay running.",
+      latest_operation: operation({
+        status: "failed",
+        error: {
+          code: "provider_unavailable",
+          message: "An older operation failed.",
+          action: "retry",
+        },
+        settled_at: "2026-08-16T00:03:00+00:00",
+      }),
+    }));
+
+    expect(projected.runtime).toMatchObject({
+      state: "error",
+      last_error: "Pi could not stay running.",
+    });
+  });
 });
