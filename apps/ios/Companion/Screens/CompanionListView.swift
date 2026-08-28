@@ -511,10 +511,10 @@ struct CompanionListView: View {
                 CompanionDetailView(
                     companion: companion,
                     onSaved: replace,
+                    onOpenChat: { path = [.chat(companionID)] },
                     onDeletionStarted: beginOptimisticDeletion,
                     onDeletionAccepted: deletionAccepted,
-                    onDeletionFailed: deletionFailed,
-                    onOpenChat: { path = [.chat(companionID)] }
+                    onDeletionFailed: deletionFailed
                 )
             }
         } else {
