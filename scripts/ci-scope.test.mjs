@@ -111,12 +111,14 @@ test("Oxlint configuration changes force every CI lane", () => {
 });
 
 test("Railway changes only request container validation in addition to quality", () => {
-  const result = classifyFiles(["deploy/railway/Dockerfile.web"]);
-  assert.equal(result.quality, true);
-  assert.equal(result.build, false);
-  assert.equal(result.containers, true);
-  assert.equal(result.database, false);
-  assert.equal(result.browser, false);
+  for (const file of ["deploy/railway/Dockerfile.web", ".github/railway-containers-bake.hcl"]) {
+    const result = classifyFiles([file]);
+    assert.equal(result.quality, true, file);
+    assert.equal(result.build, false, file);
+    assert.equal(result.containers, true, file);
+    assert.equal(result.database, false, file);
+    assert.equal(result.browser, false, file);
+  }
 });
 
 test("the Railway smoke script triggers its own container lane", () => {
