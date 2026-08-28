@@ -152,9 +152,7 @@ struct ChatComposer: View {
 
     @ViewBuilder
     private var transcriptionStatus: some View {
-        if transcriptionAvailable && (transcription.isBusy
-            || !transcription.liveTranscript.isEmpty
-            || transcriptionFailed) {
+        if transcriptionAvailable && (transcription.isBusy || transcriptionFailed) {
             VoiceTranscriptionStatusView(controller: transcription)
                 .padding(.horizontal, 2)
         }
