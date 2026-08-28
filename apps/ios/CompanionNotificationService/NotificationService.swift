@@ -22,8 +22,8 @@ final class NotificationService: UNNotificationServiceExtension {
         guard request.content.userInfo["event"] as? String == "reply",
               let companionID = request.content.userInfo["companion_id"] as? String,
               let companionName = request.content.userInfo["companion_name"] as? String,
-              let icon = CompanionNotificationIcon(apnsUserInfo: request.content.userInfo),
-              let avatarData = try? CompanionNotificationAvatar.pngData(for: icon) else {
+              let mark = CompanionNotificationMark(apnsUserInfo: request.content.userInfo),
+              let avatarData = try? CompanionNotificationAvatar.pngData(for: mark) else {
             finish(with: original)
             return
         }

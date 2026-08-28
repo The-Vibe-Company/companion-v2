@@ -13,17 +13,16 @@ struct CompanionManagementHeader: View {
                 .font(.title2.weight(.semibold))
                 .foregroundStyle(Color.companionAccent)
                 .frame(width: 48, height: 48)
-                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .background(CompanionIOSTheme.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                 .overlay {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .stroke(Color.companionBorder, lineWidth: 0.7)
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(CompanionIOSTheme.separator, lineWidth: 0.5)
                 }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(eyebrow.uppercased())
-                    .font(.caption2.weight(.bold))
-                    .tracking(1.2)
-                    .foregroundStyle(Color.companionAccent)
+                Text(eyebrow)
+                    .font(.system(size: 13))
+                    .foregroundStyle(CompanionIOSTheme.textSecondary)
                 Text(title)
                     .font(.title2.weight(.bold))
                     .foregroundStyle(Color.companionInk)
@@ -35,7 +34,7 @@ struct CompanionManagementHeader: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(18)
-        .companionGlass(radius: 22)
+        .companionGlass(radius: 18)
     }
 }
 
@@ -51,16 +50,15 @@ struct CompanionManagementCard<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             if let title {
-                Text(title.uppercased())
-                    .font(.caption2.weight(.bold))
-                    .tracking(1.1)
-                    .foregroundStyle(Color.companionMuted)
+                Text(title)
+                    .font(.system(size: 13))
+                    .foregroundStyle(CompanionIOSTheme.textSecondary)
             }
             content
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(18)
-        .companionGlass(radius: 22)
+        .companionGlass(radius: 18)
     }
 }
 
@@ -96,7 +94,7 @@ struct CompanionErrorNotice: View {
             .foregroundStyle(Color.companionDanger)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(14)
-            .companionMaterial(radius: 16)
+            .companionMaterial(radius: 12)
             .accessibilityLabel("Error. \(message)")
     }
 }
@@ -110,7 +108,7 @@ struct CompanionSuccessNotice: View {
             .foregroundStyle(Color.companionSuccess)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(14)
-            .background(Color.companionSuccess.opacity(0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .background(Color.companionSuccess.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }
 
@@ -123,7 +121,7 @@ struct CompanionWarningNotice: View {
             .foregroundStyle(Color.companionWarning)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(14)
-            .background(Color.companionWarning.opacity(0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .background(Color.companionWarning.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             .accessibilityLabel("Warning. \(message)")
     }
 }
@@ -149,7 +147,7 @@ struct CompanionEmptyCard: View {
         .frame(maxWidth: .infinity)
         .padding(.vertical, 26)
         .padding(.horizontal, 18)
-        .companionGlass(radius: 22)
+        .companionGlass(radius: 18)
     }
 }
 

@@ -14,7 +14,7 @@ let package = Package(
     ],
     targets: [
         .target(name: "CompanionKit"),
-        .target(name: "CompanionNotificationAvatar"),
+        .target(name: "CompanionNotificationAvatar", dependencies: ["CompanionKit"]),
         .testTarget(name: "CompanionKitTests", dependencies: ["CompanionKit"]),
         .testTarget(
             name: "CompanionNotificationAvatarTests",

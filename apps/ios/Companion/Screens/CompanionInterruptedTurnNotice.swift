@@ -101,7 +101,7 @@ struct CompanionInterruptedTurnNotice: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
-        .companionMaterial(radius: 16)
+        .companionMaterial(radius: 12)
         .onChange(of: turn.id) { reset() }
         .onChange(of: latestOperation) { _, operation in
             guard let operation, operation.sourceTurnID == turn.id,

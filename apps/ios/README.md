@@ -99,11 +99,13 @@ production APNs. A tap waits for session and roster restoration, verifies the wo
 access, then opens the existing chat. Foreground alerts include banner, Notification Center list,
 and sound unless that chat is already open. The app deliberately uses no numeric badge.
 Reply pushes also carry the Companion's four cosmetic icon indexes and `mutable-content: 1`. The
-embedded Notification Service Extension renders the closed blob catalog into a PNG locally, then
+embedded Notification Service Extension projects `icon_shape` and `icon_color` into the same flat
+CharacterMark geometry used by the app, renders its two white eyes into a PNG locally, then
 uses it as the sender image for Apple's communication-notification treatment. No avatar endpoint,
 credential, or network request is involved. If intent enrichment cannot finish, the extension
 returns the same title/body with the PNG as a standard attachment; if the extension itself times
-out, iOS displays the original plain alert. Decision and failure alerts remain plain notifications.
+out, iOS displays the original plain alert. Mouth and accessory indexes remain payload-compatible
+but cannot affect the notification image. Decision and failure alerts remain plain notifications.
 
 Long-term native work is guided by the repo-local `ios-product-dev`, `swiftui-expert-dev`,
 `design-frontend-dev`, and `xcodebuildmcp-cli` skills. Their iOS-specific packages are mirrored
@@ -156,7 +158,7 @@ Apple team must be `K28B69CWQ7`. Production DNS/TLS must serve the committed AAS
 exact callback component. Verify Universal Link routing on a physical signed build; simulator
 testing does not prove the production profile, entitlement, or AASA association.
 
-The Debug-only `-glass-chat-demo`, `-glass-chat-thinking-demo`, `-companion-queued-demo`, `-markdown-table-demo`,
+The Debug-only `-companion-appearance-demo`, `-companion-plugins-multi-account-demo`, `-glass-chat-demo`, `-glass-chat-thinking-demo`, `-companion-queued-demo`, `-markdown-table-demo`,
 `-glass-management-demo`, `-glass-management-demo-plugins`,
 `-companion-icon-demo`, `-companion-create-demo`, `-companion-decision-demo`, `-companion-interruption-demo`,
 `-companion-transcript-window-demo`, `-companion-resources-demo`,
@@ -167,6 +169,10 @@ alongside `-companion-icon-demo` to force the gallery's Reduce Motion path. The 
 `COMPANION_SETTINGS_DEMO_ACCESS=owner|editor|viewer` for deterministic role and deletion UI tests.
 The creation demo supplies deterministic provider and create responses so the shared identity icon gallery
 can be exercised without an account or server.
+The appearance demo persists through the same System / Black preference as Settings and shows a
+snapshot-friendly roster card, both chat bubbles, and the primary CTA while the app-wide palette changes.
+The multi-account plugins demo renders Linear with two connected accounts plus the add-account chip,
+so their shared chip fill and primary text treatment can be inspected without a server.
 The decision demo accepts `COMPANION_DECISION_DEMO_ACCESS=owner|editor|viewer` for the matching
 decision controls. Set `COMPANION_DECISION_DEMO_FAIL_ONCE=<request-id>` to exercise a failed
 submission followed by an enabled retry.

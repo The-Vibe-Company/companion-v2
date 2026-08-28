@@ -6,7 +6,7 @@ import XCTest
 @testable import CompanionNotificationAvatar
 
 final class CompanionNotificationAvatarTests: XCTestCase {
-    func testParsesNestedCompanionIconFields() {
+    func testProjectsCharacterMarkFromReplyPayloadAndIgnoresLegacyFaceFields() {
         let userInfo: [AnyHashable: Any] = [
             "version": 1,
             "companion_icon": [
@@ -18,83 +18,46 @@ final class CompanionNotificationAvatarTests: XCTestCase {
         ]
 
         XCTAssertEqual(
-            CompanionNotificationIcon(apnsUserInfo: userInfo),
-            CompanionNotificationIcon(shape: 7, mouth: 4, accessory: 6, color: 10)
+            CompanionNotificationMark(apnsUserInfo: userInfo),
+            CompanionNotificationMark(shape: 7, color: 10)
         )
     }
 
-    func testRejectsMissingAndOutOfBoundsCompanionIconFields() {
-        let missing: [AnyHashable: Any] = [
-            "companion_icon": [
-                "shape": 1,
-                "mouth": 1,
-                "accessory": 1,
-            ],
-        ]
-        XCTAssertNil(CompanionNotificationIcon(apnsUserInfo: missing))
-
-        let outOfBounds: [AnyHashable: Any] = [
-            "companion_icon": [
-                "shape": 8,
-                "mouth": 0,
-                "accessory": 0,
-                "color": 0,
-            ],
-        ]
-        XCTAssertNil(CompanionNotificationIcon(apnsUserInfo: outOfBounds))
-    }
-
-    func testRejectsNonIntegerAndBooleanFields() {
-        let fractional: [AnyHashable: Any] = [
-            "companion_icon": [
-                "shape": 1.5,
-                "mouth": 1,
-                "accessory": 1,
-                "color": 2,
-            ],
-        ]
-        XCTAssertNil(CompanionNotificationIcon(apnsUserInfo: fractional))
-
-        let boolean: [AnyHashable: Any] = [
-            "companion_icon": [
-                "shape": true,
-                "mouth": 1,
-                "accessory": 1,
-                "color": 2,
-            ],
-        ]
-        XCTAssertNil(CompanionNotificationIcon(apnsUserInfo: boolean))
-    }
-
-    func testRejectsTopLevelFieldsWithoutCompanionIconWrapper() {
+    func testProjectionRequiresOnlyTheRenderedShapeAndColor() {
         let userInfo: [AnyHashable: Any] = [
-            "shape": 1,
-            "mouth": 1,
-            "accessory": 1,
-            "color": 2,
+            "companion_icon": ["shape": 3, "color": 6],
         ]
 
-        XCTAssertNil(CompanionNotificationIcon(apnsUserInfo: userInfo))
+        XCTAssertEqual(
+            CompanionNotificationMark(apnsUserInfo: userInfo),
+            CompanionNotificationMark(shape: 3, color: 6)
+        )
     }
 
-    func testRendersDeterministicDefaultPngWithExpectedDimensions() throws {
-        let first = try CompanionNotificationAvatar.pngData(
-            for: .defaultIcon,
-            size: 64
-        )
-        let second = try CompanionNotificationAvatar.pngData(
-            for: .defaultIcon,
-            size: 64
-        )
+    func testRejectsMissingOutOfBoundsNonIntegerAndBooleanFields() {
+        XCTAssertNil(CompanionNotificationMark(apnsUserInfo: [
+            "companion_icon": ["shape": 1],
+        ]))
+        XCTAssertNil(CompanionNotificationMark(apnsUserInfo: [
+            "companion_icon": ["shape": 8, "color": 0],
+        ]))
+        XCTAssertNil(CompanionNotificationMark(apnsUserInfo: [
+            "companion_icon": ["shape": 1.5, "color": 2],
+        ]))
+        XCTAssertNil(CompanionNotificationMark(apnsUserInfo: [
+            "companion_icon": ["shape": true, "color": 2],
+        ]))
+        XCTAssertNil(CompanionNotificationMark(apnsUserInfo: ["shape": 1, "color": 2]))
+    }
+
+    func testRendersDeterministicCharacterMarkPngWithExpectedDimensions() throws {
+        let mark = CompanionNotificationMark(shape: 5, color: 7)
+        let first = try CompanionNotificationAvatar.pngData(for: mark, size: 64)
+        let second = try CompanionNotificationAvatar.pngData(for: mark, size: 64)
 
         XCTAssertEqual(first, second)
-        XCTAssertEqual(
-            Array(first.prefix(8)),
-            [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
-        )
+        XCTAssertEqual(Array(first.prefix(8)), [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
         XCTAssertGreaterThan(first.count, 24)
-
-        // PNG's first chunk is IHDR: length (4), type (4), width (4), height (4).
         XCTAssertEqual(Array(first[12..<16]), [0x49, 0x48, 0x44, 0x52])
         XCTAssertEqual(readUInt32(first, offset: 16), 64)
         XCTAssertEqual(readUInt32(first, offset: 20), 64)
@@ -103,6 +66,23 @@ final class CompanionNotificationAvatarTests: XCTestCase {
         let image = source.flatMap { CGImageSourceCreateImageAtIndex($0, 0, nil) }
         XCTAssertEqual(image?.width, 64)
         XCTAssertEqual(image?.height, 64)
+    }
+
+    func testLegacyFaceIndexesCannotChangeRenderedCharacterMark() throws {
+        let firstPayload: [AnyHashable: Any] = [
+            "companion_icon": ["shape": 6, "mouth": 0, "accessory": 0, "color": 9],
+        ]
+        let secondPayload: [AnyHashable: Any] = [
+            "companion_icon": ["shape": 6, "mouth": 4, "accessory": 6, "color": 9],
+        ]
+        let first = try XCTUnwrap(CompanionNotificationMark(apnsUserInfo: firstPayload))
+        let second = try XCTUnwrap(CompanionNotificationMark(apnsUserInfo: secondPayload))
+
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(
+            try CompanionNotificationAvatar.pngData(for: first, size: 96),
+            try CompanionNotificationAvatar.pngData(for: second, size: 96)
+        )
     }
 
     func testRejectsInvalidPngSizes() {

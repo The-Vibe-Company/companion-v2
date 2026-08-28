@@ -40,7 +40,7 @@ struct GlassChatDemoView: View {
                                 .foregroundStyle(Color.companionMuted)
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 6)
-                                .background(.thinMaterial, in: Capsule())
+                                .background(CompanionIOSTheme.card, in: Capsule())
 
                             ForEach(messages) { message in
                                 Group {
@@ -255,7 +255,7 @@ struct GlassChatDemoView: View {
                         .lineLimit(1...5)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 13)
-                        .companionGlass(radius: 23, interactive: true)
+                        .companionGlass(radius: 18, interactive: true)
                         .accessibilityIdentifier("demo.composer")
 
                     Button(action: send) {
@@ -276,7 +276,7 @@ struct GlassChatDemoView: View {
         .padding(.horizontal, 12)
         .padding(.top, 8)
         .padding(.bottom, 6)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: replying)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: replying)
     }
 
     private func send() {
@@ -348,7 +348,7 @@ private struct GlassRosterDemoView: View {
                                     }
                                 }
                                 .padding(13)
-                                .companionGlass(radius: 22, interactive: true)
+                                .companionGlass(radius: 18, interactive: true)
                             }
                             .buttonStyle(.plain)
                             .accessibilityIdentifier(companion.accessibilityID)

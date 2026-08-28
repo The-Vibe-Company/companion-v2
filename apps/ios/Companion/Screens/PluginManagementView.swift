@@ -77,7 +77,7 @@ private struct LegacyPluginManagementView: View {
                             ProgressView("Loading plugins…")
                                 .padding(28)
                                 .frame(maxWidth: .infinity)
-                                .companionGlass(radius: 22)
+                                .companionGlass(radius: 18)
                         } else if plugins.isEmpty {
                             CompanionEmptyCard(
                                 symbol: "puzzlepiece.extension",
@@ -342,10 +342,10 @@ struct ConnectCuratedPluginView: View {
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
                                 .padding(14)
-                                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                                .background(CompanionIOSTheme.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                                 .overlay {
-                                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                        .stroke(Color.companionBorder, lineWidth: 0.7)
+                                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                        .stroke(CompanionIOSTheme.separator, lineWidth: 0.5)
                                 }
                         }
 
@@ -448,7 +448,7 @@ struct ConnectCuratedPluginView: View {
         .foregroundStyle(Color.companionMuted)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
-        .companionGlass(radius: 20)
+        .companionGlass(radius: 18)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("plugins.oauth.waiting.\(plugin.provider)")
     }
@@ -620,10 +620,10 @@ struct AddPluginView: View {
                                     .frame(minHeight: 92)
                                     .scrollContentBackground(.hidden)
                                     .padding(10)
-                                    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                                    .background(CompanionIOSTheme.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                                     .overlay {
-                                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                            .stroke(Color.companionBorder, lineWidth: 0.7)
+                                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                            .stroke(CompanionIOSTheme.separator, lineWidth: 0.5)
                                     }
                             }
                         }
@@ -647,10 +647,10 @@ struct AddPluginView: View {
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
                                 .padding(14)
-                                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                                .background(CompanionIOSTheme.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                                 .overlay {
-                                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                        .stroke(Color.companionBorder, lineWidth: 0.7)
+                                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                        .stroke(CompanionIOSTheme.separator, lineWidth: 0.5)
                                 }
                         }
                     }
@@ -682,10 +682,10 @@ struct AddPluginView: View {
             .textInputAutocapitalization(capitalization)
             .autocorrectionDisabled()
             .padding(14)
-            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .background(CompanionIOSTheme.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             .overlay {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(Color.companionBorder, lineWidth: 0.7)
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(CompanionIOSTheme.separator, lineWidth: 0.5)
             }
     }
 
@@ -762,10 +762,10 @@ struct PluginMark: View {
             .font(.system(size: size * 0.40, weight: .semibold))
             .foregroundStyle(Color.companionInk)
             .frame(width: size, height: size)
-            .background(tint, in: RoundedRectangle(cornerRadius: size * 0.32, style: .continuous))
+            .background(CompanionIOSTheme.card, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay {
-                RoundedRectangle(cornerRadius: size * 0.32, style: .continuous)
-                    .stroke(Color.white.opacity(0.82), lineWidth: 0.7)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(CompanionIOSTheme.separator, lineWidth: 0.5)
             }
             .accessibilityHidden(true)
     }
@@ -782,15 +782,4 @@ struct PluginMark: View {
         }
     }
 
-    private var tint: Color {
-        switch provider.lowercased() {
-        case "linear": return Color(red: 0.80, green: 0.76, blue: 1.0)
-        case "github": return Color(red: 0.82, green: 0.84, blue: 0.88)
-        case "notion": return Color.white.opacity(0.82)
-        case "slack": return Color(red: 1.0, green: 0.84, blue: 0.90)
-        case "conductor": return Color(red: 0.78, green: 0.90, blue: 1.0)
-        case "gmail": return Color(red: 0.90, green: 0.26, blue: 0.22)
-        default: return Color.companionAccentGold.opacity(0.34)
-        }
-    }
 }

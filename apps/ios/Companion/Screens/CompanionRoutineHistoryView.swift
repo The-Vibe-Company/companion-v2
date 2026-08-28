@@ -445,14 +445,14 @@ private struct CompanionRoutineRunDetailView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(12)
-                .background(Color.companionDanger.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                .background(Color.companionDanger.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel("Error. \(error.message). Code \(error.code). Action \(error.action)")
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
-        .companionMaterial(radius: 14)
+        .companionMaterial(radius: 12)
         .accessibilityIdentifier("companion.routine-run.summary")
     }
 
@@ -524,7 +524,7 @@ private struct CompanionRoutineRunDetailView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
-        .companionMaterial(radius: 14)
+        .companionMaterial(radius: 12)
         .accessibilityIdentifier("companion.routine-run.transcript")
     }
 
@@ -587,7 +587,7 @@ private struct CompanionRoutineRunDetailView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
-        .background(Color.companionSurfaceRaised, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(CompanionIOSTheme.card, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("companion.routine-run.entry.\(entry.eventID)")
     }

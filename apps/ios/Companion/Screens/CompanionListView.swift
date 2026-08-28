@@ -102,10 +102,10 @@ struct CompanionListView: View {
                     .accessibilityIdentifier("account.menu")
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
-                    circleToolbarButton("Search", systemImage: "magnifyingglass") {
+                    headerToolbarButton("Search", systemImage: "magnifyingglass") {
                         showingSearch = true
                     }
-                    circleToolbarButton("New Bot", systemImage: "plus") {
+                    headerToolbarButton("New Bot", systemImage: "plus") {
                         showingCreateCompanion = true
                     }
                 }
@@ -300,7 +300,7 @@ struct CompanionListView: View {
             || (companion.persona?.localizedStandardContains(query) ?? false)
     }
 
-    private func circleToolbarButton(
+    private func headerToolbarButton(
         _ label: String,
         systemImage: String,
         action: @escaping () -> Void
@@ -309,9 +309,9 @@ struct CompanionListView: View {
             Image(systemName: systemImage)
                 .font(.system(size: 16, weight: .semibold))
                 .frame(width: 44, height: 44)
-                .background(CompanionIOSTheme.innerBubble, in: Circle())
-                .overlay { Circle().stroke(CompanionIOSTheme.separator, lineWidth: 1) }
         }
+        .buttonStyle(.plain)
+        .foregroundStyle(CompanionIOSTheme.textPrimary)
         .accessibilityLabel(label)
     }
 
@@ -693,7 +693,7 @@ struct CompanionListView: View {
         if reduceMotion {
             updates()
         } else {
-            withAnimation(.easeOut(duration: 0.18)) { updates() }
+            withAnimation(.easeOut(duration: 0.2)) { updates() }
         }
     }
 
@@ -770,7 +770,7 @@ struct CompanionListView: View {
         if reduceMotion {
             rosterState.removeOptimistically(companionID: companion.id)
         } else {
-            withAnimation(.easeOut(duration: 0.18)) {
+            withAnimation(.easeOut(duration: 0.2)) {
                 rosterState.removeOptimistically(companionID: companion.id)
             }
         }
@@ -825,7 +825,7 @@ struct CompanionListView: View {
             return rosterState.restoreDeletion(companionID: companionID)
         }
         var restored: CompanionSummary?
-        withAnimation(.easeOut(duration: 0.18)) {
+        withAnimation(.easeOut(duration: 0.2)) {
             restored = rosterState.restoreDeletion(companionID: companionID)
         }
         return restored
@@ -839,7 +839,7 @@ struct CompanionListView: View {
             return rosterState.reconcileDeletionResponse(companionID: companionID, operation: operation)
         }
         var restored: CompanionSummary?
-        withAnimation(.easeOut(duration: 0.18)) {
+        withAnimation(.easeOut(duration: 0.2)) {
             restored = rosterState.reconcileDeletionResponse(companionID: companionID, operation: operation)
         }
         return restored
@@ -864,17 +864,16 @@ private struct AccountAvatar: View {
                     .scaledToFill()
             } else {
                 Circle()
-                    .fill(Color(.secondarySystemBackground))
+                    .fill(CompanionIOSTheme.card)
                     .overlay {
                         Text(initials)
                             .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(Color.primary)
+                            .foregroundStyle(CompanionIOSTheme.textPrimary)
                     }
             }
         }
         .frame(width: 44, height: 44)
         .clipShape(Circle())
-        .overlay { Circle().stroke(CompanionIOSTheme.separator, lineWidth: 1) }
         .task(id: user.avatarURL) {
             guard let avatarURL = user.avatarURL,
                   let data = try? await sessionStore.userAvatarData(at: avatarURL),

@@ -4,7 +4,6 @@ import UIKit
 
 struct CompanionQueuedMessagesView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     let entries: [TranscriptEntry]
     let canManage: Bool
     let viewerID: String?
@@ -48,22 +47,15 @@ struct CompanionQueuedMessagesView: View {
 
     @ViewBuilder
     private var collapsedQueue: some View {
-        if reduceTransparency {
-            queueHeader
-                .background(
-                    Color(uiColor: .secondarySystemBackground),
-                    in: RoundedRectangle(cornerRadius: 18, style: .continuous)
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .stroke(Color(uiColor: .separator), lineWidth: 0.7)
-                }
-        } else {
-            queueHeader.glassEffect(
-                Glass.regular.tint(accent.opacity(0.06)).interactive(),
-                in: .rect(cornerRadius: 18)
+        queueHeader
+            .background(
+                CompanionIOSTheme.card,
+                in: RoundedRectangle(cornerRadius: 18, style: .continuous)
             )
-        }
+            .overlay {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(CompanionIOSTheme.separator, lineWidth: 0.5)
+            }
     }
 
     private var expandedQueue: some View {
@@ -90,7 +82,7 @@ struct CompanionQueuedMessagesView: View {
             if let removalError {
                 Text(removalError)
                     .font(.caption)
-                    .foregroundStyle(Color.red)
+                    .foregroundStyle(CompanionIOSTheme.danger)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 14)
                     .padding(.bottom, 10)
@@ -98,15 +90,10 @@ struct CompanionQueuedMessagesView: View {
                     .accessibilityIdentifier("chat.queue.error")
             }
         }
-        .background(
-            reduceTransparency
-                ? AnyShapeStyle(Color(uiColor: .secondarySystemBackground))
-                : AnyShapeStyle(.regularMaterial),
-            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
-        )
+        .background(CompanionIOSTheme.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(Color(uiColor: .separator), lineWidth: 0.7)
+                .stroke(CompanionIOSTheme.separator, lineWidth: 0.5)
         }
     }
 
@@ -118,10 +105,10 @@ struct CompanionQueuedMessagesView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(queueCountLabel)
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Color.primary)
+                        .foregroundStyle(CompanionIOSTheme.textPrimary)
                     Text(firstPreview)
                         .font(.caption)
-                        .foregroundStyle(Color.secondary)
+                        .foregroundStyle(CompanionIOSTheme.textSecondary)
                         .lineLimit(1)
                 }
 
@@ -129,7 +116,7 @@ struct CompanionQueuedMessagesView: View {
 
                 Image(systemName: "chevron.down")
                     .font(.caption.weight(.bold))
-                    .foregroundStyle(Color.secondary)
+                    .foregroundStyle(CompanionIOSTheme.textSecondary)
                     .rotationEffect(.degrees(expanded ? 180 : 0))
                     .accessibilityHidden(true)
             }
@@ -153,20 +140,20 @@ struct CompanionQueuedMessagesView: View {
             ZStack(alignment: .bottomTrailing) {
                 Image(systemName: firstAttachmentSymbol)
                     .font(.system(size: 16, weight: .medium))
-                    .foregroundStyle(Color.secondary)
+                    .foregroundStyle(CompanionIOSTheme.textSecondary)
                     .frame(width: 36, height: 36)
                     .background(
-                        Color(uiColor: .tertiarySystemFill),
-                        in: RoundedRectangle(cornerRadius: 9)
+                        CompanionIOSTheme.chip,
+                        in: RoundedRectangle(cornerRadius: 12)
                     )
 
                 Text("\(count)")
                     .font(.caption2.weight(.bold).monospacedDigit())
-                    .foregroundStyle(Color.primary)
+                    .foregroundStyle(CompanionIOSTheme.textPrimary)
                     .padding(.horizontal, 4)
                     .padding(.vertical, 2)
-                    .background(Color(uiColor: .secondarySystemBackground), in: Capsule())
-                    .overlay { Capsule().stroke(Color(uiColor: .separator), lineWidth: 0.7) }
+                    .background(CompanionIOSTheme.card, in: Capsule())
+                    .overlay { Capsule().stroke(CompanionIOSTheme.separator, lineWidth: 0.5) }
                     .offset(x: 4, y: 4)
             }
             .frame(width: 40, height: 40)
@@ -174,7 +161,7 @@ struct CompanionQueuedMessagesView: View {
         } else {
             Image(systemName: "text.bubble")
                 .font(.system(size: 16, weight: .medium))
-                .foregroundStyle(Color.secondary)
+                .foregroundStyle(CompanionIOSTheme.textSecondary)
                 .frame(width: 40, height: 40)
                 .accessibilityHidden(true)
         }
@@ -185,13 +172,13 @@ struct CompanionQueuedMessagesView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(entry.content)
                     .font(.subheadline)
-                    .foregroundStyle(Color.primary)
+                    .foregroundStyle(CompanionIOSTheme.textPrimary)
                     .lineLimit(2)
 
                 if let attachmentSummary = attachmentSummary(for: entry) {
                     Label(attachmentSummary, systemImage: attachmentSymbol(for: entry))
                         .font(.caption)
-                        .foregroundStyle(Color.secondary)
+                        .foregroundStyle(CompanionIOSTheme.textSecondary)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -213,7 +200,7 @@ struct CompanionQueuedMessagesView: View {
                     .contentShape(.rect)
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(Color.red)
+                .foregroundStyle(CompanionIOSTheme.danger)
                 .disabled(removingTurnID != nil)
                 .accessibilityLabel(removalAccessibilityLabel(for: entry))
                 .accessibilityHint("This message will not run")
@@ -319,7 +306,7 @@ struct CompanionQueuedMessagesView: View {
         if reduceMotion {
             expanded.toggle()
         } else {
-            withAnimation(.easeOut(duration: 0.18)) {
+            withAnimation(.easeOut(duration: 0.2)) {
                 expanded.toggle()
             }
         }

@@ -46,7 +46,7 @@ struct ChatComposer: View {
         .padding(.top, 8)
         .padding(.bottom, 6)
         .accessibilityIdentifier("chat.composer-controls")
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: isReplying)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: isReplying)
         .onChange(of: photoPickerItems) { _, items in
             guard !items.isEmpty else { return }
             loadSelectedPhotos(items)

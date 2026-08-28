@@ -12,7 +12,7 @@ struct BootstrapView: View {
                     .scaledToFit()
                     .padding(10)
                     .frame(width: 66, height: 66)
-                    .companionGlass(radius: 20)
+                    .companionGlass(radius: 18)
                     .accessibilityLabel("Companion")
 
                 VStack(spacing: 6) {
@@ -34,7 +34,7 @@ struct BootstrapView: View {
                 }
             }
             .padding(32)
-            .companionGlass(radius: 28)
+            .companionGlass(radius: 18)
             .padding(24)
         }
     }

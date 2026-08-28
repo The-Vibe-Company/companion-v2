@@ -395,7 +395,7 @@ struct ChatView: View {
                 )
             }
             .animation(
-                reduceMotion ? nil : .easeOut(duration: 0.18),
+                reduceMotion ? nil : .easeOut(duration: 0.2),
                 value: isNearBottom
             )
             .task(id: renderedScrollRevision) {
@@ -530,7 +530,6 @@ struct ChatView: View {
             } label: {
                 Image(systemName: "ellipsis")
                     .frame(width: 44, height: 44)
-                    .background(CompanionIOSTheme.card, in: Circle())
             }
             .buttonStyle(.plain)
             .foregroundStyle(CompanionIOSTheme.textPrimary)
@@ -548,7 +547,6 @@ struct ChatView: View {
             Image(systemName: systemImage)
                 .font(.system(size: 16, weight: .semibold))
                 .frame(width: 44, height: 44)
-                .background(CompanionIOSTheme.card, in: Circle())
         }
         .buttonStyle(.plain)
         .foregroundStyle(CompanionIOSTheme.textPrimary)
@@ -596,7 +594,6 @@ struct ChatView: View {
         .buttonStyle(.glass)
         .buttonBorderShape(unseenCount > 0 ? .capsule : .circle)
         .tint(visualTheme.accent)
-        .shadow(color: visualTheme.shadow.opacity(0.2), radius: 8, y: 3)
         .accessibilityLabel(
             unseenCount > 0
                 ? "\(unseenMessage(count: unseenCount)). Scroll to latest message"
@@ -663,7 +660,7 @@ struct ChatView: View {
             }
         }
         .padding(28)
-        .companionGlass(radius: 28)
+        .companionGlass(radius: 18)
         .padding(.top, 56)
     }
 
@@ -1343,7 +1340,7 @@ struct ChatView: View {
             if reduceMotion || !request.animated {
                 proxy.scrollTo(targetID, anchor: .bottom)
             } else {
-                withAnimation(.easeOut(duration: 0.18)) {
+                withAnimation(.easeOut(duration: 0.2)) {
                     proxy.scrollTo(targetID, anchor: .bottom)
                 }
             }
@@ -1848,7 +1845,7 @@ struct CompanionThinkingDisclosure: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private var secondaryStyle: Color { Color(uiColor: .secondaryLabel) }
+    private var secondaryStyle: Color { CompanionIOSTheme.textSecondary }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1909,7 +1906,7 @@ struct CompanionThinkingStatus: View {
 
     private var label: String { "\(companionName) thinking" }
 
-    private var statusTextColor: Color { Color(uiColor: .label) }
+    private var statusTextColor: Color { CompanionIOSTheme.textPrimary }
 
     @ViewBuilder
     var body: some View {

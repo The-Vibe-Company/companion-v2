@@ -39,9 +39,9 @@ struct ComposerAttachmentStrip: View {
             LocalAttachmentImage(data: attachment.data, maximumPixelSize: 160)
                 .frame(width: 64, height: 64)
                 .background(CompanionIOSTheme.card)
-                .clipShape(.rect(cornerRadius: 10))
+                .clipShape(.rect(cornerRadius: 12))
                 .overlay {
-                    RoundedRectangle(cornerRadius: 10)
+                    RoundedRectangle(cornerRadius: 12)
                         .stroke(CompanionIOSTheme.separator, lineWidth: 1)
                 }
                 .accessibilityLabel(attachment.filename)
@@ -71,7 +71,7 @@ struct ComposerAttachmentStrip: View {
         .padding(.vertical, 4)
         .padding(.trailing, 4)
         .frame(maxWidth: 260)
-        .companionMaterial(radius: 10)
+        .companionMaterial(radius: 12)
     }
 
     private func removeButton(_ attachment: CompanionMessageAttachment) -> some View {
@@ -102,9 +102,9 @@ struct LocalMessageAttachmentList: View {
                         .frame(minHeight: 112, maxHeight: 220)
                         .frame(maxWidth: .infinity)
                         .background(CompanionIOSTheme.card)
-                        .clipShape(.rect(cornerRadius: 10))
+                        .clipShape(.rect(cornerRadius: 12))
                         .overlay {
-                            RoundedRectangle(cornerRadius: 10)
+                            RoundedRectangle(cornerRadius: 12)
                                 .stroke(CompanionIOSTheme.separator, lineWidth: 1)
                         }
                         .accessibilityLabel(attachment.filename)
@@ -251,7 +251,7 @@ private struct AttachmentDocumentCard: View {
                 .font(.system(size: 18))
                 .foregroundStyle(CompanionIOSTheme.textPrimary)
                 .frame(width: 36, height: 36)
-                .background(CompanionIOSTheme.card, in: RoundedRectangle(cornerRadius: 9))
+                .background(CompanionIOSTheme.card, in: RoundedRectangle(cornerRadius: 12))
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(filename)
@@ -342,9 +342,9 @@ private struct RemoteAttachmentImage: View {
         .frame(minHeight: 112, maxHeight: 220)
         .frame(maxWidth: .infinity)
         .background(CompanionIOSTheme.card)
-        .clipShape(.rect(cornerRadius: 10))
+        .clipShape(.rect(cornerRadius: 12))
         .overlay {
-            RoundedRectangle(cornerRadius: 10)
+            RoundedRectangle(cornerRadius: 12)
                 .stroke(CompanionIOSTheme.separator, lineWidth: 1)
         }
         .accessibilityLabel(attachment.filename)

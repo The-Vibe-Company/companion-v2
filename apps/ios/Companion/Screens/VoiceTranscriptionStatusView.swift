@@ -44,11 +44,11 @@ struct VoiceTranscriptionStatusView: View {
         .padding(.vertical, 10)
         .background {
             if reduceTransparency {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(Color.companionCanvas)
             } else {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(.regularMaterial)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(CompanionIOSTheme.card)
             }
         }
         .accessibilityElement(children: .contain)

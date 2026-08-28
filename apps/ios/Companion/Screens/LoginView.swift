@@ -50,7 +50,7 @@ struct LoginView: View {
                 .scaledToFit()
                 .padding(12)
                 .frame(width: 82, height: 82)
-                .companionGlass(radius: 24)
+                .companionGlass(radius: 18)
                 .accessibilityLabel("Companion")
             VStack(spacing: 6) {
                 Text("Companion").font(.title2.weight(.semibold))
@@ -151,7 +151,7 @@ struct LoginView: View {
             .accessibilityIdentifier("login.submit")
         }
         .padding(20)
-        .companionGlass(radius: 26)
+        .companionGlass(radius: 18)
     }
 
     private func submit() {
@@ -242,7 +242,7 @@ struct LoginView: View {
             .foregroundStyle(Color.companionMuted)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(16)
-            .companionGlass(radius: 20)
+            .companionGlass(radius: 18)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("login.google.waiting")
         }
@@ -282,7 +282,7 @@ private extension View {
         self
             .padding(.horizontal, 12)
             .frame(minHeight: 48)
-            .companionGlass(radius: 14, interactive: true)
+            .companionGlass(radius: 18, interactive: true)
     }
 }
 

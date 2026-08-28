@@ -38,7 +38,7 @@ struct CharacterPicker: View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title)
                 .font(.system(size: 13))
-                .foregroundStyle(Color.secondary)
+                .foregroundStyle(CompanionIOSTheme.textSecondary)
             ScrollView(.horizontal) {
                 LazyHStack(spacing: 12) {
                     ForEach(0..<count, id: \.self, content: content)
@@ -98,7 +98,7 @@ struct CharacterPicker: View {
 
     private func selectionRing(_ selected: Bool, diameter: CGFloat) -> some View {
         Circle()
-            .stroke(selected ? Color.primary : Color.clear, lineWidth: 2)
+            .stroke(selected ? CompanionIOSTheme.textPrimary : Color.clear, lineWidth: 2)
             .frame(width: diameter, height: diameter)
             .accessibilityHidden(true)
     }

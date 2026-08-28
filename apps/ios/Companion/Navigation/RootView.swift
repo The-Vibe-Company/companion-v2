@@ -8,6 +8,7 @@ struct RootView: View {
 
     @Environment(NotificationCoordinator.self) private var notifications
     @AppStorage(CompanionPreferenceKeys.notifications) private var notificationsEnabled = true
+    @AppStorage(CompanionPreferenceKeys.appearance) private var appearanceValue = CompanionAppearancePreference.system.rawValue
     @State private var sessionStore = SessionStore(
         apiURL: AppConfig.apiURL,
         storage: KeychainSessionStorage(service: "\(AppConfig.callbackScheme).session"),
@@ -19,7 +20,13 @@ struct RootView: View {
     var body: some View {
         Group {
 #if DEBUG
-            if ProcessInfo.processInfo.arguments.contains("-companion-queued-demo") {
+            if ProcessInfo.processInfo.arguments.contains("-companion-appearance-demo") {
+                CompanionAppearanceDemoView()
+            } else if ProcessInfo.processInfo.arguments.contains("-companion-plugins-multi-account-demo") {
+                NavigationStack {
+                    PluginManagementView(demoModel: .linearMultiAccountDemo)
+                }
+            } else if ProcessInfo.processInfo.arguments.contains("-companion-queued-demo") {
                 CompanionQueuedMessagesDemoView()
             } else if ProcessInfo.processInfo.arguments.contains("-markdown-table-demo") {
                 MarkdownTableDemoView()
@@ -66,7 +73,9 @@ struct RootView: View {
         .task {
 #if DEBUG
             let arguments = ProcessInfo.processInfo.arguments
-            guard !arguments.contains("-companion-queued-demo"),
+            guard !arguments.contains("-companion-appearance-demo"),
+                  !arguments.contains("-companion-plugins-multi-account-demo"),
+                  !arguments.contains("-companion-queued-demo"),
                   !arguments.contains("-markdown-table-demo"),
                   !arguments.contains("-companion-interruption-demo"),
                   !arguments.contains("-companion-transcript-window-demo"),
@@ -94,7 +103,7 @@ struct RootView: View {
             guard notificationsEnabled else { return }
             enqueueNotificationTransition(enabled: true, requestAuthorization: false)
         }
-        .animation(.easeOut(duration: 0.24), value: sessionStore.phase)
+        .animation(.easeOut(duration: 0.2), value: sessionStore.phase)
         .tint(.companionAccent)
         .preferredColorScheme(preferredColorScheme)
     }
@@ -105,7 +114,8 @@ struct RootView: View {
             return .dark
         }
 #endif
-        return nil
+        let appearance = CompanionAppearancePreference(rawValue: appearanceValue) ?? .system
+        return appearance.forcesBlackPalette ? .dark : nil
     }
 
     private var activeNotificationSessionID: String? {

@@ -82,7 +82,7 @@ struct CompanionIdentityEditorView: View {
                 .textInputAutocapitalization(.words)
                 .autocorrectionDisabled()
                 .padding(14)
-                .companionMaterial(radius: 16)
+                .companionMaterial(radius: 12)
                 .disabled(saving)
                 .accessibilityIdentifier("companion.identity.name")
 
@@ -93,7 +93,7 @@ struct CompanionIdentityEditorView: View {
             TextField("What this Companion is for", text: $instructions, axis: .vertical)
                 .lineLimit(3...6)
                 .padding(14)
-                .companionMaterial(radius: 16)
+                .companionMaterial(radius: 12)
                 .disabled(saving)
                 .accessibilityIdentifier("companion.identity.instructions")
         }
@@ -214,7 +214,7 @@ struct CompanionIdentityEditorView: View {
         if reduceMotion {
             icon = updated
         } else {
-            withAnimation(.easeOut(duration: 0.18)) {
+            withAnimation(.easeOut(duration: 0.2)) {
                 icon = updated
             }
         }
