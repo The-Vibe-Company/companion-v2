@@ -884,7 +884,7 @@ export class PostgresRuntimeStore implements RuntimeStore {
         ) turn_context
         CROSS JOIN public.companion_runtime_get_routine_material(
           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
-          $6::text, $7::public.companion_runtime_work_kind, $8::uuid
+          $6::text, $7::public.companion_runtime_work_kind, $8::uuid, $9::integer
         ) routine_material
       `, [...fenceParameters(fence), leaseSeconds]);
       if (rows.length === 0) return null;

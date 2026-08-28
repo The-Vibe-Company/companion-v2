@@ -138,7 +138,8 @@ CREATE FUNCTION public.companion_runtime_get_routine_material(
   p_gate_epoch bigint,
   p_executor_id text,
   p_work_kind public.companion_runtime_work_kind,
-  p_work_id uuid
+  p_work_id uuid,
+  p_lease_seconds integer
 )
 RETURNS TABLE (
   routine_snapshot_id uuid,
@@ -155,40 +156,35 @@ SET search_path = pg_catalog, public
 SET row_security = on
 AS $$
 DECLARE
+  v_authorization record;
   v_turn_id uuid;
 BEGIN
-  SELECT lease.turn_id INTO v_turn_id
-  FROM public.companion_runtime_leases lease
-  JOIN public.companion_runtime_control control ON control.id = 'runtime-v2'
-  WHERE lease.org_id = p_org_id
-    AND lease.companion_id = p_companion_id
-    AND lease.claim_token = p_claim_token
-    AND lease.claim_epoch = p_claim_epoch
-    AND lease.gate_epoch = p_gate_epoch
-    AND lease.executor_id = p_executor_id
-    AND lease.work_kind = p_work_kind
-    AND lease.work_id = p_work_id
-    AND lease.expires_at > clock_timestamp()
-    AND control.enabled
-    AND control.gate_epoch = p_gate_epoch;
-  IF NOT FOUND THEN RETURN; END IF;
+  SELECT authorized_row.* INTO v_authorization
+  FROM public.companion_runtime_renew_and_authorize(
+    p_org_id, p_companion_id, p_claim_token, p_claim_epoch, p_gate_epoch,
+    p_executor_id, p_work_kind, p_work_id, p_lease_seconds
+  ) authorized_row;
+  IF NOT FOUND OR NOT COALESCE(v_authorization.authorized, false) THEN RETURN; END IF;
+  v_turn_id := v_authorization.turn_id;
 
   RETURN QUERY
-  SELECT turn_row.routine_snapshot_id, turn_row.routine_name, turn_row.routine_isolated,
+  SELECT turn_row.routine_snapshot_id, turn_row.routine_name,
+    COALESCE(turn_row.routine_isolated, false),
     substrate.id, substrate.sha256, substrate.content, surfaced.content
-  FROM public.companion_turns turn_row
+  FROM (SELECT 1) anchor
+  LEFT JOIN public.companion_turns turn_row
+    ON turn_row.org_id = p_org_id
+   AND turn_row.companion_id = p_companion_id
+   AND turn_row.id = v_turn_id
   LEFT JOIN public.companion_routine_context_substrates substrate
     ON substrate.id = turn_row.routine_context_substrate_id
    AND substrate.org_id = turn_row.org_id
    AND substrate.companion_id = turn_row.companion_id
   LEFT JOIN public.companion_transcript_entries surfaced
-    ON surfaced.org_id = turn_row.org_id
+   ON surfaced.org_id = turn_row.org_id
    AND surfaced.companion_id = turn_row.companion_id
    AND surfaced.event_id = turn_row.routine_relay_source_event_id
-   AND surfaced.role = 'assistant'
-  WHERE turn_row.org_id = p_org_id
-    AND turn_row.companion_id = p_companion_id
-    AND turn_row.id = v_turn_id;
+   AND surfaced.role = 'assistant';
 END
 $$;
 --> statement-breakpoint
@@ -773,7 +769,7 @@ $$;
 --> statement-breakpoint
 
 REVOKE ALL ON FUNCTION public.companion_runtime_get_routine_material(
-  uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid
+  uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer
 ) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.companion_runtime_prepare_routine_run(
   uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,boolean
@@ -805,7 +801,7 @@ BEGIN
       ON acl.grantee = role.oid
     WHERE acl.privilege_type = 'EXECUTE'
   LOOP
-    EXECUTE format('GRANT EXECUTE ON FUNCTION public.companion_runtime_get_routine_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid) TO %I', v_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.companion_runtime_get_routine_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer) TO %I', v_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.companion_runtime_prepare_routine_run(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,boolean) TO %I', v_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.companion_runtime_project_event_batch_v2(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,bigint,text,jsonb,bigint,timestamp with time zone,integer,integer,integer) TO %I', v_role);
   END LOOP;
