@@ -99,6 +99,45 @@ export type CompanionRuntimeStagePhase =
 export type CompanionDirectTransportMode = "off" | "shadow" | "on";
 
 /**
+ * Internal staging seam for environments that run the real Pi process against a local model
+ * endpoint. Production leaves this unset and continues to use `companionPiModelsJson()`.
+ */
+export type CompanionPiModelsJsonProvider = (
+  providerId: string | undefined,
+  modelId: string,
+) => string;
+
+export interface AsciiBoxCompanionRuntimeOptions {
+  onTiming?: (sample: BoxProviderCallTiming) => void;
+  onStageTiming?: (sample: CompanionRuntimeStageTiming) => void;
+  companionSkillChecksum?: string;
+  /** Isolates disposable research snapshots without changing the production disk marker. */
+  imageIdentitySalt?: string;
+  /**
+   * Mints the presigned bundle download URL. Staging calls can be hours apart, so every layout
+   * script generation asks for a fresh URL rather than caching one. Bundle mode requires both an
+   * env-derived or injected bundle plan and this provider: without it, the runtime falls back to
+   * the install-command escape hatch and the layout identity carries no bundle segment.
+   */
+  bundleUrlProvider?: () => Promise<string>;
+  /**
+   * Overrides the production bundle manifest for contained integration environments. When absent,
+   * `COMPANION_PI_BUNDLE_ENABLED` and the pinned production manifest remain the sole source. An
+   * injected plan must also provide `bundleUrlProvider` so a misconfigured acceptance test cannot
+   * silently exercise the npm fallback instead of the bundle path.
+   */
+  bundlePlan?: CompanionPiBundlePlan;
+  /** Overrides only the generated models.json contents; production leaves this unset. */
+  modelsJsonProvider?: CompanionPiModelsJsonProvider;
+  /**
+   * @internal Box Lab's Lima/QEMU acceptance run may need more wall time when x86_64 is emulated
+   * without KVM. This in-process seam is deliberately not configurable through the product
+   * environment; production keeps the fixed 300-second layout command deadline.
+   */
+  boxLabPiLayoutCommandTimeoutSeconds?: number;
+}
+
+/**
  * The hosted inbound endpoint of the on-box Companion agent, registered through the provider's
  * `host <port>` proxy at staging. Both tokens are credentials: the proxy token gates the provider
  * proxy and the bearer authenticates inbound runtime requests at the agent itself. Neither may be
@@ -199,6 +238,10 @@ const BOX_FILE_WRITE_LIMIT_BYTES = 5 * 1024 * 1024;
 const BOX_FILE_PART_BYTES = 3 * 1024 * 1024;
 /** A multi-megabyte part takes longer to upload than the short control calls share a budget with. */
 const BOX_FILE_PART_TIMEOUT_MS = 120_000;
+/** The production Pi relayout deadline. Keep this fixed unless a contained Box Lab injects one. */
+const PI_LAYOUT_COMMAND_TIMEOUT_SECONDS = 300;
+/** Box Lab's command API rejects larger values and a bounded seam cannot create an endless run. */
+const BOX_LAB_PI_LAYOUT_COMMAND_TIMEOUT_MAX_SECONDS = 900;
 /**
  * How long a started Pi daemon has to answer `active`. `systemctl --user start` returns once
  * systemd has forked `ExecStart`, and the unit is `Type=simple` with `Restart=on-failure`, so a
@@ -2286,7 +2329,7 @@ base_layout=${shellQuote(layoutIdentity.baseMarker)}
 expected_layout=${shellQuote(layoutIdentity.fullMarker)}
 companion_layout_apply_overlay() {
   mkdir -p "$HOME/.companion/bin" "$HOME/.companion/pi" "$HOME/.companion/pi/extensions" "$HOME/.companion/runtime/sessions" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.companion/runtime/memory" "$HOME/.companion/runtime/tmp" "$HOME/.companion/tools" "$HOME/${COMPANION_PI_BROKER_JOURNAL_PATH}" "$HOME/.config/systemd/user"
-  chmod 700 "$HOME/.companion/runtime" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.companion/runtime/memory" "$HOME/.companion/runtime/tmp" "$HOME/${COMPANION_PI_BROKER_JOURNAL_PATH}"
+  chmod 700 "$HOME/.companion/pi" "$HOME/.companion/runtime" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.companion/runtime/memory" "$HOME/.companion/runtime/tmp" "$HOME/${COMPANION_PI_BROKER_JOURNAL_PATH}"
   # Provider TTL can archive a Box without the control-plane stop path. Keep every secret-bearing
   # transient excluded even if staging transport disappears before its explicit cleanup request.
   printf '%s' ${shellQuote(encodedBoxIgnore)} | base64 --decode > "$HOME/.boxignore"
@@ -2765,6 +2808,8 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
   readonly #bundle: CompanionPiBundlePlan | null;
   /** Mints a fresh presigned GET URL for the bundle object each time a layout script is generated. */
   readonly #bundleUrlProvider: (() => Promise<string>) | undefined;
+  readonly #modelsJsonProvider: CompanionPiModelsJsonProvider;
+  readonly #piLayoutCommandTimeoutSeconds: number;
   readonly #onTiming: ((sample: BoxProviderCallTiming) => void) | undefined;
   readonly #onStageTiming: ((sample: CompanionRuntimeStageTiming) => void) | undefined;
   readonly #companionSkillChecksum: string | undefined;
@@ -2778,21 +2823,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
 
   constructor(
     env: NodeJS.ProcessEnv = process.env,
-    options?: {
-      onTiming?: (sample: BoxProviderCallTiming) => void;
-      onStageTiming?: (sample: CompanionRuntimeStageTiming) => void;
-      companionSkillChecksum?: string;
-      /** Isolates disposable research snapshots without changing the production disk marker. */
-      imageIdentitySalt?: string;
-      /**
-       * Mints the presigned bundle download URL. Staging calls can be hours apart, so every layout
-       * script generation asks for a fresh URL rather than caching one. Bundle mode requires both
-       * `COMPANION_PI_BUNDLE_ENABLED=true` and this provider: without it (S3 credentials absent),
-       * the runtime falls back to the install-command escape hatch and the layout identity carries
-       * no bundle segment, so the marker always describes what the script actually installs.
-       */
-      bundleUrlProvider?: () => Promise<string>;
-    },
+    options?: AsciiBoxCompanionRuntimeOptions,
   ) {
     const apiKey = env.COMPANION_BOX_API_KEY?.trim();
     if (!apiKey) {
@@ -2817,12 +2848,32 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
     this.#piPackages = resolvePiPackages(env);
     this.#qmdPackage = validPackageSpec(QMD_PACKAGE, "QMD_PACKAGE");
     // Bundle mode wins over the install command when both are configured; the install command stays
-    // the dev and emergency escape hatch when bundle mode is off. Both the enabled flag and a URL
-    // provider are required: a deployment that enables the flag without S3 credentials degrades to
-    // the escape hatch instead of generating a script that cannot download anything.
-    const bundlePlan = companionPiBundlePlan(env);
+    // the dev and emergency escape hatch when bundle mode is off. Production still requires the
+    // enabled flag to derive a plan. A contained integration may inject one, but either source also
+    // requires a URL provider or degrades to the escape hatch instead of generating a script that
+    // cannot download anything.
+    if (options?.bundlePlan !== undefined && options.bundleUrlProvider === undefined) {
+      throw new Error("bundlePlan requires bundleUrlProvider");
+    }
+    const bundlePlan = options?.bundlePlan ?? companionPiBundlePlan(env);
     this.#bundle = bundlePlan && options?.bundleUrlProvider ? bundlePlan : null;
     this.#bundleUrlProvider = this.#bundle ? options?.bundleUrlProvider : undefined;
+    this.#modelsJsonProvider = options?.modelsJsonProvider ?? companionPiModelsJson;
+    const boxLabPiLayoutCommandTimeoutSeconds = options?.boxLabPiLayoutCommandTimeoutSeconds;
+    if (
+      boxLabPiLayoutCommandTimeoutSeconds !== undefined
+      && (
+        !Number.isSafeInteger(boxLabPiLayoutCommandTimeoutSeconds)
+        || boxLabPiLayoutCommandTimeoutSeconds < 1
+        || boxLabPiLayoutCommandTimeoutSeconds > BOX_LAB_PI_LAYOUT_COMMAND_TIMEOUT_MAX_SECONDS
+      )
+    ) {
+      throw new Error(
+        `boxLabPiLayoutCommandTimeoutSeconds must be an integer between 1 and ${BOX_LAB_PI_LAYOUT_COMMAND_TIMEOUT_MAX_SECONDS}`,
+      );
+    }
+    this.#piLayoutCommandTimeoutSeconds = boxLabPiLayoutCommandTimeoutSeconds
+      ?? PI_LAYOUT_COMMAND_TIMEOUT_SECONDS;
     this.#onTiming = options?.onTiming;
     this.#onStageTiming = options?.onStageTiming;
     this.#companionSkillChecksum = options?.companionSkillChecksum;
@@ -3630,7 +3681,11 @@ done`,
     // work on every wake and can never record it, so this deliberately outlives a turn's own
     // three-minute cold-start deadline: that turn may still fail retryably, but the install it paid
     // for is kept and the member's next message short-circuits.
-    const result = await this.#command(boxId, `bash "$HOME/${PI_LAYOUT_SCRIPT_PATH}"`, 300);
+    const result = await this.#command(
+      boxId,
+      `bash "$HOME/${PI_LAYOUT_SCRIPT_PATH}"`,
+      this.#piLayoutCommandTimeoutSeconds,
+    );
     if (!result.success) {
       // The bundle branch prints a fixed marker as its last stderr line for the three failures it can
       // attribute — download, checksum, Node major — so the operator gets a stable code instead of a
@@ -3914,7 +3969,7 @@ fi`,
       },
       {
         path: COMPANION_PI_MODELS_PATH,
-        content: companionPiModelsJson(Object.keys(input.providerAuth)[0], input.modelId),
+        content: this.#modelsJsonProvider(Object.keys(input.providerAuth)[0], input.modelId),
         mode: 0o600,
       },
       {

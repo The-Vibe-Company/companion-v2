@@ -42,6 +42,8 @@ excluded product surface.
 - `packages/skills`: package parsing, validation, versioning.
 - `packages/skilldb`: hosted declared SQLite state.
 - `packages/box-runtime`: ascii.dev transport, Box disk layout, and the Pi broker integration.
+- `packages/box-lab`: local developer-only Box API test double backed by isolated real Linux; it is
+  neither a product runtime provider nor a replacement for `packages/box-sim`.
 - `packages/companion-runtime`: Runtime v2 state machine and durable execution engine.
 - `apps/runtime`: the only process allowed to claim runtime work or contact Box/Pi.
 - `packages/db/runtime-role-grants.sql`: split API, worker, and runtime grants.
@@ -88,11 +90,20 @@ workspaces, or PostgreSQL 17 plus optional MinIO/Mailpit with Homebrew locally, 
 The native Conductor stack starts per-workspace PostgreSQL plus optional MinIO and Mailpit under
 `.conductor-pg/`, then API, worker, runtime, and web in one process group. Ports derive from
 `CONDUCTOR_PORT`: web `+0`, API `+1`, PostgreSQL `+2`, MinIO API `+3`, console `+4`, SMTP `+5`,
-Mailpit UI `+6`, and private runtime `+7`; `+8` is available to the deterministic Box/Pi simulator.
+Mailpit UI `+6`, and private runtime `+7`; `+8` is shared, mutually exclusively, by the
+deterministic Box/Pi simulator and Box Lab.
 Cloud workspaces use base `3000`. Internal services, including runtime, bind loopback; cloud web
 alone binds `0.0.0.0`. Cookies and the runtime desktop HMAC key are workspace-specific. Missing
 MinIO disables uploads; missing Mailpit falls back to logged email. The launcher gives the Box key
 and runtime database URL only to `apps/runtime` without changing the published web/API port contract.
+
+Port `+8` is shared, mutually exclusively, by the simulator and Box Lab. `auto` remains the default:
+it uses a configured live Box key or otherwise the simulator; explicit `sim`, `live`, and `lab`
+modes are available. The local-only Conductor run `Dev (real Pi VM, slow)` selects `lab`: one
+Lima/QEMU `x86_64` Linux VM per Box, with real systemd and Pi. Setup never installs Lima or QEMU
+automatically; run `pnpm box:lab:doctor` for prerequisites. Conductor archive asks Box Lab to
+remove only resources owned by the exact workspace. Box Lab is intentionally absent from CI because
+its full real-Linux acceptance is slow; run it locally as the final validation after the fast suites.
 
 ## Companions Runtime v2 contract
 
@@ -137,7 +148,15 @@ and runtime database URL only to `apps/runtime` without changing the published w
 - Authorization matrices must cover non-members, cross-tenant access, actor revocation, and
   no-admin-override privacy.
 - Runtime work requires deterministic Box/Pi simulation, real PostgreSQL lease/fencing tests, and
-  fault injection before and after every external side effect and durable checkpoint.
+  fault injection before and after every external side effect and durable checkpoint. The simulator
+  remains the normal fast suite.
+- Changes to Pi installation/layout, bundle pins, Box lifecycle adapters, or the Lab itself also run
+  `pnpm box:lab:smoke` locally as the final validation after the fast suites. Box Lab is intentionally
+  slow and not part of CI. It must execute the runtime-generated script inside Lima `x86_64` or a
+  local OCI systemd container; never run `systemctl`, `loginctl`, `journalctl`, or destructive
+  lifecycle commands against the developer host.
+- Use `pnpm e2e:box-runtime-change` only as the credentialed live provider canary. It checks
+  ascii.dev-specific drift; it is not the development feedback loop for Pi installation.
 - Frontend changes require `APP_URL=http://127.0.0.1:<port> pnpm browser:smoke` plus manual
   `agent-browser` checks for changed paths.
 - Changes under `packages/companion-skill/skill/` require a version bump, top changelog entry, and

@@ -135,9 +135,11 @@ function requiresDevStackCheck(file) {
   return [
     ".conductor/settings.toml",
     "docker-compose.yml",
+    "scripts/box-lab.sh",
     "scripts/dev-conductor.sh",
     "scripts/dev-process.sh",
     "scripts/dev-runtime.sh",
+    "scripts/dev-runtime-mode.sh",
     "scripts/dev-worker.sh",
     "scripts/dev-stack-check.sh",
     "scripts/dev-stack.sh",
