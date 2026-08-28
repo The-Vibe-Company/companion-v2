@@ -420,7 +420,9 @@ async function consumeIsolatedRoutine(
   materialValue: RuntimeWorkMaterial,
   redact: RuntimeVisibleTextRedactor,
 ): Promise<RuntimeWorkDisposition> {
-  const runId = materialValue.routineId!;
+  // One routine fire is one durable turn, and the turn id is its stable run id. The routine
+  // snapshot id identifies the schedule revision that fired; it is not unique per execution.
+  const runId = materialValue.turnId!;
   const routine = requiredRoutineSession(context);
   for (;;) {
     const auth = await context.session.reauthorize();
@@ -546,7 +548,7 @@ async function handleIsolatedRoutineAttempt(
   materialValue: RuntimeWorkMaterial,
 ): Promise<RuntimeWorkDisposition> {
   const routine = requiredRoutineSession(context);
-  const runId = materialValue.routineId!;
+  const runId = materialValue.turnId!;
   const redact = context.deps.projectionRedactorFactory.forMaterial({
     orgId: context.claim.orgId,
     material: materialValue,
@@ -1010,7 +1012,6 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
     if (
       !routineMaterial.routineId
       || !routineMaterial.routineName
-      || routineMaterial.turnId !== routineMaterial.routineId
     ) {
       throw new RuntimeInvariantError({
         code: "routine_material_invalid",
