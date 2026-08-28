@@ -35,6 +35,7 @@ test("ignores constants and shell markers that only look like Companions variabl
     cat > "$HOME/.companion/bin/pi-daemon" <<'COMPANION_PI_DAEMON'
     const url = env.COMPANION_API_URL;
     const command = process.env.COMPANION_PI_BROKER_COMMAND;
+    const run = process.env.COMPANION_PI_ROUTINE_RUN_ID;
   `);
   assert.deepEqual([...names], []);
 });

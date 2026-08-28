@@ -102,6 +102,66 @@ export type BrokerPromptWriteOutcome =
   | { outcome: "rejected"; code: string }
   | { outcome: "ambiguous"; code: string };
 
+/**
+ * Controls one routine's disposable Pi session. The run id is part of every call so a routine can
+ * never accidentally address the main Companion daemon or another routine's broker socket.
+ */
+export interface RuntimePiRoutineSessionControl {
+  start(input: {
+    boxId: string;
+    runId: string;
+    /** Owner persona used by box-runtime to compose the run-only operating brief. */
+    persona: string | null;
+    signal: AbortSignal;
+  }): Promise<{ state: "idle"; invocationId: string }>;
+  state(input: {
+    boxId: string;
+    runId: string;
+    signal: AbortSignal;
+  }): Promise<{
+    invocationId: string;
+    layoutMarker: string | null;
+    activeAttemptId: string | null;
+    tailCursor: bigint;
+    acknowledgedCursor: bigint;
+    counters: PiBrokerCounters;
+    modelInput: ModelInputCapability[];
+  }>;
+  prompt(input: {
+    boxId: string;
+    runId: string;
+    commandId: string;
+    attemptId: string;
+    expectedInvocationId: string;
+    message: string;
+    signal: AbortSignal;
+  }): Promise<BrokerPromptWriteOutcome>;
+  read(input: {
+    boxId: string;
+    runId: string;
+    after: bigint;
+    signal: AbortSignal;
+  }): Promise<unknown>;
+  ack(input: {
+    boxId: string;
+    runId: string;
+    through: bigint;
+    signal: AbortSignal;
+  }): Promise<bigint>;
+  abort(input: {
+    boxId: string;
+    runId: string;
+    commandId: string;
+    attemptId: string;
+    signal: AbortSignal;
+  }): Promise<BrokerWriteOutcome>;
+  terminate(input: {
+    boxId: string;
+    runId: string;
+    signal: AbortSignal;
+  }): Promise<void>;
+}
+
 export interface RuntimePiControl {
   stopPiDaemon(input: { boxId: string; signal: AbortSignal }): Promise<void>;
   startPiDaemon(input: { boxId: string; signal: AbortSignal }): Promise<{
@@ -173,6 +233,8 @@ export interface RuntimePiControl {
     response: Record<string, unknown>;
     signal: AbortSignal;
   }): Promise<BrokerWriteOutcome>;
+  /** Optional because direct transport and disabled fixtures delegate the routine path to exec. */
+  routineSession?: RuntimePiRoutineSessionControl;
 }
 
 export interface RuntimeMaterialProvider {
@@ -314,6 +376,7 @@ export interface RuntimeEventProjector {
     checkpointSequence: bigint;
     eventCursor: bigint;
     hasVisibleOutput: boolean;
+    routineReturned: boolean;
   } | null>;
 }
 

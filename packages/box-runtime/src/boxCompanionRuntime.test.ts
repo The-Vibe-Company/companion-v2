@@ -25,6 +25,7 @@ import {
   COMPANION_OUTBOX_INSTRUCTIONS,
   composeDaemonFailureDetail,
   composedInstructions,
+  composedRoutineInstructions,
   mintBoxDesktopUrl,
   observedBoxStateFromProvider,
   parseOutboxManifest,
@@ -36,6 +37,11 @@ import {
   companionPiBundleObjectKey,
   companionPiBundleShaShort,
 } from "./piBundle";
+import {
+  COMPANION_PI_ROUTINE_SURFACE_EXTENSION_FILE,
+  COMPANION_PI_ROUTINE_SURFACE_EXTENSION_SOURCE,
+  companionPiRoutineSessionPaths,
+} from "./companionPiRoutineSession";
 import type { PiJsonObject } from "./companionPiBroker";
 import type { CompanionStagedMcpAccount } from "./companionPiInjection";
 
@@ -1166,6 +1172,8 @@ describe("default Pi packages on the Box disk", () => {
       .toContain(".companion/runtime/state/control-bundle-v1.json");
     expect(Buffer.from(encodedBoxIgnore!, "base64").toString("utf8"))
       .toContain(".companion/runtime/control-transaction-v1/");
+    expect(Buffer.from(encodedBoxIgnore!, "base64").toString("utf8"))
+      .toContain(".companion/runtime/routines/");
 
     for (const spec of [
       "npm:pi-mcp-adapter@2.12.1",
@@ -1808,6 +1816,178 @@ describe("Pi outbox maintenance", () => {
 
     await expect(runtime.listOutbox({ boxId: "bx_23456789" }))
       .rejects.toThrow(BoxRuntimeProviderError);
+  });
+});
+
+describe("isolated routine Pi sessions", () => {
+  const runId = "11111111-1111-4111-8111-111111111111";
+
+  it("rejects a non-UUID run id before contacting the Box", async () => {
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await expect(runtime.startRoutineSession({
+      boxId: "bx_23456789",
+      runId: "../main",
+      persona: null,
+    })).rejects.toMatchObject({
+      status: 400,
+      code: "routine_run_id_invalid",
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("stages surface_to_main only in the run root and launches separate broker paths", async () => {
+    const commands: string[] = [];
+    const files: Array<{ path: string; content: string }> = [];
+    const paths = companionPiRoutineSessionPaths(runId);
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const body = parseBoxTestBody(init?.body);
+      if (url.endsWith("/files") && init?.method === "PUT") {
+        files.push({ path: requiredText(body, "path"), content: requiredText(body, "content") });
+        return response({ ok: true });
+      }
+      if (url.endsWith("/commands") && init?.method === "POST") {
+        const command = requiredText(body, "command");
+        commands.push(command);
+        if (command.includes("routine-pi-session-prepared")) {
+          return response(commandResult("routine-pi-session-prepared\n"));
+        }
+        if (command.includes("routine-pi-session-ready")) {
+          const invocation = /export COMPANION_PI_INVOCATION_ID='([^']+)'/.exec(command)?.[1];
+          if (!invocation) throw new Error("routine launch did not include its invocation id");
+          return response(commandResult(`routine-pi-session-ready ${invocation}\n`));
+        }
+        return response(commandResult());
+      }
+      throw new Error(`unexpected Box request: ${init?.method ?? "GET"} ${url}`);
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await expect(runtime.startRoutineSession({
+      boxId: "bx_23456789",
+      runId,
+      persona: "Routine persona.",
+    })).resolves.toMatchObject({
+      state: "idle",
+    });
+
+    expect(files).toEqual([
+      {
+        path: `${paths.root}/state/instructions.txt`,
+        content: composedRoutineInstructions("Routine persona."),
+      },
+      { path: paths.extension, content: COMPANION_PI_ROUTINE_SURFACE_EXTENSION_SOURCE },
+    ]);
+    expect(files[1]?.content).toContain('name: "surface_to_main"');
+    expect(files[1]?.content).toContain('Type.Literal("relay")');
+    expect(files[1]?.content).toContain('Type.Literal("notify")');
+    expect(files.some((file) => file.path === `.companion/pi/extensions/${COMPANION_PI_ROUTINE_SURFACE_EXTENSION_FILE}`))
+      .toBe(false);
+    expect(commands[0]).toContain(`routine_root="$HOME/${paths.root}"`);
+    expect(commands[0]).toContain('cp -a "$HOME/.companion/pi/." "$routine_root/pi/"');
+    expect(commands[0]).toContain("routine-pi-session run root is still owned by a process");
+    expect(commands[0]).toContain("trap cleanup_failed_prepare ERR");
+    expect(commands.at(-1)).toContain(`socket="$HOME/${paths.socket}"`);
+    expect(commands.at(-1)).toContain(`broker_script="$HOME/.companion/bin/companion-pi-broker.mjs"`);
+    expect(commands.at(-1)).toContain("routine-pi-session could not be stopped after readiness timeout");
+    expect(commands.at(-1)).toContain('rm -rf "$routine_root"');
+    expect(commands.at(-1)).not.toContain("systemctl --user");
+    for (const command of commands) {
+      expect(spawnSync("bash", ["-n"], { input: command, encoding: "utf8" })).toMatchObject({
+        status: 0,
+        stderr: "",
+      });
+    }
+  });
+
+  it("removes the copied run root when pre-launch staging fails", async () => {
+    const commands: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      if (url.endsWith("/files") && init?.method === "PUT") {
+        return response({ error: "staging unavailable" }, 500);
+      }
+      if (url.endsWith("/commands") && init?.method === "POST") {
+        const command = requiredText(parseBoxTestBody(init.body), "command");
+        commands.push(command);
+        if (command.includes("routine-pi-session-prepared")) {
+          return response(commandResult("routine-pi-session-prepared\n"));
+        }
+        if (command.includes("routine-pi-session-terminated")) {
+          return response(commandResult("routine-pi-session-terminated\n"));
+        }
+      }
+      throw new Error(`unexpected Box request: ${init?.method ?? "GET"} ${url}`);
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await expect(runtime.startRoutineSession({
+      boxId: "bx_23456789",
+      runId,
+      persona: null,
+    })).rejects.toThrow();
+
+    expect(commands).toHaveLength(2);
+    expect(commands[1]).toContain("routine-pi-session-terminated");
+    expect(commands[1]).toContain('rm -rf "$routine_root"');
+  });
+
+  it("retries cleanup through the termination command when preparation fails", async () => {
+    const commands: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      if (!url.endsWith("/commands") || init?.method !== "POST") {
+        throw new Error(`unexpected Box request: ${init?.method ?? "GET"} ${url}`);
+      }
+      const command = requiredText(parseBoxTestBody(init.body), "command");
+      commands.push(command);
+      if (commands.length === 1) {
+        return response({ success: false, exitCode: 1, stdout: "", stderr: "copy failed" });
+      }
+      return response(commandResult("routine-pi-session-terminated\n"));
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await expect(runtime.startRoutineSession({
+      boxId: "bx_23456789",
+      runId,
+      persona: null,
+    })).rejects.toMatchObject({ code: "routine_session_prepare_failed" });
+
+    expect(commands).toHaveLength(2);
+    expect(commands[0]).toContain("trap cleanup_failed_prepare ERR");
+    expect(commands[1]).toContain("routine-pi-session-terminated");
+  });
+
+  it("terminates only the run-scoped process, proves it stopped, and removes its run root", async () => {
+    const commands: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      if (!url.endsWith("/commands") || init?.method !== "POST") {
+        throw new Error(`unexpected Box request: ${url}`);
+      }
+      const body = parseBoxTestBody(init.body);
+      commands.push(requiredText(body, "command"));
+      return response(commandResult("routine-pi-session-terminated\n"));
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await expect(runtime.terminateRoutineSession({ boxId: "bx_23456789", runId })).resolves.toBeUndefined();
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain(`pid_file="$HOME/${companionPiRoutineSessionPaths(runId).pid}"`);
+    expect(commands[0]).toContain('kill -- -"$pid"');
+    expect(commands[0]).toContain("signal_routine_root_processes TERM");
+    expect(commands[0]).toContain("signal_routine_root_processes KILL");
+    expect(commands[0]).toContain("routine-pi-session process survived termination");
+    expect(commands[0]).toContain('rm -rf "$routine_root"');
+    expect(commands[0]).not.toContain("systemctl --user");
+    expect(spawnSync("bash", ["-n"], { input: commands[0], encoding: "utf8" })).toMatchObject({
+      status: 0,
+      stderr: "",
+    });
   });
 });
 

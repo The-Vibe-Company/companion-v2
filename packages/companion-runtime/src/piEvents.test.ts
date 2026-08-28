@@ -21,6 +21,103 @@ function bigintAwareReplacer(_key: string, value: SnapshotValue): SnapshotValue 
 }
 
 describe("Pi journal validation and projection", () => {
+  it("projects accepted compaction metadata and routine terminal calls without generic tool cards", () => {
+    const page = validatePiJournalRead({
+      value: {
+        events: [
+          {
+            sequence: 1,
+            invocationId: PI_INVOCATION_ID,
+            attemptId: ATTEMPT_ID,
+            kind: "pi_event",
+            event: {
+              type: "compaction_end",
+              aborted: false,
+              willRetry: false,
+              result: {
+                summary: "Pinned compacted context",
+                firstKeptEntryId: "entry-7",
+                tokensBefore: 5_000,
+                estimatedTokensAfter: 900,
+                usage: { cacheRead: 400, cacheWrite: 20 },
+              },
+            },
+          },
+          {
+            sequence: 2,
+            invocationId: PI_INVOCATION_ID,
+            attemptId: ATTEMPT_ID,
+            kind: "pi_event",
+            event: {
+              type: "tool_execution_start",
+              toolName: "surface_to_main",
+              toolCallId: "return-1",
+              args: { mode: "relay", message: "Please answer this result." },
+            },
+          },
+        ],
+        nextCursor: 2,
+        acknowledgedCursor: 0,
+        hasMore: false,
+      },
+      after: 0n,
+      attemptId: ATTEMPT_ID,
+      invocationId: PI_INVOCATION_ID,
+    });
+
+    expect(classifyPiJournalPage(page).projections).toEqual([
+      {
+        sequence: 1n,
+        type: "compaction",
+        summary: "Pinned compacted context",
+        first_kept_entry_id: "entry-7",
+        tokens_before: 5_000,
+        estimated_tokens_after: 900,
+        cache_read: 400,
+        cache_write: 20,
+      },
+      {
+        sequence: 2n,
+        type: "routine_return",
+        call_id: "return-1",
+        mode: "relay",
+        message: "Please answer this result.",
+      },
+    ]);
+  });
+
+  it("omits a compaction whose entire summary is removed by redaction", () => {
+    const page = validatePiJournalRead({
+      value: {
+        events: [{
+          sequence: 1,
+          invocationId: PI_INVOCATION_ID,
+          attemptId: ATTEMPT_ID,
+          kind: "pi_event",
+          event: {
+            type: "compaction_end",
+            aborted: false,
+            willRetry: false,
+            result: {
+              summary: "remove-everything",
+              firstKeptEntryId: "entry-7",
+              tokensBefore: 5_000,
+              estimatedTokensAfter: 900,
+            },
+          },
+        }],
+        nextCursor: 1,
+        acknowledgedCursor: 0,
+        hasMore: false,
+      },
+      after: 0n,
+      attemptId: ATTEMPT_ID,
+      invocationId: PI_INVOCATION_ID,
+    });
+
+    expect(classifyPiJournalPage(page, new Date(), () => "").projections).toEqual([]);
+  });
+
   it("counts unknown events, projects process exit, and never treats it as settlement", () => {
     const page = validatePiJournalRead({
       value: {

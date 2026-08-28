@@ -48,6 +48,16 @@ const RELEASE_DENIALS = new Set([
   "settings_changed",
 ]);
 
+class RoutineCancelTerminationError extends Error {
+  readonly stableCode = "routine_cancel_termination_ambiguous";
+  readonly action = "retry" as const;
+
+  constructor() {
+    super("The isolated routine process could not be proven stopped after cancellation.");
+    this.name = "RoutineCancelTerminationError";
+  }
+}
+
 export class RuntimeEngine {
   readonly #deps: RuntimeEngineDependencies;
   readonly #sessions = new Map<string, LeaseSession>();
@@ -162,7 +172,21 @@ export class RuntimeEngine {
         return this.#result(claim, "fence_lost");
       }
       if (error instanceof LeaseAuthorizationDeniedError) {
-        return await this.#finishDenial(claim, session, error.denialCode, error);
+        try {
+          return await this.#finishDenial(claim, session, error.denialCode, error);
+        } catch (denialError) {
+          if (denialError instanceof RoutineCancelTerminationError) {
+            return await this.#finishSettlement(claim, session, {
+              terminalStatus: "interrupted",
+              error: safeErrorFromUnknown(denialError, {
+                code: "routine_cancel_termination_ambiguous",
+                message: "The isolated routine process could not be proven stopped after cancellation.",
+                action: "retry",
+              }),
+            }, denialError);
+          }
+          throw denialError;
+        }
       }
       if (error instanceof AmbiguousExternalEffectError) {
         return await this.#finishSettlement(claim, session, {
@@ -170,6 +194,16 @@ export class RuntimeEngine {
           error: safeErrorFromUnknown(error, {
             code: "external_effect_ambiguous",
             message: "An external effect may have succeeded and was not replayed.",
+            action: "retry",
+          }),
+        }, error);
+      }
+      if (error instanceof RoutineCancelTerminationError) {
+        return await this.#finishSettlement(claim, session, {
+          terminalStatus: "interrupted",
+          error: safeErrorFromUnknown(error, {
+            code: "routine_cancel_termination_ambiguous",
+            message: "The isolated routine process could not be proven stopped after cancellation.",
             action: "retry",
           }),
         }, error);
@@ -252,6 +286,42 @@ export class RuntimeEngine {
     if (auth.dispatchState !== "accepted"
       && auth.dispatchState !== "write_intent"
       && auth.dispatchState !== "ambiguous") return;
+    const runId = claim.turnId;
+    if (
+      runId
+      && auth.piInvocationId?.startsWith(`routine:${runId}:`)
+      && this.#deps.pi.routineSession
+    ) {
+      const abortController = new AbortController();
+      const abortTimer = setTimeout(() => abortController.abort(), 8_000);
+      try {
+        await this.#deps.pi.routineSession.abort({
+          boxId: auth.boxId,
+          runId,
+          commandId: this.#deps.idFactory.uuid(),
+          attemptId: claim.workId,
+          signal: abortController.signal,
+        });
+      } catch {
+        // Process termination is the authoritative cancellation boundary for isolated routines.
+      } finally {
+        clearTimeout(abortTimer);
+      }
+      const terminateController = new AbortController();
+      const terminateTimer = setTimeout(() => terminateController.abort(), 8_000);
+      try {
+        await this.#deps.pi.routineSession.terminate({
+          boxId: auth.boxId,
+          runId,
+          signal: terminateController.signal,
+        });
+        return;
+      } catch {
+        throw new RoutineCancelTerminationError();
+      } finally {
+        clearTimeout(terminateTimer);
+      }
+    }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 8_000);
     try {
@@ -262,7 +332,7 @@ export class RuntimeEngine {
         signal: controller.signal,
       });
     } catch {
-      // Stop still settles. A leftover Pi run is recovered by the next turn's idle preflight.
+      // The persistent main Pi is recovered by the next turn's idle preflight.
     } finally {
       clearTimeout(timer);
     }

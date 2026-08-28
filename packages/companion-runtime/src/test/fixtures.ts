@@ -261,6 +261,10 @@ export function attemptMaterial(overrides: Partial<RuntimeWorkMaterial> = {}): R
     promptText: "Hello from a durable turn",
     turnStartedAt: new Date("2026-08-26T13:00:00.000Z"),
     memberTimezone: "UTC",
+    routineId: null,
+    routineName: null,
+    routineIsolated: false,
+    routineContext: null,
     decisionRequestKind: null,
     decisionResponsePayload: null,
     providerMaterial: [],
@@ -298,6 +302,7 @@ export class MemoryRuntimeStore implements RuntimeStore {
   recordedMaterialSnapshots: Array<{ clientSurface: ClientSurface; materialExpiresAt: Date | null }> = [];
   publishedMaterialSnapshots: string[] = [];
   skillUpdateErrors: Array<{ code: string; message: string }> = [];
+  routinePreparations = 0;
 
   constructor(input: {
     authorization: RuntimeAuthorization;
@@ -474,6 +479,20 @@ export class MemoryRuntimeStore implements RuntimeStore {
     return { ...this.material };
   }
 
+  async prepareRoutineRun(
+    _fence: LeaseFence,
+  ): Promise<{ id: string; sha256: string; content: string } | false | null> {
+    if (this.material.routineId === null) return false;
+    if (!this.material.routineIsolated) this.routinePreparations += 1;
+    this.material.routineContext ??= {
+      id: "2a1d4f26-268e-4b8b-b254-24194374fb0a",
+      sha256: "d".repeat(64),
+      content: "Routine context substrate v1:test:1\n\nRecent main conversation:\n- User: status?",
+    };
+    this.material.routineIsolated = true;
+    return { ...this.material.routineContext };
+  }
+
   async getSkillUpdateMaterial(): Promise<RuntimeSkillUpdateMaterial | null> {
     return {
       targetSkillsRevision: this.authorization.targetSkillsRevision
@@ -586,6 +605,7 @@ export class MemoryRuntimeStore implements RuntimeStore {
     checkpointSequence: bigint;
     eventCursor: bigint;
     hasVisibleOutput: boolean;
+    routineReturned: boolean;
   } | null> {
     if (input.expectedSequence !== this.authorization.workCheckpointSequence) return null;
     this.projected.push(input.events);
@@ -596,7 +616,7 @@ export class MemoryRuntimeStore implements RuntimeStore {
     this.authorization.workCheckpointSequence = next;
     this.authorization.workCheckpoint = input.events.some((event) => event.type === "process_exit")
       ? "process_exited"
-      : input.events.some((event) => event.type === "settled")
+      : input.events.some((event) => event.type === "settled" || event.type === "routine_return")
         ? "agent_settled"
         : "event_projected";
     this.authorization.eventCursor = input.throughCursor;
@@ -614,6 +634,7 @@ export class MemoryRuntimeStore implements RuntimeStore {
       checkpointSequence: next,
       eventCursor: input.throughCursor,
       hasVisibleOutput: visible,
+      routineReturned: input.events.some((event) => event.type === "routine_return"),
     };
   }
 
@@ -674,9 +695,13 @@ export interface FakePorts {
   eventProjector: RuntimeEventProjector;
   log: string[];
   promptCalls: { attemptId: string; message: string }[];
+  routinePromptCalls: { attemptId: string; runId: string; message: string }[];
+  routineStarts: string[];
+  routineTerminates: string[];
   abortCalls: { attemptId: string; boxId: string }[];
   decisionCalls: { attemptId: string }[];
   eventReads: unknown[];
+  routineEventReads: unknown[];
   stagedAttachments: { messageEventId: string; filenames: string[] }[];
   harvestedOutputs: RuntimeOutputAttachment[];
   /** `throws` models an unreadable outbox; `incomplete` alone models a partial harvest. */
@@ -690,9 +715,13 @@ export function fakePorts(store: MemoryRuntimeStore): FakePorts {
   // the external ACK rather than merely that both happened.
   store.effectLog = log;
   const promptCalls: FakePorts["promptCalls"] = [];
+  const routinePromptCalls: FakePorts["routinePromptCalls"] = [];
+  const routineStarts: string[] = [];
+  const routineTerminates: string[] = [];
   const abortCalls: FakePorts["abortCalls"] = [];
   const decisionCalls: FakePorts["decisionCalls"] = [];
   const eventReads: unknown[] = [];
+  const routineEventReads: unknown[] = [];
   const stagedAttachments: FakePorts["stagedAttachments"] = [];
   const harvestedOutputs: RuntimeOutputAttachment[] = [];
   const clearedOutboxes: string[] = [];
@@ -763,6 +792,58 @@ export function fakePorts(store: MemoryRuntimeStore): FakePorts {
     respondExtensionUi: async (input) => {
       decisionCalls.push({ attemptId: input.attemptId });
       return { outcome: "accepted", invocationId: PI_INVOCATION_ID };
+    },
+    routineSession: {
+      start: async ({ runId }) => {
+        routineStarts.push(runId);
+        return { state: "idle", invocationId: `routine:${runId}:invocation` };
+      },
+      state: async ({ runId }) => ({
+        invocationId: `routine:${runId}:invocation`,
+        layoutMarker: "layout-current",
+        activeAttemptId: store.authorization.dispatchState === "accepted" ? ATTEMPT_ID : null,
+        tailCursor: store.authorization.eventCursor ?? 0n,
+        acknowledgedCursor: store.authorization.eventCursor ?? 0n,
+        counters: {
+          malformedLines: 0,
+          oversizedLines: 0,
+          unterminatedLines: 0,
+          unknownEvents: 0,
+          unboundEvents: 0,
+          orphanResponses: 0,
+        },
+        modelInput: ["text"],
+      }),
+      prompt: async (input) => {
+        routinePromptCalls.push({
+          attemptId: input.attemptId,
+          runId: input.runId,
+          message: input.message,
+        });
+        return {
+          outcome: "accepted",
+          invocationId: `routine:${input.runId}:invocation`,
+          initialCursor: store.authorization.eventCursor ?? 0n,
+        };
+      },
+      read: async () => routineEventReads.shift() ?? {
+        events: [],
+        nextCursor: Number(store.authorization.eventCursor ?? 0n),
+        acknowledgedCursor: Number(store.authorization.eventCursor ?? 0n),
+        hasMore: false,
+      },
+      ack: async ({ through }) => {
+        log.push("routine-ack");
+        return through;
+      },
+      abort: async ({ runId }) => ({
+        outcome: "accepted",
+        invocationId: `routine:${runId}:invocation`,
+      }),
+      terminate: async ({ runId }) => {
+        log.push("routine-terminate");
+        routineTerminates.push(runId);
+      },
     },
   };
   const resourceStager: RuntimeResourceStager = {
@@ -839,9 +920,13 @@ export function fakePorts(store: MemoryRuntimeStore): FakePorts {
     eventProjector,
     log,
     promptCalls,
+    routinePromptCalls,
+    routineStarts,
+    routineTerminates,
     abortCalls,
     decisionCalls,
     eventReads,
+    routineEventReads,
     stagedAttachments,
     harvestedOutputs,
     get harvestFailure() {

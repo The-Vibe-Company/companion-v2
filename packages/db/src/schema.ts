@@ -1029,6 +1029,12 @@ export const companionTurns = pgTable(
     routineName: text("routine_name"),
     /** Immutable routine id snapshot; unlike routine_id it survives routine deletion. */
     routineSnapshotId: uuid("routine_snapshot_id"),
+    /** Durable execution-mode pin. Once true, takeover never falls back to the main Pi session. */
+    routineIsolated: boolean("routine_isolated").notNull().default(false),
+    /** Content-addressed runtime-only main-conversation background pinned before Box contact. */
+    routineContextSubstrateId: uuid("routine_context_substrate_id"),
+    /** For relay turns, the one surfaced Companion entry the main Pi is asked to answer. */
+    routineRelaySourceEventId: text("routine_relay_source_event_id"),
     /**
      * Originating trigger, if this turn was a webhook fire. Same snapshot rules as a routine:
      * `trigger_id` is SET NULL if the trigger is deleted; `trigger_name` still labels the transcript.
@@ -1060,6 +1066,8 @@ export const companionTurns = pgTable(
     messageEvent: index("companion_turns_message_event_idx").on(t.companionId, t.messageEventId),
     routineOriginCheck: check("companion_turns_routine_origin_check", sql`(${t.routineId} is null or ${t.routineName} is not null) and (${t.routineName} is null or (char_length(${t.routineName}) between 1 and 80 and ${t.routineName} !~ E'[\\n\\r]'))`),
     routineSnapshotCheck: check("companion_turns_routine_snapshot_check", sql`${t.routineSnapshotId} is null or ${t.routineName} is not null`),
+    routineIsolationCheck: check("companion_turns_routine_isolation_check", sql`not ${t.routineIsolated} or (${t.routineSnapshotId} is not null and ${t.routineContextSubstrateId} is not null)`),
+    routineRelaySourceCheck: check("companion_turns_routine_relay_source_check", sql`${t.routineRelaySourceEventId} is null or (char_length(${t.routineRelaySourceEventId}) between 1 and 200 and ${t.routineRelaySourceEventId} !~ E'[\n\r]' and ${t.routineName} is null)`),
     routineSnapshot: index("companion_turns_routine_snapshot_idx").on(t.orgId, t.companionId, t.routineSnapshotId, t.queueSequence, t.id).where(sql`${t.routineSnapshotId} is not null`),
     triggerOriginCheck: check("companion_turns_trigger_origin_check", sql`(${t.triggerId} is null or ${t.triggerName} is not null) and (${t.triggerName} is null or (char_length(${t.triggerName}) between 1 and 80 and ${t.triggerName} !~ E'[\\n\\r]')) and not (${t.routineName} is not null and ${t.triggerName} is not null)`),
   }),
@@ -1434,7 +1442,7 @@ export const companionRuntimeEventProjections = pgTable(
     cursor: index("companion_runtime_event_projections_cursor_idx").on(t.attemptId, t.brokerSequence),
     sequenceCheck: check("companion_runtime_event_projections_sequence_check", sql`${t.brokerSequence} >= 1`),
     invocationCheck: check("companion_runtime_event_projections_invocation_check", sql`char_length(${t.piInvocationId}) between 1 and 200 and ${t.piInvocationId} !~ E'[\\n\\r]'`),
-    kindCheck: check("companion_runtime_event_projections_kind_check", sql`${t.projectionKind} in ('assistant','tool','decision','activity','settled','process_exit')`),
+    kindCheck: check("companion_runtime_event_projections_kind_check", sql`${t.projectionKind} in ('assistant','tool','decision','activity','settled','process_exit','compaction','routine_return')`),
     digestCheck: check("companion_runtime_event_projections_digest_check", sql`${t.projectionSha256} ~ '^[0-9a-f]{64}$'`),
   }),
 );
@@ -1580,6 +1588,59 @@ export const companionThreads = pgTable(
       name: "companion_threads_companion_fk",
     }),
     nonnegativeNextOrdinal: check("companion_threads_next_ordinal_check", sql`${t.nextOrdinal} >= 0`),
+  }),
+);
+
+/** Latest accepted compaction summaries from the main Pi only; never exposed by member APIs. */
+export const companionMainPiCompactions = pgTable(
+  "companion_main_pi_compactions",
+  {
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    companionId: uuid("companion_id").notNull(),
+    piInvocationId: text("pi_invocation_id").notNull(),
+    generation: bigint("generation", { mode: "number" }).notNull(),
+    eventCursor: bigint("event_cursor", { mode: "number" }).notNull(),
+    summary: text("summary").notNull(),
+    firstKeptEntryId: text("first_kept_entry_id").notNull(),
+    tokensBefore: integer("tokens_before").notNull(),
+    estimatedTokensAfter: integer("estimated_tokens_after").notNull(),
+    cacheRead: integer("cache_read"),
+    cacheWrite: integer("cache_write"),
+    sha256: text("sha256").notNull(),
+    observedAt: timestamp("observed_at", { withTimezone: true }).notNull(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.companionId, t.piInvocationId, t.generation] }),
+    companionOrgFk: foreignKey({
+      columns: [t.orgId, t.companionId],
+      foreignColumns: [companions.orgId, companions.id],
+      name: "companion_main_pi_compactions_companion_fk",
+    }).onDelete("cascade"),
+    latest: index("companion_main_pi_compactions_latest_idx").on(t.orgId, t.companionId, t.observedAt),
+  }),
+);
+
+/** Reusable rendered routine backgrounds keyed by their exact LF-normalized bytes. */
+export const companionRoutineContextSubstrates = pgTable(
+  "companion_routine_context_substrates",
+  {
+    id: uuid("id").primaryKey().notNull().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    companionId: uuid("companion_id").notNull(),
+    summarySha256: text("summary_sha256"),
+    builtThroughOrdinal: integer("built_through_ordinal").notNull(),
+    content: text("content").notNull(),
+    sha256: text("sha256").notNull(),
+    createdAt: now(),
+  },
+  (t) => ({
+    companionOrgFk: foreignKey({
+      columns: [t.orgId, t.companionId],
+      foreignColumns: [companions.orgId, companions.id],
+      name: "companion_routine_context_substrates_companion_fk",
+    }).onDelete("cascade"),
+    digest: unique("companion_routine_context_substrates_digest_uq").on(t.companionId, t.sha256),
+    companion: index("companion_routine_context_substrates_companion_idx").on(t.orgId, t.companionId, t.createdAt),
   }),
 );
 

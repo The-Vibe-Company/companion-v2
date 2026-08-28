@@ -533,6 +533,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
             'companion_turn_attempts', 'companion_operations', 'companion_decision_deliveries',
             'companion_runtime_leases', 'companion_runtime_duplicate_cleanups',
             'companion_runtime_event_projections', 'companion_runtime_desktop_requests',
+            'companion_main_pi_compactions', 'companion_routine_context_substrates',
             'companion_message_attachments', 'companion_routines', 'companion_mcp_broker_tokens',
             'companion_images'
           ]) protected(table_name)
@@ -553,6 +554,9 @@ describe("Companion runtime executor PostgreSQL surface", () => {
             'public.companion_runtime_authorize_desktop(uuid,uuid,text)',
             'public.companion_runtime_consume_desktop_request(text,bigint,integer)',
             'public.companion_runtime_project_event_batch(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,bigint,text,jsonb,bigint,timestamp with time zone,integer,integer,integer)',
+            'public.companion_runtime_get_routine_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)',
+            'public.companion_runtime_prepare_routine_run(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,boolean)',
+            'public.companion_runtime_project_event_batch_v2(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,bigint,text,jsonb,bigint,timestamp with time zone,integer,integer,integer)',
             'public.companion_runtime_record_attempt_outputs(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,jsonb,timestamp with time zone)',
             'public.companion_runtime_defer_delete(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)',
             'public.companion_runtime_image_request(text,text)',
@@ -571,13 +575,16 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           ${runtimeRole}, 'public.companion_runtime_guard_duplicate_cleanup()', 'EXECUTE'
         ) as "helperCallable"
     `;
-    expect(acl).toEqual({ privateTableReads: 0, callableFunctions: 24, helperCallable: false });
+    expect(acl).toEqual({ privateTableReads: 0, callableFunctions: 27, helperCallable: false });
     await expect(asRuntime((tx) => tx`select * from companion_turn_attempts`))
       .rejects.toThrow(/permission denied/i);
 
     const runtimeOnlySignatures = [
       "public.companion_runtime_record_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,public.companion_client_surface,timestamp with time zone,text,text)",
       "public.companion_runtime_publish_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text)",
+      "public.companion_runtime_get_routine_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)",
+      "public.companion_runtime_prepare_routine_run(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,boolean)",
+      "public.companion_runtime_project_event_batch_v2(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,bigint,text,jsonb,bigint,timestamp with time zone,integer,integer,integer)",
       "public.companion_runtime_claim_work(text,integer,integer,bigint,integer,integer)",
       "public.companion_runtime_defer_delete(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)",
       "public.companion_runtime_image_request(text,text)",
@@ -4973,6 +4980,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         checkpointSequence: 1n,
         eventCursor: 1n,
         hasVisibleOutput: true,
+        routineReturned: false,
       });
       const [durable] = await sql<Array<{ cursor: string; content: string }>>`
         select attempt.event_cursor::text as cursor, entry.content
@@ -5472,6 +5480,162 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       const resumedClaim = await claimWork();
       expect(resumedClaim).toMatchObject({ workKind: "attempt", workId: fixture.attemptId });
       await release(resumedClaim);
+    } finally {
+      await removeCompanion(fixture.companionId);
+    }
+  });
+
+  it("pins routine context and projects private events through one replay-safe terminal return", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const fixture = await createCompanion();
+    const routineId = randomUUID();
+    try {
+      await sql`
+        insert into companion_routines(
+          id, org_id, companion_id, name, prompt, cron, timezone,
+          enabled, next_fire_at, created_by
+        ) values (
+          ${routineId}::uuid, ${ids.orgA}::uuid, ${fixture.companionId}::uuid,
+          'Isolated executor check', 'Inspect runtime state', '0 9 * * *', 'UTC',
+          false, null, ${ids.ownerA}
+        )
+      `;
+      await sql`
+        update companion_transcript_entries
+        set routine_name = 'Isolated executor check', turn_id = ${fixture.turnId}::uuid
+        where companion_id = ${fixture.companionId}::uuid and turn_id is null
+      `;
+      await sql`
+        update companion_turns
+        set routine_id = ${routineId}::uuid, routine_snapshot_id = ${routineId}::uuid,
+          routine_name = 'Isolated executor check'
+        where id = ${fixture.turnId}::uuid
+      `;
+      await sql`
+        update companion_runtime_instances
+        set pi_invocation_id = 'main-pi'
+        where org_id = ${ids.orgA}::uuid and companion_id = ${fixture.companionId}::uuid
+      `;
+      await sql`
+        insert into companion_main_pi_compactions(
+          org_id, companion_id, pi_invocation_id, generation, event_cursor,
+          summary, first_kept_entry_id, tokens_before, estimated_tokens_after,
+          cache_read, cache_write, sha256, observed_at
+        ) values (
+          ${ids.orgA}::uuid, ${fixture.companionId}::uuid, 'replaced-main-pi', 1, 8,
+          'Stale context from the replaced main Pi must not be used.', 'entry-6',
+          4000, 800, 300, 10, ${"b".repeat(64)}, now() + interval '1 minute'
+        ), (
+          ${ids.orgA}::uuid, ${fixture.companionId}::uuid, 'main-pi', 1, 9,
+          ${`The main conversation established a deployment constraint.\n${"token ".repeat(3000)}`}, 'entry-7',
+          5000, 900, 400, 20, ${"a".repeat(64)}, now()
+        )
+      `;
+      const claim = await claimWork();
+      expect(claim.workKind).toBe("attempt");
+      const prepare = async () => await asRuntime((tx) => tx<Array<{
+        isolated: boolean;
+        contextId: string;
+        sha256: string;
+        content: string;
+      }>>`
+        select isolated, context_id::text as "contextId",
+          context_sha256 as sha256, context_content as content
+        from public.companion_runtime_prepare_routine_run(
+          ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
+          ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
+          'attempt', ${claim.workId}::uuid, true
+        )
+      `);
+      const firstContext = await prepare();
+      const takeoverContext = await prepare();
+      expect(takeoverContext).toEqual(firstContext);
+      expect(firstContext[0]).toMatchObject({
+        isolated: true,
+        sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+        content: expect.stringContaining("The main conversation established a deployment constraint."),
+      });
+      expect(firstContext[0]?.content).not.toContain("Stale context from the replaced main Pi");
+      expect(firstContext[0]?.content).toContain(
+        "[Additional summary detail omitted to fit the routine context budget.]",
+      );
+      const rendered = firstContext[0]!.content;
+      const estimatedTokens = Math.max(
+        Math.ceil(Buffer.byteLength(rendered, "utf8") / 4),
+        rendered.match(/[A-Za-z0-9_]+|[^\sA-Za-z0-9_]/g)?.length ?? 0,
+        Math.ceil((Buffer.byteLength(rendered, "utf8") - [...rendered].length) / 2),
+      );
+      expect(estimatedTokens).toBeLessThanOrEqual(4_000);
+
+      const events = [
+        {
+          sequence: "1", type: "assistant", entry_key: "assistant:1",
+          content: "Private routine analysis", reasoning: null,
+        },
+        {
+          sequence: "2", type: "tool", entry_key: "tool:call-1", content: "Tool · bash",
+          tool: {
+            call_id: "call-1", kind: "shell", name: "bash", title: "Check status",
+            status: "ok", detail: "green", screenshot: null,
+          },
+        },
+        {
+          sequence: "3", type: "routine_return", call_id: "return-1",
+          mode: "notify", message: "Deployment is healthy.",
+        },
+        {
+          sequence: "4", type: "routine_return", call_id: "return-2",
+          mode: "relay", message: "A later return must not win.",
+        },
+        {
+          sequence: "5", type: "assistant", entry_key: "assistant:5",
+          content: "Post-return output must be ignored", reasoning: null,
+        },
+      ];
+      const project = async () => await asRuntime((tx) => tx<Array<{
+        sequence: string;
+        cursor: string;
+        visible: boolean;
+        returned: boolean;
+      }>>`
+        select checkpoint_sequence::text as sequence, event_cursor::text as cursor,
+          has_visible_output as visible, routine_returned as returned
+        from public.companion_runtime_project_event_batch_v2(
+          ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
+          ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
+          'attempt', ${claim.workId}::uuid, ${claim.checkpointSequence}::bigint,
+          ${`pi-${fixture.attemptId}`}, ${tx.json(events)}, 5, now(), 0, 0, 0
+        )
+      `);
+      const projected = await project();
+      expect(projected).toEqual([{ sequence: "1", cursor: "5", visible: false, returned: true }]);
+      await expect(project()).resolves.toEqual(projected);
+
+      const privateEntries = await sql<Array<{ role: string; content: string }>>`
+        select role::text as role, content
+        from companion_routine_run_entries where run_id = ${fixture.turnId}::uuid
+        order by ordinal
+      `;
+      expect(privateEntries).toEqual([
+        { role: "assistant", content: "Private routine analysis" },
+        { role: "tool", content: "Tool · bash" },
+      ]);
+      const mainEntries = await sql<Array<{ content: string }>>`
+        select content from companion_transcript_entries
+        where companion_id = ${fixture.companionId}::uuid order by ordinal
+      `;
+      expect(mainEntries.map((entry) => entry.content)).toEqual([
+        fixture.prompt,
+        "Deployment is healthy.",
+      ]);
+      expect(JSON.stringify(mainEntries)).not.toContain("Private routine analysis");
+      expect(JSON.stringify(mainEntries)).not.toContain("later return");
+      expect(JSON.stringify(mainEntries)).not.toContain("Post-return");
+      const returns = await sql<Array<{ mode: string; relayTurnId: string | null }>>`
+        select mode::text as mode, relay_turn_id::text as "relayTurnId"
+        from companion_routine_returns where run_id = ${fixture.turnId}::uuid
+      `;
+      expect(returns).toEqual([{ mode: "notify", relayTurnId: null }]);
     } finally {
       await removeCompanion(fixture.companionId);
     }

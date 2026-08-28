@@ -88,7 +88,9 @@ DECLARE
     'companion_notification_devices',
     'companion_notification_deliveries',
     'companion_routine_run_entries',
-    'companion_routine_returns'
+    'companion_routine_returns',
+    'companion_main_pi_compactions',
+    'companion_routine_context_substrates'
   ];
   api_capability_managed_tables regclass[] := ARRAY[
     'public.companions'::regclass,
@@ -730,6 +732,21 @@ BEGIN
       internal_runtime_functions := internal_runtime_functions || ARRAY[
         'public.companion_api_routine_run_json(uuid,uuid,uuid,boolean,integer,integer)'::regprocedure,
         'public.companion_api_routine_run_summary_json(uuid,uuid,uuid,boolean)'::regprocedure
+      ];
+    END IF;
+    IF pg_catalog.to_regprocedure(
+      'public.companion_runtime_project_event_batch_v2(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,bigint,text,jsonb,bigint,timestamp with time zone,integer,integer,integer)'
+    ) IS NOT NULL THEN
+      companion_runtime_functions := companion_runtime_functions || ARRAY[
+        'public.companion_runtime_get_routine_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)'::regprocedure,
+        'public.companion_runtime_prepare_routine_run(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,boolean)'::regprocedure,
+        'public.companion_runtime_project_event_batch_v2(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,bigint,text,jsonb,bigint,timestamp with time zone,integer,integer,integer)'::regprocedure
+      ];
+      companion_api_functions := companion_api_functions || ARRAY[
+        'public.companion_api_routine_hidden_relay_turns(uuid,uuid)'::regprocedure
+      ];
+      internal_runtime_functions := internal_runtime_functions || ARRAY[
+        'public.companion_runtime_surface_routine_return(uuid,uuid,uuid,public.companion_routine_surface_mode,text)'::regprocedure
       ];
     END IF;
 

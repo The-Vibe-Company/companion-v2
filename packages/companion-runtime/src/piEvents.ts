@@ -133,6 +133,23 @@ export type RuntimePiProjection =
     expires_at: string;
   }
   | { sequence: bigint; type: "activity"; event_type: string }
+  | {
+    sequence: bigint;
+    type: "compaction";
+    summary: string;
+    first_kept_entry_id: string;
+    tokens_before: number;
+    estimated_tokens_after: number;
+    cache_read: number | null;
+    cache_write: number | null;
+  }
+  | {
+    sequence: bigint;
+    type: "routine_return";
+    call_id: string;
+    mode: "relay" | "notify";
+    message: string;
+  }
   | { sequence: bigint; type: "settled" }
   | { sequence: bigint; type: "process_exit"; code: number | null; signal: string | null };
 
@@ -275,6 +292,8 @@ const MAX_SUBAGENT_DETAIL = 8_000;
 /** One line naming the child agent. Anything longer is a payload, not a name. */
 const MAX_SUBAGENT_AGENT = 120;
 const MAX_TITLE = 300;
+const MAX_COMPACTION_SUMMARY = 10_000;
+const MAX_ROUTINE_RETURN = 16_384;
 const DEFAULT_DECISION_TIMEOUT_MS = COMPANION_BUDGETS_BASE.decisionTimeoutMs;
 
 /**
@@ -560,6 +579,68 @@ function toolArguments(event: Record<string, unknown>): ToolPayload | null {
 
 function toolArgumentObject(event: Record<string, unknown>): Record<string, unknown> | null {
   return dictionary(toolArguments(event));
+}
+
+function nonnegativeSafeInteger(value: unknown): number | null {
+  return Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : null;
+}
+
+function routineReturnProjection(
+  sequence: bigint,
+  event: Record<string, unknown>,
+  redact: RuntimeVisibleTextRedactor,
+): Extract<RuntimePiProjection, { type: "routine_return" }> | null {
+  if (event.type !== "tool_execution_start" || toolEventName(event) !== "surface_to_main") {
+    return null;
+  }
+  const args = toolArgumentObject(event);
+  const mode = args?.mode;
+  const rawMessage = args?.message;
+  const callId = optionalId(event.toolCallId ?? event.tool_call_id, 200);
+  if (
+    (mode !== "relay" && mode !== "notify")
+    || typeof rawMessage !== "string"
+    || !rawMessage.trim()
+    || !callId
+  ) return null;
+  const message = bounded(postgresSafeText(redact(rawMessage.trim())), MAX_ROUTINE_RETURN);
+  return message ? { sequence, type: "routine_return", call_id: callId, mode, message } : null;
+}
+
+function compactionProjection(
+  sequence: bigint,
+  event: Record<string, unknown>,
+  redact: RuntimeVisibleTextRedactor,
+): Extract<RuntimePiProjection, { type: "compaction" }> | null {
+  if (event.type !== "compaction_end" || event.aborted !== false || event.willRetry !== false) {
+    return null;
+  }
+  const result = dictionary(event.result);
+  const summary = result?.summary;
+  const kept = result?.firstKeptEntryId;
+  const tokensBefore = nonnegativeSafeInteger(result?.tokensBefore);
+  const tokensAfter = nonnegativeSafeInteger(result?.estimatedTokensAfter);
+  if (
+    typeof summary !== "string" || !summary.trim()
+    || typeof kept !== "string" || !kept || kept.length > 200 || /[\r\n]/.test(kept)
+    || tokensBefore === null || tokensAfter === null
+  ) return null;
+  const usage = dictionary(result?.usage);
+  const redactedSummary = bounded(
+    postgresSafeText(redact(summary.trim())),
+    MAX_COMPACTION_SUMMARY,
+  );
+  if (!redactedSummary) return null;
+  return {
+    sequence,
+    type: "compaction",
+    summary: redactedSummary,
+    first_kept_entry_id: kept,
+    tokens_before: tokensBefore,
+    estimated_tokens_after: tokensAfter,
+    cache_read: nonnegativeSafeInteger(usage?.cacheRead),
+    cache_write: nonnegativeSafeInteger(usage?.cacheWrite),
+  };
 }
 
 function firstText(
@@ -1085,6 +1166,17 @@ export function classifyPiJournalPage(
       projections.push(decision);
       activity = true;
       needsInput = true;
+      continue;
+    }
+    const routineReturn = routineReturnProjection(record.sequence, record.event, redact);
+    if (routineReturn) {
+      projections.push(routineReturn);
+      activity = true;
+      continue;
+    }
+    const compaction = compactionProjection(record.sequence, record.event, redact);
+    if (compaction) {
+      projections.push(compaction);
       continue;
     }
     const assistant = assistantProjection(record.sequence, record.event, redact);

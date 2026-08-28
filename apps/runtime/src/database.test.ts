@@ -21,7 +21,7 @@ const validProfile = {
   ownsDatabaseOrSchema: false,
   ownsRelations: false,
   ownsFunctionsOrTypes: false,
-  protectedRelationCount: 12,
+  protectedRelationCount: 14,
   hasPublicRelationPrivileges: false,
   requiredFunctionsReady: true,
   ownsRequiredFunctions: false,
@@ -72,6 +72,8 @@ describe("runtime database role verification", () => {
     expect(query).toContain("has_table_privilege");
     expect(query).toContain("companion_runtime_claim_work");
     expect(query).toContain("companion_runtime_renew_and_authorize");
+    expect(query).toContain("companion_runtime_get_routine_material");
+    expect(query).toContain("companion_routine_context_substrates");
   });
 
   it.each([

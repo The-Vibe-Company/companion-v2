@@ -1,6 +1,8 @@
 # Routine Pi context substrate
 
-Status: design recommendation; investigation only. This document does not implement the substrate.
+Status: implemented by the routine-isolation runtime path. Migration 0137 owns the
+runtime-only compaction and content-addressed substrate tables; the durable routine turn pins the
+rendered bytes before any Box contact.
 
 ## Decision
 
@@ -151,7 +153,10 @@ and per-fire metadata.
 ## Budget and truncation
 
 Use the selected model's tokenizer or Pi's estimator when available, plus a UTF-8 byte ceiling as
-defense in depth.
+defense in depth. Pinning happens before Box contact, where neither tokenizer is available today,
+so the database renderer uses one versioned deterministic estimate: the greatest of UTF-8 bytes
+divided by four, word-plus-punctuation units, and a multibyte-character floor. The component and
+total limits below are authoritative for that estimate; the 32 KiB ceiling remains independent.
 
 | Component | Estimated-token limit | Additional bound |
 | --- | ---: | --- |
@@ -211,9 +216,9 @@ Refresh is event-driven and lazy:
 
 Do not refresh on a clock. Time belongs in the per-run suffix.
 
-## Database/runtime implementation seams
+## Database/runtime implementation
 
-The later runtime cutover should:
+The runtime cutover:
 
 1. add org-scoped main-context base/snapshot tables with forced RLS, digests, bounded columns, and no
    direct process-role grants;

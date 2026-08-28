@@ -26,8 +26,26 @@ class RecordingSql implements RuntimeSqlClient {
     parameters: unknown[] = [],
   ): Promise<T> {
     this.calls.push({ query, parameters });
+    const rows = this.rows.map((row) => {
+      const copy = { ...row };
+      if (query.includes("companion_runtime_get_routine_material")) {
+        Object.assign(copy, {
+          relay_source_content: row.relay_source_content ?? null,
+          routine_snapshot_id: row.routine_snapshot_id ?? null,
+          routine_name: row.routine_name ?? null,
+          routine_isolated: row.routine_isolated ?? false,
+          routine_context_id: row.routine_context_id ?? null,
+          routine_context_sha256: row.routine_context_sha256 ?? null,
+          routine_context_content: row.routine_context_content ?? null,
+        });
+      }
+      if (query.includes("companion_runtime_project_event_batch_v2")) {
+        copy.routine_returned = row.routine_returned ?? false;
+      }
+      return copy;
+    });
     // SAFETY: The fixture rows are the exact shape requested by each SQL call in these tests.
-    return this.rows as T;
+    return rows as T;
   }
 }
 
@@ -581,6 +599,7 @@ describe("PostgresRuntimeStore", () => {
       checkpointSequence: 3n,
       eventCursor: 10n,
       hasVisibleOutput: true,
+      routineReturned: false,
     });
     expect(sql.calls[0]?.parameters[10]).toEqual([{
       sequence: "10",

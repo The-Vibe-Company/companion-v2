@@ -267,9 +267,14 @@ describe("COMPANION_PI_BROKER_SOURCE", () => {
 });
 
 describe("Pi broker --append-system-prompt", () => {
-  async function spawnedPiArgv(instructions: string | null): Promise<string[]> {
+  async function spawnedPiArgv(
+    instructions: string | null,
+    routineRunId: string | null = null,
+  ): Promise<string[]> {
     const home = temporaryDirectory("pi-broker-argv-");
-    const runtimeRoot = join(home, ".companion", "runtime");
+    const runtimeRoot = routineRunId
+      ? join(home, ".companion", "runtime", "routines", routineRunId)
+      : join(home, ".companion", "runtime");
     const brokerPath = join(home, "companion-pi-broker.mjs");
     const piPath = join(home, "fake-pi.mjs");
     const piArgvPath = join(home, "pi.argv.json");
@@ -283,18 +288,20 @@ describe("Pi broker --append-system-prompt", () => {
     writeFileSync(brokerPath, COMPANION_PI_BROKER_SOURCE, { mode: 0o700 });
     writeFileSync(piPath, fakePiSource(), { mode: 0o700 });
     chmodSync(piPath, 0o700);
+    const environment: NodeJS.ProcessEnv = {
+      ...process.env,
+      COMPANION_PI_ROOT: runtimeRoot,
+      COMPANION_PI_BIN: piPath,
+      COMPANION_PI_INVOCATION_ID: "invocation-argv",
+      COMPANION_PI_SOCKET_PATH: socketPath,
+      FAKE_PI_CAPTURE_PATH: join(home, "unused.ndjson"),
+      FAKE_PI_PID_PATH: join(home, "pi.pid"),
+      FAKE_PI_ARGV_PATH: piArgvPath,
+    };
+    if (routineRunId) environment.COMPANION_PI_ROUTINE_RUN_ID = routineRunId;
     trackBrokerProcess(spawn(process.execPath, [brokerPath], {
       detached: true,
-      env: {
-        ...process.env,
-        COMPANION_PI_ROOT: runtimeRoot,
-        COMPANION_PI_BIN: piPath,
-        COMPANION_PI_INVOCATION_ID: "invocation-argv",
-        COMPANION_PI_SOCKET_PATH: socketPath,
-        FAKE_PI_CAPTURE_PATH: join(home, "unused.ndjson"),
-        FAKE_PI_PID_PATH: join(home, "pi.pid"),
-        FAKE_PI_ARGV_PATH: piArgvPath,
-      },
+      env: environment,
       stdio: ["pipe", "pipe", "pipe"],
     }));
     return waitForStringArrayJsonFile(piArgvPath);
@@ -313,6 +320,19 @@ describe("Pi broker --append-system-prompt", () => {
 
   it("omits --append-system-prompt when instructions.txt is whitespace-only", async () => {
     expect(await spawnedPiArgv("   \n")).not.toContain("--append-system-prompt");
+  });
+
+  it("starts a routine root as a fresh Pi session without --continue", async () => {
+    const runId = "11111111-1111-4111-8111-111111111111";
+    const argv = await spawnedPiArgv(null, runId);
+    expect(argv).toEqual([
+      "--mode",
+      "rpc",
+      "--session-dir",
+      expect.stringContaining(`/runtime/routines/${runId}/sessions`),
+      "--no-skills",
+    ]);
+    expect(argv).not.toContain("--continue");
   });
 });
 

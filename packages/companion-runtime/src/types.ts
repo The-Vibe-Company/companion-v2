@@ -387,6 +387,17 @@ export interface RuntimeWorkMaterial {
   turnStartedAt: Date | null;
   /** Stored member IANA timezone; UTC is supplied by the database only when the profile is unset. */
   memberTimezone: string | null;
+  /** Scheduled routine identity; null for ordinary and trigger-origin turns. */
+  routineId: string | null;
+  routineName: string | null;
+  /** Once true, takeover must keep using the run-scoped session even if the deploy gate is off. */
+  routineIsolated: boolean;
+  /** Immutable runtime-only main-conversation background pinned before first Box contact. */
+  routineContext: {
+    id: string;
+    sha256: string;
+    content: string;
+  } | null;
   decisionRequestKind: DecisionRequestKind | null;
   decisionResponsePayload: Record<string, unknown> | null;
   providerMaterial: Record<string, unknown>[];

@@ -349,29 +349,53 @@ describe("Companion routines over the real database", () => {
         content: "Prepared the terminal notification.",
       },
     ]);
+    const [substrate] = await integrationDb
+      .insert(schema.companionRoutineContextSubstrates)
+      .values({
+        orgId: fixture.orgA,
+        companionId,
+        summarySha256: null,
+        builtThroughOrdinal: marker?.ordinal ?? 0,
+        content: "Pinned main conversation context.",
+        sha256: "f".repeat(64),
+      })
+      .returning({ id: schema.companionRoutineContextSubstrates.id });
+    await integrationDb
+      .update(schema.companionTurns)
+      .set({ routineIsolated: true, routineContextSubstrateId: substrate!.id })
+      .where(eq(schema.companionTurns.id, run!.id));
+    const [returned] = await integrationSql<{ accepted: boolean }[]>`
+      select companion_runtime_surface_routine_return(
+        ${fixture.orgA}::uuid, ${companionId}::uuid, ${run!.id}::uuid,
+        'notify', 'The deployment is healthy.'
+      ) as accepted
+    `;
     const mainEntryEventId = `routine-return:${run!.id}`;
-    await integrationDb.insert(schema.companionTranscriptEntries).values({
-      orgId: fixture.orgA,
-      companionId,
-      eventId: mainEntryEventId,
-      ordinal: (marker?.ordinal ?? 0) + 1,
-      role: "assistant",
-      content: "The deployment is healthy.",
+    expect(returned).toEqual({ accepted: true });
+    const storedReturn = await integrationDb.query.companionRoutineReturns.findFirst({
+      where: eq(schema.companionRoutineReturns.runId, run!.id),
     });
-    await integrationDb.insert(schema.companionRoutineReturns).values({
+    expect(storedReturn).toMatchObject({ mainEntryEventId, relayTurnId: null, mode: "notify" });
+    const [replayed] = await integrationSql<{ accepted: boolean }[]>`
+      select companion_runtime_surface_routine_return(
+        ${fixture.orgA}::uuid, ${companionId}::uuid, ${run!.id}::uuid,
+        'relay', 'This later call must not win.'
+      ) as accepted
+    `;
+    expect(replayed).toEqual({ accepted: false });
+
+    const projectedThread = await asActor(fixture.owner, (database) => readCompanionThreadV2({
+      actor: fixture.owner,
       orgId: fixture.orgA,
       companionId,
-      runId: run!.id,
-      mode: "notify",
+      database,
+    }));
+    expect(projectedThread.entries.map((entry) => entry.event_id)).toEqual([
+      marker!.eventId,
       mainEntryEventId,
-    });
-    await expect(integrationDb.insert(schema.companionRoutineReturns).values({
-      orgId: fixture.orgA,
-      companionId,
-      runId: run!.id,
-      mode: "notify",
-      mainEntryEventId,
-    })).rejects.toMatchObject({ cause: { code: "23505" } });
+    ]);
+    expect(JSON.stringify(projectedThread.entries)).not.toContain("Inspected the deployment");
+    expect(JSON.stringify(projectedThread.entries)).not.toContain("This later call must not win.");
 
     await integrationDb
       .update(schema.companionTurns)
@@ -554,6 +578,89 @@ describe("Companion routines over the real database", () => {
     expect(JSON.stringify(detail.internal_entries)).not.toContain(
       "This reply was produced by the pre-cutover main Pi session.",
     );
+  });
+
+  it("references a hidden ordinary turn for relay without projecting its synthetic prompt", async () => {
+    const created = await asActor(fixture.owner, (database) => createCompanionRoutineV2({
+      orgId: fixture.orgA,
+      companionId,
+      ...draft("Relay check"),
+      database,
+    }));
+    await integrationDb
+      .update(schema.companionRoutines)
+      .set({ nextFireAt: new Date() })
+      .where(eq(schema.companionRoutines.id, created.id));
+    const [claim] = await claimDueCompanionRoutines({
+      workerId: "integration-routine-relay-worker",
+      database: integrationDb,
+    });
+    await fireCompanionRoutine({
+      workerId: "integration-routine-relay-worker",
+      orgId: fixture.orgA,
+      routineId: created.id,
+      clientMessageId: routineFireMessageId({
+        routineId: created.id,
+        scheduledFor: claim!.scheduledFor,
+      }),
+      scheduledFor: claim!.scheduledFor,
+      nextFireAt: new Date(Date.now() + 60 * 60 * 1000),
+      database: integrationDb,
+    });
+    const [run] = await integrationDb
+      .select({ id: schema.companionTurns.id })
+      .from(schema.companionTurns)
+      .where(eq(schema.companionTurns.routineSnapshotId, created.id));
+    const marker = await integrationDb.query.companionTranscriptEntries.findFirst({
+      where: eq(schema.companionTranscriptEntries.turnId, run!.id),
+    });
+    const [substrate] = await integrationDb
+      .insert(schema.companionRoutineContextSubstrates)
+      .values({
+        orgId: fixture.orgA,
+        companionId,
+        summarySha256: null,
+        builtThroughOrdinal: marker?.ordinal ?? 0,
+        content: "Pinned relay context.",
+        sha256: "e".repeat(64),
+      })
+      .returning({ id: schema.companionRoutineContextSubstrates.id });
+    await integrationDb
+      .update(schema.companionTurns)
+      .set({ routineIsolated: true, routineContextSubstrateId: substrate!.id })
+      .where(eq(schema.companionTurns.id, run!.id));
+
+    const [returned] = await integrationSql<{ accepted: boolean }[]>`
+      select companion_runtime_surface_routine_return(
+        ${fixture.orgA}::uuid, ${companionId}::uuid, ${run!.id}::uuid,
+        'relay', 'Please explain the failed deployment.'
+      ) as accepted
+    `;
+    expect(returned).toEqual({ accepted: true });
+    const storedReturn = await integrationDb.query.companionRoutineReturns.findFirst({
+      where: eq(schema.companionRoutineReturns.runId, run!.id),
+    });
+    expect(storedReturn?.relayTurnId).not.toBeNull();
+    const relayTurn = await integrationDb.query.companionTurns.findFirst({
+      where: eq(schema.companionTurns.id, storedReturn!.relayTurnId!),
+    });
+    expect(relayTurn).toMatchObject({
+      routineSnapshotId: null,
+      routineRelaySourceEventId: `routine-return:${run!.id}`,
+      status: "queued",
+    });
+
+    const projectedThread = await asActor(fixture.owner, (database) => readCompanionThreadV2({
+      actor: fixture.owner,
+      orgId: fixture.orgA,
+      companionId,
+      database,
+    }));
+    const serialized = JSON.stringify(projectedThread.entries);
+    expect(serialized).toContain("Please explain the failed deployment.");
+    expect(serialized).not.toContain("Respond to the surfaced routine entry");
+    expect(projectedThread.entries.filter((entry) =>
+      entry.content === "Please explain the failed deployment.")).toHaveLength(1);
   });
 
   it("keeps a claimed instant comparable after the worker's JavaScript round trip", async () => {
