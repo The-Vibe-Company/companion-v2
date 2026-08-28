@@ -1596,6 +1596,57 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    func testMemberSettingsCustomHeadersSupportButtonAndLeadingEdgeBack() throws {
+        let app = launchCompanionRoster(access: "owner")
+
+        app.buttons["account.menu"].tap()
+        let memberSettings = app.buttons["Member settings"]
+        XCTAssertTrue(memberSettings.waitForExistence(timeout: 2))
+        memberSettings.tap()
+
+        let profile = app.descendants(matching: .any)["settings.profile"]
+        XCTAssertTrue(profile.waitForExistence(timeout: 2))
+        profile.tap()
+
+        let customBack = app.buttons["navigation.custom-back"]
+        XCTAssertTrue(customBack.waitForExistence(timeout: 2))
+        XCTAssertEqual(customBack.label, "Back")
+        customBack.tap()
+        XCTAssertTrue(profile.waitForExistence(timeout: 2))
+
+        let plugins = app.descendants(matching: .any)["settings.plugins"]
+        plugins.tap()
+        XCTAssertTrue(app.staticTexts["Plugins"].waitForExistence(timeout: 2))
+        swipeFromLeadingEdge(in: app)
+        XCTAssertTrue(profile.waitForExistence(timeout: 3))
+    }
+
+    @MainActor
+    func testBotDetailRoutineAndRunCustomHeadersSupportConsecutiveEdgePops() throws {
+        let app = launchCompanionSettings(access: "owner")
+        let routineID = "33333333-3333-4333-8333-333333333333"
+        let runID = "88888888-8888-4888-8888-888888888888"
+        let routine = scrollToButton("companion.details.routine.\(routineID)", in: app)
+
+        routine.tap()
+        XCTAssertTrue(app.staticTexts["Weekday brief"].waitForExistence(timeout: 2))
+        let customBack = app.buttons["navigation.custom-back"]
+        XCTAssertTrue(customBack.waitForExistence(timeout: 2))
+        customBack.tap()
+        XCTAssertTrue(app.staticTexts["Bot details"].waitForExistence(timeout: 3))
+
+        scrollToButton("companion.details.routine.\(routineID)", in: app).tap()
+        let run = scrollToButton("companion.details.routine-run.\(runID)", in: app)
+        run.tap()
+        XCTAssertTrue(app.staticTexts["Routine run"].waitForExistence(timeout: 2))
+
+        swipeFromLeadingEdge(in: app)
+        XCTAssertTrue(run.waitForExistence(timeout: 3))
+        swipeFromLeadingEdge(in: app)
+        XCTAssertTrue(app.staticTexts["Bot details"].waitForExistence(timeout: 3))
+    }
+
+    @MainActor
     func testOwnerRosterRetriesAnAmbiguousDeleteWithTheRetainedRequest() throws {
         let app = launchCompanionRoster(access: "owner")
         let row = app.descendants(matching: .any)["companion.row.c96ab360-00f3-4497-a51a-51442db8add1"]

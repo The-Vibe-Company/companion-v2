@@ -573,9 +573,70 @@ private enum CompanionSettingsDemoFixtures {
                     selectedMCPAccountIDs: ["55555555-5555-4555-8555-555555555555"],
                     muted: patch.muted ?? false
                 )
-            }
+            },
+            listRoutines: { [routine] },
+            listRoutineRuns: { _, _ in
+                CompanionRoutineRunList(runs: [routineRunSummary], nextCursor: nil)
+            },
+            routineRun: { _, _ in routineRunDetail }
         )
     }
+
+    private static let routine: CompanionRoutine = decode(#"""
+    {
+      "id":"33333333-3333-4333-8333-333333333333",
+      "name":"Weekday brief",
+      "prompt":"Summarize the weekday release status.",
+      "cron":"0 9 * * 1-5",
+      "timezone":"America/New_York",
+      "enabled":true,
+      "next_fire_at":"2026-08-27T13:00:00.000Z",
+      "last_error_message":null
+    }
+    """#)
+
+    private static let routineRunSummary = CompanionRoutineRunSummary(
+        runID: "88888888-8888-4888-8888-888888888888",
+        companionID: "c96ab360-00f3-4497-a51a-51442db8add1",
+        routine: CompanionRoutineIdentitySnapshot(
+            id: "33333333-3333-4333-8333-333333333333",
+            name: "Weekday brief"
+        ),
+        status: .succeeded,
+        outcome: .surfaced,
+        surfaceMode: .notify,
+        mainEntryEventID: "routine-return:demo",
+        relayTurnID: nil,
+        createdAt: "2026-08-27T13:00:00.000Z",
+        startedAt: "2026-08-27T13:00:01.000Z",
+        settledAt: "2026-08-27T13:00:05.000Z",
+        error: nil
+    )
+
+    private static let routineRunDetail = CompanionRoutineRunDetail(
+        runID: routineRunSummary.runID,
+        companionID: routineRunSummary.companionID,
+        routine: routineRunSummary.routine,
+        status: routineRunSummary.status,
+        outcome: routineRunSummary.outcome,
+        surfaceMode: routineRunSummary.surfaceMode,
+        mainEntryEventID: routineRunSummary.mainEntryEventID,
+        relayTurnID: routineRunSummary.relayTurnID,
+        createdAt: routineRunSummary.createdAt,
+        startedAt: routineRunSummary.startedAt,
+        settledAt: routineRunSummary.settledAt,
+        error: routineRunSummary.error,
+        internalEntries: [
+            CompanionRoutineRunEntry(
+                eventID: "routine:assistant:demo",
+                ordinal: 0,
+                role: "assistant",
+                content: "The weekday brief completed.",
+                createdAt: "2026-08-27T13:00:04.000Z"
+            ),
+        ],
+        nextEntryCursor: nil
+    )
 
     private static let plugins: [CompanionPluginAccount] = [
         decode(#"{"id":"55555555-5555-4555-8555-555555555555","provider":"linear","label":"work","transport":"http","endpoint":"https://mcp.linear.app","connected":true,"created_at":"2026-08-25T08:00:00.000Z","updated_at":"2026-08-25T08:00:00.000Z"}"#),

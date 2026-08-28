@@ -96,11 +96,13 @@ private final class SwipeBackInstallerViewController: UIViewController, UIGestur
 }
 
 extension View {
-    func companionNavigationSwipeBackEnabled() -> some View {
+    func companionNavigationSwipeBackEnabled(_ enabled: Bool = true) -> some View {
         background {
-            CompanionNavigationSwipeBackInstaller()
-                .frame(width: 0, height: 0)
-                .accessibilityHidden(true)
+            if enabled {
+                CompanionNavigationSwipeBackInstaller()
+                    .frame(width: 0, height: 0)
+                    .accessibilityHidden(true)
+            }
         }
     }
 }
