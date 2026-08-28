@@ -398,8 +398,6 @@ export interface RuntimeEngineDependencies {
   clock: RuntimeClock;
   jitter: () => number;
   executorId: string;
-  /** New routine runs use the isolated path only when this deployment gate is enabled. */
-  routineIsolationEnabled?: boolean;
   /**
    * Delay after an empty event page before the next read. A function form lets the transport
    * composition answer per Box: the direct long-poll channel already waited server-side, so its

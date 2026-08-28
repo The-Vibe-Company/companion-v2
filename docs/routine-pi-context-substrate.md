@@ -1,6 +1,6 @@
 # Routine Pi context substrate
 
-Status: implemented by the feature-gated routine-isolation runtime path. Migration 0137 owns the
+Status: implemented by the routine-isolation runtime path. Migration 0137 owns the
 runtime-only compaction and content-addressed substrate tables; the durable routine turn pins the
 rendered bytes before any Box contact.
 

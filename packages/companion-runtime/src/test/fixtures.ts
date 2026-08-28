@@ -481,10 +481,8 @@ export class MemoryRuntimeStore implements RuntimeStore {
 
   async prepareRoutineRun(
     _fence: LeaseFence,
-    enableNewIsolation: boolean,
   ): Promise<{ id: string; sha256: string; content: string } | false | null> {
     if (this.material.routineId === null) return false;
-    if (!this.material.routineIsolated && !enableNewIsolation) return false;
     if (!this.material.routineIsolated) this.routinePreparations += 1;
     this.material.routineContext ??= {
       id: "2a1d4f26-268e-4b8b-b254-24194374fb0a",

@@ -52,7 +52,7 @@ export interface RuntimeStore {
     fence: LeaseFence,
     leaseSeconds: typeof RUNTIME_LEASE_SECONDS,
   ): Promise<RuntimeWorkMaterial | null>;
-  prepareRoutineRun(fence: LeaseFence, enableNewIsolation: boolean): Promise<{
+  prepareRoutineRun(fence: LeaseFence): Promise<{
     id: string;
     sha256: string;
     content: string;
@@ -892,7 +892,7 @@ export class PostgresRuntimeStore implements RuntimeStore {
     }, true);
   }
 
-  async prepareRoutineRun(fence: LeaseFence, enableNewIsolation: boolean): Promise<{
+  async prepareRoutineRun(fence: LeaseFence): Promise<{
     id: string;
     sha256: string;
     content: string;
@@ -904,7 +904,7 @@ export class PostgresRuntimeStore implements RuntimeStore {
           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
           $6::text, $7::public.companion_runtime_work_kind, $8::uuid, $9::boolean
         )
-      `, [...fenceParameters(fence), enableNewIsolation]);
+      `, [...fenceParameters(fence), true]);
       if (rows.length === 0) return null;
       const row = one(rows, "routine run preparation");
       const isolated = booleanValue(row.isolated);

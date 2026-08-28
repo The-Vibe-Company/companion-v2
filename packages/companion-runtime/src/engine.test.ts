@@ -947,7 +947,6 @@ describe("RuntimeEngine attempts", () => {
       hasMore: false,
     });
     const dependencies = engineDependencies({ store, ports });
-    dependencies.routineIsolationEnabled = true;
 
     const result = await new RuntimeEngine(dependencies).execute(claim);
 

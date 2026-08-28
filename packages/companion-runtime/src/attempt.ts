@@ -1004,10 +1004,7 @@ async function consumeAcceptedAttempt(
 
 export async function handleAttempt(context: AttemptContext): Promise<RuntimeWorkDisposition> {
   const pinnedRoutineContext = await context.session.fencedMutation(async () =>
-    await context.deps.store.prepareRoutineRun(
-      context.session.fence,
-      context.deps.routineIsolationEnabled === true,
-    ));
+    await context.deps.store.prepareRoutineRun(context.session.fence));
   if (pinnedRoutineContext) {
     const routineMaterial = await material(context);
     if (

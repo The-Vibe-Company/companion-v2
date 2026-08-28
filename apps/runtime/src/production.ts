@@ -336,7 +336,6 @@ export async function buildProductionRuntimeService(
       concurrency: config.concurrency,
       sweepIntervalMs: config.sweepIntervalMs,
       claimsEnabled: true,
-      routineIsolationEnabled: config.routineIsolationEnabled,
       log,
     });
     const desktop = createRuntimeDesktopPort({

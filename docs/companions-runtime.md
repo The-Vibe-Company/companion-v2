@@ -659,9 +659,9 @@ reads; recovery codes, messages, and actions remain Owner/Editor-only. The conve
 masks the fire marker itself, but a surfaced return is an ordinary visible Companion entry and
 therefore becomes normal conversation history.
 
-This behavior is activated for new runs by `COMPANION_ROUTINE_ISOLATION_ENABLED` after the
-schema/read API and both first-party history views are deployed. With that deploy gate off,
-`companion_api_read_thread` continues its compatibility projection:
+This behavior is the only execution path for new routine runs. The existing Companions flag remains
+the operational kill switch. For historical pre-cutover rows, `companion_api_read_thread` retains
+its compatibility projection:
 `routine {id, name}` on the originating user entry, prompt retained in `content`, first-party bubble
 hidden, and routine Pi output in the ordinary thread. Server-side partitioning replaces that
 compatibility path; client-side filtering alone is explicitly rejected because it cannot provide a
