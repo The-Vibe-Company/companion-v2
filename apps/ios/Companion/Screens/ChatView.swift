@@ -505,6 +505,11 @@ struct ChatView: View {
         }
 
         ToolbarItemGroup(placement: .topBarTrailing) {
+            CompanionStatusBadge(
+                runtime: currentCompanion.runtime,
+                compact: true
+            )
+
             if currentCompanion.access != .viewer {
                 chatHeaderButton(
                     systemImage: "desktopcomputer",
@@ -815,18 +820,6 @@ struct ChatView: View {
                 source: .reasoning,
                 animated: true
             )
-        }
-    }
-
-    private var statusLabel: String {
-        if isReplying { return "Replying" }
-        switch currentCompanion.runtime.state {
-        case .running: return "Online"
-        case .provisioning: return "Starting"
-        case .stopping: return "Stopping"
-        case .error: return "Needs attention"
-        case .notCreated, .stopped: return "Asleep"
-        case .unknown: return "Unknown"
         }
     }
 
@@ -1875,6 +1868,8 @@ struct CompanionThinkingDisclosure: View {
                 .padding(.horizontal, 10)
                 .frame(minHeight: 32)
                 .background(CompanionIOSTheme.chip, in: Capsule())
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
 
@@ -1921,6 +1916,8 @@ struct CompanionThinkingStatus: View {
         if isInteractive {
             Button(action: onTap) {
                 statusContent
+                    .frame(minHeight: 44, alignment: .leading)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel(label)

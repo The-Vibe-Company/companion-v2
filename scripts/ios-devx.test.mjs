@@ -155,6 +155,10 @@ test("chat uses the approved two-sided bubbles and morphing composer", () => {
   assert.match(composer, /else if showsSendButton \|\| !transcriptionAvailable/);
   assert.match(composer, /\.background\(CompanionIOSTheme\.primaryCTA, in: Circle\(\)\)/);
   assert.match(chat, /CharacterMark\([\s\S]{0,220}?size: 20/);
+  assert.match(
+    chat,
+    /CompanionStatusBadge\([\s\S]{0,120}?runtime: currentCompanion\.runtime,[\s\S]{0,80}?compact: true/,
+  );
   assert.doesNotMatch(decisionCard, /pending \? accent\.opacity/);
   assert.doesNotMatch(glassDemoBubbles, /accent:|tint:/);
   assert.doesNotMatch(queuedDemoBubbles, /accent:|tint:/);
@@ -241,6 +245,22 @@ test("native message interactions stay accessible without simulator CI", () => {
   assert.match(interactions, /\.textSelection\(\.enabled\)/);
 
   assert.match(markdown, /\.frame\(minWidth: 44, minHeight: 44\)/);
+  const thinkingDisclosure = chat.slice(
+    chat.indexOf("struct CompanionThinkingDisclosure"),
+    chat.indexOf("struct CompanionThinkingStatus"),
+  );
+  const thinkingStatus = chat.slice(
+    chat.indexOf("struct CompanionThinkingStatus"),
+    chat.indexOf("private struct TranscriptRowInput"),
+  );
+  assert.match(
+    thinkingDisclosure,
+    /\.background\(CompanionIOSTheme\.chip, in: Capsule\(\)\)[\s\S]{0,100}?\.frame\(minHeight: 44\)/,
+  );
+  assert.match(
+    thinkingStatus,
+    /Button\(action: onTap\)[\s\S]{0,180}?\.frame\(minHeight: 44, alignment: \.leading\)/,
+  );
   assert.match(markdown, /UIPasteboard\.general\.string = code/);
   assert.match(markdown, /\.sensoryFeedback\(\.success, trigger: copyFeedbackTrigger\)/);
   assert.match(markdown, /accessibilityReduceMotion/);
