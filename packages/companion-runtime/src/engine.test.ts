@@ -969,6 +969,48 @@ describe("RuntimeEngine attempts", () => {
     expect(ports.routineTerminates).toEqual([TURN_ID]);
   });
 
+  it("interrupts an isolated routine when its process cannot be proven stopped after return", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(claim),
+      material: attemptMaterial({
+        routineId: TURN_ID,
+        routineName: "strict-stop-check",
+        routineIsolated: true,
+      }),
+    });
+    const ports = fakePorts(store);
+    ports.routineEventReads.push({
+      events: [{
+        sequence: 1,
+        invocationId: `routine:${TURN_ID}:invocation`,
+        attemptId: ATTEMPT_ID,
+        kind: "pi_event",
+        event: {
+          type: "tool_execution_start",
+          toolName: "surface_to_main",
+          toolCallId: "return-1",
+          args: { mode: "notify", message: "This return is already durable." },
+        },
+      }],
+      nextCursor: 1,
+      acknowledgedCursor: 0,
+      hasMore: false,
+    });
+    ports.pi.routineSession!.terminate = async () => {
+      throw new Error("routine process survived termination");
+    };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("interrupted");
+    expect(store.settlements).toEqual([expect.objectContaining({ terminalStatus: "interrupted" })]);
+    expect(store.projected.flat()).toContainEqual(expect.objectContaining({
+      type: "routine_return",
+      call_id: "return-1",
+    }));
+  });
+
   it("settles an isolated routine with no terminal return as successful no_output", async () => {
     const claim = attemptClaim();
     const context = {

@@ -210,12 +210,15 @@ DECLARE
   v_attempt public.companion_turn_attempts%ROWTYPE;
   v_turn public.companion_turns%ROWTYPE;
   v_summary public.companion_main_pi_compactions%ROWTYPE;
+  v_current_main_pi_invocation_id text;
+  v_summary_text text;
   v_tail text := '';
   v_built_through integer := -1;
   v_snapshot_version text;
   v_content text;
   v_digest text;
   v_context_id uuid;
+  v_content_estimated_tokens integer;
 BEGIN
   IF p_work_kind <> 'attempt' THEN RETURN; END IF;
   PERFORM 1
@@ -264,48 +267,107 @@ BEGIN
     RAISE EXCEPTION 'routine context was pinned without isolated execution' USING ERRCODE = '55000';
   END IF;
 
+  SELECT instance.pi_invocation_id INTO v_current_main_pi_invocation_id
+  FROM public.companion_runtime_instances instance
+  WHERE instance.org_id = p_org_id AND instance.companion_id = p_companion_id;
+
   SELECT compaction.* INTO v_summary
   FROM public.companion_main_pi_compactions compaction
   WHERE compaction.org_id = p_org_id AND compaction.companion_id = p_companion_id
+    AND compaction.pi_invocation_id = v_current_main_pi_invocation_id
   ORDER BY compaction.observed_at DESC, compaction.generation DESC
   LIMIT 1;
+
+  IF v_summary.sha256 IS NULL THEN
+    v_summary_text := '[No accepted main-Pi compaction summary yet.]';
+  ELSIF GREATEST(
+    CEIL(octet_length(v_summary.summary) / 4.0)::integer,
+    regexp_count(v_summary.summary, '[[:alnum:]_]+|[^[:space:][:alnum:]_]'),
+    CEIL((octet_length(v_summary.summary) - char_length(v_summary.summary)) / 2.0)::integer
+  ) <= 2500 THEN
+    v_summary_text := v_summary.summary;
+  ELSE
+    -- A model tokenizer is unavailable before Box contact. This deterministic estimator combines
+    -- the common UTF-8-byte heuristic with word/punctuation and multibyte floors. Keep complete
+    -- summary lines, reserving room for an explicit clipping marker instead of taking a byte slice.
+    WITH summary_lines AS (
+      SELECT line, ordinal,
+        GREATEST(
+          1,
+          CEIL(octet_length(line) / 4.0)::integer,
+          regexp_count(line, '[[:alnum:]_]+|[^[:space:][:alnum:]_]'),
+          CEIL((octet_length(line) - char_length(line)) / 2.0)::integer
+        ) AS estimated_tokens
+      FROM regexp_split_to_table(v_summary.summary, E'\n') WITH ORDINALITY AS split(line, ordinal)
+    ), budgeted AS (
+      SELECT line, ordinal,
+        sum(estimated_tokens) OVER (ORDER BY ordinal) AS cumulative_tokens
+      FROM summary_lines
+    )
+    SELECT COALESCE(string_agg(line, E'\n' ORDER BY ordinal), '')
+    INTO v_summary_text
+    FROM budgeted
+    WHERE cumulative_tokens <= 2450;
+    v_summary_text := CASE WHEN v_summary_text = '' THEN '' ELSE v_summary_text || E'\n' END
+      || '[Additional summary detail omitted to fit the routine context budget.]';
+  END IF;
 
   SELECT COALESCE(max(entry.ordinal), -1) INTO v_built_through
   FROM public.companion_transcript_entries entry
   WHERE entry.org_id = p_org_id AND entry.companion_id = p_companion_id
     AND entry.created_at <= v_turn.created_at;
 
-  SELECT COALESCE(string_agg(rendered.line, E'\n' ORDER BY rendered.ordinal), '')
-  INTO v_tail
-  FROM (
-    SELECT selected.ordinal,
-      '[' || to_char(selected.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') || '] '
-      || CASE selected.role
+  WITH eligible AS (
+    SELECT entry.*
+    FROM public.companion_transcript_entries entry
+    WHERE entry.org_id = p_org_id AND entry.companion_id = p_companion_id
+      AND entry.ordinal <= v_built_through
+      AND entry.role IN ('user','assistant','decision','tool')
+      AND NOT EXISTS (
+        SELECT 1 FROM public.companion_turns origin
+        WHERE origin.org_id = entry.org_id AND origin.companion_id = entry.companion_id
+          AND origin.message_event_id = entry.event_id
+          AND (origin.routine_snapshot_id IS NOT NULL OR origin.routine_relay_source_event_id IS NOT NULL)
+      )
+    ORDER BY entry.ordinal DESC
+    LIMIT 12
+  ), rendered AS (
+    SELECT eligible.ordinal,
+      '[' || to_char(eligible.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') || '] '
+      || CASE eligible.role
         WHEN 'user' THEN COALESCE(author.name, 'Member') || ': '
         WHEN 'assistant' THEN 'Companion: '
         WHEN 'decision' THEN 'Decision: '
         WHEN 'tool' THEN 'Tool: '
         ELSE 'Context: '
       END
-      || left(regexp_replace(selected.content, E'[\n\r]+', ' ', 'g'), 500) AS line
-    FROM (
-      SELECT entry.*
-      FROM public.companion_transcript_entries entry
-      WHERE entry.org_id = p_org_id AND entry.companion_id = p_companion_id
-        AND entry.ordinal <= v_built_through
-        AND entry.role IN ('user','assistant','decision','tool')
-        AND NOT EXISTS (
-          SELECT 1 FROM public.companion_turns origin
-          WHERE origin.org_id = entry.org_id AND origin.companion_id = entry.companion_id
-            AND origin.message_event_id = entry.event_id
-            AND (origin.routine_snapshot_id IS NOT NULL OR origin.routine_relay_source_event_id IS NOT NULL)
-        )
-      ORDER BY entry.ordinal DESC
-      LIMIT 12
-    ) selected
-    LEFT JOIN public.profiles author ON author.id = selected.author_id
-  ) rendered;
-  v_tail := left(v_tail, 5000);
+      || CASE WHEN char_length(clean.content) <= 500 THEN clean.content
+        ELSE left(clean.content, 250) || ' … [' || (char_length(clean.content) - 500)::text
+          || ' characters omitted] … ' || right(clean.content, 250)
+      END AS line
+    FROM eligible
+    LEFT JOIN public.profiles author ON author.id = eligible.author_id
+    CROSS JOIN LATERAL (
+      SELECT regexp_replace(eligible.content, E'[\n\r]+', ' ', 'g') AS content
+    ) clean
+  ), estimated AS (
+    SELECT rendered.*,
+      GREATEST(
+        1,
+        CEIL(octet_length(rendered.line) / 4.0)::integer,
+        regexp_count(rendered.line, '[[:alnum:]_]+|[^[:space:][:alnum:]_]'),
+        CEIL((octet_length(rendered.line) - char_length(rendered.line)) / 2.0)::integer
+      ) AS estimated_tokens
+    FROM rendered
+  ), budgeted AS (
+    SELECT estimated.*,
+      sum(estimated_tokens) OVER (ORDER BY ordinal DESC) AS cumulative_tokens
+    FROM estimated
+  )
+  SELECT COALESCE(string_agg(budgeted.line, E'\n' ORDER BY budgeted.ordinal), '')
+  INTO v_tail
+  FROM budgeted
+  WHERE budgeted.cumulative_tokens <= 1250;
   v_snapshot_version := 'v1:' || COALESCE(v_summary.sha256, 'none') || ':' || v_built_through::text;
   v_content := '--- Main conversation context (background, not the routine task) ---' || E'\n'
     || 'Snapshot: ' || v_snapshot_version || E'\n'
@@ -313,12 +375,20 @@ BEGIN
     || 'Summary observed at: ' || CASE WHEN v_summary.observed_at IS NULL THEN 'none yet'
       ELSE to_char(v_summary.observed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') END || E'\n\n'
     || '## Stable summary' || E'\n'
-    || COALESCE(left(v_summary.summary, 10000), '[No accepted main-Pi compaction summary yet.]') || E'\n\n'
+    || v_summary_text || E'\n\n'
     || '## Recent main-thread tail' || E'\n'
     || CASE WHEN v_tail = '' THEN '[No eligible recent main-thread entries.]' ELSE v_tail END || E'\n'
     || '--- End main conversation context ---' || E'\n';
   IF octet_length(v_content) > 32768 THEN
     RAISE EXCEPTION 'routine context renderer exceeded its hard limit' USING ERRCODE = '22023';
+  END IF;
+  v_content_estimated_tokens := GREATEST(
+    CEIL(octet_length(v_content) / 4.0)::integer,
+    regexp_count(v_content, '[[:alnum:]_]+|[^[:space:][:alnum:]_]'),
+    CEIL((octet_length(v_content) - char_length(v_content)) / 2.0)::integer
+  );
+  IF v_content_estimated_tokens > 4000 THEN
+    RAISE EXCEPTION 'routine context renderer exceeded its token budget' USING ERRCODE = '22023';
   END IF;
   v_digest := encode(sha256(convert_to(v_content, 'UTF8')), 'hex');
 

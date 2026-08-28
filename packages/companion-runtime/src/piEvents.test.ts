@@ -86,6 +86,38 @@ describe("Pi journal validation and projection", () => {
     ]);
   });
 
+  it("omits a compaction whose entire summary is removed by redaction", () => {
+    const page = validatePiJournalRead({
+      value: {
+        events: [{
+          sequence: 1,
+          invocationId: PI_INVOCATION_ID,
+          attemptId: ATTEMPT_ID,
+          kind: "pi_event",
+          event: {
+            type: "compaction_end",
+            aborted: false,
+            willRetry: false,
+            result: {
+              summary: "remove-everything",
+              firstKeptEntryId: "entry-7",
+              tokensBefore: 5_000,
+              estimatedTokensAfter: 900,
+            },
+          },
+        }],
+        nextCursor: 1,
+        acknowledgedCursor: 0,
+        hasMore: false,
+      },
+      after: 0n,
+      attemptId: ATTEMPT_ID,
+      invocationId: PI_INVOCATION_ID,
+    });
+
+    expect(classifyPiJournalPage(page, new Date(), () => "").projections).toEqual([]);
+  });
+
   it("counts unknown events, projects process exit, and never treats it as settlement", () => {
     const page = validatePiJournalRead({
       value: {

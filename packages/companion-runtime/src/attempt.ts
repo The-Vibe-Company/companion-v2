@@ -320,22 +320,12 @@ function isolatedRoutinePrompt(
 }
 
 async function terminateRoutineSession(context: AttemptContext, runId: string): Promise<void> {
-  try {
-    await context.session.external(async (signal) =>
-      await requiredRoutineSession(context).terminate({
-        boxId: requiredRuntime(context).boxId,
-        runId,
-        signal,
-      }));
-  } catch (error) {
-    if (mustAbandonRuntimeExecution(error)) throw error;
-    context.deps.log?.warn({
-      ts: context.deps.clock.now().toISOString(),
-      event: "runtime.routine_session.terminate_failed",
-      companionId: context.claim.companionId,
-      attemptId: context.claim.workId,
-    });
-  }
+  await context.session.external(async (signal) =>
+    await requiredRoutineSession(context).terminate({
+      boxId: requiredRuntime(context).boxId,
+      runId,
+      signal,
+    }));
 }
 
 async function ackRoutineEvents(

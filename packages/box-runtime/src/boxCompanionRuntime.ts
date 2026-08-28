@@ -221,6 +221,7 @@ const RUNTIME_IMAGE_WARMUP_COMMAND_TIMEOUT_SECONDS = 45;
 const RUNTIME_IMAGE_PLAYBOOK_UNSTABLE = "Runtime image playbook did not stabilize";
 const RUNTIME_IMAGE_BOXIGNORE = [
   ".companion/runtime/logs/",
+  ".companion/runtime/routines/",
   ".companion/runtime/state/skill-archives/",
   ".companion/runtime/state/control-bundle-v1.json",
   ".companion/runtime/control-transaction-v1/",
@@ -1214,6 +1215,31 @@ ledger="$HOME/${paths.dispatchLedger}"
 pid_file="$HOME/${paths.pid}"
 invocation_file="$HOME/${paths.invocation}"
 broker_script="$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}"
+routine_root_has_process() {
+  local proc_env candidate
+  for proc_env in /proc/[0-9]*/environ; do
+    [ -r "$proc_env" ] || continue
+    candidate="\${proc_env%/environ}"
+    tr '\\0' '\\n' < "$proc_env" 2>/dev/null | grep -Fx "COMPANION_PI_ROOT=$routine_root" >/dev/null || continue
+    kill -0 "\${candidate##*/}" 2>/dev/null && return 0
+  done
+  return 1
+}
+stop_routine_processes() {
+  kill -TERM "$pid" 2>/dev/null || true
+  kill -TERM -- -"$pid" 2>/dev/null || true
+  for _ in $(seq 1 50); do
+    if ! routine_root_has_process; then return 0; fi
+    sleep 0.1
+  done
+  kill -KILL -- -"$pid" 2>/dev/null || true
+  kill -KILL "$pid" 2>/dev/null || true
+  for _ in $(seq 1 50); do
+    if ! routine_root_has_process; then return 0; fi
+    sleep 0.1
+  done
+  return 1
+}
 pi_daemon="$HOME/.companion/bin/pi-daemon"
 if [ ! -r "$pi_daemon" ] || [ ! -x "$broker_script" ]; then
   echo 'routine-pi-session runtime binaries are unavailable' >&2
@@ -1279,14 +1305,21 @@ for _ in $(seq 1 ${PI_ROUTINE_READY_PROBES}); do
     exit 0
   fi
   if ! kill -0 "$pid" 2>/dev/null; then
-    rm -f "$socket" "$pid_file"
+    if ! stop_routine_processes; then
+      echo 'routine-pi-session process survived early broker exit' >&2
+      exit 1
+    fi
+    rm -rf "$routine_root"
     echo 'routine-pi-session broker exited before readiness' >&2
     exit 1
   fi
   sleep 0.1
 done
-kill -TERM "$pid" 2>/dev/null || true
-rm -f "$socket" "$pid_file"
+if ! stop_routine_processes; then
+  echo 'routine-pi-session could not be stopped after readiness timeout' >&2
+  exit 1
+fi
+rm -rf "$routine_root"
 echo 'routine-pi-session did not become ready' >&2
 exit 1
 `;
@@ -1308,6 +1341,16 @@ routine_pid_owned() {
   tr '\\0' '\\n' < "/proc/$candidate/environ" 2>/dev/null | grep -Fx "COMPANION_PI_ROOT=$routine_root" >/dev/null || return 1
   tr '\\0' ' ' < "/proc/$candidate/cmdline" 2>/dev/null | grep -F "$broker_script" >/dev/null || return 1
 }
+routine_root_has_process() {
+  local proc_env candidate
+  for proc_env in /proc/[0-9]*/environ; do
+    [ -r "$proc_env" ] || continue
+    candidate="\${proc_env%/environ}"
+    tr '\\0' '\\n' < "$proc_env" 2>/dev/null | grep -Fx "COMPANION_PI_ROOT=$routine_root" >/dev/null || continue
+    kill -0 "\${candidate##*/}" 2>/dev/null && return 0
+  done
+  return 1
+}
 if [ -s "$pid_file" ]; then
   pid="$(cat "$pid_file")"
   if kill -0 "$pid" 2>/dev/null; then
@@ -1321,13 +1364,21 @@ if [ -s "$pid_file" ]; then
       if ! kill -0 "$pid" 2>/dev/null; then break; fi
       sleep 0.1
     done
-    if kill -0 "$pid" 2>/dev/null; then
+    if routine_root_has_process; then
       kill -KILL -- -"$pid" 2>/dev/null || true
       kill -KILL "$pid" 2>/dev/null || true
+      for _ in $(seq 1 50); do
+        if ! routine_root_has_process; then break; fi
+        sleep 0.1
+      done
     fi
   fi
 fi
-rm -f "$socket" "$pid_file"
+if routine_root_has_process; then
+  echo 'routine-pi-session process survived termination' >&2
+  exit 1
+fi
+rm -rf "$routine_root"
 printf '%s\\n' routine-pi-session-terminated
 `;
 }

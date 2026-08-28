@@ -626,10 +626,15 @@ function compactionProjection(
     || tokensBefore === null || tokensAfter === null
   ) return null;
   const usage = dictionary(result?.usage);
+  const redactedSummary = bounded(
+    postgresSafeText(redact(summary.trim())),
+    MAX_COMPACTION_SUMMARY,
+  );
+  if (!redactedSummary) return null;
   return {
     sequence,
     type: "compaction",
-    summary: bounded(postgresSafeText(redact(summary.trim())), MAX_COMPACTION_SUMMARY),
+    summary: redactedSummary,
     first_kept_entry_id: kept,
     tokens_before: tokensBefore,
     estimated_tokens_after: tokensAfter,

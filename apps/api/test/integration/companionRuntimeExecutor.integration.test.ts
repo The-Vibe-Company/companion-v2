@@ -5512,13 +5512,22 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         where id = ${fixture.turnId}::uuid
       `;
       await sql`
+        update companion_runtime_instances
+        set pi_invocation_id = 'main-pi'
+        where org_id = ${ids.orgA}::uuid and companion_id = ${fixture.companionId}::uuid
+      `;
+      await sql`
         insert into companion_main_pi_compactions(
           org_id, companion_id, pi_invocation_id, generation, event_cursor,
           summary, first_kept_entry_id, tokens_before, estimated_tokens_after,
           cache_read, cache_write, sha256, observed_at
         ) values (
+          ${ids.orgA}::uuid, ${fixture.companionId}::uuid, 'replaced-main-pi', 1, 8,
+          'Stale context from the replaced main Pi must not be used.', 'entry-6',
+          4000, 800, 300, 10, ${"b".repeat(64)}, now() + interval '1 minute'
+        ), (
           ${ids.orgA}::uuid, ${fixture.companionId}::uuid, 'main-pi', 1, 9,
-          'The main conversation established a deployment constraint.', 'entry-7',
+          ${`The main conversation established a deployment constraint.\n${"token ".repeat(3000)}`}, 'entry-7',
           5000, 900, 400, 20, ${"a".repeat(64)}, now()
         )
       `;
@@ -5546,6 +5555,17 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
         content: expect.stringContaining("The main conversation established a deployment constraint."),
       });
+      expect(firstContext[0]?.content).not.toContain("Stale context from the replaced main Pi");
+      expect(firstContext[0]?.content).toContain(
+        "[Additional summary detail omitted to fit the routine context budget.]",
+      );
+      const rendered = firstContext[0]!.content;
+      const estimatedTokens = Math.max(
+        Math.ceil(Buffer.byteLength(rendered, "utf8") / 4),
+        rendered.match(/[A-Za-z0-9_]+|[^\sA-Za-z0-9_]/g)?.length ?? 0,
+        Math.ceil((Buffer.byteLength(rendered, "utf8") - [...rendered].length) / 2),
+      );
+      expect(estimatedTokens).toBeLessThanOrEqual(4_000);
 
       const events = [
         {

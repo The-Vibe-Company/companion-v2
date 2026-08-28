@@ -1172,6 +1172,8 @@ describe("default Pi packages on the Box disk", () => {
       .toContain(".companion/runtime/state/control-bundle-v1.json");
     expect(Buffer.from(encodedBoxIgnore!, "base64").toString("utf8"))
       .toContain(".companion/runtime/control-transaction-v1/");
+    expect(Buffer.from(encodedBoxIgnore!, "base64").toString("utf8"))
+      .toContain(".companion/runtime/routines/");
 
     for (const spec of [
       "npm:pi-mcp-adapter@2.12.1",
@@ -1888,6 +1890,8 @@ describe("isolated routine Pi sessions", () => {
     expect(commands[0]).toContain('cp -a "$HOME/.companion/pi/." "$routine_root/pi/"');
     expect(commands.at(-1)).toContain(`socket="$HOME/${paths.socket}"`);
     expect(commands.at(-1)).toContain(`broker_script="$HOME/.companion/bin/companion-pi-broker.mjs"`);
+    expect(commands.at(-1)).toContain("routine-pi-session could not be stopped after readiness timeout");
+    expect(commands.at(-1)).toContain('rm -rf "$routine_root"');
     expect(commands.at(-1)).not.toContain("systemctl --user");
     for (const command of commands) {
       expect(spawnSync("bash", ["-n"], { input: command, encoding: "utf8" })).toMatchObject({
@@ -1897,7 +1901,7 @@ describe("isolated routine Pi sessions", () => {
     }
   });
 
-  it("terminates only the run-scoped process and removes its socket marker", async () => {
+  it("terminates only the run-scoped process, proves it stopped, and removes its run root", async () => {
     const commands: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
@@ -1914,7 +1918,8 @@ describe("isolated routine Pi sessions", () => {
     expect(commands).toHaveLength(1);
     expect(commands[0]).toContain(`pid_file="$HOME/${companionPiRoutineSessionPaths(runId).pid}"`);
     expect(commands[0]).toContain('kill -- -"$pid"');
-    expect(commands[0]).toContain("rm -f \"$socket\" \"$pid_file\"");
+    expect(commands[0]).toContain("routine-pi-session process survived termination");
+    expect(commands[0]).toContain('rm -rf "$routine_root"');
     expect(commands[0]).not.toContain("systemctl --user");
     expect(spawnSync("bash", ["-n"], { input: commands[0], encoding: "utf8" })).toMatchObject({
       status: 0,
