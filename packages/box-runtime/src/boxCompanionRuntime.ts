@@ -1573,6 +1573,15 @@ printf '%s\\n' "$expected_invocation" > "$cancel_marker_tmp"
 chmod 600 "$cancel_marker_tmp"
 mv -f "$cancel_marker_tmp" "$routine_cancel_marker"
 acquire_routine_lock
+# Wait for any serialized prepare/launch to finish before classifying a marker-free root. A
+# cancellation before start legitimately has no root; an existing root without either durable
+# identity marker is ambiguous and must retain its journal rather than be erased.
+if [ ! -s "$reservation_file" ] && [ ! -s "$invocation_file" ] \
+  && { [ -e "$routine_root" ] || [ -L "$routine_root" ]; }; then
+  if [ "$(head -n 1 "$routine_cancel_marker" 2>/dev/null || true)" = "$expected_invocation" ]; then rm -f "$routine_cancel_marker"; fi
+  echo 'routine-pi-session root ownership is ambiguous' >&2
+  exit 1
+fi
 if [ -s "$reservation_file" ]; then
   reserved_invocation="$(head -n 1 "$reservation_file" 2>/dev/null || true)"
   if [ "$reserved_invocation" != "$expected_invocation" ]; then

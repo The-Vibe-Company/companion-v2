@@ -2127,6 +2127,16 @@ describe("isolated routine Pi sessions", () => {
     expect(commands[0]).toContain("signal_routine_root_processes TERM");
     expect(commands[0]).toContain("signal_routine_root_processes KILL");
     expect(commands[0]).toContain("routine-pi-session process survived termination");
+    const ownershipGuard = commands[0]!.indexOf(
+      'if [ ! -s "$reservation_file" ] && [ ! -s "$invocation_file" ]',
+    );
+    expect(ownershipGuard).toBeGreaterThan(-1);
+    expect(commands[0]).toContain(
+      '&& { [ -e "$routine_root" ] || [ -L "$routine_root" ]; }; then',
+    );
+    expect(ownershipGuard)
+      .toBeGreaterThan(commands[0]!.lastIndexOf("\nacquire_routine_lock\n"));
+    expect(ownershipGuard).toBeLessThan(commands[0]!.indexOf('rm -rf "$routine_root"'));
     expect(commands[0]!.indexOf("mv -f \"$cancel_marker_tmp\" \"$routine_cancel_marker\""))
       .toBeLessThan(commands[0]!.lastIndexOf("\nacquire_routine_lock\n"));
     expect(commands[0]).toContain('rm -rf "$routine_root"');
