@@ -254,7 +254,7 @@ private struct MarkdownParagraphView: View {
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(accent)
                         .frame(width: 36, height: 36)
-                        .background(CompanionIOSTheme.card, in: RoundedRectangle(cornerRadius: 10))
+                        .background(CompanionIOSTheme.card, in: RoundedRectangle(cornerRadius: 12))
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text(linkTitle)
@@ -649,7 +649,7 @@ private struct MarkdownCodeBlock: View {
             }
             .scrollIndicators(.visible)
         }
-        .companionMaterial(radius: 10)
+        .companionMaterial(radius: 12)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Code block, \(languageLabel)")
         .accessibilityIdentifier("markdown.code-block.\(identifier)")
@@ -661,12 +661,12 @@ private struct MarkdownCodeBlock: View {
             if reduceMotion {
                 isCopied = false
             } else {
-                withAnimation(.easeOut(duration: 0.18)) {
+                withAnimation(.easeOut(duration: 0.2)) {
                     isCopied = false
                 }
             }
         }
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: isCopied)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: isCopied)
     }
 
     private func copyCode() {
@@ -678,7 +678,7 @@ private struct MarkdownCodeBlock: View {
         if reduceMotion {
             isCopied = true
         } else {
-            withAnimation(.easeOut(duration: 0.18)) {
+            withAnimation(.easeOut(duration: 0.2)) {
                 isCopied = true
             }
         }
@@ -733,7 +733,7 @@ private struct MarkdownTableView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .clipped()
-        .companionMaterial(radius: 10)
+        .companionMaterial(radius: 12)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(
             "Table, \(columns.count) columns, \(dataRowCount) rows"

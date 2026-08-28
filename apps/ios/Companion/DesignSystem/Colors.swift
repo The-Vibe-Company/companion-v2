@@ -1,89 +1,68 @@
 import SwiftUI
 import UIKit
+import CompanionKit
 
 /// Approved Grok Bot palette for native iOS surfaces. Wave-specific views should use these
 /// semantic tokens so System and Black appearance can swap surfaces without changing mark colors.
 enum CompanionIOSTheme {
-    static let canvas = adaptive(light: 0xFFFFFF, black: 0x000000)
-    static let card = adaptive(light: 0xF2F2F7, black: 0x1C1C1E)
-    static let botBubble = adaptive(light: 0xEFEFF1, black: 0x1C1C1E)
-    static let innerBubble = adaptive(light: 0xFFFFFF, black: 0x1C1C1E)
-    static let chip = adaptive(light: 0xEFEFF1, black: 0x1C1C1E)
-    static let userBubble = adaptive(light: 0x0B0B0F, black: 0xFFFFFF)
-    static let userBubbleText = adaptive(light: 0xFFFFFF, black: 0x000000)
-    static let textPrimary = adaptive(light: 0x111111, black: 0xF2F2F7)
-    static let textSecondary = Color(red: 142 / 255, green: 142 / 255, blue: 147 / 255)
-    static let separator = adaptive(light: 0xE5E5EA, black: 0x38383A)
-    static let primaryCTA = adaptive(light: 0x0B0B0F, black: 0xFFFFFF)
-    static let primaryCTAText = adaptive(light: 0xFFFFFF, black: 0x000000)
-    static let actionBlue = Color(red: 0, green: 122 / 255, blue: 1)
-    static let toggleGreen = Color(red: 52 / 255, green: 199 / 255, blue: 89 / 255)
-    static let danger = Color(red: 1, green: 59 / 255, blue: 48 / 255)
+    static let canvas = adaptive(light: CompanionAppearancePalette.Light.canvas, black: CompanionAppearancePalette.Black.canvas)
+    static let card = adaptive(light: CompanionAppearancePalette.Light.card, black: CompanionAppearancePalette.Black.card)
+    static let botBubble = adaptive(light: CompanionAppearancePalette.Light.botBubble, black: CompanionAppearancePalette.Black.botBubble)
+    static let innerBubble = adaptive(light: CompanionAppearancePalette.Light.innerBubble, black: CompanionAppearancePalette.Black.innerBubble)
+    static let chip = adaptive(light: CompanionAppearancePalette.Light.chip, black: CompanionAppearancePalette.Black.chip)
+    static let userBubble = adaptive(light: CompanionAppearancePalette.Light.userBubble, black: CompanionAppearancePalette.Black.userBubble)
+    static let userBubbleText = adaptive(light: CompanionAppearancePalette.Light.userBubbleText, black: CompanionAppearancePalette.Black.userBubbleText)
+    static let textPrimary = adaptive(light: CompanionAppearancePalette.Light.textPrimary, black: CompanionAppearancePalette.Black.textPrimary)
+    static let textSecondary = color(CompanionAppearancePalette.textSecondary)
+    static let separator = adaptive(light: CompanionAppearancePalette.Light.separator, black: CompanionAppearancePalette.Black.separator)
+    static let primaryCTA = adaptive(light: CompanionAppearancePalette.Light.primaryCTA, black: CompanionAppearancePalette.Black.primaryCTA)
+    static let primaryCTAText = adaptive(light: CompanionAppearancePalette.Light.primaryCTAText, black: CompanionAppearancePalette.Black.primaryCTAText)
+    static let actionBlue = color(CompanionAppearancePalette.actionBlue)
+    static let toggleGreen = color(CompanionAppearancePalette.toggleGreen)
+    static let danger = color(CompanionAppearancePalette.danger)
+    static let warning = color(CompanionAppearancePalette.warning)
+    static let dangerText = adaptive(
+        light: CompanionAppearancePalette.dangerTextLight,
+        black: CompanionAppearancePalette.danger
+    )
+    static let successText = adaptive(
+        light: CompanionAppearancePalette.successTextLight,
+        black: CompanionAppearancePalette.toggleGreen
+    )
+    static let warningText = adaptive(
+        light: CompanionAppearancePalette.warningTextLight,
+        black: CompanionAppearancePalette.warning
+    )
+
+    static let characterMarkPalette = CompanionAppearancePalette.characterMarks.map { color($0) }
 
     private static func adaptive(light: UInt32, black: UInt32) -> Color {
         Color(uiColor: UIColor { traits in
             UIColor(rgb: traits.userInterfaceStyle == .dark ? black : light)
         })
     }
+
+    private static func color(_ rgb: UInt32) -> Color {
+        Color(uiColor: UIColor(rgb: rgb))
+    }
 }
 
 extension Color {
-    static let companionCanvas = adaptive(
-        light: UIColor(red: 0.955, green: 0.965, blue: 0.985, alpha: 1),
-        dark: UIColor(red: 0.045, green: 0.052, blue: 0.075, alpha: 1)
-    )
-    static let companionInk = adaptive(
-        light: UIColor(red: 0.055, green: 0.065, blue: 0.095, alpha: 1),
-        dark: UIColor(red: 0.94, green: 0.945, blue: 0.965, alpha: 1)
-    )
-    static let companionMuted = adaptive(
-        light: UIColor(red: 0.35, green: 0.37, blue: 0.43, alpha: 1),
-        dark: UIColor(red: 0.68, green: 0.70, blue: 0.76, alpha: 1)
-    )
-    static let companionAccent = Color(red: 0.91, green: 0.16, blue: 0.25)
-    static let companionAccentWarm = Color(red: 0.98, green: 0.47, blue: 0.11)
-    static let companionAccentGold = Color(red: 1.00, green: 0.72, blue: 0.10)
-    static let companionSurface = adaptive(
-        light: UIColor(white: 1, alpha: 0.72),
-        dark: UIColor(red: 0.10, green: 0.11, blue: 0.15, alpha: 0.86)
-    )
-    static let companionSurfaceRaised = adaptive(
-        light: UIColor(white: 1, alpha: 0.56),
-        dark: UIColor(red: 0.16, green: 0.17, blue: 0.22, alpha: 0.82)
-    )
-    static let companionSurfaceOpaque = adaptive(
-        light: UIColor(white: 1, alpha: 1),
-        dark: UIColor(red: 0.10, green: 0.11, blue: 0.15, alpha: 1)
-    )
-    static let companionBorder = adaptive(
-        light: UIColor(white: 1, alpha: 0.78),
-        dark: UIColor(white: 1, alpha: 0.16)
-    )
-    static let companionDivider = adaptive(
-        light: UIColor(white: 0, alpha: 0.08),
-        dark: UIColor(white: 1, alpha: 0.12)
-    )
-    static let companionDanger = adaptive(
-        light: UIColor(red: 0.76, green: 0.08, blue: 0.16, alpha: 1),
-        dark: UIColor(red: 1.00, green: 0.43, blue: 0.48, alpha: 1)
-    )
-    static let companionSuccess = adaptive(
-        light: UIColor(red: 0.08, green: 0.56, blue: 0.31, alpha: 1),
-        dark: UIColor(red: 0.28, green: 0.80, blue: 0.49, alpha: 1)
-    )
-    static let companionWarning = adaptive(
-        light: UIColor(red: 0.84, green: 0.45, blue: 0.03, alpha: 1),
-        dark: UIColor(red: 1.00, green: 0.68, blue: 0.24, alpha: 1)
-    )
+    static let companionCanvas = CompanionIOSTheme.canvas
+    static let companionInk = CompanionIOSTheme.textPrimary
+    static let companionMuted = CompanionIOSTheme.textSecondary
+    static let companionAccent = CompanionIOSTheme.actionBlue
+    static let companionAccentWarm = CompanionIOSTheme.warning
+    static let companionAccentGold = CompanionIOSTheme.warning
+    static let companionSurface = CompanionIOSTheme.card
+    static let companionSurfaceRaised = CompanionIOSTheme.card
+    static let companionSurfaceOpaque = CompanionIOSTheme.card
+    static let companionBorder = CompanionIOSTheme.separator
+    static let companionDivider = CompanionIOSTheme.separator
+    static let companionDanger = CompanionIOSTheme.dangerText
+    static let companionSuccess = CompanionIOSTheme.successText
+    static let companionWarning = CompanionIOSTheme.warningText
     static let companionAccentForeground = Color.white
-
-    private static func adaptive(light: UIColor, dark: UIColor) -> Color {
-        Color(
-            uiColor: UIColor { traits in
-                traits.userInterfaceStyle == .dark ? dark : light
-            }
-        )
-    }
 }
 
 private extension UIColor {

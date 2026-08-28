@@ -619,7 +619,11 @@ private struct CompanionInstructionsSheet: View {
                 Button {
                     Task { await saveInstructions() }
                 } label: {
-                    if saving { ProgressView().tint(.white) } else { Text("Save instructions") }
+                    if saving {
+                        ProgressView().tint(CompanionIOSTheme.primaryCTAText)
+                    } else {
+                        Text("Save instructions")
+                    }
                 }
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(CompanionIOSTheme.primaryCTAText)
@@ -856,7 +860,7 @@ private struct CompanionRoutineRunRow: View {
     }
 
     private var statusColor: Color {
-        run.outcome == .error ? Color.red : (run.outcome == .pending ? Color.orange : CompanionIOSTheme.toggleGreen)
+        run.outcome == .error ? CompanionIOSTheme.danger : (run.outcome == .pending ? CompanionIOSTheme.warning : CompanionIOSTheme.toggleGreen)
     }
 }
 

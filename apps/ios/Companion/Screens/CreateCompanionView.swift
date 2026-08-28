@@ -125,9 +125,9 @@ struct CreateCompanionView: View {
                         .autocorrectionDisabled()
                         .font(.title3.weight(.semibold))
                         .padding(14)
-                        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .background(CompanionIOSTheme.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                         .overlay {
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
                                 .stroke(Color.companionBorder, lineWidth: 0.7)
                         }
                         .accessibilityLabel("Companion name")
@@ -456,7 +456,7 @@ struct CreateCompanionView: View {
         if reduceMotion {
             icon = updated
         } else {
-            withAnimation(.easeOut(duration: 0.18)) {
+            withAnimation(.easeOut(duration: 0.2)) {
                 icon = updated
             }
         }

@@ -110,7 +110,7 @@ struct CompanionToolRunCard: View {
             .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(Color(uiColor: .separator), lineWidth: 0.7)
+                    .stroke(CompanionIOSTheme.separator, lineWidth: 0.5)
             }
             .accessibilityHidden(true)
     }
@@ -118,14 +118,14 @@ struct CompanionToolRunCard: View {
     private var previewBadge: some View {
         Label("Preview", systemImage: "photo")
             .font(.caption.weight(.medium))
-            .foregroundStyle(Color(uiColor: .secondaryLabel))
+            .foregroundStyle(CompanionIOSTheme.textSecondary)
             .accessibilityHidden(true)
     }
 
     private var openIndicator: some View {
         Image(systemName: "chevron.right")
             .font(.caption.weight(.semibold))
-            .foregroundStyle(Color(uiColor: .tertiaryLabel))
+            .foregroundStyle(CompanionIOSTheme.textSecondary)
             .frame(width: 28, height: 44)
             .accessibilityHidden(true)
     }
@@ -160,8 +160,8 @@ struct CompanionToolRunCard: View {
 
     private var borderColor: Color {
         switch tool.status {
-        case .error: return Color(uiColor: .systemRed)
-        case .timeout: return Color(uiColor: .systemOrange)
+        case .error: return CompanionIOSTheme.danger
+        case .timeout: return CompanionIOSTheme.warning
         case .running, .ok: return .clear
         }
     }
@@ -202,7 +202,7 @@ struct CompanionToolRunDetailView: View {
                 .padding(.horizontal, 20)
                 .padding(.vertical, 18)
             }
-            .background(Color(uiColor: .systemGroupedBackground))
+            .background(CompanionIOSTheme.canvas)
             .navigationTitle("Tool details")
             .navigationBarTitleDisplayMode(.inline)
             .accessibilityIdentifier("tool-run.detail")
@@ -224,11 +224,11 @@ struct CompanionToolRunDetailView: View {
         VStack(alignment: .leading, spacing: 12) {
             Label(tool.kind.label, systemImage: tool.kind.systemImage)
                 .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Color(uiColor: .secondaryLabel))
+                .foregroundStyle(CompanionIOSTheme.textSecondary)
 
             Text(tool.displayTitle)
                 .font(.title2.weight(.semibold))
-                .foregroundStyle(Color(uiColor: .label))
+                .foregroundStyle(CompanionIOSTheme.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
                 .accessibilityIdentifier("tool-run.detail.title")
@@ -236,11 +236,11 @@ struct CompanionToolRunDetailView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Tool name")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(Color(uiColor: .secondaryLabel))
+                    .foregroundStyle(CompanionIOSTheme.textSecondary)
 
                 Text(tool.name.isEmpty ? "Unnamed tool" : tool.name)
                     .font(.system(.headline, design: .monospaced).weight(.semibold))
-                    .foregroundStyle(Color(uiColor: .label))
+                    .foregroundStyle(CompanionIOSTheme.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
                     .accessibilityIdentifier("tool-run.detail.name")
@@ -261,7 +261,7 @@ struct CompanionToolRunDetailView: View {
         if let timestamp, !timestamp.isEmpty {
             Label(timestamp, systemImage: "clock")
                 .font(.caption)
-                .foregroundStyle(Color(uiColor: .secondaryLabel))
+                .foregroundStyle(CompanionIOSTheme.textSecondary)
                 .fixedSize(horizontal: true, vertical: false)
                 .accessibilityLabel("Recorded \(timestamp)")
                 .accessibilityIdentifier("tool-run.detail.timestamp")
@@ -273,7 +273,7 @@ struct CompanionToolRunDetailView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Preview")
                 .font(.headline)
-                .foregroundStyle(Color(uiColor: .label))
+                .foregroundStyle(CompanionIOSTheme.textPrimary)
 
             if let screenshotImage {
                 Image(uiImage: screenshotImage)
@@ -281,20 +281,20 @@ struct CompanionToolRunDetailView: View {
                     .scaledToFit()
                     .frame(maxWidth: .infinity)
                     .background(
-                        Color(uiColor: .secondarySystemBackground),
-                        in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        CompanionIOSTheme.card,
+                        in: RoundedRectangle(cornerRadius: 12, style: .continuous)
                     )
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     .overlay {
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .stroke(Color(uiColor: .separator), lineWidth: 0.7)
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(CompanionIOSTheme.separator, lineWidth: 0.5)
                     }
                     .accessibilityLabel("Screenshot preview from \(tool.name.isEmpty ? tool.kind.label : tool.name)")
                     .accessibilityIdentifier("tool-run.detail.screenshot")
             } else if screenshotLoaded {
                 Text("Preview unavailable.")
                     .font(.subheadline)
-                    .foregroundStyle(Color(uiColor: .secondaryLabel))
+                    .foregroundStyle(CompanionIOSTheme.textSecondary)
                     .accessibilityIdentifier("tool-run.detail.preview-unavailable")
             } else {
                 ProgressView("Loading preview…")
@@ -307,29 +307,29 @@ struct CompanionToolRunDetailView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Details")
                 .font(.headline)
-                .foregroundStyle(Color(uiColor: .label))
+                .foregroundStyle(CompanionIOSTheme.textPrimary)
 
             if let detail = tool.detail, !detail.isEmpty {
                 Text(detail)
                     .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(Color(uiColor: .label))
+                    .foregroundStyle(CompanionIOSTheme.textPrimary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
                     .padding(14)
                     .background(
-                        Color(uiColor: .secondarySystemBackground),
-                        in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        CompanionIOSTheme.card,
+                        in: RoundedRectangle(cornerRadius: 12, style: .continuous)
                     )
                     .overlay {
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .stroke(Color(uiColor: .separator), lineWidth: 0.7)
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(CompanionIOSTheme.separator, lineWidth: 0.5)
                     }
                     .accessibilityIdentifier("tool-run.detail.payload")
             } else {
                 Text("No detail payload was recorded for this operation.")
                     .font(.subheadline)
-                    .foregroundStyle(Color(uiColor: .secondaryLabel))
+                    .foregroundStyle(CompanionIOSTheme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("tool-run.detail.empty")
             }
@@ -357,7 +357,7 @@ private struct ToolRunStatusView: View {
 
             Text(status.label)
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(Color(uiColor: .label))
+                .foregroundStyle(CompanionIOSTheme.textPrimary)
                 .lineLimit(1)
         }
         .fixedSize(horizontal: true, vertical: false)
@@ -455,10 +455,10 @@ private extension CompanionToolRunStatus {
 
     var color: Color {
         switch self {
-        case .running: return Color(uiColor: .systemBlue)
-        case .ok: return Color(uiColor: .systemGreen)
-        case .error: return Color(uiColor: .systemRed)
-        case .timeout: return Color(uiColor: .systemOrange)
+        case .running: return CompanionIOSTheme.actionBlue
+        case .ok: return CompanionIOSTheme.toggleGreen
+        case .error: return CompanionIOSTheme.danger
+        case .timeout: return CompanionIOSTheme.warning
         }
     }
 }

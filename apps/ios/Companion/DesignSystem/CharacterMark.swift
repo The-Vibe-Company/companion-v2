@@ -84,17 +84,5 @@ struct CharacterMark: View {
         (0..<count).contains(value) ? value : fallback
     }
 
-    static let palette: [Color] = [
-        Color(red: 0, green: 0, blue: 0),
-        Color(red: 162 / 255, green: 132 / 255, blue: 94 / 255),
-        Color(red: 1, green: 59 / 255, blue: 48 / 255),
-        Color(red: 1, green: 149 / 255, blue: 0),
-        Color(red: 1, green: 204 / 255, blue: 0),
-        Color(red: 52 / 255, green: 199 / 255, blue: 89 / 255),
-        Color(red: 48 / 255, green: 176 / 255, blue: 199 / 255),
-        Color(red: 0, green: 122 / 255, blue: 1),
-        Color(red: 175 / 255, green: 82 / 255, blue: 222 / 255),
-        Color(red: 1, green: 45 / 255, blue: 85 / 255),
-        Color(red: 142 / 255, green: 142 / 255, blue: 147 / 255),
-    ]
+    static let palette = CompanionIOSTheme.characterMarkPalette
 }

@@ -18,6 +18,8 @@ Light (default): canvas #FFFFFF; surface.card #F2F2F7 (settings cards, plugin ro
 
 Black (Appearance option): canvas #000000; surface.card #1C1C1E; surface.bubble.bot #1C1C1E; bubble.user #FFFFFF with text inverting to #000000; text.primary #F2F2F7; text.secondary #8E8E93; separator #38383A; cta.primary #FFFFFF with #000000 label.
 
+The static launch canvas is always #000000. iOS launch screens cannot read the app's persisted Appearance choice before SwiftUI starts, so a black launch canvas prevents a saved Black preference from flashing white on a system-light device. Once the app root renders, System follows the OS and Black remains true black.
+
 ### 3. Typography (SF Pro, system font)
 Large title 28-34 bold; Row title 17 semibold; Body 16 regular; Preview/description 15 regular secondary; Section label 13 regular secondary; Timestamp 13-14 regular secondary; Button label 15 semibold; In-chat time 12 regular secondary. No display fonts, no letter-spacing games, no uppercase labels.
 
@@ -30,12 +32,12 @@ A mark is a solid shape in one palette color with two small white eyes (two roun
 - One SwiftUI CharacterMark view, vector-drawn, used by every surface and by the APNs avatar renderer.
 
 ### 5. Radii, spacing, depth, motion
-Radii: bubbles & cards 18; inner cards 12; chips & pills = capsule; header buttons = circle (44pt hit). Spacing: 4pt base; 16 screen margins; 12 between grouped cards; 8 between list rows (NO hairlines between rows — only inside grouped settings cards). Depth: flat, no shadows in content. Motion: system sheets, spring pushes, 0.2s control transitions, soft haptics on toggle and send.
+Radii: bubbles & cards 18; inner cards 12; chips & pills = capsule. Header actions keep a 44pt hit area but render as bare icons with no drawn circle, outline, or shadow. Spacing: 4pt base; 16 screen margins; 12 between grouped cards; 8 between list rows (NO hairlines between rows — only inside grouped settings cards). Depth: flat, no shadows in content. Motion: system sheets, spring pushes, 0.2s control transitions, soft haptics on toggle and send.
 
 ## Part II — Components (Wave A scope: HOME only; chat/sheets/computer are later waves)
 
 ### 6. Home
-- Header: owner avatar photo (44pt circle, left) — search circle button, + circle button (right). 1pt outline circles, white fill (light) / #1C1C1E (black). + opens New Bot creation.
+- Header: owner avatar photo (44pt clipped circle, left) with no border or ring — bare search and + icons (right), each retaining a 44pt hit area with no visible circle or outline. + opens New Bot creation. Chat header computer and overflow actions use the same bare-icon treatment.
 - Sections: collapsible. Header row = section name + chevron, text.secondary. A section with <=3 bots renders as a PINNED GRID: horizontal row of 64-80pt marks with labels underneath. Otherwise standard rows. Unassigned is the default section at the bottom.
 - Row: mark 36pt — title 17 semibold — preview one line 15 regular secondary — trailing timestamp (hierarchical: 8:41 AM today, Yesterday, weekday, 8/19) — blue unread dot 6pt right-aligned when unread. No hairline between rows.
 - Swipe actions: trailing Move to (section picker), mute, delete.

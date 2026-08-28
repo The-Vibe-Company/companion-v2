@@ -53,7 +53,7 @@ struct CompanionQueuedMessagesDemoView: View {
                             TextField("Message Luna", text: $draft)
                                 .padding(.horizontal, 16)
                                 .frame(minHeight: 46)
-                                .companionGlass(radius: 23, interactive: true)
+                                .companionGlass(radius: 18, interactive: true)
                                 .accessibilityIdentifier("queue.demo.composer")
 
                             Button { } label: {

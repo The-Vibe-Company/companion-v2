@@ -11,6 +11,13 @@ struct PluginManagementView: View {
     @State private var showingAddPlugin = false
     @State private var curatedPlugin: CuratedCompanionPlugin?
     @State private var pluginToDisconnect: CompanionPluginAccount?
+    private let demoMode: Bool
+
+    init(demoModel: CompanionPluginSheetModel? = nil) {
+        demoMode = demoModel != nil
+        _model = State(initialValue: demoModel ?? CompanionPluginSheetModel(accounts: []))
+        _loading = State(initialValue: demoModel == nil)
+    }
 
     var body: some View {
         CompanionSheetCanvas {
@@ -58,6 +65,7 @@ struct PluginManagementView: View {
                     }
 
                     Button {
+                        guard !demoMode else { return }
                         showingAddPlugin = true
                     } label: {
                         Label("Add custom MCP", systemImage: "terminal")
@@ -79,7 +87,10 @@ struct PluginManagementView: View {
                 .padding(.top, 8)
                 .padding(.bottom, 32)
             }
-            .refreshable { await reload() }
+            .refreshable {
+                guard !demoMode else { return }
+                await reload()
+            }
             .scrollDismissesKeyboard(.interactively)
         }
         .toolbar(.hidden, for: .navigationBar)
@@ -116,7 +127,10 @@ struct PluginManagementView: View {
         } message: {
             Text("Its encrypted credential and all Companion attachments will be removed.")
         }
-        .task { await reload() }
+        .task {
+            guard !demoMode else { return }
+            await reload()
+        }
     }
 
     private var searchField: some View {
@@ -220,6 +234,7 @@ struct PluginManagementView: View {
                         Button("Authorize") { connect(row.item, suggestedLabel: account.label) }
                     }
                     Button("Remove", systemImage: "trash", role: .destructive) {
+                        guard !demoMode else { return }
                         pluginToDisconnect = account
                     }
                 } label: {
@@ -236,6 +251,7 @@ struct PluginManagementView: View {
                     .frame(height: 30)
                     .background(CompanionIOSTheme.chip, in: Capsule())
                 }
+                .accessibilityIdentifier("plugins.account.\(row.item.provider).\(account.id)")
                 .accessibilityLabel(
                     account.connected ? "\(account.label), connected" : "\(account.label), authorization required"
                 )
@@ -247,18 +263,20 @@ struct PluginManagementView: View {
                 } label: {
                     Label("Account", systemImage: "plus")
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(CompanionIOSTheme.textSecondary)
+                        .foregroundStyle(CompanionIOSTheme.textPrimary)
                         .padding(.horizontal, 10)
                         .frame(height: 30)
                         .background(CompanionIOSTheme.chip, in: Capsule())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Add another \(row.item.title) account")
+                .accessibilityIdentifier("plugins.account.add.\(row.item.provider)")
             }
         }
     }
 
     private func connect(_ item: CompanionPluginCatalogItem, suggestedLabel: String? = nil) {
+        guard !demoMode else { return }
         guard !item.id.hasPrefix("custom:") else {
             showingAddPlugin = true
             return
@@ -288,6 +306,7 @@ struct PluginManagementView: View {
     }
 
     private func disconnect(_ plugin: CompanionPluginAccount) async {
+        guard !demoMode else { return }
         do {
             try await sessionStore.deleteCompanionPlugin(accountID: plugin.id)
             success = "\(plugin.label) removed."

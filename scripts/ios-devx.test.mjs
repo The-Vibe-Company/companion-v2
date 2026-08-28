@@ -59,7 +59,7 @@ test("Debug and Release keep distinct native identities and API contracts", () =
   assert.match(plist, /<string>Companion \(623507\)<\/string>/);
   assert.match(plist, /<string>Companion623507<\/string>/);
   assert.match(plist, /<key>ITSAppUsesNonExemptEncryption<\/key>\s*<false\/>/);
-  assert.match(plist, /<key>UIUserInterfaceStyle<\/key>\s*<string>Light<\/string>/);
+  assert.doesNotMatch(plist, /<key>UIUserInterfaceStyle<\/key>/);
 });
 
 test("the iOS app packages the approved light appearance and provider marks", () => {
@@ -86,6 +86,95 @@ test("the iOS app packages the approved light appearance and provider marks", ()
   assert.equal(appIcon[25], 2, "App Store icon must be RGB without alpha");
 });
 
+test("the iOS app wires the approved OLED palette and CharacterMark notification projection", () => {
+  const palette = read("apps/ios/CompanionKit/Sources/CompanionKit/CompanionAppearance.swift");
+  const colors = read("apps/ios/Companion/DesignSystem/Colors.swift");
+  const root = read("apps/ios/Companion/Navigation/RootView.swift");
+  const launchCanvas = JSON.parse(
+    read("apps/ios/Companion/Support/Assets.xcassets/LaunchCanvas.colorset/Contents.json"),
+  );
+  const renderer = read(
+    "apps/ios/CompanionKit/Sources/CompanionNotificationAvatar/CompanionNotificationAvatar.swift",
+  );
+  const service = read("apps/ios/CompanionNotificationService/NotificationService.swift");
+  const appearanceDemo = read("apps/ios/Companion/Screens/CompanionAppearanceDemoView.swift");
+
+  for (const value of [
+    "0x000000", "0x1C1C1E", "0xFFFFFF", "0xF2F2F7", "0x8E8E93", "0x38383A",
+  ]) {
+    assert.match(palette, new RegExp(value));
+  }
+  assert.match(root, /@AppStorage\(CompanionPreferenceKeys\.appearance\)/);
+  assert.match(root, /appearance\.forcesBlackPalette \? \.dark : nil/);
+  assert.doesNotMatch(read("apps/ios/Companion/Support/Info.plist"), /UIUserInterfaceStyle/);
+  assert.deepEqual(
+    launchCanvas.colors.map((entry) => ({
+      appearance: entry.appearances?.[0]?.value ?? "universal",
+      components: entry.color.components,
+    })),
+    [
+      {
+        appearance: "universal",
+        components: { alpha: "1.000", blue: "0.000", green: "0.000", red: "0.000" },
+      },
+    ],
+  );
+  assert.match(read("docs/ios-design.md"), /static launch canvas is always #000000/);
+  assert.match(colors, /CompanionAppearancePalette\.Black\.canvas/);
+  assert.match(renderer, /CharacterMarkGeometry\.commands\(shapeIndex:/);
+  assert.match(renderer, /CharacterMarkGeometry\.eyeSegments/);
+  assert.doesNotMatch(renderer, /draw(?:Mouth|Face|Accessory)|draw(?:Linear|Radial)Gradient|setShadow/);
+  assert.match(service, /CompanionNotificationMark\(apnsUserInfo:/);
+  assert.match(appearanceDemo, /demo\.appearance\.gallery/);
+  assert.match(root, /-companion-appearance-demo/);
+  assert.match(read("apps/ios/README.md"), /nested\s+`companion_icon` dictionary/);
+});
+
+test("the plugin add-account chip matches connected account tokens", () => {
+  const plugins = read("apps/ios/Companion/Screens/PluginCatalogSheet.swift");
+  const root = read("apps/ios/Companion/Navigation/RootView.swift");
+  const addChip = plugins.slice(
+    plugins.indexOf('Label("Account", systemImage: "plus")'),
+    plugins.indexOf('.accessibilityIdentifier("plugins.account.add.', plugins.indexOf('Label("Account", systemImage: "plus")')),
+  );
+
+  assert.match(addChip, /foregroundStyle\(CompanionIOSTheme\.textPrimary\)/);
+  assert.match(addChip, /background\(CompanionIOSTheme\.chip, in: Capsule\(\)\)/);
+  assert.doesNotMatch(addChip, /textSecondary/);
+  assert.match(root, /PluginManagementView\(demoModel: \.linearMultiAccountDemo\)/);
+  assert.match(root, /-companion-plugins-multi-account-demo/);
+  assert.match(plugins, /Button \{\s*guard !demoMode else \{ return \}\s*showingAddPlugin = true/);
+  assert.match(plugins, /private func disconnect[\s\S]{0,120}?guard !demoMode else \{ return \}/);
+});
+
+test("home and chat header chrome keeps bare 44-point actions", () => {
+  const roster = read("apps/ios/Companion/Screens/CompanionListView.swift");
+  const chat = read("apps/ios/Companion/Screens/ChatView.swift");
+  const design = read("docs/ios-design.md");
+  const homeButton = roster.slice(
+    roster.indexOf("private func headerToolbarButton"),
+    roster.indexOf("private func sectionHeader"),
+  );
+  const accountAvatar = roster.slice(
+    roster.indexOf("private struct AccountAvatar"),
+    roster.indexOf("#if DEBUG", roster.indexOf("private struct AccountAvatar")),
+  );
+  const chatHeader = chat.slice(
+    chat.indexOf("private var headerToolbar"),
+    chat.indexOf("private var loadEarlierButton"),
+  );
+
+  assert.match(homeButton, /frame\(width: 44, height: 44\)/);
+  assert.doesNotMatch(homeButton, /Circle\(\)|\.background\(|\.overlay/);
+  assert.match(accountAvatar, /clipShape\(Circle\(\)\)/);
+  assert.doesNotMatch(accountAvatar, /Circle\(\)\.stroke/);
+  assert.match(chatHeader, /systemImage: "desktopcomputer"/);
+  assert.match(chatHeader, /Image\(systemName: "ellipsis"\)[\s\S]{0,80}?frame\(width: 44, height: 44\)/);
+  assert.doesNotMatch(chatHeader, /background\(CompanionIOSTheme\.card, in: Circle\(\)\)/);
+  assert.match(design, /bare search and \+ icons/);
+  assert.match(design, /Chat header computer and overflow actions use the same bare-icon treatment/);
+});
+
 test("full-screen native backdrops stay neutral in every state", () => {
   const glassComponents = read("apps/ios/Companion/DesignSystem/GlassComponents.swift");
   const backdrop = glassComponents.slice(
@@ -102,10 +191,10 @@ test("full-screen native backdrops stay neutral in every state", () => {
     "apps/ios/Companion/DesignSystem/ManagementComponents.swift",
   );
 
-  assert.match(backdrop, /Color\.companionCanvas\s*\n\s*\.ignoresSafeArea\(\)/);
+  assert.match(backdrop, /CompanionIOSTheme\.canvas\s*\n\s*\.ignoresSafeArea\(\)/);
   assert.deepEqual(
-    [...backdrop.matchAll(/\bColor\.[A-Za-z]\w*/g)].map(([color]) => color),
-    ["Color.companionCanvas"],
+    [...backdrop.matchAll(/\bCompanionIOSTheme\.[A-Za-z]\w*/g)].map(([color]) => color),
+    ["CompanionIOSTheme.canvas"],
   );
   assert.doesNotMatch(
     backdrop,
@@ -411,7 +500,7 @@ test("the chat scroll-to-bottom control floats over the transcript", () => {
   assert.match(button, /\.buttonStyle\(\.glass\)/);
   assert.equal(button.match(/Button\(action: action\)/g)?.length, 1);
   assert.match(button, /\.buttonBorderShape\(unseenCount > 0 \? \.capsule : \.circle\)/);
-  assert.match(button, /\.shadow\(color: visualTheme\.shadow\.opacity\(0\.2\), radius: 8, y: 3\)/);
+  assert.doesNotMatch(button, /\.shadow\(/);
 });
 
 test("native transcript taps dismiss the keyboard without consuming message controls", () => {

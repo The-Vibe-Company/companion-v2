@@ -10,18 +10,6 @@ public enum CompanionPreferenceKeys {
     public static let notificationPrefix = "companion.preferences.bot-notifications."
 }
 
-public enum CompanionAppearancePreference: String, CaseIterable, Codable, Equatable, Hashable, Sendable {
-    case system
-    case black
-
-    public var label: String {
-        switch self {
-        case .system: "System"
-        case .black: "Black"
-        }
-    }
-}
-
 public struct MemberSettingsSheetModel: Equatable, Sendable {
     private let originalName: String
     private let originalTimezone: String?
@@ -203,6 +191,33 @@ public struct CompanionPluginSheetModel: Equatable, Sendable {
         self.query = query
         self.yoursOnly = yoursOnly
         self.accounts = accounts
+    }
+
+    /// Deterministic multi-account state used by the DEBUG plugin-sheet showcase.
+    public static var linearMultiAccountDemo: Self {
+        let timestamp = "2026-08-28T09:51:00.000Z"
+        return Self(accounts: [
+            CompanionPluginAccount(
+                id: "11111111-1111-4111-8111-111111111111",
+                provider: "linear",
+                label: "work",
+                transport: .http,
+                endpoint: "https://mcp.linear.app/mcp",
+                connected: true,
+                createdAt: timestamp,
+                updatedAt: timestamp
+            ),
+            CompanionPluginAccount(
+                id: "22222222-2222-4222-8222-222222222222",
+                provider: "linear",
+                label: "client",
+                transport: .http,
+                endpoint: "https://mcp.linear.app/mcp",
+                connected: true,
+                createdAt: timestamp,
+                updatedAt: timestamp
+            ),
+        ])
     }
 
     public var sections: [CompanionPluginSheetSection] {

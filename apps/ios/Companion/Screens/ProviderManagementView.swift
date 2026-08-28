@@ -33,7 +33,7 @@ struct ProviderManagementView: View {
                             ProgressView("Loading providers…")
                                 .padding(28)
                                 .frame(maxWidth: .infinity)
-                                .companionGlass(radius: 22)
+                                .companionGlass(radius: 18)
                         } else if let providers {
                             connectedProviders(providers)
                             availableProviders(providers)
@@ -390,9 +390,9 @@ private struct ConnectProviderView: View {
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .padding(14)
-                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .background(CompanionIOSTheme.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                 .overlay {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
                         .stroke(Color.companionBorder, lineWidth: 0.7)
                 }
         }
@@ -418,7 +418,7 @@ private struct ConnectProviderView: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .padding(14)
-                        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .background(CompanionIOSTheme.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                     Button(submitting ? "Connecting…" : "Complete connection", systemImage: "checkmark") {
                         Task { await completeAuthorizationCode() }
                     }
@@ -435,7 +435,7 @@ private struct ConnectProviderView: View {
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity)
                             .padding(16)
-                            .background(Color.companionInk.opacity(0.05), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                            .background(CompanionIOSTheme.chip, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                             .accessibilityLabel("One-time code \(code)")
                     }
                     if let url = oauth.verificationURL {
@@ -606,10 +606,10 @@ struct ProviderMark: View {
             .font(.system(size: size * 0.42, weight: .semibold))
             .foregroundStyle(foreground)
             .frame(width: size, height: size)
-            .background(background, in: RoundedRectangle(cornerRadius: size * 0.32, style: .continuous))
+            .background(CompanionIOSTheme.card, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay {
-                RoundedRectangle(cornerRadius: size * 0.32, style: .continuous)
-                    .stroke(Color.white.opacity(0.8), lineWidth: 0.7)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(CompanionIOSTheme.separator, lineWidth: 0.5)
             }
             .accessibilityHidden(true)
     }
@@ -625,19 +625,7 @@ struct ProviderMark: View {
         }
     }
 
-    private var background: Color {
-        switch providerID {
-        case "anthropic": return Color(red: 0.92, green: 0.86, blue: 0.76)
-        case "openai-codex", "openai": return Color.companionInk
-        case "google": return Color(red: 0.83, green: 0.91, blue: 1.0)
-        case "zai": return Color(red: 0.84, green: 0.88, blue: 1.0)
-        case "kimi-coding": return Color(red: 0.82, green: 0.92, blue: 0.90)
-        case "moonshotai": return Color(red: 0.88, green: 0.86, blue: 1.0)
-        default: return Color.companionAccentGold.opacity(0.34)
-        }
-    }
-
     private var foreground: Color {
-        ["openai-codex", "openai"].contains(providerID) ? .white : .companionInk
+        CompanionIOSTheme.textPrimary
     }
 }

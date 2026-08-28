@@ -91,7 +91,7 @@ struct GlassManagementDemoView: View {
                         TextField("Companion name", text: $companionName)
                             .font(.title3.weight(.semibold))
                             .padding(14)
-                            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                            .background(CompanionIOSTheme.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                             .accessibilityIdentifier("demo.management.name")
                         Button("Surprise me", systemImage: "dice.fill") { randomizeIcon() }
                             .buttonStyle(.glass)
@@ -384,7 +384,7 @@ struct GlassManagementDemoView: View {
     }
 
     private func randomizeIcon() {
-        withAnimation(.spring(duration: 0.35, bounce: 0.24)) {
+        withAnimation(.easeOut(duration: 0.2)) {
             icon = .init(
                 shape: .random(in: 0..<8),
                 mouth: .random(in: 0..<5),

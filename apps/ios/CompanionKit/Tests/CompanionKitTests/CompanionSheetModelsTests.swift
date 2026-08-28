@@ -2,6 +2,45 @@ import Foundation
 import Testing
 @testable import CompanionKit
 
+@Test
+func appearancePreferencesKeepSystemAdaptiveAndBlackExplicit() {
+    #expect(CompanionAppearancePreference.system.label == "System")
+    #expect(!CompanionAppearancePreference.system.forcesBlackPalette)
+    #expect(CompanionAppearancePreference.black.label == "Black")
+    #expect(CompanionAppearancePreference.black.forcesBlackPalette)
+}
+
+@Test
+func approvedAppearancePaletteMatchesTheDesignContract() {
+    #expect(CompanionAppearancePalette.Light.canvas == 0xFFFFFF)
+    #expect(CompanionAppearancePalette.Light.card == 0xF2F2F7)
+    #expect(CompanionAppearancePalette.Light.botBubble == 0xEFEFF1)
+    #expect(CompanionAppearancePalette.Light.innerBubble == 0xFFFFFF)
+    #expect(CompanionAppearancePalette.Light.chip == 0xEFEFF1)
+    #expect(CompanionAppearancePalette.Light.userBubble == 0x0B0B0F)
+    #expect(CompanionAppearancePalette.Light.userBubbleText == 0xFFFFFF)
+    #expect(CompanionAppearancePalette.Light.textPrimary == 0x111111)
+    #expect(CompanionAppearancePalette.Light.separator == 0xE5E5EA)
+    #expect(CompanionAppearancePalette.Light.primaryCTA == 0x0B0B0F)
+    #expect(CompanionAppearancePalette.Light.primaryCTAText == 0xFFFFFF)
+    #expect(CompanionAppearancePalette.Black.canvas == 0x000000)
+    #expect(CompanionAppearancePalette.Black.card == 0x1C1C1E)
+    #expect(CompanionAppearancePalette.Black.botBubble == 0x1C1C1E)
+    #expect(CompanionAppearancePalette.Black.innerBubble == 0x1C1C1E)
+    #expect(CompanionAppearancePalette.Black.chip == 0x1C1C1E)
+    #expect(CompanionAppearancePalette.Black.userBubble == 0xFFFFFF)
+    #expect(CompanionAppearancePalette.Black.userBubbleText == 0x000000)
+    #expect(CompanionAppearancePalette.Black.textPrimary == 0xF2F2F7)
+    #expect(CompanionAppearancePalette.Black.separator == 0x38383A)
+    #expect(CompanionAppearancePalette.Black.primaryCTA == 0xFFFFFF)
+    #expect(CompanionAppearancePalette.Black.primaryCTAText == 0x000000)
+    #expect(CompanionAppearancePalette.textSecondary == 0x8E8E93)
+    #expect(CompanionAppearancePalette.dangerTextLight == 0xC21429)
+    #expect(CompanionAppearancePalette.successTextLight == 0x10733B)
+    #expect(CompanionAppearancePalette.warningTextLight == 0x955000)
+    #expect(CompanionAppearancePalette.characterMarks.count == 11)
+}
+
 private let sheetTestCompanionID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 private let sheetTestRoutineID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 private let sheetTestTimestamp = "2026-08-27T18:00:00.000Z"
@@ -104,6 +143,18 @@ func pluginSheetProjectsTrailingStateSearchAndMultipleAccountChips() throws {
 
     model.query = "quivr"
     #expect(model.sections.flatMap(\.rows).map(\.item.provider) == ["github"])
+}
+
+@Test
+func pluginSheetMultiAccountDemoKeepsTwoConnectedLinearAccounts() throws {
+    let linear = try #require(
+        CompanionPluginSheetModel.linearMultiAccountDemo.sections
+            .flatMap(\.rows)
+            .first(where: { $0.item.provider == "linear" })
+    )
+
+    #expect(linear.connectionState == .added)
+    #expect(linear.connectedAccountLabels == ["client", "work"])
 }
 
 @Test
