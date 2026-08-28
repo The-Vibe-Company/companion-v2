@@ -796,6 +796,69 @@ async function handleRestartPi(context: OperationContext): Promise<RuntimeWorkDi
   }
 }
 
+async function handleIsolatedRoutineRetry(
+  context: OperationContext,
+): Promise<RuntimeWorkDisposition | null> {
+  if (context.claim.turnId === null) return null;
+  const authorization = await context.session.reauthorize();
+  if (authorization.workCheckpoint === "pi_ready") return runtimeSucceeded;
+  if (authorization.workCheckpoint !== "pending") {
+    throw new RuntimeInvariantError({
+      code: "operation_checkpoint_invalid",
+      message: "The isolated routine retry reached an unsupported checkpoint.",
+      action: "none",
+    });
+  }
+  const material = await context.session.fencedMutation(async () =>
+    await context.deps.materialProvider.getMaterial({
+      store: context.deps.store,
+      fence: context.session.fence,
+      signal: context.session.signal,
+    }));
+  if (material === null) {
+    throw new RuntimeInvariantError({
+      code: "runtime_resource_snapshot_missing",
+      message: "The retry resource snapshot is unavailable.",
+      action: "retry",
+    });
+  }
+  if (material.routineId === null) return null;
+  if (!material.routineIsolated) {
+    await context.session.checkpoint({ nextCheckpoint: "pi_ready" });
+    return runtimeSucceeded;
+  }
+  const runId = context.claim.turnId;
+  const routine = context.deps.pi.routineSession;
+  if (!routine) {
+    throw new RuntimeInvariantError({
+      code: "routine_session_unavailable",
+      message: "The isolated routine session control is unavailable.",
+      action: "retry",
+    });
+  }
+  const invocationId = requiredAuthorization(context.session).commandPiInvocationId;
+  if (invocationId === null) {
+    await context.session.checkpoint({ nextCheckpoint: "pi_ready" });
+    return runtimeSucceeded;
+  }
+  if (!invocationId.startsWith(`routine:${runId}:`)) {
+    throw new RuntimeInvariantError({
+      code: "routine_session_invocation_mismatch",
+      message: "The isolated routine retry identity did not match its run.",
+      action: "retry",
+    });
+  }
+  await lifecycle(context, "stop_pi", async ({ signal }) =>
+    await routine.terminate({
+      boxId: requiredBoxId(context.session),
+      runId,
+      expectedInvocationId: invocationId,
+      signal,
+    }));
+  await context.session.checkpoint({ nextCheckpoint: "pi_ready" });
+  return runtimeSucceeded;
+}
+
 async function handleRestartBox(context: OperationContext): Promise<RuntimeWorkDisposition> {
   for (;;) {
     const authorization = await context.session.reauthorize();
@@ -1078,7 +1141,7 @@ export async function handleOperation(
     case "stop":
       return await handleStop(context);
     case "restart_pi":
-      return await handleRestartPi(context);
+      return await handleIsolatedRoutineRetry(context) ?? await handleRestartPi(context);
     case "restart_box":
       return await handleRestartBox(context);
     case "apply_settings":

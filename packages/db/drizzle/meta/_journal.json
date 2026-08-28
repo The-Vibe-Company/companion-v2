@@ -974,6 +974,13 @@
       "when": 1791738400000,
       "tag": "0138_companion_routine_cancel_identity",
       "breakpoints": true
+    },
+    {
+      "idx": 139,
+      "version": "7",
+      "when": 1791824800000,
+      "tag": "0139_companion_routine_parallel_scheduling",
+      "breakpoints": true
     }
   ]
 }

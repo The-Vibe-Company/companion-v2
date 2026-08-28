@@ -105,12 +105,12 @@ Runtime state is explicit and durable:
   invocation id, and applied configuration revision.
 - `companion_turns` owns `client_message_id`, initiating actor/surface, queue state, inactivity and
   absolute deadlines, and one stable expurgated error.
-- `companion_turn_attempts` owns explicit retry identity, Pi invocation, dispatch/acknowledgement,
-  correlated event cursor, and outcome.
+- `companion_turn_attempts` owns explicit retry identity, execution lane (`main` or `routine`), Pi
+  invocation, dispatch/acknowledgement, correlated event cursor, and outcome.
 - `companion_operations` owns start, stop, Pi restart, Box restart, settings apply, and delete intent
   plus checkpoints. Multiple operations may wait; one may run per Companion.
-- `companion_runtime_leases` owns the claim token, attempt epoch, executor id, and expiry used to
-  fence every checkpoint and settlement.
+- `companion_runtime_leases` owns independent `main` and `routine` claim tokens, globally increasing
+  attempt epochs, executor ids, and expiries used to fence every checkpoint and settlement.
 - `companion_images` owns provider-wide content-addressed image intent, published build status,
   bounded retry state, and the epoch-fenced single-builder lease used only by `apps/runtime`.
 - `companion_message_attachments` owns the files one transcript entry carries: `user_upload` for what
@@ -158,9 +158,10 @@ queued → starting → dispatching → running ↔ needs_input
                                       └→ succeeded | failed | interrupted | cancelled
 ```
 
-Only one attempt is active per Companion. Later turns remain queued in durable order. An interrupted
-turn blocks the queue until Owner/Editor Retry or Cancel. Settings revisions accepted during a turn
-apply after its settlement and before the next turn. On a warm Box, configuration is published as
+Only one attempt is active per execution lane. One ordinary main attempt and one isolated routine
+attempt may run concurrently; later turns remain ordered within their lane. An interrupted turn
+blocks only its lane until Owner/Editor Retry or Cancel. Settings revisions accepted during a turn
+apply after the routine lane is quiescent and before the next main turn. On a warm Box, configuration is published as
 applied only after runtime stages the exact snapshot, restarts Pi, and observes a different idle Pi
 invocation; takeover repeats those idempotent steps if their final observation was lost.
 
@@ -178,8 +179,11 @@ and defaults to eight concurrent Companions. A completed execution interrupts on
 recovery sleep so a start can hand its newly idle Pi directly to the queued turn. `/healthz` fails when PostgreSQL, the claim loop, or the
 latest sweep is unhealthy.
 
-Work precedence is permanent delete, explicit stop/restart, decision response, active attempt,
-configuration apply, next queued turn, then health observation. Lifecycle calls that are known
+Main-lane precedence is permanent delete, explicit stop/restart, main decision response, active main
+attempt, configuration apply, next main turn, then health observation. The routine lane independently
+orders its decision response, active attempt, and next routine turn. Main lifecycle work waits for a
+quiescent routine lane without preempting its renewal; a routine Retry addresses only that run.
+Lifecycle calls that are known
 idempotent retry network, `429`, and `5xx` failures up to five times with jittered
 1/2/5/10/30-second backoff. Epoch predicates prevent an expired executor from committing after a
 replacement claims the work, but database fencing never pretends to fence a provider side effect.
@@ -247,11 +251,16 @@ Layout 14 installs a small Node broker under systemd between runtime commands an
 - unknown event types are counted and ignored rather than treated as user-fatal errors.
 
 The routine-isolation cutover extends this broker layout without adding a second harness or runtime
-owner. A routine-origin turn is still claimed and serialized by the Companion's one PostgreSQL
-lease, but runtime launches the same Pi binary with the same staged tools, skills, plugins, model,
-and provider material under a run-scoped session directory and broker socket. The main Pi daemon is
-idle and never receives the routine prompt. PostgreSQL, rather than the ephemeral Box session
-directory, is the durable routine-history authority.
+owner. A routine-origin turn is serialized by the Companion's `routine` PostgreSQL lease while the
+`main` lease may concurrently run an ordinary turn. Runtime launches the same Pi binary with the
+same staged tools, skills, plugins, model, and provider material under a run-scoped session directory
+and broker socket. The Box runs at most the main daemon plus one routine Pi. PostgreSQL, rather than
+the ephemeral Box session directory, is the durable routine-history authority.
+
+Shared Box mutation remains single-owner: settings and lifecycle work wait for the routine lane to
+be quiescent, and an interrupted routine must be retried or cancelled before those operations
+proceed. Routine context is pinned and read-only; run-local memory cannot write parent memory. A
+`relay` return enters the ordinary main queue and does not inherit routine-lane ordering.
 
 The runtime instance and the run-scoped broker intentionally have different Pi invocation
 identities. A routine attempt pins its broker identity with the dispatch write intent and uses that

@@ -306,7 +306,10 @@ async function createCompanion(input: {
   return { companionId, turnId, attemptId, prompt };
 }
 
-async function claimWork(): Promise<Claim> {
+async function claimWorkRows(
+  limit: number,
+  claimant = executorId,
+): Promise<Claim[]> {
   const rows = await asRuntime((tx) => tx<Array<Claim>>`
     select org_id::text as "orgId", companion_id::text as "companionId",
       claim_token::text as "claimToken", claim_epoch::text as "claimEpoch",
@@ -314,22 +317,45 @@ async function claimWork(): Promise<Claim> {
       work_id::text as "workId", checkpoint,
       checkpoint_sequence::text as "checkpointSequence",
       runtime_generation::text as "runtimeGeneration"
-    from public.companion_runtime_claim_work(${executorId}, 1, 30, (
+    from public.companion_runtime_claim_work(${claimant}, ${limit}, 30, (
       select gate_epoch from public.companion_runtime_gate_status()
-    ), 3, 1)
+    ), 4, 1)
   `);
+  return rows;
+}
+
+async function claimWork(): Promise<Claim> {
+  const rows = await claimWorkRows(1);
   if (!rows[0]) throw new Error("expected one Runtime v2 claim");
   return rows[0];
 }
 
-async function release(claim: Claim): Promise<void> {
+async function release(claim: Claim, claimant = executorId): Promise<void> {
   await asRuntime((tx) => tx`
     select public.companion_runtime_release_lease(
       ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
-      ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
+      ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${claimant},
       ${claim.workKind}, ${claim.workId}::uuid
     )
   `);
+}
+
+async function authorizeClaim(
+  claim: Claim,
+  claimant = executorId,
+): Promise<{ authorized: boolean; denialCode: string | null }> {
+  const [authorization] = await asRuntime((tx) => tx<Array<{
+    authorized: boolean;
+    denialCode: string | null;
+  }>>`
+    select authorized, denial_code as "denialCode"
+    from public.companion_runtime_renew_and_authorize_v2(
+      ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
+      ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${claimant},
+      ${claim.workKind}::public.companion_runtime_work_kind, ${claim.workId}::uuid, 30
+    )
+  `);
+  return authorization ?? { authorized: false, denialCode: "lease_lost" };
 }
 
 async function removeCompanion(companionId: string): Promise<void> {
@@ -2521,7 +2547,8 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       expect(protocolTwoClaims).toEqual([]);
       const [unclaimed] = await sql<Array<{ workKind: string | null; workId: string | null }>>`
         select work_kind::text as "workKind", work_id::text as "workId"
-        from companion_runtime_leases where companion_id = ${companionId}::uuid
+        from companion_runtime_leases
+        where companion_id = ${companionId}::uuid and lane = 'main'
       `;
       expect(unclaimed).toEqual({ workKind: null, workId: null });
 
@@ -2595,6 +2622,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           from companion_operations operation
           join companion_runtime_leases lease
             on lease.org_id = operation.org_id and lease.companion_id = operation.companion_id
+           and lease.lane = 'main'
           where operation.id = ${operationId}::uuid
         `;
         expect(durable).toMatchObject({
@@ -2663,7 +2691,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           set claimed_at = now() - interval '1 minute',
               renewed_at = now() - interval '2 seconds',
               expires_at = now() - interval '1 second'
-          where companion_id = ${companionId}::uuid
+          where companion_id = ${companionId}::uuid and lane = 'main'
         `;
       });
 
@@ -2727,7 +2755,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           set claimed_at = now() - interval '1 minute',
               renewed_at = now() - interval '2 seconds',
               expires_at = now() - interval '1 second'
-          where companion_id = ${companionId}::uuid
+          where companion_id = ${companionId}::uuid and lane = 'main'
         `;
       });
 
@@ -5497,6 +5525,287 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       expect(resumedClaim).toMatchObject({ workKind: "attempt", workId: fixture.attemptId });
       await release(resumedClaim);
     } finally {
+      await removeCompanion(fixture.companionId);
+    }
+  });
+
+  it("runs main turns and isolated routines concurrently with independent takeover, retry, and cancel", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const fixture = await createCompanion({
+      boxReady: true,
+      selectedSkillIds: [],
+      selectedMcpAccountIds: [],
+    });
+    const routineId = randomUUID();
+    const routineExecutor = `${executorId}-routine-takeover`;
+    const mainExecutor = `${executorId}-main-takeover`;
+    const retryExecutor = `${executorId}-routine-retry`;
+    let routineClaim: Claim | undefined;
+    let mainClaim: Claim | undefined;
+    let retryClaim: Claim | undefined;
+    try {
+      await sql`
+        update companion_runtime_instances
+        set material_pi_invocation_id = pi_invocation_id, material_client_surface = 'web',
+          material_expires_at = now() + interval '6 hours', last_observed_at = now()
+        where companion_id = ${fixture.companionId}::uuid
+      `;
+      const initialMain = await claimWork();
+      expect(initialMain).toMatchObject({
+        workKind: "attempt",
+        workId: fixture.attemptId,
+        companionId: fixture.companionId,
+      });
+      await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          select public.companion_api_create_routine(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid, ${routineId}::uuid,
+            'Parallel routine', 'Inspect the deployment.', '0 9 * * *', 'UTC', true,
+            now() + interval '1 hour'
+          )
+        `,
+      });
+      await sql`
+        update companion_routines set next_fire_at = now() - interval '1 second'
+        where id = ${routineId}::uuid
+      `;
+      const [due] = await asWorker((tx) => tx<Array<{ scheduledFor: Date }>>`
+        select scheduled_for as "scheduledFor"
+        from public.companion_claim_due_routines('parallel-worker', 1, 60)
+        where routine_id = ${routineId}::uuid
+      `);
+      if (!due) throw new Error("expected the parallel routine to become due");
+      const fired = await asWorker((tx) => tx<Array<{ outcome: string }>>`
+        select outcome from public.companion_fire_routine(
+          'parallel-worker', ${ids.orgA}::uuid, ${routineId}::uuid, ${randomUUID()}::uuid,
+          ${due.scheduledFor.toISOString()}::timestamptz, now() + interval '1 hour'
+        )
+      `);
+      expect(fired).toEqual([{ outcome: "fired" }]);
+
+      const [routineTurn] = await sql<Array<{ turnId: string }>>`
+        select id::text as "turnId" from companion_turns
+        where companion_id = ${fixture.companionId}::uuid
+          and routine_snapshot_id = ${routineId}::uuid
+      `;
+      if (!routineTurn) throw new Error("expected a routine-origin turn");
+
+      // The newly-fired routine claims its own lane while the main attempt holds a live lease.
+      [routineClaim] = await claimWorkRows(1);
+      expect(routineClaim).toMatchObject({ workKind: "attempt", companionId: fixture.companionId });
+      if (!routineClaim) throw new Error("expected the routine scheduling lane");
+      await sql`
+        update companion_turns set status = 'running'
+        where id = ${routineTurn.turnId}::uuid
+      `;
+      await sql`
+        update companion_turn_attempts
+        set status = 'running', checkpoint = 'running', dispatch_state = 'accepted',
+          provider_credential_refs = '[]'::jsonb, mcp_credential_refs = '[]'::jsonb,
+          command_id = ${randomUUID()}::uuid,
+          pi_invocation_id = ${`routine:${routineTurn.turnId}:dispatch-v2:active`},
+          dispatch_accepted_at = now(), last_activity_at = now()
+        where id = ${routineClaim.workId}::uuid
+      `;
+
+      // Expiring only the routine lane transfers only that run; the main fence remains valid.
+      await sql`
+        update companion_runtime_leases
+        set renewed_at = now() - interval '2 seconds', expires_at = now() - interval '1 second'
+        where companion_id = ${fixture.companionId}::uuid and lane = 'routine'
+      `;
+      [routineClaim] = await claimWorkRows(1, routineExecutor);
+      expect(routineClaim).toMatchObject({ workId: expect.any(String) });
+      expect(await authorizeClaim(initialMain)).toEqual({ authorized: true, denialCode: null });
+
+      await sql`
+        update companion_turn_attempts set status = 'cancelled', settled_at = now()
+        where id = ${fixture.attemptId}::uuid
+      `;
+      await sql`
+        update companion_turns set status = 'cancelled', settled_at = now()
+        where id = ${fixture.turnId}::uuid
+      `;
+      await release(initialMain);
+      const [routineOnlyProjection] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ activeTurn: unknown; queuedCount: number }>>`
+          select active_turn as "activeTurn", queued_count as "queuedCount"
+          from public.companion_api_read_thread(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid
+          )
+        `,
+      });
+      expect(routineOnlyProjection).toEqual({ activeTurn: null, queuedCount: 0 });
+
+      const lifecycleRequestId = randomUUID();
+      const [lifecycle] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ operation: { id: string } }>>`
+          select * from public.companion_api_enqueue_operation(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid,
+            ${lifecycleRequestId}::uuid, 'restart_box', 'web'
+          )
+        `,
+      });
+      expect(await claimWorkRows(1, `${mainExecutor}-lifecycle`)).toEqual([]);
+      expect(await authorizeClaim(routineClaim!, routineExecutor)).toEqual({
+        authorized: true,
+        denialCode: null,
+      });
+      await sql`
+        update companion_operations set status = 'cancelled', settled_at = now(), updated_at = now()
+        where id = ${lifecycle!.operation.id}::uuid
+      `;
+
+      const enqueueMain = async (content: string) => {
+        const [enqueued] = await asApi({
+          orgId: ids.orgA,
+          actorId: ids.ownerA,
+          action: (tx) => tx<Array<{ turn: { id: string } }>>`
+            select turn from public.companion_api_enqueue_turn(
+              ${ids.orgA}::uuid, ${fixture.companionId}::uuid, ${randomUUID()}::uuid,
+              ${content}, 'web', '[]'::jsonb
+            )
+          `,
+        });
+        const turnId = stringValue(enqueued?.turn.id);
+        if (turnId === null) throw new Error("expected an ordinary main turn");
+        return turnId;
+      };
+
+      const runningTurnId = await enqueueMain("Answer while the routine is running");
+      [mainClaim] = await claimWorkRows(1, mainExecutor);
+      expect(mainClaim).toMatchObject({ workKind: "attempt", companionId: fixture.companionId });
+      const [runningAttempt] = await sql<Array<{ turnId: string; lane: string }>>`
+        select turn_id::text as "turnId", execution_lane as lane
+        from companion_turn_attempts where id = ${mainClaim!.workId}::uuid
+      `;
+      expect(runningAttempt).toEqual({ turnId: runningTurnId, lane: "main" });
+
+      await sql`
+        update companion_turn_attempts set status = 'cancelled', settled_at = now()
+        where id = ${mainClaim!.workId}::uuid
+      `;
+      await sql`
+        update companion_turns set status = 'cancelled', settled_at = now()
+        where id = ${runningTurnId}::uuid
+      `;
+      await release(mainClaim!, mainExecutor);
+      mainClaim = undefined;
+      await sql`
+        update companion_turns set status = 'needs_input'
+        where id = ${routineTurn.turnId}::uuid
+      `;
+      await sql`
+        update companion_turn_attempts set status = 'needs_input', checkpoint = 'needs_input'
+        where id = ${routineClaim!.workId}::uuid
+      `;
+
+      const needsInputTurnId = await enqueueMain("Answer while the routine needs input");
+      [mainClaim] = await claimWorkRows(1, mainExecutor);
+      const [needsInputAttempt] = await sql<Array<{ turnId: string; lane: string }>>`
+        select turn_id::text as "turnId", execution_lane as lane
+        from companion_turn_attempts where id = ${mainClaim!.workId}::uuid
+      `;
+      expect(needsInputAttempt).toEqual({ turnId: needsInputTurnId, lane: "main" });
+
+      // A main takeover does not disturb the routine lease or authorization.
+      await sql`
+        update companion_runtime_leases
+        set renewed_at = now() - interval '2 seconds', expires_at = now() - interval '1 second'
+        where companion_id = ${fixture.companionId}::uuid and lane = 'main'
+      `;
+      const mainAttemptId = mainClaim!.workId;
+      [mainClaim] = await claimWorkRows(1, `${mainExecutor}-second`);
+      expect(mainClaim).toMatchObject({ workId: mainAttemptId });
+      expect(await authorizeClaim(routineClaim!, routineExecutor)).toEqual({
+        authorized: true,
+        denialCode: null,
+      });
+
+      // Retry remains a routine-lane operation and can be claimed while the main attempt runs.
+      await sql`
+        update companion_turn_attempts set status = 'interrupted', settled_at = now(),
+          last_error_code = 'dispatch_ambiguous', last_error_message = 'Ambiguous routine run.',
+          last_error_action = 'retry'
+        where id = ${routineClaim!.workId}::uuid
+      `;
+      await sql`
+        update companion_turns set status = 'interrupted', settled_at = now(),
+          inactivity_deadline_at = null, last_error_code = 'dispatch_ambiguous',
+          last_error_message = 'Ambiguous routine run.', last_error_action = 'retry'
+        where id = ${routineTurn.turnId}::uuid
+      `;
+      await release(routineClaim!, routineExecutor);
+      routineClaim = undefined;
+      const retryId = randomUUID();
+      const [retried] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ operation: { id: string; kind: string } }>>`
+          select * from public.companion_api_retry_turn(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid, ${routineTurn.turnId}::uuid,
+            ${retryId}::uuid, 'web'
+          )
+        `,
+      });
+      expect(retried?.operation.kind).toBe("restart_pi");
+      [retryClaim] = await claimWorkRows(1, retryExecutor);
+      expect(retryClaim).toMatchObject({ workKind: "operation", workId: retried!.operation.id });
+      expect(await authorizeClaim(mainClaim!, `${mainExecutor}-second`)).toEqual({
+        authorized: true,
+        denialCode: null,
+      });
+
+      const [retryCheckpoint] = await asRuntime((tx) => tx<Array<{ sequence: string | null }>>`
+        select public.companion_runtime_checkpoint(
+          ${retryClaim!.orgId}::uuid, ${retryClaim!.companionId}::uuid,
+          ${retryClaim!.claimToken}::uuid, ${retryClaim!.claimEpoch}::bigint,
+          ${retryClaim!.gateEpoch}::bigint, ${retryExecutor}, 'operation',
+          ${retryClaim!.workId}::uuid, ${retryClaim!.checkpointSequence}::bigint,
+          'pi_ready', null, null, null, null, null, null, null, null
+        )::text as sequence
+      `);
+      expect(retryCheckpoint?.sequence).not.toBeNull();
+      const [retrySettled] = await asRuntime((tx) => tx<Array<{ settled: boolean }>>`
+        select public.companion_runtime_settle(
+          ${retryClaim!.orgId}::uuid, ${retryClaim!.companionId}::uuid,
+          ${retryClaim!.claimToken}::uuid, ${retryClaim!.claimEpoch}::bigint,
+          ${retryClaim!.gateEpoch}::bigint, ${retryExecutor}, 'operation',
+          ${retryClaim!.workId}::uuid, 'succeeded', null, null, null
+        ) as settled
+      `);
+      expect(retrySettled?.settled).toBe(true);
+      retryClaim = undefined;
+      const [cancelled] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ turn: { status: string } }>>`
+          select * from public.companion_api_cancel_turn(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid, ${routineTurn.turnId}::uuid
+          )
+        `,
+      });
+      expect(cancelled?.turn.status).toBe("cancelled");
+      expect(await authorizeClaim(mainClaim!, `${mainExecutor}-second`)).toEqual({
+        authorized: true,
+        denialCode: null,
+      });
+      const [settledRetry] = await sql<Array<{ status: string }>>`
+        select status::text as status from companion_operations
+        where id = ${retried!.operation.id}::uuid
+      `;
+      expect(settledRetry?.status).toBe("succeeded");
+    } finally {
+      if (retryClaim) await release(retryClaim, retryExecutor);
+      if (mainClaim) await release(mainClaim, `${mainExecutor}-second`);
+      if (routineClaim) await release(routineClaim, routineExecutor);
+      await sql`delete from companion_routines where companion_id = ${fixture.companionId}::uuid`;
       await removeCompanion(fixture.companionId);
     }
   });

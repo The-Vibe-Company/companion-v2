@@ -7,12 +7,15 @@ import type { OperationRuntimeClaim } from "./types";
 import {
   BOX_ID,
   PI_INVOCATION_ID,
+  ROUTINE_SNAPSHOT_ID,
+  TURN_ID,
   MemoryRuntimeStore,
   TestClock,
   engineDependencies,
   fakePorts,
   operationAuthorization,
   operationClaim,
+  attemptMaterial,
 } from "./test/fixtures";
 
 describe("runtime lifecycle operations", () => {
@@ -734,6 +737,38 @@ describe("runtime lifecycle operations", () => {
     }]);
     expect(store.publishedMaterialSnapshots).toEqual([PI_INVOCATION_ID]);
     expect(store.authorization.piInvocationId).toBe(PI_INVOCATION_ID);
+  });
+
+  it("retries an isolated routine by terminating only that run's Pi process", async () => {
+    const invocationId = `routine:${TURN_ID}:dispatch-v2:previous`;
+    const claim = operationClaim({ operationKind: "restart_pi", turnId: TURN_ID });
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        boxId: BOX_ID,
+        boxState: "ready",
+        piState: "running",
+        piInvocationId: "main-pi-invocation",
+        commandPiInvocationId: invocationId,
+      }),
+      material: attemptMaterial({
+        routineId: ROUTINE_SNAPSHOT_ID,
+        routineName: "Parallel routine",
+        routineIsolated: true,
+      }),
+    });
+    const ports = fakePorts(store);
+    let mainRestarts = 0;
+    ports.pi.restartPiDaemon = async () => {
+      mainRestarts += 1;
+      return { state: "idle", invocationId: PI_INVOCATION_ID };
+    };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(ports.routineTerminates).toEqual([TURN_ID]);
+    expect(mainRestarts).toBe(0);
+    expect(store.authorization.piInvocationId).toBe("main-pi-invocation");
   });
 
   it("keeps the installed tree and completes Restart Pi when an auto-update fails", async () => {
