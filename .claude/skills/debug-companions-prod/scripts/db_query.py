@@ -84,6 +84,67 @@ QUERIES: dict[str, dict] = {
             ),
         ],
     },
+    "routines": {
+        "description": (
+            "Routine schedules for one companion (or all companions with --limit), "
+            "with fire schedule, enablement, lease, and last stable error code. "
+            "Prompt and error message text are deliberately not selected."
+        ),
+        "params": ("companion_id_optional", "limit"),
+        "statements": [
+            (
+                "select r.id, r.companion_id, c.name as companion_name, r.name,\n"
+                "       r.cron, r.timezone, r.enabled, r.next_fire_at,\n"
+                "       now() - r.next_fire_at as overdue_by,\n"
+                "       r.last_fired_at, r.last_error_code, r.last_error_at,\n"
+                "       r.consecutive_failures, r.claimed_by, r.lease_expires_at\n"
+                "from public.companion_routines r\n"
+                "join public.companions c on c.id = r.companion_id\n"
+                "where (:'companion_id_optional'::text = ''\n"
+                "       or r.companion_id::text = :'companion_id_optional'::text)\n"
+                "order by r.next_fire_at asc nulls last\n"
+                "limit :'limit'::int"
+            ),
+            (
+                "select companion_id, count(*) as routine_turns,\n"
+                "       max(created_at) as last_routine_turn_at\n"
+                "from public.companion_turns\n"
+                "where routine_name is not null\n"
+                "  and (:'companion_id_optional'::text = ''\n"
+                "       or companion_id::text = :'companion_id_optional'::text)\n"
+                "group by companion_id\n"
+                "order by last_routine_turn_at desc\n"
+                "limit :'limit'::int"
+            ),
+            (
+                "select id, routine_name, status, created_at, state_changed_at,\n"
+                "       last_error_code, last_error_action\n"
+                "from public.companion_turns\n"
+                "where routine_name is not null\n"
+                "  and (:'companion_id_optional'::text = ''\n"
+                "       or companion_id::text = :'companion_id_optional'::text)\n"
+                "order by created_at desc\n"
+                "limit :'limit'::int"
+            ),
+            (
+                "select t.id as turn_id, t.routine_isolated,\n"
+                "       t.routine_context_substrate_id,\n"
+                "       s.sha256, s.octets, s.created_at as substrate_created_at\n"
+                "from public.companion_turns t\n"
+                "left join (\n"
+                "  select id, org_id, companion_id, sha256,\n"
+                "         octet_length(content) as octets, created_at\n"
+                "  from public.companion_routine_context_substrates\n"
+                ") s on s.id = t.routine_context_substrate_id\n"
+                "    and s.org_id = t.org_id and s.companion_id = t.companion_id\n"
+                "where t.routine_name is not null\n"
+                "  and (:'companion_id_optional'::text = ''\n"
+                "       or t.companion_id::text = :'companion_id_optional'::text)\n"
+                "order by t.created_at desc\n"
+                "limit :'limit'::int"
+            ),
+        ],
+    },
     "stuck": {
         "description": (
             "Companions whose queue head is interrupted/needs_input while queued "
@@ -223,6 +284,7 @@ QUERIES: dict[str, dict] = {
 
 PARAM_SOURCES = {
     "companion_id": "companion",
+    "companion_id_optional": "companion",
     "turn_id": "turn",
     "since_seconds": "since",
     "limit": "limit",
@@ -233,7 +295,15 @@ def collect_params(name: str, args: argparse.Namespace) -> dict[str, str]:
     """Validate CLI arguments into psql variable values. Raises ProdToolError."""
     values: dict[str, str] = {}
     for param in QUERIES[name]["params"]:
-        if param == "companion_id":
+        if param == "companion_id_optional":
+            if args.companion:
+                if not prodlib.UUID_RE.match(args.companion):
+                    raise prodlib.ProdToolError("--companion must be a uuid")
+                values[param] = args.companion.lower()
+            else:
+                # Empty string is the documented "all companions" sentinel.
+                values[param] = ""
+        elif param == "companion_id":
             if not args.companion:
                 raise prodlib.ProdToolError(f"query {name} requires --companion <uuid>")
             if not prodlib.UUID_RE.match(args.companion):

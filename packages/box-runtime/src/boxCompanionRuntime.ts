@@ -5041,6 +5041,15 @@ done`,
         PI_ROUTINE_START_TIMEOUT_SECONDS,
         input.signal,
       );
+      // The Box command runner reports exit 1 for any script that leaves a detached daemon child
+      // behind, even when the script itself reached `exit 0`. The launch script prints its readiness
+      // acknowledgement only after the broker socket exists, so a matching marker in stdout is the
+      // authoritative readiness proof — the same precedence the prepare step already uses. Trust it
+      // before the envelope's success flag, and fail only when the marker is absent or mismatched.
+      const readyInvocation = routineInvocationFromOutput(started.stdout);
+      if (readyInvocation === invocationId) {
+        return { state: "idle" as const, invocationId: readyInvocation };
+      }
       if (!started.success) {
         throw new BoxRuntimeProviderError(
           `Routine Pi session failed to start${commandFailureDetail(started)}`,
@@ -5048,14 +5057,11 @@ done`,
           "routine_session_start_failed",
         );
       }
-      if (routineInvocationFromOutput(started.stdout) !== invocationId) {
-        throw new BoxRuntimeProviderError(
-          "Routine Pi session did not return a readiness acknowledgement",
-          502,
-          "routine_session_start_ambiguous",
-        );
-      }
-      return { state: "idle" as const, invocationId };
+      throw new BoxRuntimeProviderError(
+        "Routine Pi session did not return a readiness acknowledgement",
+        502,
+        "routine_session_start_ambiguous",
+      );
     } catch (error) {
       try {
         // Use an independent cleanup call: the originating request signal may be why staging

@@ -1903,6 +1903,49 @@ describe("isolated routine Pi sessions", () => {
     }
   });
 
+  it("accepts a readiness marker the Box runner reports as exit 1 without cleaning up", async () => {
+    // The Box command runner reports exit 1 for any script that leaves a detached daemon child
+    // behind, even when the script itself reached `exit 0`. The launch script prints its readiness
+    // acknowledgement only after the broker socket exists, so the marker outranks the exit code.
+    const commands: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      if (url.endsWith("/files") && init?.method === "PUT") {
+        return response({ ok: true });
+      }
+      if (url.endsWith("/commands") && init?.method === "POST") {
+        const command = requiredText(parseBoxTestBody(init?.body), "command");
+        commands.push(command);
+        if (command.includes("routine-pi-session-prepared")) {
+          return response(commandResult("routine-pi-session-prepared\n"));
+        }
+        if (command.includes("routine-pi-session-ready")) {
+          const invocation = /export COMPANION_PI_INVOCATION_ID='([^']+)'/.exec(command)?.[1];
+          if (!invocation) throw new Error("routine launch did not include its invocation id");
+          return response({
+            success: false,
+            exitCode: 1,
+            stdout: `routine-pi-session-ready ${invocation}\n`,
+            stderr: "",
+          });
+        }
+        return response(commandResult());
+      }
+      throw new Error(`unexpected Box request: ${init?.method ?? "GET"} ${url}`);
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await expect(runtime.startRoutineSession({
+      boxId: "bx_23456789",
+      runId,
+      persona: null,
+    })).resolves.toMatchObject({ state: "idle" });
+
+    expect(commands).toHaveLength(3);
+    expect(commands.at(-1)).toContain("routine-pi-session-ready");
+    expect(commands.join("\n")).not.toContain("routine-pi-session-terminated");
+  });
+
   it("removes the copied run root when pre-launch staging fails", async () => {
     const commands: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
