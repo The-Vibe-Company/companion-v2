@@ -258,25 +258,30 @@ private final class StaleUnauthorizedThreadURLProtocol: URLProtocol, @unchecked 
 
     override func startLoading() {
         let path = request.url?.path ?? ""
+        let cursor = URLComponents(
+            url: request.url!,
+            resolvingAgainstBaseURL: false
+        )?.queryItems?.first(where: { $0.name == "cursor" })?.value
+        if path.hasSuffix("/thread-delta"), cursor == "old-thread-unauthorized" {
+            Self.lock.lock()
+            Self.oldRequestDidStart = true
+            Self.lock.unlock()
+            DispatchQueue.global().async { [weak self] in
+                _ = Self.releaseResponse.wait(timeout: .now() + 5)
+                self?.finish(
+                    statusCode: 401,
+                    headers: ["Content-Type": "application/json"],
+                    payload: #"{"code":"unauthorized","message":"Old session expired"}"#
+                )
+            }
+            return
+        }
         let statusCode: Int
         let headers: [String: String]?
         let payload: String
         if path.hasSuffix("/thread-delta") {
-            let cursor = URLComponents(
-                url: request.url!,
-                resolvingAgainstBaseURL: false
-            )?.queryItems?.first(where: { $0.name == "cursor" })?.value
-            if cursor == "old-thread-unauthorized" {
-                Self.lock.lock()
-                Self.oldRequestDidStart = true
-                Self.lock.unlock()
-                _ = Self.releaseResponse.wait(timeout: .now() + 5)
-                statusCode = 401
-                payload = #"{"code":"unauthorized","message":"Old session expired"}"#
-            } else {
-                statusCode = 200
-                payload = #"{"cursor":"new-thread-fresh","reset_entries":false,"changed_entries":[],"deleted_event_ids":[],"thread":{"companion_id":"22222222-2222-4222-8222-222222222222","viewer_id":"user-2","read_only":false,"can_send":true,"transcription_available":true,"active_turn":null,"queued_count":0,"interrupted_turn":null}}"#
-            }
+            statusCode = 200
+            payload = #"{"cursor":"new-thread-fresh","reset_entries":false,"changed_entries":[],"deleted_event_ids":[],"thread":{"companion_id":"22222222-2222-4222-8222-222222222222","viewer_id":"user-2","read_only":false,"can_send":true,"transcription_available":true,"active_turn":null,"queued_count":0,"interrupted_turn":null}}"#
             headers = ["Content-Type": "application/json"]
         } else if path == "/v1/auth/login" {
             statusCode = 200
@@ -291,6 +296,10 @@ private final class StaleUnauthorizedThreadURLProtocol: URLProtocol, @unchecked 
             headers = ["Content-Type": "application/json"]
             payload = #"{"code":"not_found","message":"Unexpected test request"}"#
         }
+        finish(statusCode: statusCode, headers: headers, payload: payload)
+    }
+
+    private func finish(statusCode: Int, headers: [String: String]?, payload: String) {
         let response = HTTPURLResponse(
             url: request.url!,
             statusCode: statusCode,
