@@ -1995,7 +1995,8 @@ func transcriptWindowRevealsOlderPageAfterReplacingCachedTailWithCompleteHistory
     #expect(window.exposedCount == 250)
     #expect(window.visibleRange == (750..<1_000))
     #expect(window.hasEarlierEntries)
-    #expect(window.loadEarlier())
+    let loadedEarlier = window.loadEarlier()
+    #expect(loadedEarlier)
     #expect(window.exposedCount == 300)
     #expect(window.visibleRange == (700..<1_000))
 }
