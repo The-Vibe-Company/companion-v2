@@ -55,6 +55,19 @@ public struct CompanionThreadProjection: Equatable, Sendable {
     }
 }
 
+/// Resolves what a composer may claim about send capability.
+///
+/// A cached transcript renders before any server read, and the runtime re-evaluates membership,
+/// Companion ACL, and provider access immediately before Box contact. Until a server response is
+/// installed, capability is unknown (`nil`) rather than denied: only a server read may tell a
+/// member their conversation is read-only. `false` therefore always means a real Viewer denial.
+public enum CompanionThreadSendCapability {
+    public static func resolve(thread: CompanionThread?, serverVerified: Bool) -> Bool? {
+        guard serverVerified, let thread else { return nil }
+        return thread.canSend
+    }
+}
+
 public enum CompanionChatInputFocus: Equatable, Sendable {
     case composer
     case decision(requestID: String)

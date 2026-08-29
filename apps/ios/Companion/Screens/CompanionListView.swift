@@ -69,145 +69,7 @@ struct CompanionListView: View {
 
     var body: some View {
         NavigationStack(path: $path) {
-            CompanionIOSTheme.canvas
-                .ignoresSafeArea()
-                .overlay {
-                Group {
-                    if loading && companions.isEmpty {
-                        loadingState
-                    } else if let error, companions.isEmpty {
-                        errorState(error)
-                    } else if matchingCompanions.isEmpty {
-                        emptyState
-                    } else {
-                        roster
-                    }
-                }
-                }
-            // Install the widened leading-edge capture once for the whole stack so direct and
-            // value-based pushes share the same guarded UIKit pop path.
-            .companionNavigationSwipeBackEnabled()
-            .navigationBarTitleDisplayMode(.inline)
-            .navigationDestination(for: CompanionRoute.self) { route in
-                destination(for: route)
-            }
-            .searchable(
-                text: $query,
-                isPresented: $showingSearch,
-                placement: .navigationBarDrawer(displayMode: .always),
-                prompt: "Search Companions"
-            )
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Menu {
-                        Text(session.user.email)
-                        Divider()
-                        Button("Member settings", systemImage: "person.crop.circle") {
-                            showingMemberSettings = true
-                        }
-                        Button("Model providers", systemImage: "cpu") {
-                            showingProviders = true
-                        }
-                        Button("Plugins", systemImage: "puzzlepiece.extension") {
-                            showingPlugins = true
-                        }
-                        Divider()
-                        Button("Sign out", systemImage: "rectangle.portrait.and.arrow.right") {
-                            Task { await sessionStore.signOut() }
-                        }
-                    } label: {
-                        AccountAvatar(user: session.user)
-                    }
-                    .accessibilityLabel("Account for \(session.user.email)")
-                    .accessibilityIdentifier("account.menu")
-                }
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    headerToolbarButton("Search", systemImage: "magnifyingglass") {
-                        showingSearch = true
-                    }
-                    headerToolbarButton("New Bot", systemImage: "plus") {
-                        showingCreateCompanion = true
-                    }
-                }
-            }
-            .sheet(isPresented: $showingCreateCompanion) {
-                CreateCompanionView { companion in
-                    rosterState.prepend(companion)
-                    path = [.chat(companion.id)]
-                    Task { await reload(silently: true) }
-                }
-                .tint(CompanionIOSTheme.actionBlue)
-            }
-            .sheet(isPresented: $showingProviders) {
-                ProviderManagementView()
-                    .tint(Color.companionAccent)
-            }
-            .sheet(isPresented: $showingPlugins) {
-                PluginManagementView()
-                    .tint(Color.companionAccent)
-            }
-            .sheet(isPresented: $showingMemberSettings) {
-                MemberSettingsView(session: session)
-                    .tint(Color.companionAccent)
-            }
-            .confirmationDialog(
-                "Delete \(companionToDelete?.name ?? "Companion")?",
-                isPresented: Binding(
-                    get: { companionToDelete != nil },
-                    set: { if !$0 { companionToDelete = nil } }
-                ),
-                titleVisibility: .visible,
-                presenting: companionToDelete
-            ) { companion in
-                Button("Delete Companion", role: .destructive) {
-                    Task { await delete(companion) }
-                }
-                Button("Cancel", role: .cancel) {}
-            } message: { _ in
-                Text("Its Box, thread, and Companion record will be permanently deleted. This cannot be undone.")
-            }
-            .confirmationDialog(
-                moveCompanionDialogTitle,
-                isPresented: Binding(
-                    get: { companionToMove != nil },
-                    set: { if !$0 { companionToMove = nil } }
-                ),
-                titleVisibility: .visible,
-                presenting: companionToMove
-            ) { companion in
-                ForEach(ownedSections) { section in
-                    Button(section.name) { Task { await move(companion, to: section.id) } }
-                }
-                Button("Unassigned") { Task { await move(companion, to: nil) } }
-                Button("New Section") {
-                    pendingNewSectionCompanion = companion
-                    newSectionName = ""
-                    showingNewSection = true
-                }
-                Button("Cancel", role: .cancel) {}
-            }
-            .alert("New Section", isPresented: $showingNewSection) {
-                TextField("Section name", text: $newSectionName)
-                Button("Create") { Task { await createSectionAndMove() } }
-                    .disabled(newSectionName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("The Companion will move into the new section.")
-            }
-            .confirmationDialog(
-                "Delete \(sectionToDelete?.name ?? "section")?",
-                isPresented: Binding(
-                    get: { sectionToDelete != nil },
-                    set: { if !$0 { sectionToDelete = nil } }
-                ),
-                titleVisibility: .visible,
-                presenting: sectionToDelete
-            ) { section in
-                Button("Delete Section", role: .destructive) { Task { await deleteSection(section) } }
-                Button("Cancel", role: .cancel) {}
-            } message: { _ in
-                Text("Companions in this section will move to Unassigned.")
-            }
+            rosterScreen
             .task(id: session.orgID) {
                 await reload(silently: initialSnapshot != nil)
                 while !Task.isCancelled {
@@ -229,34 +91,196 @@ struct CompanionListView: View {
                     )
                 }
             }
-            .onAppear {
-                if !loading {
-                    CompanionPerformanceTelemetry.rosterWillRender(
-                        cacheRestoreMilliseconds: sessionStore.initialCacheRestoreMilliseconds,
-                        companionCount: companions.count
-                    )
-                }
-            }
-            .onChange(of: loading) { _, isLoading in
-                guard !isLoading else { return }
-                CompanionPerformanceTelemetry.rosterWillRender(
-                    cacheRestoreMilliseconds: sessionStore.initialCacheRestoreMilliseconds,
-                    companionCount: companions.count
-                )
-            }
+            .onAppear { recordRosterFrame(isLoading: loading) }
+            .onChange(of: loading) { _, isLoading in recordRosterFrame(isLoading: isLoading) }
+            .onChange(of: path) { previous, next in recordChatOpen(from: previous, to: next) }
             .onChange(of: notifications.pendingDestination) { _, _ in
                 openPendingNotificationIfPossible()
             }
-            .onChange(of: scenePhase) { _, phase in
-                guard phase == .active else { return }
-                Task { await reload(silently: !companions.isEmpty) }
-            }
+            .onChange(of: scenePhase) { _, phase in reloadOnForeground(phase) }
             .tint(CompanionIOSTheme.textPrimary)
+        }
+    }
+
+    // body is a single expression, and the Swift solver abandoned it once this chain grew. Each
+    // property below is type-checked on its own, so the chain is split rather than shortened; the
+    // modifier order, and therefore the behavior, is unchanged.
+    private var rosterScreen: some View {
+        rosterSheets
+        .confirmationDialog(
+            "Delete \(companionToDelete?.name ?? "Companion")?",
+            isPresented: Binding(
+                get: { companionToDelete != nil },
+                set: { if !$0 { companionToDelete = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: companionToDelete
+        ) { companion in
+            Button("Delete Companion", role: .destructive) {
+                Task { await delete(companion) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("Its Box, thread, and Companion record will be permanently deleted. This cannot be undone.")
+        }
+        .confirmationDialog(
+            moveCompanionDialogTitle,
+            isPresented: Binding(
+                get: { companionToMove != nil },
+                set: { if !$0 { companionToMove = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: companionToMove
+        ) { companion in
+            ForEach(ownedSections) { section in
+                Button(section.name) { Task { await move(companion, to: section.id) } }
+            }
+            Button("Unassigned") { Task { await move(companion, to: nil) } }
+            Button("New Section") {
+                pendingNewSectionCompanion = companion
+                newSectionName = ""
+                showingNewSection = true
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+        .alert("New Section", isPresented: $showingNewSection) {
+            TextField("Section name", text: $newSectionName)
+            Button("Create") { Task { await createSectionAndMove() } }
+                .disabled(newSectionName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The Companion will move into the new section.")
+        }
+        .confirmationDialog(
+            "Delete \(sectionToDelete?.name ?? "section")?",
+            isPresented: Binding(
+                get: { sectionToDelete != nil },
+                set: { if !$0 { sectionToDelete = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: sectionToDelete
+        ) { section in
+            Button("Delete Section", role: .destructive) { Task { await deleteSection(section) } }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("Companions in this section will move to Unassigned.")
+        }
+    }
+
+    private var rosterSheets: some View {
+        rosterSurface
+        .sheet(isPresented: $showingCreateCompanion) {
+            CreateCompanionView { companion in
+                rosterState.prepend(companion)
+                path = [.chat(companion.id)]
+                Task { await reload(silently: true) }
+            }
+            .tint(CompanionIOSTheme.actionBlue)
+        }
+        .sheet(isPresented: $showingProviders) {
+            ProviderManagementView()
+                .tint(Color.companionAccent)
+        }
+        .sheet(isPresented: $showingPlugins) {
+            PluginManagementView()
+                .tint(Color.companionAccent)
+        }
+        .sheet(isPresented: $showingMemberSettings) {
+            MemberSettingsView(session: session)
+                .tint(Color.companionAccent)
+        }
+    }
+
+    private var rosterSurface: some View {
+        CompanionIOSTheme.canvas
+            .ignoresSafeArea()
+            .overlay { rosterContent }
+        // Install the widened leading-edge capture once for the whole stack so direct and
+        // value-based pushes share the same guarded UIKit pop path.
+        .companionNavigationSwipeBackEnabled()
+        .navigationBarTitleDisplayMode(.inline)
+        .navigationDestination(for: CompanionRoute.self) { route in
+            destination(for: route)
+        }
+        .searchable(
+            text: $query,
+            isPresented: $showingSearch,
+            placement: .navigationBarDrawer(displayMode: .always),
+            prompt: "Search Companions"
+        )
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Menu {
+                    Text(session.user.email)
+                    Divider()
+                    Button("Member settings", systemImage: "person.crop.circle") {
+                        showingMemberSettings = true
+                    }
+                    Button("Model providers", systemImage: "cpu") {
+                        showingProviders = true
+                    }
+                    Button("Plugins", systemImage: "puzzlepiece.extension") {
+                        showingPlugins = true
+                    }
+                    Divider()
+                    Button("Sign out", systemImage: "rectangle.portrait.and.arrow.right") {
+                        Task { await sessionStore.signOut() }
+                    }
+                } label: {
+                    AccountAvatar(user: session.user)
+                }
+                .accessibilityLabel("Account for \(session.user.email)")
+                .accessibilityIdentifier("account.menu")
+            }
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                headerToolbarButton("Search", systemImage: "magnifyingglass") {
+                    showingSearch = true
+                }
+                headerToolbarButton("New Bot", systemImage: "plus") {
+                    showingCreateCompanion = true
+                }
+            }
+        }
+    }
+
+    private var rosterContent: some View {
+        Group {
+            if loading && companions.isEmpty {
+                loadingState
+            } else if let error, companions.isEmpty {
+                errorState(error)
+            } else if matchingCompanions.isEmpty {
+                emptyState
+            } else {
+                roster
+            }
         }
     }
 
     private var companions: [CompanionSummary] {
         rosterState.companions
+    }
+
+    private func reloadOnForeground(_ phase: ScenePhase) {
+        guard phase == .active else { return }
+        Task { await reload(silently: !companions.isEmpty) }
+    }
+
+    private func recordRosterFrame(isLoading: Bool) {
+        guard !isLoading else { return }
+        CompanionPerformanceTelemetry.rosterWillRender(
+            cacheRestoreMilliseconds: sessionStore.initialCacheRestoreMilliseconds,
+            companionCount: companions.count
+        )
+    }
+
+    /// Times the transcript from the moment a chat becomes the visible route. A row push, a
+    /// notification, and the details-to-chat replacement all arrive here, unlike a gesture on the
+    /// row, which competes with the NavigationLink for the same touch.
+    private func recordChatOpen(from previous: [CompanionRoute], to next: [CompanionRoute]) {
+        guard next.last != previous.last,
+              case .chat(let companionID)? = next.last else { return }
+        CompanionPerformanceTelemetry.chatTapped(companionID: companionID)
     }
 
     private var roster: some View {
@@ -427,9 +451,6 @@ struct CompanionListView: View {
             )
         }
         .buttonStyle(.plain)
-        .simultaneousGesture(TapGesture().onEnded {
-            CompanionPerformanceTelemetry.chatTapped(companionID: companion.id)
-        })
         .disabled(busy)
         .accessibilityIdentifier("companion.row.\(companion.id)")
         .contextMenu { companionContextMenu(for: companion, busy: busy) }

@@ -167,6 +167,10 @@ struct ChatView: View {
     private let services: ChatServices?
     @State private var currentCompanion: CompanionSummary
     @State private var threadProjection = CompanionThreadProjection()
+    /// Cached transcripts render instantly but carry no authority. Send capability stays unknown,
+    /// not denied, until a fresh server response lands, so an unsynchronized thread never claims
+    /// Viewer read-only access to an Owner or Editor.
+    @State private var threadAuthorityVerified: Bool
     @State private var refreshGate = ChatRefreshGate()
     @State private var loading = true
     @State private var sending = false
@@ -220,6 +224,7 @@ struct ChatView: View {
         _currentCompanion = State(initialValue: companion)
         _threadProjection = State(initialValue: CompanionThreadProjection(thread: cachedThread))
         _loading = State(initialValue: cachedThread == nil)
+        _threadAuthorityVerified = State(initialValue: cachedThread == nil)
         _historyIsPartial = State(initialValue: initialSnapshot?.isPartial == true)
         _transcriptWindow = State(initialValue: CompanionTranscriptWindow(
             totalCount: cachedThread?.entries.filter { !$0.queued }.count ?? 0
@@ -854,7 +859,7 @@ struct ChatView: View {
                 companionID: currentCompanion.id,
                 companionName: currentCompanion.name,
                 companionIcon: currentCompanion.icon,
-                canSend: thread?.canSend,
+                canSend: verifiedCanSend,
                 transcriptionAvailable: thread?.transcriptionAvailable == true,
                 isReplying: isReplying,
                 hasLiveReasoning: liveReasoningEventID != nil,
@@ -1137,6 +1142,9 @@ struct ChatView: View {
                 && tailChanged
                 && readerIsNearBottom
             refreshSelectedToolDetail(from: next.entries)
+            if !threadAuthorityVerified {
+                threadAuthorityVerified = true
+            }
             if error != nil {
                 error = nil
             }
@@ -1439,6 +1447,13 @@ struct ChatView: View {
         threadProjection.thread
     }
 
+    private var verifiedCanSend: Bool? {
+        CompanionThreadSendCapability.resolve(
+            thread: thread,
+            serverVerified: threadAuthorityVerified
+        )
+    }
+
     private func recordTranscriptFrameIfAvailable() {
         guard let thread else { return }
         CompanionPerformanceTelemetry.transcriptWillRender(
@@ -1683,6 +1698,7 @@ struct ChatView: View {
         cancelAssistantTailReveal()
         refreshGate.invalidate()
         threadProjection.reset()
+        threadAuthorityVerified = false
         transcriptWindow.reset()
         unseenTracker.reset()
         unseenCount = 0
