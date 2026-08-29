@@ -231,7 +231,11 @@ func offlineSessionRestoresRosterWithoutWaitingForNetwork() throws {
     )
 
     #expect(store.phase == .active(session))
-    #expect(store.initialRosterSnapshot == snapshot)
+    let restored = try #require(store.initialRosterSnapshot)
+    #expect(restored.schemaVersion == snapshot.schemaVersion)
+    #expect(restored.cursor == snapshot.cursor)
+    #expect(restored.companions == snapshot.companions)
+    #expect(restored.sections == snapshot.sections)
     #expect((store.initialCacheRestoreMilliseconds ?? .infinity) < 50)
 }
 
