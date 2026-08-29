@@ -324,6 +324,41 @@ func detectsBareMessageURLsWithoutTrailingPunctuationOrBlockedSchemes() throws {
 }
 
 @Test
+func mapsEveryRuntimeStateToTheCompactStatusIndicator() {
+    let expected: [(CompanionRuntimeState, CompanionStatusIndicatorState)] = [
+        (.notCreated, .inactive),
+        (.provisioning, .inactive),
+        (.running, .live),
+        (.stopping, .inactive),
+        (.stopped, .inactive),
+        (.error, .error),
+        (.unknown, .inactive),
+    ]
+
+    for (runtimeState, status) in expected {
+        #expect(
+            CompanionStatusIndicatorState(
+                runtimeState: runtimeState,
+                isReplying: false
+            ) == status
+        )
+    }
+
+    let replying = CompanionStatusIndicatorState(runtimeState: .running, isReplying: true)
+    #expect(replying == .replying)
+    #expect(replying.tint == .live)
+}
+
+@Test
+func replyingIndicatorFallsBackToAStaticLiveDotForReducedMotion() {
+    let replying = CompanionStatusIndicatorState(runtimeState: .running, isReplying: true)
+
+    #expect(replying.shouldPulse(reduceMotion: false))
+    #expect(!replying.shouldPulse(reduceMotion: true))
+    #expect(replying.tint == .live)
+}
+
+@Test
 func routesOnlyPendingExternalOAuthCallbackShapes() throws {
     let googleScheme = "dev.companion.mobile.dev"
     let googleState = "native-state"

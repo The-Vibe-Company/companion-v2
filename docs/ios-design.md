@@ -14,9 +14,9 @@ This document is the single source of truth for the Companion iOS redesign. It c
 5. **Native iOS or nothing.** Sheets, toggles, swipe actions, keyboards, haptics: all system components styled minimally.
 
 ### 2. Color tokens
-Light (default): canvas #FFFFFF; surface.card #F2F2F7 (settings cards, plugin rows); surface.bubble.bot #EFEFF1; surface.bubble.inner #FFFFFF (inner card inside approval container); surface.chip #EFEFF1; bubble.user #0B0B0F; text.primary #111111; text.secondary #8E8E93; separator #E5E5EA (hairlines inside grouped cards only); cta.primary #0B0B0F; action.blue #007AFF (links, Authorize, Add routine, unread dots); toggle.green #34C759 (native toggles ON, connection checkmarks); danger #FF3B30 (destructive only).
+Light (default): canvas #FFFFFF; surface.card #F2F2F7 (settings cards, plugin rows); surface.bubble.bot #EFEFF1; surface.bubble.inner #FFFFFF (inner card inside approval container); surface.chip #EFEFF1; bubble.user #0B0B0F; text.primary #111111; text.secondary #8E8E93; separator #E5E5EA (hairlines inside grouped cards only); cta.primary #0B0B0F; action.blue #007AFF (links, Authorize, Add routine, unread dots); toggle.green #34C759 (native toggles ON, connection checkmarks, live/replying status dots); danger #FF3B30 (destructive actions and runtime-error dots only).
 
-Black (Appearance option): canvas #000000; surface.card #1C1C1E; surface.bubble.bot #1C1C1E; bubble.user #FFFFFF with text inverting to #000000; text.primary #F2F2F7; text.secondary #8E8E93; separator #38383A; cta.primary #FFFFFF with #000000 label; readable links on dark surfaces lift to system dark-mode blue #0A84FF, while the inverted white member bubble retains #007AFF.
+Black (Appearance option): canvas #000000; surface.card #1C1C1E; surface.bubble.bot #1C1C1E; bubble.user #FFFFFF with text inverting to #000000; text.primary #F2F2F7; text.secondary #8E8E93; separator #38383A; cta.primary #FFFFFF with #000000 label; readable links on dark surfaces lift to system dark-mode blue #0A84FF, while the inverted white member bubble retains #007AFF. Status dots retain the same system green, gray, and red semantics against OLED surfaces.
 
 The static launch canvas is always #000000. iOS launch screens cannot read the app's persisted Appearance choice before SwiftUI starts, so a black launch canvas prevents a saved Black preference from flashing white on a system-light device. Once the app root renders, System follows the OS and Black remains true black.
 
@@ -32,14 +32,14 @@ A mark is a solid shape in one palette color with two small white eyes (two roun
 - One SwiftUI CharacterMark view, vector-drawn, used by every surface and by the APNs avatar renderer.
 
 ### 5. Radii, spacing, depth, motion
-Radii: bubbles & cards 18; inner cards 12; chips & pills = capsule. Header actions keep a 44pt hit area but render as bare icons with no drawn circle, outline, or shadow. Spacing: 4pt base; 16 screen margins; 12 between grouped cards; 8 between list rows (NO hairlines between rows — only inside grouped settings cards). Depth: flat, no shadows in content. Motion: system sheets, spring pushes, 0.2s control transitions, soft haptics on toggle and send.
+Radii: bubbles & cards 18; inner cards 12; chips & pills = capsule. Header actions keep a 44pt hit area but render as bare icons with no drawn circle, outline, or shadow. Spacing: 4pt base; 16 screen margins; 12 between grouped cards; 8 between list rows (NO hairlines between rows — only inside grouped settings cards). Depth: flat, no shadows in content. Motion: system sheets, spring pushes, 0.2s control transitions, soft haptics on toggle and send. A replying status dot uses one restrained 1.4-second pulse; Reduce Motion keeps the same static green dot.
 
 ## Part II — Components (Wave A scope: HOME only; chat/sheets/computer are later waves)
 
 ### 6. Home
-- Header: owner avatar photo (44pt clipped circle, left) with no border or ring — bare search and + icons (right), each retaining a 44pt hit area with no visible circle or outline. + opens New Bot creation. The chat header keeps only back, the tappable Companion pill, and the bare computer action.
+- Header: owner avatar photo (44pt clipped circle, left) with no border or ring — bare search and + icons (right), each retaining a 44pt hit area with no visible circle or outline. + opens New Bot creation. The chat header keeps only back, the tappable Companion pill, and the bare computer action; an 8pt status dot trails the name inside the pill.
 - Sections: collapsible. Header row = section name + chevron, text.secondary. Every section uses standard rows with a 36pt mark, title, one-line preview, timestamp, and unread dot. Unassigned is the default section at the bottom.
-- Row: mark 36pt — title 17 semibold — preview one line 15 regular secondary — trailing timestamp (hierarchical: 8:41 AM today, Yesterday, weekday, 8/19) — blue unread dot 6pt right-aligned when unread. No hairline between rows.
+- Row: mark 36pt — title 17 semibold — preview one line 15 regular secondary — 8pt status dot immediately before the trailing timestamp (hierarchical: 8:41 AM today, Yesterday, weekday, 8/19) — blue unread dot 6pt right-aligned when unread. The status mapping is green for running, pulsing green for Pi-acknowledged replying, red for runtime error, and gray for every stopped/starting/stopping/not-created projection; archived Boxes are normalized to stopped by the API. No hairline between rows.
 - Swipe actions: trailing Move to (section picker), mute, delete.
 - Row activation: single tap opens chat. Long-press context menu: Settings (opens detail), Duplicate (copy with suffix, opens detail), Move to, Delete.
 - Creation sheet (New Bot): name field, shape row (8 shapes, tap to select), color row (11 swatches), title optional. Two taps and a name — done. No wizard.

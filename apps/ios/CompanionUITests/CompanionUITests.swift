@@ -1334,9 +1334,11 @@ final class CompanionUITests: XCTestCase {
 
         row.tap()
         XCTAssertTrue(app.descendants(matching: .any)["chat.transcript"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["chat.details"].exists)
+        let details = app.buttons["chat.details"]
+        XCTAssertTrue(details.exists)
+        XCTAssertTrue(details.label.contains("Replying"))
 
-        app.buttons["chat.details"].tap()
+        details.tap()
         XCTAssertTrue(app.staticTexts["Bot details"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.buttons["companion.details.open-chat"].exists)
     }
@@ -1528,14 +1530,15 @@ final class CompanionUITests: XCTestCase {
         app.launchEnvironment["COMPANION_API_URL"] = "http://127.0.0.1:9"
         app.launch()
 
-        for (id, name) in [
-            ("c96ab360-00f3-4497-a51a-51442db8add1", "Luna"),
-            ("d96ab360-00f3-4497-a51a-51442db8add2", "Nova"),
-            ("e96ab360-00f3-4497-a51a-51442db8add3", "Orbit"),
+        for (id, name, status) in [
+            ("c96ab360-00f3-4497-a51a-51442db8add1", "Luna", "Live"),
+            ("d96ab360-00f3-4497-a51a-51442db8add2", "Nova", "Replying"),
+            ("e96ab360-00f3-4497-a51a-51442db8add3", "Orbit", "Error"),
         ] {
             let row = app.descendants(matching: .any)["companion.row.\(id)"]
             XCTAssertTrue(row.waitForExistence(timeout: 5), "Missing list row for \(name)")
             XCTAssertTrue(row.label.contains(name))
+            XCTAssertTrue(row.label.contains(status))
             XCTAssertTrue(row.label.contains("Release notes are ready."))
         }
     }
