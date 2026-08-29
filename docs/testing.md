@@ -198,7 +198,8 @@ read-only cached authority, cursor merge ordering/upserts/tombstones without gap
 offline roster bootstrap, foreground revalidation wiring, push invalidation delivery, and a cached
 thread remaining renderable with no blocking loader while its delta request is suspended. Server
 tests independently prove cursor scope/version bounds, replay determinism, deletion correctness,
-and APNs `content-available` coexistence with ordinary alerts.
+bounded long-thread cursors, historical reset correctness, side-effect-free unread-preserving
+background reads, and APNs `content-available` coexistence with ordinary alerts.
 
 Run targeted affected-package tests first, followed by:
 

@@ -9,6 +9,7 @@ import {
   readCompanionThreadV2,
   saveCompanionProvider,
   setCompanionWorkspaceShareV2,
+  syncCompanionThreadV2,
   updateCompanionMemberStateV2,
 } from "@companion/core";
 import { schema, withTenantContext, type Db } from "@companion/db";
@@ -236,6 +237,20 @@ describe("Runtime v2 Companion member state", () => {
     }))).unread).toBe(false);
 
     await send("Second message");
+    expect((await asActor(fixture.admin, (database) => getCompanionV2({
+      actor: fixture.admin,
+      orgId: fixture.orgA,
+      companionId: alphaId,
+      database,
+    }))).unread).toBe(true);
+
+    const backgroundSync = await asActor(fixture.admin, (database) => syncCompanionThreadV2({
+      actor: fixture.admin,
+      orgId: fixture.orgA,
+      companionId: alphaId,
+      database,
+    }));
+    expect(backgroundSync.entries.at(-1)?.content).toBe("Second message");
     expect((await asActor(fixture.admin, (database) => getCompanionV2({
       actor: fixture.admin,
       orgId: fixture.orgA,

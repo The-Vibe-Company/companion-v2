@@ -12,16 +12,19 @@ private struct FixedSessionStorage: SessionStorage {
 private final class SuspendedThreadSyncURLProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var requestStarted = DispatchSemaphore(value: 0)
     nonisolated(unsafe) static var releaseResponse = DispatchSemaphore(value: 0)
+    nonisolated(unsafe) static var requestedURL: URL?
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        Self.requestedURL = request.url
         Self.requestStarted.signal()
         _ = Self.releaseResponse.wait(timeout: .now() + 5)
         let payload = #"""
         {
           "cursor":"next-cursor",
+          "reset_entries":false,
           "changed_entries":[],
           "deleted_event_ids":[],
           "thread":{
@@ -80,7 +83,8 @@ private final class BackgroundRefreshURLProtocol: URLProtocol, @unchecked Sendab
         } else {
             payload = #"""
             {
-              "cursor":"fresh-thread","changed_entries":[],"deleted_event_ids":[],
+              "cursor":"fresh-thread","reset_entries":true,
+              "changed_entries":[],"deleted_event_ids":[],
               "thread":{
                 "companion_id":"33333333-3333-4333-8333-333333333333","viewer_id":"user-1",
                 "read_only":false,"can_send":true,"transcription_available":true,
@@ -123,10 +127,11 @@ func sqliteCachePersistsRestoresScopesAndBoundedThreadTail() throws {
     #expect(try cache.roster(scope: "org-a:user-b") == nil)
 
     let entries = try (0..<300).map { try transcriptEntry(ordinal: $0) }
-    let snapshot = CompanionThreadSnapshot.bounded(
+    let snapshot = CompanionThreadSnapshot(
         cursor: "thread-cursor",
         thread: try companionThread(entries: entries)
     )
+    #expect(snapshot.thread.entries.count == 300)
     try cache.saveThread(snapshot, scope: "org-a:user-a", companionID: snapshot.thread.companionID)
     let restored = try #require(cache.thread(
         scope: "org-a:user-a",
@@ -135,6 +140,36 @@ func sqliteCachePersistsRestoresScopesAndBoundedThreadTail() throws {
     #expect(restored.isPartial)
     #expect(restored.thread.entries.count == 250)
     #expect(restored.thread.entries.first?.ordinal == 50)
+}
+
+@Test
+func threadDeltaKeepsFullLiveHistoryAndResetsExceptionalHistory() throws {
+    let entries = try (0..<300).map { try transcriptEntry(ordinal: $0) }
+    let thread = try companionThread(entries: [])
+    let delta = CompanionThreadDelta(
+        cursor: "full-cursor",
+        resetEntries: true,
+        changedEntries: entries,
+        deletedEventIDs: [],
+        thread: CompanionThreadMetadata(
+            companionID: thread.companionID,
+            viewerID: thread.viewerID,
+            readOnly: thread.readOnly,
+            canSend: thread.canSend,
+            transcriptionAvailable: thread.transcriptionAvailable,
+            activeTurn: thread.activeTurn,
+            queuedCount: thread.queuedCount,
+            interruptedTurn: thread.interruptedTurn
+        )
+    )
+
+    let live = delta.applying(to: CompanionThreadSnapshot(
+        cursor: "stale-cursor",
+        thread: try companionThread(entries: [try transcriptEntry(ordinal: 999)])
+    ))
+    #expect(live.thread.entries.count == 300)
+    #expect(live.thread.entries.first?.ordinal == 0)
+    #expect(live.thread.entries.last?.ordinal == 299)
 }
 
 @Test @MainActor
@@ -164,12 +199,15 @@ func offlineSessionRestoresRosterWithoutWaitingForNetwork() throws {
 func cachedThreadRemainsRenderableWhileDeltaSynchronizationIsInFlight() async throws {
     SuspendedThreadSyncURLProtocol.requestStarted = DispatchSemaphore(value: 0)
     SuspendedThreadSyncURLProtocol.releaseResponse = DispatchSemaphore(value: 0)
+    SuspendedThreadSyncURLProtocol.requestedURL = nil
     let fixture = try cacheFixture()
     defer { try? FileManager.default.removeItem(at: fixture.directory) }
     let session = testSession()
-    let cached = CompanionThreadSnapshot.bounded(
+    let cached = CompanionThreadSnapshot(
         cursor: "prior-cursor",
-        thread: try companionThread(entries: [try transcriptEntry(ordinal: 1)])
+        thread: try companionThread(entries: try (0..<300).map {
+            try transcriptEntry(ordinal: $0)
+        })
     )
     try fixture.cache.saveThread(
         cached,
@@ -206,12 +244,17 @@ func cachedThreadRemainsRenderableWhileDeltaSynchronizationIsInFlight() async th
     // The request has reached the transport and is deliberately suspended. Cached content remains
     // the projection, so ChatView's loader predicate stays false throughout revalidation.
     #expect(!projection.needsBlockingLoader)
-    #expect(store.cachedThread(companionID: cached.thread.companionID)?.thread.entries.count == 1)
+    #expect(store.cachedThread(companionID: cached.thread.companionID)?.thread.entries.count == 250)
+    #expect(URLComponents(
+        url: try #require(SuspendedThreadSyncURLProtocol.requestedURL),
+        resolvingAgainstBaseURL: false
+    )?.queryItems?.contains(URLQueryItem(name: "cursor", value: "prior-cursor")) == true)
 
     SuspendedThreadSyncURLProtocol.releaseResponse.signal()
     let refreshed = try await synchronization.value
     #expect(refreshed.value.thread.canSend)
     #expect(refreshed.value.cursor == "next-cursor")
+    #expect(refreshed.value.isPartial)
 }
 
 @Test

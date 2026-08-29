@@ -76,7 +76,12 @@ extension CompanionThreadSnapshot {
         )
     }
 
-    static func bounded(cursor: String?, thread: CompanionThread, syncedAt: Date = .now) -> Self {
+    static func bounded(
+        cursor: String?,
+        thread: CompanionThread,
+        isPartial: Bool = false,
+        syncedAt: Date = .now
+    ) -> Self {
         let sortedEntries = thread.entries.sorted {
             $0.ordinal == $1.ordinal ? $0.eventID < $1.eventID : $0.ordinal < $1.ordinal
         }
@@ -84,7 +89,7 @@ extension CompanionThreadSnapshot {
         return Self(
             cursor: cursor,
             thread: thread.copy(entries: cachedEntries),
-            isPartial: cachedEntries.count < sortedEntries.count,
+            isPartial: isPartial || cachedEntries.count < sortedEntries.count,
             syncedAt: syncedAt
         )
     }
@@ -223,7 +228,13 @@ public final class SQLiteCompanionSnapshotCache: CompanionSnapshotCache, @unchec
         scope: String,
         companionID: String
     ) throws {
-        let payload = try encoder.encode(snapshot)
+        let persistedSnapshot = CompanionThreadSnapshot.bounded(
+            cursor: snapshot.cursor,
+            thread: snapshot.thread,
+            isPartial: snapshot.isPartial,
+            syncedAt: snapshot.syncedAt
+        )
+        let payload = try encoder.encode(persistedSnapshot)
         guard payload.count <= Self.maximumThreadBytes else { throw CacheError.tooLarge }
         try write(
             """

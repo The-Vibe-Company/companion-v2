@@ -66,7 +66,11 @@ const threadCursorSchema = z.object({
   org_id: z.string().uuid(),
   actor_id: actorIdSchema,
   companion_id: z.string().uuid(),
-  entries: z.array(threadDigestRecordSchema).max(COMPANION_SYNC_CURSOR_MAX_RECORDS),
+  /** Exact digests for the mutable transcript tail; the immutable prefix is one bounded digest. */
+  entries: z.array(threadDigestRecordSchema).max(250),
+  entry_count: z.number().int().nonnegative().max(COMPANION_SYNC_CURSOR_MAX_RECORDS),
+  prefix_count: z.number().int().nonnegative().max(COMPANION_SYNC_CURSOR_MAX_RECORDS),
+  prefix_digest: digestSchema,
   metadata_digest: digestSchema,
   projection_digest: digestSchema,
 }).strict();
@@ -214,8 +218,14 @@ function decodeCursor(
       }
     } else {
       assertThreadRecords(cursor.entries);
+      if (cursor.prefix_count + cursor.entries.length !== cursor.entry_count) {
+        throw new CompanionSyncCursorError();
+      }
       if (companionSyncDigest({
         entries: cursor.entries,
+        entry_count: cursor.entry_count,
+        prefix_count: cursor.prefix_count,
+        prefix_digest: cursor.prefix_digest,
         metadata_digest: cursor.metadata_digest,
       }) !== cursor.projection_digest) {
         throw new CompanionSyncCursorError();
@@ -297,7 +307,16 @@ function threadCursor(input: {
   entries: readonly CompanionTranscriptEntry[];
   metadata: CompanionThreadMetadata;
 }): string {
-  const entryRecords = entryDigestRecords(input.entries);
+  const orderedEntries = [...input.entries].sort(
+    (left, right) => left.ordinal - right.ordinal || compareStrings(left.event_id, right.event_id),
+  );
+  // Validate the complete projection before reducing it to a bounded cursor. Transcript ordinals
+  // are unique and monotonic; keeping the newest 250 exact digests covers every mutable/live entry,
+  // while a prefix digest detects any exceptional historical edit or deletion and forces a reset.
+  assertThreadRecords(entryDigestRecords(orderedEntries));
+  const prefixCount = Math.max(0, orderedEntries.length - 250);
+  const prefixDigest = companionSyncDigest(entryDigestRecords(orderedEntries.slice(0, prefixCount)));
+  const entryRecords = entryDigestRecords(orderedEntries.slice(prefixCount));
   const metadataDigest = companionSyncDigest(input.metadata);
   return encodeCursor({
     v: COMPANION_SYNC_CURSOR_VERSION,
@@ -306,9 +325,15 @@ function threadCursor(input: {
     actor_id: input.actorId,
     companion_id: input.companionId,
     entries: entryRecords,
+    entry_count: orderedEntries.length,
+    prefix_count: prefixCount,
+    prefix_digest: prefixDigest,
     metadata_digest: metadataDigest,
     projection_digest: companionSyncDigest({
       entries: entryRecords,
+      entry_count: orderedEntries.length,
+      prefix_count: prefixCount,
+      prefix_digest: prefixDigest,
       metadata_digest: metadataDigest,
     }),
   });
@@ -430,6 +455,19 @@ export function buildCompanionThreadDelta(input: {
     : undefined;
   const previousThread = previous?.kind === "thread" ? previous : undefined;
   const metadata = withoutThreadEntries(input.thread);
+  const orderedEntries = [...input.thread.entries].sort(
+    (left, right) => left.ordinal - right.ordinal || compareStrings(left.event_id, right.event_id),
+  );
+  const previousPrefix = previousThread
+    ? orderedEntries.slice(0, previousThread.prefix_count)
+    : [];
+  const prefixStillMatches = previousThread !== undefined
+    && previousPrefix.length === previousThread.prefix_count
+    && companionSyncDigest(entryDigestRecords(previousPrefix)) === previousThread.prefix_digest;
+  const resetEntries = previousThread === undefined || !prefixStillMatches;
+  const comparableEntries = previousThread
+    ? orderedEntries.slice(previousThread.prefix_count)
+    : orderedEntries;
   const response = {
     cursor: threadCursor({
       orgId: input.orgId,
@@ -438,14 +476,13 @@ export function buildCompanionThreadDelta(input: {
       entries: input.thread.entries,
       metadata,
     }),
-    changed_entries: previousThread
-      ? changedThreadEntries(input.thread.entries, previousThread.entries)
-      : [...input.thread.entries].sort(
-          (left, right) => left.ordinal - right.ordinal || compareStrings(left.event_id, right.event_id),
-        ),
-    deleted_event_ids: previousThread
-      ? deletedThreadEntryIds(input.thread.entries, previousThread.entries)
-      : [],
+    reset_entries: resetEntries,
+    changed_entries: resetEntries
+      ? orderedEntries
+      : changedThreadEntries(comparableEntries, previousThread.entries),
+    deleted_event_ids: resetEntries
+      ? []
+      : deletedThreadEntryIds(comparableEntries, previousThread.entries),
     thread: metadata,
   } satisfies CompanionThreadDeltaResponse;
   return companionThreadDeltaResponseSchema.parse(response);

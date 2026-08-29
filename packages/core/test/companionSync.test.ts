@@ -245,6 +245,7 @@ describe("Companion stateless sync projections", () => {
       companionId: COMPANION_ID,
       thread: original,
     });
+    expect(initial.reset_entries).toBe(true);
     const updated = thread([
       entry(EVENT_ONE, 2, "one updated"),
       entry(EVENT_THREE, 1, "three"),
@@ -259,6 +260,7 @@ describe("Companion stateless sync projections", () => {
 
     expect(next.changed_entries.map((item) => item.event_id)).toEqual([EVENT_THREE, EVENT_ONE]);
     expect(next.deleted_event_ids).toEqual([EVENT_TWO]);
+    expect(next.reset_entries).toBe(false);
     expect(next.thread).not.toHaveProperty("entries");
     expect(buildCompanionThreadDelta({
       orgId: ORG_ID,
@@ -267,5 +269,52 @@ describe("Companion stateless sync projections", () => {
       thread: updated,
       cursor: initial.cursor,
     })).toEqual(next);
+  });
+
+  it("keeps long-thread cursors bounded and sends only appended tail entries", () => {
+    const entries = Array.from({ length: 5_000 }, (_, index) =>
+      entry(`event:${index}`, index, `message ${index}`));
+    const initial = buildCompanionThreadDelta({
+      orgId: ORG_ID,
+      actorId: OWNER_ID,
+      companionId: COMPANION_ID,
+      thread: thread(entries),
+    });
+    expect(initial.cursor.length).toBeLessThan(256 * 1024);
+
+    const appended = entry("event:5000", 5_000, "message 5000");
+    const next = buildCompanionThreadDelta({
+      orgId: ORG_ID,
+      actorId: OWNER_ID,
+      companionId: COMPANION_ID,
+      thread: thread([...entries, appended]),
+      cursor: initial.cursor,
+    });
+    expect(next.reset_entries).toBe(false);
+    expect(next.changed_entries).toEqual([appended]);
+    expect(next.deleted_event_ids).toEqual([]);
+  });
+
+  it("resets from a bounded cursor when an exceptional historical prefix changes", () => {
+    const entries = Array.from({ length: 300 }, (_, index) =>
+      entry(`event:${index}`, index, `message ${index}`));
+    const initial = buildCompanionThreadDelta({
+      orgId: ORG_ID,
+      actorId: OWNER_ID,
+      companionId: COMPANION_ID,
+      thread: thread(entries),
+    });
+    const corrected = entries.map((item, index) =>
+      index === 0 ? { ...item, content: "corrected history" } : item);
+    const next = buildCompanionThreadDelta({
+      orgId: ORG_ID,
+      actorId: OWNER_ID,
+      companionId: COMPANION_ID,
+      thread: thread(corrected),
+      cursor: initial.cursor,
+    });
+    expect(next.reset_entries).toBe(true);
+    expect(next.changed_entries).toEqual(corrected);
+    expect(next.deleted_event_ids).toEqual([]);
   });
 });

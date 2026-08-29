@@ -96,29 +96,35 @@ public struct CompanionThreadMetadata: Codable, Equatable, Sendable {
 
 public struct CompanionThreadDelta: Codable, Equatable, Sendable {
     public let cursor: String
+    public let resetEntries: Bool
     public let changedEntries: [TranscriptEntry]
     public let deletedEventIDs: [String]
     public let thread: CompanionThreadMetadata
 
     enum CodingKeys: String, CodingKey {
         case cursor
+        case resetEntries = "reset_entries"
         case changedEntries = "changed_entries"
         case deletedEventIDs = "deleted_event_ids"
         case thread
     }
 
     public func applying(to snapshot: CompanionThreadSnapshot?) -> CompanionThreadSnapshot {
+        let existingEntries: [TranscriptEntry] = resetEntries
+            ? []
+            : (snapshot?.thread.entries ?? [])
         var entries = Dictionary(
-            uniqueKeysWithValues: (snapshot?.thread.entries ?? []).map { ($0.eventID, $0) }
+            uniqueKeysWithValues: existingEntries.map { ($0.eventID, $0) }
         )
         deletedEventIDs.forEach { entries[$0] = nil }
         changedEntries.forEach { entries[$0.eventID] = $0 }
         let ordered = entries.values.sorted {
             $0.ordinal == $1.ordinal ? $0.eventID < $1.eventID : $0.ordinal < $1.ordinal
         }
-        return CompanionThreadSnapshot.bounded(
+        return CompanionThreadSnapshot(
             cursor: cursor,
-            thread: thread.thread(entries: ordered)
+            thread: thread.thread(entries: ordered),
+            isPartial: resetEntries ? false : (snapshot?.isPartial ?? false)
         )
     }
 }

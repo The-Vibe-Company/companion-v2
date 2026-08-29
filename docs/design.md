@@ -349,9 +349,13 @@ never authorize a mutation: cached thread capabilities are forced read-only unti
 `GET /v1/companions/sync` and `GET /v1/companions/:id/thread-delta` accept opaque, versioned,
 scope-bound cursors. The API still performs the ordinary authorized PostgreSQL reads, then returns
 only changed projections, deletion tombstones, current roster ordering, and current thread metadata;
-it never contacts Box or Pi. Missing cursors produce the initial complete projection, while malformed
-or cross-scope cursors fail closed. Foreground activation and APNs `content-available` invalidation
-reuse these same endpoints rather than introducing a mobile-only capability contract.
+it never contacts Box or Pi and background/prefetch reads do not advance the member's unread
+watermark. Opening the visible thread clears unread through the ordinary member-state capability.
+Thread cursors retain exact digests for a bounded mutable tail plus one historical-prefix digest;
+an exceptional edit outside that tail returns an explicit replacement projection. Missing cursors
+produce the initial complete projection, while malformed or cross-scope cursors fail closed.
+Foreground activation and APNs `content-available` invalidation reuse these same endpoints rather
+than introducing a mobile-only capability contract.
 
 Provider connections and member MCP accounts are workspace/member-scoped, envelope-encrypted, and
 write-only. Runtime decrypts only the selected values after authorization. Durable Box config uses

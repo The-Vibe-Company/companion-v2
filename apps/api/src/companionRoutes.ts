@@ -83,6 +83,7 @@ import {
   listCompanionTriggersV2,
   readCompanionAttachmentV2,
   readCompanionThreadV2,
+  syncCompanionThreadV2,
   retryCompanionTurnV2,
   rotateCompanionTriggerSecretV2,
   registerCompanionTriggerWebhookV2,
@@ -252,6 +253,7 @@ function defaultCompanionRouteDependencies() {
     fireCompanionTrigger,
     failCompanionTriggerFire,
     readCompanionThreadV2,
+    syncCompanionThreadV2,
     retryCompanionTurnV2,
     setCompanionProviderV2,
     setCompanionWorkspaceShareV2,
@@ -689,6 +691,7 @@ export function registerCompanionRoutes(
     rotateCompanionTriggerSecretV2,
     answerCompanionTriggerDecisionV2,
     readCompanionThreadV2,
+    syncCompanionThreadV2,
     retryCompanionTurnV2,
     setCompanionProviderV2,
     setCompanionWorkspaceShareV2,
@@ -1840,7 +1843,7 @@ export function registerCompanionRoutes(
             companionId,
           });
         }
-        const thread = await readCompanionThreadV2({ actor, orgId, companionId, database });
+        const thread = await syncCompanionThreadV2({ actor, orgId, companionId, database });
         return buildCompanionThreadDelta({
           orgId,
           actorId: actor.id,

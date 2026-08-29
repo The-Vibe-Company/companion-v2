@@ -84,6 +84,8 @@ public final class SessionStore {
     ] = [:]
     private var rosterSyncGeneration = 0
     private var threadSyncGenerations: [String: Int] = [:]
+    /// Full foreground projections live only for this process; SQLite intentionally keeps a tail.
+    private var liveThreadSnapshots: [String: CompanionThreadSnapshot] = [:]
 
     public init(
         apiURL: URL,
@@ -252,8 +254,9 @@ public final class SessionStore {
 
     public func cachedThread(companionID: String) -> CompanionThreadSnapshot? {
         guard let scope = currentSession.flatMap({ Self.cacheScope(for: $0) }) else { return nil }
-        return (try? cache?.thread(scope: scope, companionID: companionID))?
-            .readOnlyPresentation()
+        let snapshot = liveThreadSnapshots[companionID]
+            ?? ((try? cache?.thread(scope: scope, companionID: companionID)) ?? nil)
+        return snapshot?.readOnlyPresentation()
     }
 
     /// A narrow push/foreground invalidation seam. Consumers choose whether the matching resource
@@ -947,7 +950,8 @@ public final class SessionStore {
     }
 
     public func synchronizeThread(
-        companionID: String
+        companionID: String,
+        markRead: Bool = false
     ) async throws -> CompanionSyncMeasurement<CompanionThreadSnapshot> {
         guard let session = currentSession,
               let scope = Self.cacheScope(for: session) else {
@@ -955,16 +959,18 @@ public final class SessionStore {
         }
         let generation = (threadSyncGenerations[companionID] ?? 0) &+ 1
         threadSyncGenerations[companionID] = generation
-        let baseline = try? cache?.thread(scope: scope, companionID: companionID)
+        let baseline = liveThreadSnapshots[companionID]
+            ?? (try? cache?.thread(scope: scope, companionID: companionID))
+        let requestCursor = baseline?.cursor
         let response: CompanionSyncMeasurement<CompanionThreadDelta>
         do {
             response = try await authenticated {
                 try await client.synchronizeCompanionThread(
                     companionID: companionID,
-                    cursor: baseline?.cursor
+                    cursor: requestCursor
                 )
             }
-        } catch let error as APIError where error.status == 400 && baseline?.cursor != nil {
+        } catch let error as APIError where error.status == 400 && requestCursor != nil {
             response = try await authenticated {
                 try await client.synchronizeCompanionThread(
                     companionID: companionID,
@@ -973,13 +979,24 @@ public final class SessionStore {
             }
         }
         guard threadSyncGenerations[companionID] == generation else { throw CancellationError() }
-        let snapshot = response.value.applying(to: baseline)
+        let snapshot = response.value.applying(to: requestCursor == nil ? nil : baseline)
+        let rosterMarksUnread = initialRosterSnapshot?.companions.first {
+            $0.id == companionID
+        }?.unread == true
+        if markRead,
+           requestCursor == nil || !response.value.changedEntries.isEmpty || rosterMarksUnread {
+            _ = try? await updateCompanionMemberState(
+                companionID: companionID,
+                patch: CompanionMemberStatePatch(unread: false)
+            )
+        }
         if let cache {
             try await Task.detached(priority: .utility) {
                 try cache.saveThread(snapshot, scope: scope, companionID: companionID)
             }.value
         }
         guard threadSyncGenerations[companionID] == generation else { throw CancellationError() }
+        liveThreadSnapshots[companionID] = snapshot
         return CompanionSyncMeasurement(
             value: snapshot,
             receivedBytes: response.receivedBytes,
@@ -1081,6 +1098,10 @@ public final class SessionStore {
     private func publish(_ session: Session) {
         let nextPhase = session.needsOnboarding ? Phase.onboarding(session) : .active(session)
         guard phase != nextPhase else { return }
+        if currentSession.flatMap(Self.cacheScope(for:)) != Self.cacheScope(for: session) {
+            liveThreadSnapshots.removeAll()
+            threadSyncGenerations.removeAll()
+        }
         phase = nextPhase
     }
 
@@ -1119,6 +1140,7 @@ public final class SessionStore {
         if let scope { try? cache?.remove(scope: scope) }
         persistedSession = nil
         initialRosterSnapshot = nil
+        liveThreadSnapshots.removeAll()
         await client.setAuthority(nil)
         bootstrapError = nil
         phase = .signedOut

@@ -36,11 +36,14 @@ The one-time empty-cache path uses stable row skeletons; later launches keep cac
 offline and revalidate with one `GET /v1/companions/sync` request. Its opaque cursor returns only
 changed Companion/section projections, deletion tombstones, and current ID order. Entering the
 foreground runs the same delta revalidation. The most recently active Companion's bounded 250-entry
-transcript tail is prefetched, and every successfully synchronized thread tail is persisted. Chat
-installs that read-only cached projection immediately, then calls
+transcript tail is prefetched, and every successfully synchronized thread tail is persisted. The
+live synchronized thread remains complete in memory; only the on-device restore tail is bounded.
+Prefetch/background reads preserve unread state. Chat installs that read-only cached projection
+immediately, then calls
 `GET /v1/companions/:id/thread-delta`; fresh metadata is required before send, attachment,
-transcription, or decision controls become active. SQLite never stores attachment bytes and is
-purged for that member/workspace scope on logout or invalid session.
+transcription, or decision controls become active, and the visible chat explicitly clears unread.
+SQLite never stores attachment bytes and is purged for that member/workspace scope on logout or
+invalid session.
 
 The native roster can request Owner-only durable deletion. A confirmed deletion removes the Companion from the
 local roster immediately while the durable request runs; request failure restores the row, and a

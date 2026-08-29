@@ -1641,6 +1641,8 @@ export type CompanionThreadMetadata = z.infer<typeof companionThreadMetadataSche
 
 export const companionThreadDeltaResponseSchema = z.object({
   cursor: companionSyncCursorSchema,
+  /** True when the bounded cursor detected an edit/delete outside its retained digest tail. */
+  reset_entries: z.boolean(),
   changed_entries: z.array(companionTranscriptEntrySchema),
   deleted_event_ids: z.array(z.string().min(1).max(200)),
   thread: companionThreadMetadataSchema,
