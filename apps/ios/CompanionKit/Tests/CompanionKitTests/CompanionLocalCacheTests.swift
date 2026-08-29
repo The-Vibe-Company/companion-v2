@@ -9,6 +9,26 @@ private struct FixedSessionStorage: SessionStorage {
     func remove() throws {}
 }
 
+private struct WriteFailingSnapshotCache: CompanionSnapshotCache {
+    func roster(scope: String) throws -> CompanionRosterSnapshot? { nil }
+
+    func saveRoster(_ snapshot: CompanionRosterSnapshot, scope: String) throws {
+        throw SQLiteCompanionSnapshotCache.CacheError.tooLarge
+    }
+
+    func thread(scope: String, companionID: String) throws -> CompanionThreadSnapshot? { nil }
+
+    func saveThread(
+        _ snapshot: CompanionThreadSnapshot,
+        scope: String,
+        companionID: String
+    ) throws {
+        throw SQLiteCompanionSnapshotCache.CacheError.tooLarge
+    }
+
+    func remove(scope: String) throws {}
+}
+
 private final class SuspendedThreadSyncURLProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var releaseResponse = DispatchSemaphore(value: 0)
     private static let lock = NSLock()
@@ -774,6 +794,39 @@ func explicitBackgroundRefreshUpdatesRosterAndThreadCache() async throws {
     #expect(BackgroundRefreshURLProtocol.requestsStarted >= 2)
     #expect(store.initialRosterSnapshot?.companions.map(\.id) == [companionY])
     #expect(store.cachedThread(companionID: companionY)?.cursor == "fresh-thread")
+}
+
+@Test @MainActor
+func successfulSynchronizationSurvivesUnavailableOfflineCache() async throws {
+    BackgroundRefreshURLProtocol.reset()
+    let session = testSession()
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [BackgroundRefreshURLProtocol.self]
+    let client = APIClient(
+        baseURL: URL(string: "https://example.test")!,
+        session: URLSession(configuration: configuration),
+        initialAuthority: session
+    )
+    let store = SessionStore(
+        apiURL: URL(string: "https://example.test")!,
+        storage: FixedSessionStorage(data: try JSONEncoder().encode(session)),
+        cache: WriteFailingSnapshotCache(),
+        apiClient: client
+    )
+    let companionID = "33333333-3333-4333-8333-333333333333"
+
+    let roster = try await store.synchronizeRoster()
+    #expect(roster.value.companions.map(\.id) == [companionID])
+    #expect(store.initialRosterSnapshot?.cursor == "fresh-roster")
+
+    let thread = try await store.synchronizeThread(companionID: companionID)
+    #expect(thread.value.cursor == "fresh-thread")
+    #expect(thread.value.thread.canSend)
+
+    let liveProjection = try #require(store.cachedThread(companionID: companionID))
+    #expect(liveProjection.cursor == "fresh-thread")
+    #expect(liveProjection.thread.readOnly)
+    #expect(!liveProjection.thread.canSend)
 }
 
 private func cacheFixture() throws -> (directory: URL, cache: SQLiteCompanionSnapshotCache) {
