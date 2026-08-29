@@ -48,6 +48,99 @@ describe("Companion routines over the real database", () => {
     return { name, prompt: `Write the ${name} summary.`, cron, timezone: "UTC" };
   }
 
+  async function seedRoutineProposal(input: {
+    requestKey: string;
+    proposal: {
+      kind: "routine";
+      name: string;
+      prompt: string;
+      cron: string;
+      timezone: string;
+    };
+  }): Promise<void> {
+    const turnId = randomUUID();
+    const attemptId = randomUUID();
+    const clientMessageId = randomUUID();
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+    const decision = {
+      request_id: input.requestKey,
+      kind: "routine",
+      name: "propose_routine",
+      title: `Propose ${input.proposal.name}`,
+      detail: "Create or update a scheduled routine.",
+      status: "pending",
+      answer: null,
+      decided_by_id: null,
+      decided_by_name: null,
+      decided_at: null,
+      expires_at: expiresAt.toISOString(),
+      proposal: input.proposal,
+    };
+
+    await integrationSql`
+      insert into companion_threads(org_id, companion_id, next_ordinal, last_message_at)
+      values (${fixture.orgA}::uuid, ${companionId}::uuid, 3, now())
+      on conflict (companion_id) do update
+      set next_ordinal = greatest(companion_threads.next_ordinal, 3), updated_at = now()
+    `;
+    await integrationSql`
+      insert into companion_transcript_entries(
+        org_id, companion_id, event_id, ordinal, role, content, author_id
+      ) values (
+        ${fixture.orgA}::uuid, ${companionId}::uuid, ${`msg:${clientMessageId}`},
+        0, 'user', 'Propose a routine', ${fixture.owner.id}
+      )
+    `;
+    await integrationSql`
+      insert into companion_turns (
+        id, org_id, companion_id, client_message_id, message_event_id,
+        queue_sequence, actor_id, client_surface, status,
+        inactivity_deadline_at, absolute_deadline_at
+      ) values (
+        ${turnId}::uuid, ${fixture.orgA}::uuid, ${companionId}::uuid,
+        ${clientMessageId}::uuid, ${`msg:${clientMessageId}`}, 1,
+        ${fixture.owner.id}, 'native_mobile', 'needs_input',
+        null, now() + interval '2 hours'
+      )
+    `;
+    await integrationSql`
+      insert into companion_turn_attempts (
+        id, org_id, companion_id, turn_id, attempt_number, actor_id,
+        runtime_generation, settings_revision, skills_revision, model_id,
+        provider_ids, provider_credential_refs, selected_skill_ids,
+        selected_mcp_account_ids, mcp_credential_refs,
+        status, checkpoint, dispatch_state, command_id,
+        dispatch_accepted_at, pi_invocation_id, last_activity_at
+      ) values (
+        ${attemptId}::uuid, ${fixture.orgA}::uuid, ${companionId}::uuid, ${turnId}::uuid,
+        1, ${fixture.owner.id}, 1, 1, 1, 'claude-opus-4-8',
+        ${JSON.stringify(["anthropic"])}::jsonb,
+        ${JSON.stringify([{ provider_id: "anthropic", credential_generation: randomUUID(), credential_version: 1 }])}::jsonb,
+        '[]'::jsonb, '[]'::jsonb, '[]'::jsonb,
+        'needs_input', 'needs_input', 'accepted', ${randomUUID()}::uuid,
+        now(), ${`pi-${attemptId}`}, now()
+      )
+    `;
+    await integrationSql`
+      insert into companion_decision_deliveries(
+        org_id, companion_id, turn_id, attempt_id,
+        request_key, request_kind, expires_at, proposal
+      ) values (
+        ${fixture.orgA}::uuid, ${companionId}::uuid, ${turnId}::uuid, ${attemptId}::uuid,
+        ${input.requestKey}, 'routine_proposal', ${expiresAt.toISOString()},
+        ${JSON.stringify(input.proposal)}::jsonb
+      )
+    `;
+    await integrationSql`
+      insert into companion_transcript_entries(
+        org_id, companion_id, event_id, ordinal, role, content, decision
+      ) values (
+        ${fixture.orgA}::uuid, ${companionId}::uuid, ${`decision:${input.requestKey}`},
+        1, 'decision', ${decision.title}, ${JSON.stringify(decision)}::jsonb
+      )
+    `;
+  }
+
   beforeEach(async () => {
     fixture = await createIntegrationFixture();
     await saveCompanionProvider({
@@ -130,6 +223,160 @@ describe("Companion routines over the real database", () => {
       companionId,
       database,
     }))).resolves.toEqual([]);
+  });
+
+  it("approves a same-name proposal in place, resets failures, and returns the routine", async () => {
+    const existing = await asActor(fixture.owner, (database) => createCompanionRoutineV2({
+      orgId: fixture.orgA,
+      companionId,
+      ...draft("Daily standup"),
+      database,
+    }));
+    const previousNextFireAt = existing.next_fire_at;
+    await integrationDb
+      .update(schema.companionRoutines)
+      .set({
+        lastErrorCode: "fire_failed",
+        lastErrorMessage: "The previous run failed.",
+        lastErrorAt: new Date(),
+        consecutiveFailures: 4,
+        nextFireAt: new Date(Date.now() - 1_000),
+      })
+      .where(eq(schema.companionRoutines.id, existing.id));
+    const staleWorkerId = "routine-proposal-stale-worker";
+    const [staleClaim] = await claimDueCompanionRoutines({
+      workerId: staleWorkerId,
+      database: integrationDb,
+    });
+    expect(staleClaim?.routineId).toBe(existing.id);
+    const proposal = {
+      kind: "routine" as const,
+      name: "daily STANDUP",
+      prompt: "Write the revised standup.",
+      cron: "30 10 * * 1-5",
+      timezone: "America/New_York",
+    };
+    const requestKey = randomUUID();
+    await seedRoutineProposal({ requestKey, proposal });
+
+    const approved = await asActor(fixture.owner, (database) =>
+      answerCompanionRoutineDecisionV2({
+        orgId: fixture.orgA,
+        companionId,
+        requestId: requestKey,
+        decision: "allow",
+        database,
+      }));
+
+    expect(approved).toMatchObject({
+      id: existing.id,
+      name: existing.name,
+      prompt: proposal.prompt,
+      cron: proposal.cron,
+      timezone: proposal.timezone,
+      enabled: true,
+      last_error_code: null,
+      last_error_message: null,
+      last_error_at: null,
+      consecutive_failures: 0,
+    });
+    expect(approved?.next_fire_at).not.toBe(previousNextFireAt);
+    expect(new Date(approved!.next_fire_at!).getTime()).toBeGreaterThan(Date.now());
+
+    const [claimState] = await integrationDb
+      .select({
+        claimedBy: schema.companionRoutines.claimedBy,
+        leaseExpiresAt: schema.companionRoutines.leaseExpiresAt,
+      })
+      .from(schema.companionRoutines)
+      .where(eq(schema.companionRoutines.id, existing.id));
+    expect(claimState).toEqual({ claimedBy: null, leaseExpiresAt: null });
+
+    await failCompanionRoutineFire({
+      workerId: staleWorkerId,
+      orgId: fixture.orgA,
+      routineId: existing.id,
+      errorCode: "fire_failed",
+      errorMessage: "The stale worker must not settle.",
+      nextFireAt: new Date(Date.now() + 2 * 60 * 60 * 1000),
+      database: integrationDb,
+    });
+
+    const routines = await asActor(fixture.owner, (database) => listCompanionRoutinesV2({
+      orgId: fixture.orgA,
+      companionId,
+      database,
+    }));
+    expect(routines).toHaveLength(1);
+    expect(routines[0]).toMatchObject({
+      id: existing.id,
+      prompt: proposal.prompt,
+      next_fire_at: approved!.next_fire_at,
+      last_error_code: null,
+      consecutive_failures: 0,
+    });
+    const [audit] = await integrationSql<{ action: string; target_id: string; mode: string }[]>`
+      select action, target_id, metadata ->> 'mode' as mode
+      from audit_log
+      where org_id = ${fixture.orgA}::uuid
+        and target_type = 'companion_routine'
+        and target_id = ${existing.id}
+        and action = 'companion.routine.proposal.approved'
+      order by created_at desc
+      limit 1
+    `;
+    expect(audit).toEqual({
+      action: "companion.routine.proposal.approved",
+      target_id: existing.id,
+      mode: "updated",
+    });
+  });
+
+  it("creates a fresh routine when the proposed same-name routine was deleted", async () => {
+    const existing = await asActor(fixture.owner, (database) => createCompanionRoutineV2({
+      orgId: fixture.orgA,
+      companionId,
+      ...draft("Daily standup"),
+      database,
+    }));
+    const proposal = {
+      kind: "routine" as const,
+      name: "Daily standup",
+      prompt: "Write a fresh standup.",
+      cron: "45 11 * * 1-5",
+      timezone: "UTC",
+    };
+    const requestKey = randomUUID();
+    await seedRoutineProposal({ requestKey, proposal });
+    await asActor(fixture.owner, (database) => deleteCompanionRoutineV2({
+      orgId: fixture.orgA,
+      companionId,
+      routineId: existing.id,
+      database,
+    }));
+
+    const approved = await asActor(fixture.owner, (database) =>
+      answerCompanionRoutineDecisionV2({
+        orgId: fixture.orgA,
+        companionId,
+        requestId: requestKey,
+        decision: "allow",
+        database,
+      }));
+
+    expect(approved).toMatchObject({
+      prompt: proposal.prompt,
+      cron: proposal.cron,
+      timezone: proposal.timezone,
+      enabled: true,
+    });
+    expect(approved?.id).toEqual(expect.any(String));
+    expect(approved?.id).not.toBe(existing.id);
+    await expect(asActor(fixture.owner, (database) => listCompanionRoutinesV2({
+      orgId: fixture.orgA,
+      companionId,
+      database,
+    }))).resolves.toEqual([approved]);
   });
 
   it("refuses an unschedulable cadence, a Viewer write, an outsider, and the eleventh routine", async () => {
@@ -840,7 +1087,11 @@ describe("Companion routines over the real database", () => {
       requestId: expiredAllowRequestKey,
       decision: "allow",
       database,
-    }))).rejects.toMatchObject({ cause: { code: "55000" } });
+    }))).rejects.toMatchObject({
+      code: "routine_update_failed",
+      httpStatus: 409,
+      message: "Unable to apply the routine proposal. Please try again.",
+    });
 
     await expect(asActor(fixture.owner, (database) => listCompanionRoutinesV2({
       orgId: fixture.orgA,

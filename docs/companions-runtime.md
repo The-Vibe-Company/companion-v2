@@ -538,8 +538,9 @@ same full staging contract.
 A `companion:routine:<name>` confirmation with a strict JSON `{summary, proposal}` body projects as
 `request_kind = routine_proposal`. Pi emits these through the staged `propose_routine` tool. The
 payload is name, prompt, cron, and timezone; a redacted or malformed message is counted as unknown.
-Owner/Editor approval runs `companion_api_answer_routine_decision`, which creates the routine under
-the approver's authority after the current turn.
+Owner/Editor approval runs `companion_api_answer_routine_decision` under the approver's authority
+after the current turn: a same-name proposal (case-insensitive) updates the existing routine in
+place, while a different name creates a new routine.
 
 A `companion:trigger:<name>` confirmation with a strict JSON `{summary, proposal}` body projects as
 `request_kind = trigger_proposal`. Pi emits these through the staged `propose_trigger` tool. The

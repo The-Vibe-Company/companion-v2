@@ -3,6 +3,7 @@ import { and, eq, sql as drizzleSql } from "drizzle-orm";
 import { z } from "zod";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  CompanionTriggerDecisionUpdateError,
   CompanionTriggerNotFoundError,
   answerCompanionTriggerDecisionV2,
   composeTriggerPrompt,
@@ -1097,12 +1098,17 @@ describe("Companion triggers over the real database", () => {
     `)), "22023");
 
     // An expired card cannot be approved into a live webhook.
-    await expectSqlState(asActor(fixture.developer, (database) => answerCompanionTriggerDecisionV2({
+    await expect(asActor(fixture.developer, (database) => answerCompanionTriggerDecisionV2({
       orgId: fixture.orgA,
       companionId,
       requestId: expiredKey,
       decision: "allow",
       database,
-    })), "55000");
+    }))).rejects.toMatchObject({
+      name: CompanionTriggerDecisionUpdateError.name,
+      code: "trigger_update_failed",
+      httpStatus: 409,
+      message: "Unable to apply the trigger proposal. Please try again.",
+    });
   });
 });

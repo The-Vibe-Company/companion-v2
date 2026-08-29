@@ -86,7 +86,8 @@ explicitly recoverable interruption even after the browser, API, or one runtime 
   timezone, and a prompt of at most 16,384 characters. Names are unique per Companion
   (case-insensitive). Fires must be at least five minutes apart.
 - Creation is Owner/Editor only: the context-panel + control, or Pi `propose_routine` approved as a
-  decision card. Viewer reads the panel and cards but cannot write.
+  decision card. Approval of a same-name proposal (case-insensitive) updates that routine in place;
+  a different name creates a new routine. Viewer reads the panel and cards but cannot write.
 - The worker claims due rows and fires as the immutable Companion Owner. Fire is API-level turn
   enqueue; the worker never contacts Box or Pi. The message id is deterministic
   (`uuidv5(routineId|scheduledFor)`), so at-least-once ticks collapse to one turn.

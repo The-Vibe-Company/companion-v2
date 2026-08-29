@@ -14,6 +14,10 @@ import {
 } from "@companion/contracts";
 import type { Db } from "@companion/db";
 
+import {
+  CompanionDecisionConflictError,
+  CompanionDecisionNotFoundError,
+} from "./companions";
 import { getCompanionDecisionV2 } from "./companionRuntimeApi";
 import { sanitizeCompanionRuntimeError } from "./companionRuntimeErrors";
 
@@ -38,6 +42,58 @@ function hasDatabaseErrorCode(cause: unknown, expected: string): boolean {
     current = "cause" in node.data ? node.data.cause : null;
   }
   return false;
+}
+
+function databaseErrorCode(cause: Error): string | null {
+  const seen = new Set<unknown>();
+  let current: unknown = cause;
+  while (current !== null && !seen.has(current)) {
+    const node = databaseErrorNodeSchema.safeParse(current);
+    if (!node.success) break;
+    seen.add(current);
+    if (node.data.code) return node.data.code;
+    current = "cause" in node.data ? node.data.cause : null;
+  }
+  return null;
+}
+
+/** Validation errors contain no SQL diagnostics and retain their ordinary public shape. */
+function isTriggerDecisionDomainError(error: Error): boolean {
+  return error instanceof z.ZodError
+    || error instanceof CompanionDecisionConflictError
+    || error instanceof CompanionDecisionNotFoundError;
+}
+
+export class CompanionTriggerDecisionUpdateError extends Error {
+  readonly code = "trigger_update_failed" as const;
+  readonly httpStatus: 400 | 403 | 404 | 409 | 500;
+
+  constructor(options?: {
+    cause?: unknown;
+    httpStatus?: 400 | 403 | 404 | 409 | 500;
+  }) {
+    super("Unable to apply the trigger proposal. Please try again.", options);
+    this.name = "CompanionTriggerDecisionUpdateError";
+    this.httpStatus = options?.httpStatus ?? 500;
+  }
+}
+
+function triggerDecisionError(error: Error): Error {
+  if (isTriggerDecisionDomainError(error)
+      || error instanceof CompanionTriggerDecisionUpdateError) {
+    return error instanceof Error ? error : new Error(String(error));
+  }
+  const code = databaseErrorCode(error);
+  const httpStatus = code === "42501"
+    ? 403
+    : code === "P0002" || code === "02000"
+      ? 404
+      : code === "23505" || code === "40001" || code === "55000"
+        ? 409
+        : code === "22023" || code === "P0001"
+          ? 400
+          : 500;
+  return new CompanionTriggerDecisionUpdateError({ cause: error, httpStatus });
 }
 
 export class CompanionTriggerNotFoundError extends Error {
@@ -74,11 +130,6 @@ export function companionTriggerWebhookUrl(
  */
 const triggerRowSchema = companionTriggerSchema.omit({ webhook_url: true }).extend({
   secret: z.string().regex(/^[0-9a-f]{32,128}$/).nullable(),
-}).strict();
-
-/** Internal row variant that always carries the raw secret (Owner/Editor reads only). */
-const secretTriggerRowSchema = companionTriggerSchema.omit({ webhook_url: true }).extend({
-  secret: z.string().regex(/^[0-9a-f]{32,128}$/),
 }).strict();
 
 function parseTrigger<T>(
@@ -249,26 +300,39 @@ export async function answerCompanionTriggerDecisionV2(input: {
   let triggerId: string | null = null;
   let secret: string | null = null;
   if (input.decision === "allow") {
-    const pending = await getCompanionDecisionV2({
-      orgId: input.orgId,
-      companionId: input.companionId,
-      requestId: input.requestId,
-      database: input.database,
-    });
+    let pending: Awaited<ReturnType<typeof getCompanionDecisionV2>>;
+    try {
+      pending = await getCompanionDecisionV2({
+        orgId: input.orgId,
+        companionId: input.companionId,
+        requestId: input.requestId,
+        database: input.database,
+      });
+    } catch (error) {
+      throw triggerDecisionError(
+        error instanceof Error ? error : new Error("Companion trigger decision failed"),
+      );
+    }
     companionTriggerProposalSchema.parse(pending.proposal);
     triggerId = randomUUID();
     secret = generateCompanionTriggerSecret();
   }
-  await input.database.execute(sql`
-    select * from public.companion_api_answer_trigger_decision(
-      ${input.orgId}::uuid,
-      ${input.companionId}::uuid,
-      ${input.requestId},
-      ${input.decision},
-      ${triggerId}::uuid,
-      ${secret}
-    )
-  `);
+  try {
+    await input.database.execute(sql`
+      select * from public.companion_api_answer_trigger_decision(
+        ${input.orgId}::uuid,
+        ${input.companionId}::uuid,
+        ${input.requestId},
+        ${input.decision},
+        ${triggerId}::uuid,
+        ${secret}
+      )
+    `);
+  } catch (error) {
+    throw triggerDecisionError(
+      error instanceof Error ? error : new Error("Companion trigger decision failed"),
+    );
+  }
 }
 
 export interface CompanionTriggerWebhookRow {
