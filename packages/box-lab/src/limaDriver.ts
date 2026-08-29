@@ -11,6 +11,7 @@ import {
   type DriverCommandResult,
   type DriverDoctorCheck,
 } from "./driver";
+import { guestCommandResult, wrapGuestCommand } from "./guestCommand";
 import {
   ProcessExecutionError,
   safeProcessFailure,
@@ -359,23 +360,18 @@ export class LimaDriver implements BoxLabDriver {
 
   async execute(input: DriverCommandInput): Promise<DriverCommandResult> {
     this.#resource(input.resourceName);
-    const guestCommand = `umask 0022\n${input.command}`;
+    const guestCommand = wrapGuestCommand(input.command);
     const result = await this.#runner.run({
       executable: "limactl",
       args: [
         "shell", "--workdir", "/home/user", input.resourceName,
         "timeout", "--signal=TERM", "--kill-after=5s", `${input.timeoutSeconds}s`,
-        "bash", "--noprofile", "--norc", "-lc", guestCommand,
+        "bash", "--noprofile", "--norc", "-c", guestCommand.wrapper,
+        "box-lab-command", guestCommand.command, guestCommand.completionMarker,
       ],
       timeoutMs: (input.timeoutSeconds + 10) * 1_000,
     });
-    return {
-      success: successful(result),
-      exitCode: result.timedOut ? null : result.exitCode,
-      stdout: result.stdout,
-      stderr: result.stderr,
-      timedOut: result.timedOut || result.exitCode === 124,
-    };
+    return guestCommandResult(result, guestCommand.completionMarker);
   }
 
   async stop(resourceName: string): Promise<void> {
@@ -391,7 +387,7 @@ export class LimaDriver implements BoxLabDriver {
   }
 
   async #exists(resourceName: string): Promise<boolean> {
-    const listed = await this.#run(["list", "--json", resourceName], 30_000);
+    const listed = await this.#run(["list", "--json"], 30_000);
     if (!successful(listed)) throw safeProcessFailure("Box Lab Lima inventory", listed);
     return parsedLimaNames(listed.stdout).includes(resourceName);
   }

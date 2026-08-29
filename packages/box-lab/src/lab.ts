@@ -22,6 +22,7 @@ const BOX_ID_PATTERN = /^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/;
 const SNAPSHOT_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const DELETION_ID_PATTERN = /^bdop_[a-f0-9]{32}$/;
 const MAX_COMMAND_SECONDS = 900;
+const DELETION_RETRY_DELAYS_MS = [100, 500] as const;
 
 export class BoxLabError extends Error {
   readonly status: number;
@@ -115,6 +116,14 @@ function safeSnapshotName(value: string): string {
   return value;
 }
 
+function deletionRetryDelay(attemptCount: number): number | undefined {
+  return DELETION_RETRY_DELAYS_MS[attemptCount - 1];
+}
+
+function deletionWindowStartAttemptCount(attemptCount: number): number {
+  return attemptCount - (attemptCount % (DELETION_RETRY_DELAYS_MS.length + 1));
+}
+
 export class BoxLabService {
   readonly #driver: BoxLabDriver;
   readonly #store: BoxLabStateStore;
@@ -122,6 +131,7 @@ export class BoxLabService {
   readonly #diagnosticsDirectory: string;
   #state: BoxLabPersistedState | null = null;
   readonly #background = new Set<Promise<void>>();
+  readonly #activeDeletionOperations = new Set<string>();
   readonly #resourceTasks = new Map<string, Promise<void>>();
   readonly #snapshotDeletionTasks = new Map<string, Promise<void>>();
 
@@ -143,6 +153,7 @@ export class BoxLabService {
     const deletionsToResume: Array<{
       operation: BoxLabDeletionRecord;
       resourceName: string;
+      windowStartAttemptCount: number;
     }> = [];
     for (const box of this.#state.boxes) {
       if (box.state === "provisioning" || box.state === "archiving") {
@@ -161,19 +172,32 @@ export class BoxLabService {
       }
     }
     for (const operation of this.#state.deletions) {
-      if (operation.status !== "pending" && operation.status !== "processing") continue;
+      const windowStartAttemptCount = deletionWindowStartAttemptCount(operation.attemptCount);
+      const resumable = operation.status === "pending"
+        || operation.status === "processing"
+        || (
+          operation.status === "blocked"
+          && operation.attemptCount > windowStartAttemptCount
+        );
+      if (!resumable) continue;
       const box = this.#state.boxes.find((candidate) => candidate.id === operation.targetId);
       operation.status = "pending";
       operation.completedAt = null;
       deletionsToResume.push({
         operation,
         resourceName: box?.resourceName ?? `${this.#resourcePrefix}-${operation.targetId}`,
+        windowStartAttemptCount,
       });
       recovered = true;
     }
     if (recovered) await this.#persist();
     for (const deletion of deletionsToResume) {
-      this.#scheduleDeletion(this.#state, deletion.operation, deletion.resourceName);
+      this.#startDeletionWindow(
+        this.#state,
+        deletion.operation,
+        deletion.resourceName,
+        deletion.windowStartAttemptCount,
+      );
     }
   }
 
@@ -243,10 +267,23 @@ export class BoxLabService {
     this.#track(this.#queueResources(resourceNames, guardedAction));
   }
 
+  #startDeletionWindow(
+    state: BoxLabPersistedState,
+    operation: BoxLabDeletionRecord,
+    resourceName: string,
+    windowStartAttemptCount: number,
+    pendingPersist: Promise<void> = Promise.resolve(),
+  ): void {
+    if (this.#activeDeletionOperations.has(operation.id)) return;
+    this.#activeDeletionOperations.add(operation.id);
+    this.#scheduleDeletion(state, operation, resourceName, windowStartAttemptCount, pendingPersist);
+  }
+
   #scheduleDeletion(
     state: BoxLabPersistedState,
     operation: BoxLabDeletionRecord,
     resourceName: string,
+    windowStartAttemptCount: number,
     pendingPersist: Promise<void> = Promise.resolve(),
   ): void {
     const boxId = operation.targetId;
@@ -255,6 +292,7 @@ export class BoxLabService {
       operation.status = "processing";
       operation.attemptCount += 1;
       await this.#persist();
+      let retryDelayMs: number | undefined;
       try {
         await this.#driver.delete(resourceName);
         state.boxes = state.boxes.filter((candidate) => candidate.id !== boxId);
@@ -262,11 +300,40 @@ export class BoxLabService {
         operation.completedAt = new Date().toISOString();
       } catch (error) {
         operation.status = "blocked";
+        retryDelayMs = deletionRetryDelay(operation.attemptCount - windowStartAttemptCount);
         throw error;
       } finally {
         await this.#persist();
+        if (retryDelayMs === undefined) {
+          this.#activeDeletionOperations.delete(operation.id);
+        } else {
+          this.#scheduleDeletionRetry(
+            state,
+            operation,
+            resourceName,
+            windowStartAttemptCount,
+            retryDelayMs,
+          );
+        }
       }
     });
+  }
+
+  #scheduleDeletionRetry(
+    state: BoxLabPersistedState,
+    operation: BoxLabDeletionRecord,
+    resourceName: string,
+    windowStartAttemptCount: number,
+    delayMs: number,
+  ): void {
+    const retry = new Promise<void>((resolvePromise) => setTimeout(resolvePromise, delayMs)).then(() => {
+      if (operation.status === "blocked") {
+        this.#scheduleDeletion(state, operation, resourceName, windowStartAttemptCount);
+      } else {
+        this.#activeDeletionOperations.delete(operation.id);
+      }
+    });
+    this.#track(retry);
   }
 
   async #writeDiagnostic(
@@ -513,7 +580,23 @@ export class BoxLabService {
     const state = await this.#readyState();
     const box = this.#box(state, boxId);
     const existing = state.deletions.find((operation) => operation.targetId === boxId && operation.status !== "completed");
-    if (existing) return structuredClone(existing);
+    if (existing) {
+      if (existing.status === "blocked" && !this.#activeDeletionOperations.has(existing.id)) {
+        const windowStartAttemptCount = existing.attemptCount;
+        existing.status = "pending";
+        existing.completedAt = null;
+        const pendingPersist = this.#persist();
+        this.#startDeletionWindow(
+          state,
+          existing,
+          box.resourceName,
+          windowStartAttemptCount,
+          pendingPersist,
+        );
+        await pendingPersist;
+      }
+      return structuredClone(existing);
+    }
     const operation: BoxLabDeletionRecord = {
       id: `bdop_${randomBytes(16).toString("hex")}`,
       targetId: boxId,
@@ -524,7 +607,7 @@ export class BoxLabService {
     };
     state.deletions.push(operation);
     const pendingPersist = this.#persist();
-    this.#scheduleDeletion(state, operation, box.resourceName, pendingPersist);
+    this.#startDeletionWindow(state, operation, box.resourceName, operation.attemptCount, pendingPersist);
     await pendingPersist;
     return structuredClone(operation);
   }

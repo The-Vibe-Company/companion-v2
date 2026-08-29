@@ -10,20 +10,28 @@ export interface LocalSmokeSelection {
   forcePinnedInstall: boolean;
 }
 
-function option(args: readonly string[], name: string): string | undefined {
-  const index = args.indexOf(name);
-  if (index < 0) return undefined;
-  const value = args[index + 1];
-  if (!value || value.startsWith("--")) throw new Error(`${name} requires a value`);
-  return value;
+function smokeOptions(args: readonly string[]): Map<"--profile" | "--scenario", string> {
+  const options = new Map<"--profile" | "--scenario", string>();
+  for (let index = 0; index < args.length; index += 2) {
+    const name = args[index];
+    if (name !== "--profile" && name !== "--scenario") {
+      throw new Error(`Unknown smoke argument: ${name}`);
+    }
+    if (options.has(name)) throw new Error(`${name} may only be provided once`);
+    const value = args[index + 1];
+    if (!value || value.startsWith("--")) throw new Error(`${name} requires a value`);
+    options.set(name, value);
+  }
+  return options;
 }
 
 export function resolveLocalSmokeSelection(args: readonly string[]): LocalSmokeSelection {
-  const profile = option(args, "--profile") ?? "deterministic";
+  const options = smokeOptions(args);
+  const profile = options.get("--profile") ?? "deterministic";
   if (profile !== "deterministic" && profile !== "real-provider") {
     throw new Error("--profile must be deterministic or real-provider");
   }
-  const scenario = option(args, "--scenario") ?? "lifecycle";
+  const scenario = options.get("--scenario") ?? "lifecycle";
   if (scenario !== "lifecycle" && scenario !== "bundle") {
     throw new Error("--scenario must be lifecycle or bundle");
   }

@@ -494,10 +494,9 @@ check_prerequisites() {
   ok "Workspace dependencies ready"
 
   if [ "$dev_box_mode" = "lab" ]; then
-    BOX_LAB_DRIVER="${BOX_LAB_DRIVER:-lima}" \
-      BOX_LAB_WORKSPACE_ID="${BOX_LAB_WORKSPACE_ID:-${CONDUCTOR_WORKSPACE_ID:-$PROJECT}}" \
+    BOX_LAB_WORKSPACE_ID="${BOX_LAB_WORKSPACE_ID:-${CONDUCTOR_WORKSPACE_ID:-$PROJECT}}" \
       bash scripts/dev-process.sh box-lab pnpm box:lab:doctor \
-      || die "Box Lab prerequisites are unavailable. See the doctor output above; Lima/QEMU is never installed automatically."
+      || die "Box Lab prerequisites are unavailable. See the doctor output above; host virtualization dependencies are never installed automatically."
     ok "Box/Pi Linux Lab prerequisites"
   fi
 
@@ -914,9 +913,8 @@ cmd_archive() {
   step "Archiving workspace — stopping native services + removing workspace state"
   PG_BIN="$(detect_pg_bin || true)"
   stop_services
-  if [ "${CONDUCTOR_IS_LOCAL:-0}" = "1" ]; then
-    BOX_LAB_DRIVER="${BOX_LAB_DRIVER:-lima}" \
-      BOX_LAB_WORKSPACE_ID="${BOX_LAB_WORKSPACE_ID:-${CONDUCTOR_WORKSPACE_ID:-$PROJECT}}" \
+  if [ "$CONDUCTOR_IS_CLOUD" = false ]; then
+    BOX_LAB_WORKSPACE_ID="${BOX_LAB_WORKSPACE_ID:-${CONDUCTOR_WORKSPACE_ID:-$PROJECT}}" \
       bash scripts/dev-process.sh box-lab pnpm box:lab:reset \
       || die "Could not remove the Box Lab resources owned by this workspace."
   fi

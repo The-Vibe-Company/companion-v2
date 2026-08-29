@@ -37,6 +37,20 @@ describe("Box Lab configuration", () => {
     expect(config.apiKey).toBe("explicit-lab-key");
   });
 
+  it("does not validate an unused Conductor port when the Lab port is explicit", () => {
+    const config = resolveBoxLabConfig({
+      BOX_LAB_DRIVER: "lima",
+      BOX_LAB_PORT: "6123",
+      CONDUCTOR_PORT: "65535",
+    }, "/work/repo");
+
+    expect(config.port).toBe(6123);
+    expect(() => resolveBoxLabConfig({
+      BOX_LAB_DRIVER: "lima",
+      CONDUCTOR_PORT: "65535",
+    }, "/work/repo")).toThrow(/leave room/);
+  });
+
   it("refuses externally reachable listeners", () => {
     expect(() => resolveBoxLabConfig({ BOX_LAB_HOST: "0.0.0.0" }, "/work/repo"))
       .toThrow(/loopback/);

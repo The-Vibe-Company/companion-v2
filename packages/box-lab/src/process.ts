@@ -1,6 +1,7 @@
 import { spawn, type SpawnOptions } from "node:child_process";
 
 const DEFAULT_OUTPUT_LIMIT_BYTES = 2 * 1024 * 1024;
+const PROCESS_RESULT_TAIL_BYTES = 1_024;
 
 export interface ProcessInvocation {
   executable: string;
@@ -18,6 +19,8 @@ export interface ProcessResult {
   signal: NodeJS.Signals | null;
   stdout: string;
   stderr: string;
+  /** Bounded internal tail for protocol markers; never surface it as command output or diagnostics. */
+  stderrTail?: string;
   timedOut: boolean;
 }
 
@@ -40,6 +43,20 @@ function appendBounded(chunks: Buffer[], chunk: Buffer, state: { bytes: number }
   const accepted = chunk.subarray(0, Math.max(0, limit - state.bytes));
   chunks.push(accepted);
   state.bytes += accepted.byteLength;
+}
+
+function appendTail(previous: Buffer, chunk: Buffer): Buffer {
+  if (chunk.byteLength >= PROCESS_RESULT_TAIL_BYTES) {
+    return chunk.subarray(chunk.byteLength - PROCESS_RESULT_TAIL_BYTES);
+  }
+  const combined = Buffer.concat([previous, chunk]);
+  return combined.byteLength <= PROCESS_RESULT_TAIL_BYTES
+    ? combined
+    : combined.subarray(combined.byteLength - PROCESS_RESULT_TAIL_BYTES);
+}
+
+function isBrokenPipe(error: Error): boolean {
+  return "code" in error && error.code === "EPIPE";
 }
 
 /**
@@ -71,10 +88,12 @@ export class SpawnProcessRunner implements ProcessRunner {
       }
       const stdout: Buffer[] = [];
       const stderr: Buffer[] = [];
+      let stderrTail: Buffer = Buffer.alloc(0);
       const stdoutState = { bytes: 0 };
       const stderrState = { bytes: 0 };
       const limit = invocation.outputLimitBytes ?? DEFAULT_OUTPUT_LIMIT_BYTES;
       let timedOut = false;
+      let inputFailed = false;
       let killTimer: ReturnType<typeof setTimeout> | undefined;
       const timeout = invocation.timeoutMs === undefined
         ? undefined
@@ -87,9 +106,17 @@ export class SpawnProcessRunner implements ProcessRunner {
       timeout?.unref();
       if (stdio === "pipe") {
         child.stdout?.on("data", (chunk: Buffer) => appendBounded(stdout, chunk, stdoutState, limit));
-        child.stderr?.on("data", (chunk: Buffer) => appendBounded(stderr, chunk, stderrState, limit));
-        if (invocation.input !== undefined) child.stdin?.end(invocation.input);
-        else child.stdin?.end();
+        child.stderr?.on("data", (chunk: Buffer) => {
+          appendBounded(stderr, chunk, stderrState, limit);
+          stderrTail = appendTail(stderrTail, chunk);
+        });
+        child.stdin?.once("error", (error: Error) => {
+          // The child exit remains authoritative when it deliberately closes stdin before consuming
+          // a buffered payload. Without this listener, Node promotes EPIPE to an uncaught exception.
+          if (isBrokenPipe(error)) return;
+          inputFailed = true;
+          child.kill("SIGTERM");
+        });
       }
       child.once("error", (error) => {
         if (timeout) clearTimeout(timeout);
@@ -99,14 +126,26 @@ export class SpawnProcessRunner implements ProcessRunner {
       child.once("close", (exitCode, signal) => {
         if (timeout) clearTimeout(timeout);
         if (killTimer) clearTimeout(killTimer);
+        if (inputFailed) {
+          rejectPromise(new ProcessExecutionError(
+            "process_input_failed",
+            "Process input could not be written",
+          ));
+          return;
+        }
         resolvePromise({
           exitCode,
           signal,
           stdout: Buffer.concat(stdout).toString("utf8"),
           stderr: Buffer.concat(stderr).toString("utf8"),
+          stderrTail: stderrTail.toString("utf8"),
           timedOut,
         });
       });
+      if (stdio === "pipe") {
+        if (invocation.input !== undefined) child.stdin?.end(invocation.input);
+        else child.stdin?.end();
+      }
     });
   }
 }

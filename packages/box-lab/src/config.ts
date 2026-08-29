@@ -81,9 +81,12 @@ export function resolveBoxLabConfig(
   }
   const stateRoot = resolve(env.BOX_LAB_STATE_DIR?.trim() || resolve(cwd, ".context", "box-lab"));
   const stateDirectory = resolve(stateRoot, scope);
+  const port = env.BOX_LAB_PORT === undefined
+    ? conductorPort(env)
+    : positivePort(env.BOX_LAB_PORT, 0);
   return {
     host: requestedHost,
-    port: positivePort(env.BOX_LAB_PORT, conductorPort(env)),
+    port,
     apiKey,
     workspaceId,
     workspaceScope: scope,

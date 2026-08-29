@@ -30,7 +30,7 @@ const COMPANION_ID = "11111111-1111-4111-8111-111111111111";
 const ORG_ID = "22222222-2222-4222-8222-222222222222";
 const GENERATION = 1;
 const BOX_TTL_SECONDS = 21_600;
-const SMOKE_DEADLINE_MS = 25 * 60_000;
+const PROVIDER_OPERATION_DEADLINE_MS = 25 * 60_000;
 const PI_INSTALL_COMMAND = [
   `npm install --global ${COMPANION_PI_NPM_PACKAGE}@${COMPANION_PI_BUNDLE.piVersion}`,
   'export PATH="$(npm prefix --global)/bin:$PATH"',
@@ -110,6 +110,25 @@ export async function runRetainedFailureCase(input: {
   }
 }
 
+export async function runRetainedCreatedBoxCase(input: {
+  caseName: string;
+  create: () => Promise<string>;
+  ready: (boxId: string) => Promise<void>;
+  action: (boxId: string) => Promise<void>;
+  cleanup: (boxId: string) => Promise<void>;
+}): Promise<void> {
+  const boxId = await input.create();
+  await runRetainedFailureCase({
+    caseName: input.caseName,
+    boxId,
+    action: async () => {
+      await input.ready(boxId);
+      await input.action(boxId);
+    },
+    cleanup: () => input.cleanup(boxId),
+  });
+}
+
 export async function retryBoxLabPrewarm(input: {
   action: () => Promise<void>;
   attempts: number;
@@ -138,8 +157,10 @@ function report(options: BoxLabSmokeOptions, phase: string, fields: BoxLabSmokeR
   options.report?.({ type: "box-lab.smoke", phase, at: new Date().toISOString(), ...fields });
 }
 
-function deadlineAt(): Date {
-  return new Date(Date.now() + SMOKE_DEADLINE_MS);
+function providerOperationDeadlineAt(): Date {
+  // The complete Lab smoke intentionally spans several slow provider operations and may exceed
+  // this interval. Each individual provider operation receives one fixed absolute deadline.
+  return new Date(Date.now() + PROVIDER_OPERATION_DEADLINE_MS);
 }
 
 function shellQuote(value: string): string {
@@ -483,24 +504,19 @@ async function sendPrompt(runtime: AsciiBoxCompanionRuntime, boxId: string): Pro
   await waitForSettled(runtime, boxId, attemptId, dispatched.initialCursor);
 }
 
-async function createBlankBox(
-  maintenance: AsciiBoxMaintenanceClient,
-  baseUrl: string,
-  apiKey: string,
-): Promise<string> {
+async function createBlankBox(maintenance: AsciiBoxMaintenanceClient): Promise<string> {
   const created = await maintenance.createEphemeralBox({
     ttlSeconds: 3_600,
     noEnv: true,
-    deadlineAt: deadlineAt(),
+    deadlineAt: providerOperationDeadlineAt(),
   });
-  await waitForBoxState(baseUrl, apiKey, created.boxId, "running");
   return created.boxId;
 }
 
 async function deleteBox(maintenance: AsciiBoxMaintenanceClient, boxId: string): Promise<void> {
   await maintenance.deletePermanentlyAndWait({
     boxId,
-    deadlineAt: deadlineAt(),
+    deadlineAt: providerOperationDeadlineAt(),
     pollIntervalMs: 50,
   });
 }
@@ -543,12 +559,12 @@ async function runFailureMatrix(input: {
 }): Promise<void> {
   const { options, maintenance, clientEnv, baseUrl, apiKey } = input;
   const run = async (name: string, action: (boxId: string) => Promise<void>): Promise<void> => {
-    const boxId = await createBlankBox(maintenance, baseUrl, apiKey);
-    await runRetainedFailureCase({
+    await runRetainedCreatedBoxCase({
       caseName: name,
-      boxId,
-      action: async () => action(boxId),
-      cleanup: async () => deleteBox(maintenance, boxId),
+      create: () => createBlankBox(maintenance),
+      ready: async (boxId) => await waitForBoxState(baseUrl, apiKey, boxId, "running"),
+      action,
+      cleanup: (boxId) => deleteBox(maintenance, boxId),
     });
     report(options, "failure_case_passed", { case: name });
   };
@@ -697,7 +713,7 @@ async function runBoxLabSmokeWithDispatcher(options: BoxLabSmokeOptions): Promis
       companionId: COMPANION_ID,
       generation: GENERATION,
       ttlSeconds: BOX_TTL_SECONDS,
-      deadlineAt: deadlineAt(),
+      deadlineAt: providerOperationDeadlineAt(),
     });
     retainedBoxId = created.boxId;
     await maintenance.applyGenerationBoxSettings({
@@ -705,7 +721,7 @@ async function runBoxLabSmokeWithDispatcher(options: BoxLabSmokeOptions): Promis
       companionId: COMPANION_ID,
       generation: GENERATION,
       ttlSeconds: BOX_TTL_SECONDS,
-      deadlineAt: deadlineAt(),
+      deadlineAt: providerOperationDeadlineAt(),
     });
     await waitForBoxState(server.baseUrl, options.config.apiKey, created.boxId, "running");
     report(options, "box_ready", { boxId: created.boxId });
@@ -735,9 +751,10 @@ async function runBoxLabSmokeWithDispatcher(options: BoxLabSmokeOptions): Promis
     report(options, "layout_installed", { mode: firstLayout.applied, piVersion: COMPANION_PI_BUNDLE.piVersion });
 
     const snapshotName = `box-lab-${Date.now().toString(36)}`.slice(0, 63);
-    await maintenance.saveNamedSnapshot({ boxId: created.boxId, name: snapshotName, deadlineAt: deadlineAt() });
+    const snapshotDeadlineAt = providerOperationDeadlineAt();
+    await maintenance.saveNamedSnapshot({ boxId: created.boxId, name: snapshotName, deadlineAt: snapshotDeadlineAt });
     for (;;) {
-      const snapshot = await maintenance.getNamedSnapshot({ name: snapshotName, deadlineAt: deadlineAt() });
+      const snapshot = await maintenance.getNamedSnapshot({ name: snapshotName, deadlineAt: snapshotDeadlineAt });
       if (snapshot?.status === "ready") break;
       if (!snapshot || snapshot.status === "failed") throw new Error("Named snapshot failed");
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
@@ -768,7 +785,9 @@ test -f "/run/user/$(id -u)/companion/providers.env"`);
 runtime_credential_dir="/run/user/$(id -u)/companion"
 mkdir -p "$runtime_credential_dir"
 printf '%s\\n' box-lab-synthetic-volatile-credential > "$runtime_credential_dir/providers.env"
-chmod 600 "$runtime_credential_dir/providers.env"`);
+chmod 600 "$runtime_credential_dir/providers.env"
+grep -Fxq box-lab-synthetic-volatile-credential "$runtime_credential_dir/providers.env"
+test "$(stat -c '%a' "$runtime_credential_dir/providers.env")" = 600`);
     await runtime.archiveExistingBox({ boxId: created.boxId });
     await waitForBoxState(server.baseUrl, options.config.apiKey, created.boxId, "archived");
     await runtime.resumeExistingBox({ boxId: created.boxId });
@@ -790,7 +809,7 @@ test ! -e "/run/user/$(id -u)/companion/providers.env"`);
       ttlSeconds: 3_600,
       from: snapshotName,
       noEnv: true,
-      deadlineAt: deadlineAt(),
+      deadlineAt: providerOperationDeadlineAt(),
     });
     if (clone.boxId === created.boxId) throw new Error("Snapshot clone reused the source Box id");
     await waitForBoxState(server.baseUrl, options.config.apiKey, clone.boxId, "running");
@@ -823,7 +842,7 @@ test ! -e "/run/user/$(id -u)/companion/providers.env"`);
     await sendPrompt(runtime, clone.boxId);
     report(options, "clone_settled", { boxId: clone.boxId, coldInstall: false, snapshotImmutable: true });
     await deleteBox(maintenance, clone.boxId);
-    await maintenance.deleteNamedSnapshot({ name: snapshotName, deadlineAt: deadlineAt() });
+    await maintenance.deleteNamedSnapshot({ name: snapshotName, deadlineAt: providerOperationDeadlineAt() });
 
     if (options.failureMatrix === true) {
       await runFailureMatrix({

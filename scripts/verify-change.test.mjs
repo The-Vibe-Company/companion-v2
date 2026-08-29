@@ -168,11 +168,7 @@ test("documentation-only changes do not schedule application checks", () => {
 });
 
 test("Conductor launcher changes schedule the native development stack check", () => {
-  const plan = createVerificationPlan([
-    ".conductor/settings.toml",
-    "scripts/setup-conductor.sh",
-    "scripts/box-lab.sh",
-  ], {
+  const plan = createVerificationPlan(["scripts/box-lab.sh"], {
     workspaces,
   });
   assert.deepEqual(plan.fastSteps.map(({ id }) => id), ["hygiene", "dev-stack", "quality"]);

@@ -137,19 +137,29 @@ describe("Box Lab Box v1 server", () => {
     await waitState(handle, created.boxId, "running");
 
     await client.saveNamedSnapshot({ boxId: created.boxId, name: "contract-snapshot", deadlineAt });
-    for (;;) {
+    let snapshotReady = false;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
       const snapshot = await client.getNamedSnapshot({ name: "contract-snapshot", deadlineAt });
-      if (snapshot?.status === "ready") break;
+      if (snapshot?.status === "ready") {
+        snapshotReady = true;
+        break;
+      }
+      if (snapshot?.status === "failed") break;
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 1));
     }
+    expect(snapshotReady).toBe(true);
     const clone = await client.createEphemeralBox({
       ttlSeconds: 3_600,
       from: "contract-snapshot",
       deadlineAt,
     });
     await waitState(handle, clone.boxId, "running");
-    expect([...driver.resources.values()].some((resource) => resource.files.has(".companion/probe.txt")))
-      .toBe(true);
+    const probeHolders = [...driver.resources.values()]
+      .filter((resource) => resource.files.has(".companion/probe.txt"));
+    expect(probeHolders).toHaveLength(2);
+    expect(probeHolders.every((resource) => (
+      resource.files.get(".companion/probe.txt")?.toString("utf8") === "alive\n"
+    ))).toBe(true);
 
     await expect(client.deletePermanentlyAndWait({
       boxId: clone.boxId,

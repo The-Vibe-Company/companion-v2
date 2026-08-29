@@ -602,6 +602,71 @@ assert_runtime_mode_rejected "an unknown Box mode" \
   "Invalid COMPANION_DEV_BOX_MODE=unknown" \
   COMPANION_DEV_BOX_MODE=unknown
 
+# Exercise the Lab branch with contained launcher shims. An absent driver must stay absent until
+# the TypeScript config selects its host-platform default; an explicit override must pass through.
+(
+  runtime_lab_test_dir="$(mktemp -d "$ROOT/.context/dev-runtime-lab-test.XXXXXX")"
+  trap 'rm -rf "$runtime_lab_test_dir"' EXIT
+  mkdir -p "$runtime_lab_test_dir/scripts"
+  cp "$ROOT/scripts/dev-runtime.sh" "$runtime_lab_test_dir/scripts/dev-runtime.sh"
+  cp "$ROOT/scripts/dev-runtime-mode.sh" "$runtime_lab_test_dir/scripts/dev-runtime-mode.sh"
+  # These variables expand only inside the generated role-boundary shim.
+  # shellcheck disable=SC2016
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'set -euo pipefail' \
+    'role="$1"' \
+    'if [ "$role" = "box-lab" ]; then' \
+    '  printf "%s\n" "${BOX_LAB_DRIVER-unset}" >"$RUNTIME_LAB_DRIVER_PROBE"' \
+    '  trap "exit 0" HUP INT TERM' \
+    '  while :; do sleep 1; done' \
+    'fi' \
+    'exit 0' \
+    >"$runtime_lab_test_dir/scripts/dev-process.sh"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' \
+    >"$runtime_lab_test_dir/scripts/box-lab.sh"
+  printf '%s\n' \
+    'import { existsSync } from "node:fs";' \
+    'const probe = process.env.RUNTIME_LAB_DRIVER_PROBE;' \
+    'const started = Date.now();' \
+    'const wait = () => {' \
+    '  if (probe && existsSync(probe)) process.exit(0);' \
+    '  if (Date.now() - started > 2_000) process.exit(1);' \
+    '  setTimeout(wait, 10);' \
+    '};' \
+    'wait();' \
+    >"$runtime_lab_test_dir/scripts/wait-http-ready.mjs"
+  chmod +x "$runtime_lab_test_dir/scripts/dev-process.sh" \
+    "$runtime_lab_test_dir/scripts/box-lab.sh"
+
+  runtime_lab_driver_probe="$runtime_lab_test_dir/driver"
+  env -u BOX_LAB_DRIVER \
+    RUNTIME_LAB_DRIVER_PROBE="$runtime_lab_driver_probe" \
+    BOX_LAB_API_KEY=box-lab-test-key \
+    COMPANION_DEV_BOX_MODE=lab \
+    COMPANION_COMPANIONS_ENABLED=true \
+    COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS=example.test \
+    CONDUCTOR_IS_LOCAL=1 \
+    bash "$runtime_lab_test_dir/scripts/dev-runtime.sh" true >/dev/null
+  if [ "$(cat "$runtime_lab_driver_probe")" != "unset" ]; then
+    printf '[dev-stack-check] dev-runtime must leave the Box Lab driver unset for platform selection\n' >&2
+    exit 1
+  fi
+
+  BOX_LAB_DRIVER=oci-systemd \
+    RUNTIME_LAB_DRIVER_PROBE="$runtime_lab_driver_probe" \
+    BOX_LAB_API_KEY=box-lab-test-key \
+    COMPANION_DEV_BOX_MODE=lab \
+    COMPANION_COMPANIONS_ENABLED=true \
+    COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS=example.test \
+    CONDUCTOR_IS_LOCAL=1 \
+    bash "$runtime_lab_test_dir/scripts/dev-runtime.sh" true >/dev/null
+  if [ "$(cat "$runtime_lab_driver_probe")" != "oci-systemd" ]; then
+    printf '[dev-stack-check] dev-runtime must preserve an explicit Box Lab driver override\n' >&2
+    exit 1
+  fi
+)
+
 if ! grep -Fq '[scripts.run."Dev (real Pi VM, slow)"]' .conductor/settings.toml \
   || ! grep -Fq 'available_in = ["local"]' .conductor/settings.toml \
   || ! grep -Fq 'COMPANION_DEV_BOX_MODE=lab bash scripts/dev-conductor.sh' .conductor/settings.toml; then
@@ -627,6 +692,42 @@ if ! grep -Fq "BOX_LAB_WORKSPACE_ID=\"\$box_lab_workspace_id\" \\" scripts/dev-r
   printf '[dev-stack-check] the runtime launcher must pass the resolved workspace identity only to Box Lab\n' >&2
   exit 1
 fi
+
+# Direct invocation is documented outside Conductor too. With CONDUCTOR_IS_LOCAL absent, the
+# resolved environment is local and archive must still reset the exact workspace-owned Lab scope.
+(
+  archive_probe_dir="$(mktemp -d "$ROOT/.context/archive-probe.XXXXXX")"
+  trap 'rm -rf "$archive_probe_dir"' EXIT
+  # The nested shell expands values loaded from the launcher under test.
+  # shellcheck disable=SC2016
+  archive_box_lab_probe="$({
+    env -u CONDUCTOR_IS_LOCAL -u BOX_LAB_DRIVER \
+      CONDUCTOR_PORT=4310 COMPANION_DEV_SKIP_ENV_FILE=1 \
+      bash -c '
+        source "$1" archive
+        STATE_DIR="$2/state"
+        mkdir -p "$STATE_DIR"
+        step() { :; }
+        ok() { :; }
+        die() { printf "die:%s\n" "$1"; exit 1; }
+        detect_pg_bin() { :; }
+        stop_services() { :; }
+        bash() {
+          if [ "$1 $2 $3 $4" = "scripts/dev-process.sh box-lab pnpm box:lab:reset" ]; then
+            printf "reset:%s\n" "${BOX_LAB_DRIVER-unset}"
+            return 0
+          fi
+          command bash "$@"
+        }
+        cmd_archive
+      ' _ "$ROOT/scripts/dev-conductor.sh" "$archive_probe_dir"
+  } 2>/dev/null)"
+  if [ "$archive_box_lab_probe" != "reset:unset" ]; then
+    printf '[dev-stack-check] direct local archive must reset Box Lab with platform driver selection: %s\n' \
+      "$archive_box_lab_probe" >&2
+    exit 1
+  fi
+)
 
 for disabled_mode in \
   'COMPANION_COMPANIONS_ENABLED=false COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS=example.test' \

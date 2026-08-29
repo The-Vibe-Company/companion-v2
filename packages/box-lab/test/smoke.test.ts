@@ -4,6 +4,7 @@ import {
   BoxLabFailureCaseError,
   boxLabFailureIdentitySalt,
   retryBoxLabPrewarm,
+  runRetainedCreatedBoxCase,
   runRetainedFailureCase,
 } from "../src/smoke";
 
@@ -33,6 +34,31 @@ describe("Box Lab failure-case retention", () => {
       boxId: "bx_23456789",
       cause,
     } satisfies Partial<BoxLabFailureCaseError>);
+    expect(cleanup).not.toHaveBeenCalled();
+  });
+
+  it("retains an acknowledged Box id when readiness fails before the scenario", async () => {
+    const cause = new Error("Box did not become ready");
+    const ready = vi.fn(async () => {
+      throw cause;
+    });
+    const action = vi.fn(async () => undefined);
+    const cleanup = vi.fn(async () => undefined);
+
+    await expect(runRetainedCreatedBoxCase({
+      caseName: "node_absent",
+      create: async () => "bx_3456789a",
+      ready,
+      action,
+      cleanup,
+    })).rejects.toMatchObject({
+      name: "BoxLabFailureCaseError",
+      caseName: "node_absent",
+      boxId: "bx_3456789a",
+      cause,
+    } satisfies Partial<BoxLabFailureCaseError>);
+    expect(ready).toHaveBeenCalledWith("bx_3456789a");
+    expect(action).not.toHaveBeenCalled();
     expect(cleanup).not.toHaveBeenCalled();
   });
 });

@@ -9,6 +9,7 @@ import {
   type DriverCommandResult,
   type DriverDoctorCheck,
 } from "./driver";
+import { guestCommandResult, wrapGuestCommand } from "./guestCommand";
 import {
   ProcessExecutionError,
   safeProcessFailure,
@@ -319,7 +320,7 @@ export class OciSystemdDriver implements BoxLabDriver {
     const result = await this.#runner.run({
       executable: this.#engine,
       args: [
-        "exec", "--interactive", "--user", "user",
+        "exec", "--interactive", "--workdir", "/home/user", "--user", "user",
         "--env", "HOME=/home/user", "--env", "USER=user",
         resourceName, "bash", "--noprofile", "--norc", "-c", WRITE_FILE_SCRIPT,
         "box-lab-write", relativePath,
@@ -332,25 +333,20 @@ export class OciSystemdDriver implements BoxLabDriver {
 
   async execute(input: DriverCommandInput): Promise<DriverCommandResult> {
     this.#resource(input.resourceName);
-    const guestCommand = `umask 0022\n${input.command}`;
+    const guestCommand = wrapGuestCommand(input.command);
     const result = await this.#runner.run({
       executable: this.#engine,
       args: [
-        "exec", "--user", "user",
+        "exec", "--workdir", "/home/user", "--user", "user",
         "--env", "HOME=/home/user", "--env", "USER=user", "--env", "SHELL=/bin/bash",
         input.resourceName,
         "timeout", "--signal=TERM", "--kill-after=5s", `${input.timeoutSeconds}s`,
-        "bash", "--noprofile", "--norc", "-lc", guestCommand,
+        "bash", "--noprofile", "--norc", "-c", guestCommand.wrapper,
+        "box-lab-command", guestCommand.command, guestCommand.completionMarker,
       ],
       timeoutMs: (input.timeoutSeconds + 10) * 1_000,
     });
-    return {
-      success: successful(result),
-      exitCode: result.timedOut ? null : result.exitCode,
-      stdout: result.stdout,
-      stderr: result.stderr,
-      timedOut: result.timedOut || result.exitCode === 124,
-    };
+    return guestCommandResult(result, guestCommand.completionMarker);
   }
 
   async stop(resourceName: string): Promise<void> {
@@ -397,7 +393,7 @@ export class OciSystemdDriver implements BoxLabDriver {
       if (isExplicitResourceNotFound(this.#engine, "image", snapshotResourceName, inspected)) return;
       throw safeProcessFailure("Box Lab snapshot deletion inventory", inspected);
     }
-    const result = await this.#run(["image", "rm", snapshotResourceName], 60_000);
+    const result = await this.#run(["image", "rm", "--force", snapshotResourceName], 60_000);
     if (isExplicitResourceNotFound(this.#engine, "image", snapshotResourceName, result)) return;
     if (!successful(result)) throw safeProcessFailure("Box Lab snapshot delete", result);
   }
@@ -407,7 +403,7 @@ export class OciSystemdDriver implements BoxLabDriver {
     const result = await this.#runner.run({
       executable: this.#engine,
       args: [
-        "exec", "--interactive", "--tty", "--user", "user",
+        "exec", "--interactive", "--tty", "--workdir", "/home/user", "--user", "user",
         "--env", "HOME=/home/user", resourceName, "bash", "--login",
       ],
       stdio: "inherit",

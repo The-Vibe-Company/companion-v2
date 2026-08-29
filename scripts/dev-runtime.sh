@@ -85,7 +85,6 @@ case "$box_mode" in
       BOX_LAB_PORT="$box_dev_port" \
       BOX_LAB_API_KEY="$box_lab_api_key" \
       BOX_LAB_WORKSPACE_ID="$box_lab_workspace_id" \
-      BOX_LAB_DRIVER="${BOX_LAB_DRIVER:-lima}" \
       bash "$SCRIPT_DIR/dev-process.sh" box-lab \
       bash "$SCRIPT_DIR/box-lab.sh" dev &
     box_dev_pid=$!

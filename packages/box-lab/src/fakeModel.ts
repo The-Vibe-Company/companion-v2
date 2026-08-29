@@ -32,10 +32,10 @@ export function boxLabModelsJson(): string {
 }
 
 /** This source runs inside the disposable Box. It never receives a real provider credential. */
-export function fakeModelServerSource(): string {
+export function fakeModelServerSource(port = BOX_LAB_FAKE_MODEL_PORT): string {
   return `import { createServer } from "node:http";
 
-const port = ${BOX_LAB_FAKE_MODEL_PORT};
+const port = ${port};
 const responseText = "box-lab-deterministic-ok";
 
 function json(response, status, body) {
@@ -54,7 +54,12 @@ createServer(async (request, response) => {
     return;
   }
   const chunks = [];
-  for await (const chunk of request) chunks.push(Buffer.from(chunk));
+  try {
+    for await (const chunk of request) chunks.push(Buffer.from(chunk));
+  } catch {
+    response.destroy();
+    return;
+  }
   let body;
   try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
   catch { json(response, 400, { error: { message: "invalid json", type: "invalid_request_error" } }); return; }
@@ -92,6 +97,7 @@ After=network.target
 
 [Service]
 Type=simple
+Environment=PATH=/home/user/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/usr/bin/env node /home/user/.box-lab/fake-model.mjs
 Restart=on-failure
 RestartSec=1

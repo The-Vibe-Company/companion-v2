@@ -100,6 +100,24 @@ class FailingSnapshotDriver extends BlockingLifecycleDriver {
   }
 }
 
+class TransientDeleteDriver extends BlockingLifecycleDriver {
+  remainingFailures: number;
+
+  constructor(failures: number) {
+    super();
+    this.remainingFailures = failures;
+  }
+
+  override async delete(resourceName: string): Promise<void> {
+    if (this.remainingFailures > 0) {
+      this.remainingFailures -= 1;
+      this.deleteCalls += 1;
+      throw new ProcessExecutionError("process_failed", "Contained deletion failed transiently");
+    }
+    await super.delete(resourceName);
+  }
+}
+
 class BlockingStateStore extends BoxLabStateStore {
   saveGate: OperationGate | undefined;
 
@@ -425,7 +443,52 @@ describe("Box Lab lifecycle serialization", () => {
 });
 
 describe("Box Lab deletion recovery", () => {
-  for (const [status, attemptCount] of [["pending", 0], ["processing", 2]] as const) {
+  it("retries a transient blocked deletion without another DELETE request", async () => {
+    const test = await context(new TransientDeleteDriver(1));
+    try {
+      const boxId = await runningBox(test.service);
+      const requested = await test.service.requestDeletion(boxId);
+      const completed = await completedDeletion(test.service, requested);
+
+      expect(completed).toMatchObject({ status: "completed", attemptCount: 2 });
+      expect(test.driver.deleteCalls).toBe(2);
+      expect(test.driver.resources.size).toBe(0);
+    } finally {
+      await test.service.close();
+      await rm(test.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("opens a new bounded retry window when DELETE is repeated for a blocked operation", async () => {
+    const driver = new TransientDeleteDriver(3);
+    const test = await context(driver);
+    try {
+      const boxId = await runningBox(test.service);
+      const requested = await test.service.requestDeletion(boxId);
+      await test.service.close();
+
+      expect(await test.service.getDeletion(requested.id)).toMatchObject({
+        status: "blocked",
+        attemptCount: 3,
+      });
+      expect(test.driver.deleteCalls).toBe(3);
+      expect(test.driver.resources.size).toBe(1);
+
+      driver.remainingFailures = 0;
+      const retried = await test.service.requestDeletion(boxId);
+      const completed = await completedDeletion(test.service, retried);
+
+      expect(retried.id).toBe(requested.id);
+      expect(completed).toMatchObject({ status: "completed", attemptCount: 4 });
+      expect(test.driver.deleteCalls).toBe(4);
+      expect(test.driver.resources.size).toBe(0);
+    } finally {
+      await test.service.close();
+      await rm(test.directory, { recursive: true, force: true });
+    }
+  });
+
+  for (const [status, attemptCount] of [["pending", 0], ["processing", 2], ["blocked", 1]] as const) {
     it(`replays an idempotent ${status} deletion after service restart`, async () => {
       const test = await context();
       const boxId = status === "pending" ? "bx_23456789" : "bx_3456789a";

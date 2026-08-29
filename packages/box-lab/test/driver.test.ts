@@ -68,13 +68,76 @@ describe("OCI systemd driver", () => {
     expect(runner.calls).toHaveLength(1);
     expect(runner.calls[0]).toMatchObject({ executable: "docker" });
     expect(runner.calls[0]!.args).toEqual([
-      "exec", "--user", "user",
+      "exec", "--workdir", "/home/user", "--user", "user",
       "--env", "HOME=/home/user", "--env", "USER=user", "--env", "SHELL=/bin/bash",
       resourceName,
       "timeout", "--signal=TERM", "--kill-after=5s", "12s",
-      "bash", "--noprofile", "--norc", "-lc", `umask 0022\n${hostile}`,
+      "bash", "--noprofile", "--norc", "-c", expect.stringContaining("status=$?"),
+      "box-lab-command", `umask 0022\n${hostile}`,
+      expect.stringMatching(/^box-lab-command-[a-f0-9]{32}$/),
     ]);
+    expect(runner.calls[0]!.args.at(-4)).not.toContain(hostile);
     expect("shell" in runner.calls[0]!).toBe(false);
+  });
+
+  it("keeps a completed guest exit 124 distinct from an actual timeout", async () => {
+    const runner = new RecordingRunner();
+    runner.run = async (invocation) => {
+      runner.calls.push(invocation);
+      const marker = invocation.args.at(-1)!;
+      return {
+        ...success,
+        exitCode: 124,
+        stdout: "guest-output\n",
+        stderr: `guest-error\n\u001e${marker}:124\u001e`,
+      };
+    };
+    const driver = ociDriver(runner);
+    const resourceName = "companion-box-lab-test-0123456789ab-bx_23456789";
+
+    await expect(driver.execute({ resourceName, command: "exit 124", timeoutSeconds: 12 }))
+      .resolves.toEqual({
+        success: false,
+        exitCode: 124,
+        stdout: "guest-output\n",
+        stderr: "guest-error\n",
+        timedOut: false,
+      });
+
+    const timedOutRunner = new ScriptedRunner([{
+      ...success,
+      exitCode: 124,
+      stdout: "partial output\n",
+      stderr: "",
+    }]);
+    const timedOutDriver = ociDriver(timedOutRunner);
+    await expect(timedOutDriver.execute({ resourceName, command: "sleep 30", timeoutSeconds: 1 }))
+      .resolves.toMatchObject({ success: false, exitCode: null, timedOut: true });
+  });
+
+  it("classifies guest exit 124 from the bounded stderr tail after visible output is capped", async () => {
+    const runner = new RecordingRunner();
+    runner.run = async (invocation) => {
+      runner.calls.push(invocation);
+      const marker = invocation.args.at(-1)!;
+      return {
+        ...success,
+        exitCode: 124,
+        stderr: "x".repeat(2 * 1024 * 1024),
+        stderrTail: `x\u001e${marker}:124\u001e`,
+      };
+    };
+    const driver = ociDriver(runner);
+
+    await expect(driver.execute({
+      resourceName: "companion-box-lab-test-0123456789ab-bx_23456789",
+      command: "exit 124",
+      timeoutSeconds: 12,
+    })).resolves.toMatchObject({
+      success: false,
+      exitCode: 124,
+      timedOut: false,
+    });
   });
 
   it("rejects resource names from another workspace before process execution", async () => {
@@ -186,6 +249,18 @@ describe("OCI systemd driver", () => {
     expect(runner.calls.map((call) => call.args[0])).toEqual(["container", "rm"]);
   });
 
+  it("force-removes a snapshot image that may still be referenced by a clone", async () => {
+    const snapshot = "companion-box-lab-test-0123456789ab-snapshot-ready";
+    const runner = new ScriptedRunner([success, success]);
+    const driver = ociDriver(runner);
+
+    await expect(driver.deleteSnapshot(snapshot)).resolves.toBeUndefined();
+    expect(runner.calls.map((call) => call.args)).toEqual([
+      ["image", "inspect", snapshot],
+      ["image", "rm", "--force", snapshot],
+    ]);
+  });
+
   it("resets only resources carrying the exact workspace label", async () => {
     const runner = new RecordingRunner();
     runner.run = async (invocation) => {
@@ -273,6 +348,33 @@ describe("OCI systemd driver", () => {
 });
 
 describe("Lima x86_64 driver", () => {
+  it("keeps a completed guest exit 124 distinct from an actual timeout", async () => {
+    const runner = new RecordingRunner();
+    runner.run = async (invocation) => {
+      runner.calls.push(invocation);
+      const marker = invocation.args.at(-1)!;
+      return {
+        ...success,
+        exitCode: 124,
+        stderr: `\u001e${marker}:124\u001e`,
+      };
+    };
+    const driver = new LimaDriver({
+      runner,
+      resourcePrefix: "companion-box-lab-owned-0123456789ab",
+      stateDirectory: "/tmp/box-lab-test",
+    });
+
+    await expect(driver.execute({
+      resourceName: "companion-box-lab-owned-0123456789ab-bx_23456789",
+      command: "exit 124",
+      timeoutSeconds: 12,
+    })).resolves.toMatchObject({ success: false, exitCode: 124, timedOut: false });
+    expect(runner.calls[0]!.args.slice(0, 4)).toEqual([
+      "shell", "--workdir", "/home/user", "companion-box-lab-owned-0123456789ab-bx_23456789",
+    ]);
+  });
+
   it("preserves a clone failure when the source VM restarts successfully", async () => {
     const runner = new ScriptedRunner([
       success,
@@ -329,6 +431,38 @@ describe("Lima x86_64 driver", () => {
       message: "Box Lab Lima inventory returned invalid output",
     });
     expect(runner.calls).toHaveLength(1);
+    expect(runner.calls[0]!.args).toEqual(["list", "--json"]);
+  });
+
+  it("treats an already absent Lima resource as deleted", async () => {
+    const runner = new ScriptedRunner([{ ...success, stdout: "[]\n" }]);
+    const driver = new LimaDriver({
+      runner,
+      resourcePrefix: "companion-box-lab-owned-0123456789ab",
+      stateDirectory: "/tmp/box-lab-test",
+    });
+
+    await expect(driver.delete("companion-box-lab-owned-0123456789ab-bx_23456789"))
+      .resolves.toBeUndefined();
+    expect(runner.calls).toHaveLength(1);
+    expect(runner.calls[0]!.args).toEqual(["list", "--json"]);
+  });
+
+  it("does not mistake a Lima inventory failure for an absent resource", async () => {
+    const runner = new ScriptedRunner([{
+      ...success,
+      exitCode: 1,
+      stdout: "",
+      stderr: "inventory service unavailable",
+    }]);
+    const driver = new LimaDriver({
+      runner,
+      resourcePrefix: "companion-box-lab-owned-0123456789ab",
+      stateDirectory: "/tmp/box-lab-test",
+    });
+
+    await expect(driver.delete("companion-box-lab-owned-0123456789ab-bx_23456789"))
+      .rejects.toMatchObject({ name: "ProcessExecutionError", code: "process_failed" });
     expect(runner.calls[0]!.args).toEqual(["list", "--json"]);
   });
 

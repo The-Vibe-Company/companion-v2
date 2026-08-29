@@ -1,13 +1,12 @@
 #!/usr/bin/env node
 
-import { access, rm } from "node:fs/promises";
-
 import { BOX_LAB_CLI_USAGE, resolveLocalSmokeSelection } from "./cliOptions";
 import { resolveBoxLabConfig, type BoxLabConfig } from "./config";
 import { createBoxLabDriver } from "./factory";
 import { BoxLabService } from "./lab";
 import { createBoxLabServer } from "./server";
 import { runBoxLabSmoke } from "./smoke";
+import { resetBoxLab } from "./reset";
 import { BoxLabStateStore } from "./state";
 
 interface BoxLabCliOutput {
@@ -82,21 +81,8 @@ async function smoke(env: NodeJS.ProcessEnv): Promise<void> {
 }
 
 async function reset(config: BoxLabConfig): Promise<void> {
-  const statePath = new BoxLabStateStore(config.stateDirectory, config.workspaceScope).path;
-  let knownState = true;
-  try { await access(statePath); } catch { knownState = false; }
-  try {
-    await createBoxLabDriver(config).reset();
-    await rm(config.stateDirectory, { recursive: true, force: true });
-    output({ type: "box-lab.reset", ok: true, result: knownState ? "removed" : "already_clean" });
-  } catch (error) {
-    const missingDriver = error instanceof Error && "code" in error && error.code === "ENOENT";
-    if (missingDriver && !knownState) {
-      output({ type: "box-lab.reset", ok: true, result: "already_clean" });
-      return;
-    }
-    throw error;
-  }
+  const result = await resetBoxLab(config);
+  output({ type: "box-lab.reset", ok: true, result });
 }
 
 async function main(): Promise<void> {

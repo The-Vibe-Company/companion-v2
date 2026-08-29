@@ -42,4 +42,17 @@ describe("Box Lab local CLI policy", () => {
     expect(() => resolveLocalSmokeSelection(["--scenario", "ci"]))
       .toThrow("--scenario must be lifecycle or bundle");
   });
+
+  it("rejects unknown, duplicate, and incomplete smoke arguments", () => {
+    expect(() => resolveLocalSmokeSelection(["--scenerio", "bundle"]))
+      .toThrow("Unknown smoke argument: --scenerio");
+    expect(() => resolveLocalSmokeSelection(["positional-value"]))
+      .toThrow("Unknown smoke argument: positional-value");
+    expect(() => resolveLocalSmokeSelection(["--scenario", "bundle", "--scenario", "lifecycle"]))
+      .toThrow("--scenario may only be provided once");
+    expect(() => resolveLocalSmokeSelection(["--profile", "deterministic", "--profile"]))
+      .toThrow("--profile may only be provided once");
+    expect(() => resolveLocalSmokeSelection(["--profile"]))
+      .toThrow("--profile requires a value");
+  });
 });
