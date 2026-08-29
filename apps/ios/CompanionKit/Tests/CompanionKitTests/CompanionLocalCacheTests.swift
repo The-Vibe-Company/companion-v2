@@ -11,7 +11,7 @@ private struct FixedSessionStorage: SessionStorage {
 
 private final class SuspendedThreadSyncURLProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var releaseResponse = DispatchSemaphore(value: 0)
-    private nonisolated(unsafe) static let lock = NSLock()
+    private static let lock = NSLock()
     private nonisolated(unsafe) static var requestDidStart = false
     private nonisolated(unsafe) static var requestedURL: URL?
 
@@ -77,7 +77,7 @@ private final class SuspendedThreadSyncURLProtocol: URLProtocol, @unchecked Send
 }
 
 private final class BackgroundRefreshURLProtocol: URLProtocol, @unchecked Sendable {
-    private nonisolated(unsafe) static let lock = NSLock()
+    private static let lock = NSLock()
     private nonisolated(unsafe) static var requestCount = 0
 
     static func reset() {
@@ -219,7 +219,8 @@ func offlineSessionRestoresRosterWithoutWaitingForNetwork() throws {
     let snapshot = CompanionRosterSnapshot(
         cursor: "roster-cursor",
         companions: [try companionSummary()],
-        sections: []
+        sections: [],
+        syncedAt: Date(timeIntervalSince1970: 1_777_680_000)
     )
     try fixture.cache.saveRoster(snapshot, scope: "org-1:user-1")
 
