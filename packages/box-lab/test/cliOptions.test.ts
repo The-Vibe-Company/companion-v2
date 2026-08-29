@@ -34,6 +34,10 @@ describe("Box Lab local CLI policy", () => {
       failureMatrix: false,
       forcePinnedInstall: false,
     });
+    expect(resolveLocalSmokeSelection(["--", "--scenario", "bundle"])).toMatchObject({
+      profile: "deterministic",
+      scenario: "bundle",
+    });
   });
 
   it("rejects unsupported local profiles and scenarios", () => {
@@ -54,5 +58,9 @@ describe("Box Lab local CLI policy", () => {
       .toThrow("--profile may only be provided once");
     expect(() => resolveLocalSmokeSelection(["--profile"]))
       .toThrow("--profile requires a value");
+    expect(() => resolveLocalSmokeSelection(["--", "--", "--scenario", "bundle"]))
+      .toThrow("Unknown smoke argument: --");
+    expect(() => resolveLocalSmokeSelection(["--scenario", "bundle", "--"]))
+      .toThrow("Unknown smoke argument: --");
   });
 });

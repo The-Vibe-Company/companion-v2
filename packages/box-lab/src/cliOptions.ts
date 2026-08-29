@@ -12,13 +12,14 @@ export interface LocalSmokeSelection {
 
 function smokeOptions(args: readonly string[]): Map<"--profile" | "--scenario", string> {
   const options = new Map<"--profile" | "--scenario", string>();
-  for (let index = 0; index < args.length; index += 2) {
-    const name = args[index];
+  const optionArgs = args[0] === "--" ? args.slice(1) : args;
+  for (let index = 0; index < optionArgs.length; index += 2) {
+    const name = optionArgs[index];
     if (name !== "--profile" && name !== "--scenario") {
       throw new Error(`Unknown smoke argument: ${name}`);
     }
     if (options.has(name)) throw new Error(`${name} may only be provided once`);
-    const value = args[index + 1];
+    const value = optionArgs[index + 1];
     if (!value || value.startsWith("--")) throw new Error(`${name} requires a value`);
     options.set(name, value);
   }
