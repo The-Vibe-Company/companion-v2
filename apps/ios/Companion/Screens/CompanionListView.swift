@@ -167,7 +167,7 @@ struct CompanionListView: View {
                 Text("Its Box, thread, and Companion record will be permanently deleted. This cannot be undone.")
             }
             .confirmationDialog(
-                "Move \(companionToMove?.name ?? "Companion") to",
+                moveCompanionDialogTitle,
                 isPresented: Binding(
                     get: { companionToMove != nil },
                     set: { if !$0 { companionToMove = nil } }
@@ -290,14 +290,14 @@ struct CompanionListView: View {
             ForEach(0..<5, id: \.self) { index in
                 HStack(spacing: 12) {
                     Circle()
-                        .fill(CompanionIOSTheme.surfaceCard)
+                        .fill(CompanionIOSTheme.card)
                         .frame(width: 36, height: 36)
                     VStack(alignment: .leading, spacing: 7) {
                         RoundedRectangle(cornerRadius: 3)
-                            .fill(CompanionIOSTheme.surfaceCard)
+                            .fill(CompanionIOSTheme.card)
                             .frame(width: index.isMultiple(of: 2) ? 112 : 146, height: 15)
                         RoundedRectangle(cornerRadius: 3)
-                            .fill(CompanionIOSTheme.surfaceCard)
+                            .fill(CompanionIOSTheme.card)
                             .frame(maxWidth: index.isMultiple(of: 2) ? 214 : 176)
                             .frame(height: 12)
                     }
@@ -346,6 +346,11 @@ struct CompanionListView: View {
 
     private var matchingCompanions: [CompanionSummary] {
         companions.filter(matchesSearch)
+    }
+
+    private var moveCompanionDialogTitle: String {
+        let name = companionToMove?.name ?? "Companion"
+        return "Move \(name) to"
     }
 
     private var mostRecentCompanionID: String? {
