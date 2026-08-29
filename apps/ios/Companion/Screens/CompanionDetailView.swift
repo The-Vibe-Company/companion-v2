@@ -27,6 +27,7 @@ struct CompanionDetailView: View {
     @State private var modelID: String
     @State private var loadingProviders = true
     @State private var savingModel = false
+    @State private var providerModelSelectionRevision = 0
     @State private var deleting = false
     @State private var confirmingDelete = false
     @State private var showingProviders = false
@@ -128,13 +129,13 @@ struct CompanionDetailView: View {
         }
         .onChange(of: providerID) { _, _ in selectDefaultModel() }
         .onChange(of: titleFocused) { _, focused in
-            if !focused, editingTitle { Task { await saveIdentity() } }
+            if !focused, editingTitle { requestIdentitySave() }
         }
         .sheet(isPresented: $showingCharacterPicker) {
             CompanionCharacterPickerSheet(icon: model.icon) { icon in
                 model.icon = icon
                 showingCharacterPicker = false
-                Task { await saveIdentity() }
+                requestIdentitySave()
             }
         }
         .sheet(isPresented: $showingInstructions) {
@@ -179,7 +180,7 @@ struct CompanionDetailView: View {
 
     private var characterHero: some View {
         Button {
-            guard canEdit else { return }
+            guard canEdit, !savingModel, !savingIdentity else { return }
             showingCharacterPicker = true
             UISelectionFeedbackGenerator().selectionChanged()
         } label: {
@@ -187,7 +188,7 @@ struct CompanionDetailView: View {
                 .padding(.vertical, 4)
         }
         .buttonStyle(.plain)
-        .disabled(!canEdit)
+        .disabled(!canEdit || savingModel || savingIdentity)
         .accessibilityLabel(canEdit ? "Change \(model.name)'s character" : "\(model.name)'s character")
         .accessibilityIdentifier("companion.details.character")
     }
@@ -220,6 +221,7 @@ struct CompanionDetailView: View {
                             .frame(width: 44, height: 44)
                     }
                     .buttonStyle(.plain)
+                    .disabled(savingModel)
                     .accessibilityLabel("Edit Bot name")
                 }
             }
@@ -232,13 +234,16 @@ struct CompanionDetailView: View {
     private var characterSection: some View {
         CompanionSheetSection("Character") {
             CompanionSheetCard {
-                CompanionCharacterControls(icon: $model.icon, canEdit: canEdit && !savingIdentity) {
-                    Task { await saveIdentity() }
+                CompanionCharacterControls(
+                    icon: $model.icon,
+                    canEdit: canEdit && !savingModel && !savingIdentity
+                ) {
+                    requestIdentitySave()
                 }
                 CompanionSheetSeparator()
                 Button {
                     model.icon = defaultIcon
-                    Task { await saveIdentity() }
+                    requestIdentitySave()
                 } label: {
                     CompanionSheetValueRow(
                         title: "Reset to default",
@@ -246,7 +251,7 @@ struct CompanionDetailView: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .disabled(!canEdit || savingIdentity || model.icon == defaultIcon)
+                .disabled(!canEdit || savingModel || savingIdentity || model.icon == defaultIcon)
             }
             Text("How this Bot's mark looks everywhere")
                 .font(.system(size: 15))
@@ -265,7 +270,7 @@ struct CompanionDetailView: View {
                 )
             }
             .buttonStyle(.plain)
-            .disabled(!canEdit)
+            .disabled(!canEdit || savingModel || savingIdentity)
             .accessibilityIdentifier("companion.details.instructions")
         }
     }
@@ -289,14 +294,6 @@ struct CompanionDetailView: View {
                         symbol: "cpu",
                         showsChevron: false
                     )
-                    if canEdit && providers?.canManage == true {
-                        CompanionSheetSeparator()
-                        Button("Open providers", systemImage: "cpu") {
-                            showingProviders = true
-                        }
-                        .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
-                        .padding(.horizontal, 16)
-                    }
                     CompanionSheetSeparator()
                     Button("Try again", systemImage: "arrow.clockwise") {
                         Task { await loadProviders() }
@@ -304,62 +301,120 @@ struct CompanionDetailView: View {
                     .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
                     .padding(.horizontal, 16)
                 } else {
-                    Picker("Model provider", selection: $providerID) {
-                        ForEach(connectedProviders) { provider in
-                            Text(provider.name).tag(provider.id)
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .frame(minHeight: 56)
-                    .disabled(!canEdit || savingModel)
-                    .accessibilityIdentifier("companion.details.provider")
-
-                    if let selectedProvider {
+                    providerSelectionRow
+                    if selectedProvider != nil {
                         CompanionSheetSeparator()
-                        Picker("Model", selection: $modelID) {
-                            ForEach(selectedProvider.models) { model in
-                                Text(model.name).tag(model.id)
-                            }
-                        }
-                        .padding(.horizontal, 16)
-                        .frame(minHeight: 56)
-                        .disabled(!canEdit || savingModel)
-                        .accessibilityIdentifier("companion.details.model")
-                    }
-
-                    if canEdit {
-                        CompanionSheetSeparator()
-                        HStack(spacing: 12) {
-                            Button(savingModel ? "Saving…" : "Save provider and model") {
-                                Task { await saveProviderAndModel() }
-                            }
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(CompanionIOSTheme.primaryCTAText)
-                            .padding(.horizontal, 14)
-                            .frame(minHeight: 44)
-                            .background(CompanionIOSTheme.primaryCTA, in: Capsule())
-                            .disabled(!canSaveProviderAndModel)
-                            .accessibilityIdentifier("companion.details.provider.save")
-
-                            if providers?.canManage == true {
-                                Button("Manage providers", systemImage: "slider.horizontal.3") {
-                                    showingProviders = true
-                                }
-                                .font(.system(size: 15, weight: .semibold))
-                                .foregroundStyle(CompanionIOSTheme.actionBlue)
-                                .frame(minHeight: 44)
-                            }
-                            Spacer(minLength: 0)
-                        }
-                        .padding(.horizontal, 16)
+                        modelSelectionRow
                     }
                 }
+            }
+            if canEdit && providers?.canManage == true {
+                manageProvidersCard
             }
             Text("Provider and model changes are applied between turns. Saving never wakes an asleep Box.")
                 .font(.system(size: 15))
                 .foregroundStyle(CompanionIOSTheme.textSecondary)
                 .padding(.horizontal, 4)
         }
+    }
+
+    private var providerSelectionRow: some View {
+        Menu {
+            ForEach(connectedProviders) { provider in
+                Button {
+                    selectProvider(provider)
+                } label: {
+                    if provider.id == providerID {
+                        Label(provider.name, systemImage: "checkmark")
+                    } else {
+                        Text(provider.name)
+                    }
+                }
+                .accessibilityIdentifier("companion.details.provider.option.\(provider.id)")
+            }
+        } label: {
+            selectionValueRow(
+                title: "Provider",
+                value: selectedProvider?.name ?? providerID,
+                symbol: "cpu"
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(!canEdit || savingModel || savingIdentity || editingTitle)
+        .accessibilityLabel("Provider, \(selectedProvider?.name ?? providerID)")
+        .accessibilityValue(savingModel ? "Updating" : "")
+        .accessibilityHint(canEdit ? "Choose a connected model provider." : "Read only.")
+        .accessibilityIdentifier("companion.details.provider")
+    }
+
+    private var modelSelectionRow: some View {
+        Menu {
+            if let selectedProvider {
+                ForEach(selectedProvider.models) { option in
+                    Button {
+                        selectModel(option)
+                    } label: {
+                        if option.id == modelID {
+                            Label(option.name, systemImage: "checkmark")
+                        } else {
+                            Text(option.name)
+                        }
+                    }
+                    .accessibilityIdentifier("companion.details.model.option.\(option.id)")
+                }
+            }
+        } label: {
+            selectionValueRow(
+                title: "Model",
+                value: selectedModel?.name ?? modelID,
+                symbol: "sparkles"
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(
+            !canEdit
+                || savingModel
+                || savingIdentity
+                || editingTitle
+                || selectedProvider?.models.isEmpty != false
+        )
+        .accessibilityLabel("Model, \(selectedModel?.name ?? modelID)")
+        .accessibilityValue(savingModel ? "Updating" : "")
+        .accessibilityHint(canEdit ? "Choose a model for the selected provider." : "Read only.")
+        .accessibilityIdentifier("companion.details.model")
+    }
+
+    private var manageProvidersCard: some View {
+        CompanionSheetCard {
+            Button {
+                guard !savingModel, !savingIdentity, !editingTitle else { return }
+                showingProviders = true
+            } label: {
+                CompanionSheetValueRow(
+                    title: "Manage providers",
+                    value: connectedProviderCountLabel,
+                    symbol: "slider.horizontal.3"
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(savingModel || savingIdentity || editingTitle)
+            .accessibilityHint("Manage connected model providers.")
+            .accessibilityIdentifier("companion.details.providers.manage")
+        }
+    }
+
+    private func selectionValueRow(
+        title: String,
+        value: String,
+        symbol: String
+    ) -> some View {
+        CompanionSheetValueRow(
+            title: title,
+            value: value.isEmpty ? "Not set" : value,
+            symbol: symbol,
+            showsProgress: savingModel
+        )
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var resourceSections: some View {
@@ -496,16 +551,18 @@ struct CompanionDetailView: View {
         connectedProviders.first(where: { $0.id == providerID })
     }
 
+    private var selectedModel: CompanionProviderDefinition.Model? {
+        selectedProvider?.models.first(where: { $0.id == modelID })
+    }
+
+    private var connectedProviderCountLabel: String {
+        let count = connectedProviders.count
+        return count == 1 ? "1 connected" : "\(count) connected"
+    }
+
     private var changedProviderOrModel: Bool {
         providerID != model.companion.runtime.providerIDs.first
             || modelID != model.companion.modelID
-    }
-
-    private var canSaveProviderAndModel: Bool {
-        canEdit
-            && !savingModel
-            && changedProviderOrModel
-            && selectedProvider?.models.contains(where: { $0.id == modelID }) == true
     }
 
     private var deletionActive: Bool {
@@ -613,10 +670,9 @@ struct CompanionDetailView: View {
                 response = try await sessionStore.listCompanionProviders()
             }
             providers = response
-            if providerID.isEmpty {
+            if !savingModel, providerID.isEmpty {
                 providerID = response.connectedDefinitions.first?.id ?? ""
             }
-            selectDefaultModel()
             error = nil
         } catch {
             self.error = companionDisplayMessage(
@@ -637,16 +693,69 @@ struct CompanionDetailView: View {
         }
     }
 
-    private func saveProviderAndModel() async {
-        guard canSaveProviderAndModel else { return }
+    private func selectProvider(_ provider: CompanionProviderDefinition) {
+        guard canEdit,
+              !savingModel,
+              !savingIdentity,
+              !editingTitle,
+              let selectedModelID = provider.defaultModelID else { return }
+
+        let providerChanged = providerID != provider.id
+        let modelChanged = modelID != selectedModelID
+        guard providerChanged || modelChanged else { return }
+
+        providerID = provider.id
+        modelID = selectedModelID
+        providerModelSelectionRevision += 1
         savingModel = true
         error = nil
+        success = nil
+        let revision = providerModelSelectionRevision
+        Task {
+            await updateProviderAndModel(
+                providerID: provider.id,
+                modelID: selectedModelID,
+                revision: revision
+            )
+        }
+    }
+
+    private func selectModel(_ selectedModel: CompanionProviderDefinition.Model) {
+        guard canEdit,
+              !savingModel,
+              !savingIdentity,
+              !editingTitle,
+              selectedProvider != nil,
+              modelID != selectedModel.id else { return }
+
+        modelID = selectedModel.id
+        providerModelSelectionRevision += 1
+        savingModel = true
+        error = nil
+        success = nil
+        let revision = providerModelSelectionRevision
+        Task {
+            await updateProviderAndModel(
+                providerID: providerID,
+                modelID: selectedModel.id,
+                revision: revision
+            )
+        }
+    }
+
+    private func updateProviderAndModel(
+        providerID selectedProviderID: String,
+        modelID selectedModelID: String,
+        revision: Int
+    ) async {
+        guard canEdit, providerModelSelectionRevision == revision else { return }
+
         do {
             let input = UpdateCompanionInput(
                 name: model.normalizedName,
                 persona: model.companion.persona,
-                providerID: providerID,
-                modelID: modelID,
+                providerID: selectedProviderID,
+                modelID: selectedModelID,
                 icon: model.icon
             )
             let updated: CompanionSummary
@@ -658,15 +767,23 @@ struct CompanionDetailView: View {
                     input: input
                 )
             }
+            guard !Task.isCancelled, providerModelSelectionRevision == revision else { return }
             apply(updated)
-            success = "Provider and model saved."
+            providerID = updated.runtime.providerIDs.first ?? selectedProviderID
+            modelID = updated.modelID ?? selectedModelID
+            success = "Provider and model updated."
         } catch {
+            guard !Task.isCancelled, providerModelSelectionRevision == revision else { return }
+            providerID = model.companion.runtime.providerIDs.first ?? ""
+            modelID = model.companion.modelID ?? ""
             self.error = companionDisplayMessage(
                 error,
-                fallback: "Provider and model could not be saved."
+                fallback: "Provider and model could not be updated."
             )
         }
-        savingModel = false
+        if providerModelSelectionRevision == revision {
+            savingModel = false
+        }
     }
 
     private func deleteCompanion() async {
@@ -717,13 +834,19 @@ struct CompanionDetailView: View {
         routinesLoading = false
     }
 
-    private func saveIdentity() async {
-        guard model.canSaveIdentity, !savingIdentity else {
+    private func requestIdentitySave() {
+        guard model.canSaveIdentity else {
             editingTitle = false
             return
         }
+        guard !savingIdentity, !savingModel else { return }
+
         savingIdentity = true
         error = nil
+        Task { await saveIdentity() }
+    }
+
+    private func saveIdentity() async {
         do {
             let updated = try await update(persona: model.companion.persona)
             apply(updated)
