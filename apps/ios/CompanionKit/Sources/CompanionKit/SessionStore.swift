@@ -994,7 +994,10 @@ public final class SessionStore {
                 )
             }
         }
-        guard threadSyncGenerations[companionID] == generation else { throw CancellationError() }
+        guard threadSyncGenerations[companionID] == generation,
+              currentSession.flatMap(Self.cacheScope(for:)) == scope else {
+            throw CancellationError()
+        }
         let snapshot = response.value.applying(to: requestCursor == nil ? nil : baseline)
         let rosterMarksUnread = initialRosterSnapshot?.companions.first {
             $0.id == companionID
@@ -1016,7 +1019,10 @@ public final class SessionStore {
                 try cache.saveThread(snapshot, scope: scope, companionID: companionID)
             }.value
         }
-        guard threadSyncGenerations[companionID] == generation else { throw CancellationError() }
+        guard threadSyncGenerations[companionID] == generation,
+              currentSession.flatMap(Self.cacheScope(for:)) == scope else {
+            throw CancellationError()
+        }
         liveThreadSnapshots[companionID] = snapshot
         return CompanionSyncMeasurement(
             value: snapshot,

@@ -149,10 +149,12 @@ private final class SuspendedRosterSyncURLProtocol: URLProtocol, @unchecked Send
     nonisolated(unsafe) static var releaseResponse = DispatchSemaphore(value: 0)
     private static let lock = NSLock()
     private nonisolated(unsafe) static var rosterRequestDidStart = false
+    private nonisolated(unsafe) static var oldThreadRequestDidStart = false
 
     static func reset() {
         lock.lock()
         rosterRequestDidStart = false
+        oldThreadRequestDidStart = false
         lock.unlock()
         releaseResponse = DispatchSemaphore(value: 0)
     }
@@ -161,6 +163,12 @@ private final class SuspendedRosterSyncURLProtocol: URLProtocol, @unchecked Send
         lock.lock()
         defer { lock.unlock() }
         return rosterRequestDidStart
+    }
+
+    static var hasStartedOldThreadRequest: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return oldThreadRequestDidStart
     }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -180,6 +188,22 @@ private final class SuspendedRosterSyncURLProtocol: URLProtocol, @unchecked Send
             statusCode = 200
             headers = ["Content-Type": "application/json"]
             payload = #"{"cursor":"old-fresh","changed_companions":[],"deleted_companion_ids":[],"companion_ids":[],"changed_sections":[],"deleted_section_ids":[],"section_ids":[]}"#
+        case let path where path.hasSuffix("/thread-delta"):
+            let cursor = URLComponents(
+                url: request.url!,
+                resolvingAgainstBaseURL: false
+            )?.queryItems?.first(where: { $0.name == "cursor" })?.value
+            if cursor == "old-thread" {
+                Self.lock.lock()
+                Self.oldThreadRequestDidStart = true
+                Self.lock.unlock()
+                _ = Self.releaseResponse.wait(timeout: .now() + 5)
+            }
+            statusCode = 200
+            headers = ["Content-Type": "application/json"]
+            let responseCursor = cursor == "old-thread" ? "old-thread-fresh" : "new-thread-fresh"
+            let viewerID = cursor == "old-thread" ? "user-1" : "user-2"
+            payload = #"{"cursor":"\#(responseCursor)","reset_entries":false,"changed_entries":[],"deleted_event_ids":[],"thread":{"companion_id":"22222222-2222-4222-8222-222222222222","viewer_id":"\#(viewerID)","read_only":false,"can_send":true,"transcription_available":true,"active_turn":null,"queued_count":0,"interrupted_turn":null}}"#
         case "/v1/auth/logout":
             statusCode = 200
             headers = nil
@@ -306,7 +330,7 @@ func offlineSessionRestoresRosterWithoutWaitingForNetwork() throws {
 }
 
 @Test @MainActor
-func sessionScopeChangesFenceInFlightRosterRefreshes() async throws {
+func sessionScopeChangesFenceInFlightCacheRefreshes() async throws {
     let fixture = try cacheFixture()
     defer { try? FileManager.default.removeItem(at: fixture.directory) }
     do {
@@ -383,6 +407,56 @@ func sessionScopeChangesFenceInFlightRosterRefreshes() async throws {
         #expect(store.currentSession?.user.id == "user-2")
         #expect(store.initialRosterSnapshot?.cursor == "new-cursor")
         #expect(store.initialRosterSnapshot?.companions.map(\.name) == ["New account"])
+    }
+
+    do {
+        SuspendedRosterSyncURLProtocol.reset()
+        let oldSession = testSession()
+        let companionID = "22222222-2222-4222-8222-222222222222"
+        let oldThread = CompanionThreadSnapshot(
+            cursor: "old-thread",
+            thread: try companionThread(entries: [try transcriptEntry(ordinal: 1)])
+        )
+        let newThread = CompanionThreadSnapshot(
+            cursor: "new-thread",
+            thread: try companionThread(entries: [try transcriptEntry(ordinal: 2)])
+        )
+        try fixture.cache.saveThread(
+            oldThread,
+            scope: "org-1:user-1",
+            companionID: companionID
+        )
+        try fixture.cache.saveThread(
+            newThread,
+            scope: "org-2:user-2",
+            companionID: companionID
+        )
+        let store = SessionStore(
+            apiURL: URL(string: "https://example.test")!,
+            storage: FixedSessionStorage(data: try JSONEncoder().encode(oldSession)),
+            cache: fixture.cache,
+            apiClient: suspendedRosterClient(initialAuthority: oldSession)
+        )
+        let oldSynchronization = Task {
+            try await store.synchronizeThread(companionID: companionID)
+        }
+        for _ in 0..<500 where !SuspendedRosterSyncURLProtocol.hasStartedOldThreadRequest {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        #expect(SuspendedRosterSyncURLProtocol.hasStartedOldThreadRequest)
+
+        try await store.signIn(email: "new@example.com", password: "password")
+        let newSynchronization = try await store.synchronizeThread(companionID: companionID)
+        #expect(newSynchronization.value.cursor == "new-thread-fresh")
+        SuspendedRosterSyncURLProtocol.releaseResponse.signal()
+        do {
+            _ = try await oldSynchronization.value
+            Issue.record("The old account thread refresh should be cancelled")
+        } catch is CancellationError {}
+
+        #expect(store.currentSession?.user.id == "user-2")
+        #expect(store.cachedThread(companionID: companionID)?.cursor == "new-thread-fresh")
+        #expect(store.cachedThread(companionID: companionID)?.thread.viewerID == "user-2")
     }
 }
 
