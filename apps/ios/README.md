@@ -20,7 +20,7 @@ selectable. Creation asks only for a name, optional title, shape, and color, the
 
 The native roster groups Companions into collapsible, owner-scoped sections and keeps Unassigned at
 the bottom. Every section uses flat 36pt-mark rows with a title, one-line preview, hierarchical
-timestamp, runtime-status dot, and unread dot; there is no automatic grid threshold. The same 8pt
+timestamp followed by an 8pt runtime-status dot in a fixed trailing slot, and unread dot; there is no automatic grid threshold. The same 8pt
 status dot trails the Companion name inside the chat-header pill. Running is green, Pi-acknowledged
 replying uses a restrained green pulse, runtime error is red, and every other projected lifecycle
 state is gray. Reduce Motion keeps replying as a static green dot. Both surfaces consume the runtime
