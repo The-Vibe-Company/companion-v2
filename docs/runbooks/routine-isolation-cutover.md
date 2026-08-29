@@ -18,6 +18,12 @@ The current runtime always passes `true` to `companion_runtime_prepare_routine_r
 routine run to isolation when that argument is true. The worker does not choose the execution
 mode; it only persists the routine-origin turn.
 
+Migration `0139_companion_routine_parallel_scheduling.sql` adds independently fenced `main` and
+`routine` leases and claim protocol 4. One ordinary main attempt and one isolated routine attempt
+may then run concurrently. Protocol-3 runtimes may finish an existing fenced claim after the
+migration, but cannot claim new work; deploy protocol-4 runtime immediately after the release
+migration. There is no separate parallelism flag.
+
 The actual product gate remains:
 
 ```dotenv
@@ -34,7 +40,8 @@ variables are a product kill switch, not an isolation/legacy selector.
 
 | Runtime binary | Database | Isolation variable | Result |
 | --- | --- | --- | --- |
-| Current, at or after final #466 | Includes migration 0137 | Any value or absent | Variable is ignored. Every new routine run is prepared as isolated. |
+| Current parallel runtime | Includes migrations 0137 and 0139 | Any value or absent | Variable is ignored. New routine runs are isolated and use the routine lease while the main lease remains available. |
+| Protocol-3 runtime | Includes migration 0139 | Any value or absent | Existing claims remain fenced, but new claims are rejected until protocol-4 runtime is deployed. |
 | Intermediate, unmerged #466 build | Includes migration 0137 | Absent or `false` | New, unpinned runs use the legacy ordinary-turn path. An already-isolated run remains isolated because the SQL checks its durable pin before the flag argument. |
 | Intermediate, unmerged #466 build | Includes migration 0137 | `true` | New runs are pinned to isolation. The variable was read by runtime only, not worker. |
 | Pre-#466 runtime | Includes migration 0137 | Any value | The old runtime ignores the variable and never calls the preparation function, so it executes the legacy path. The migration is additive for that binary. |
@@ -45,11 +52,10 @@ On the intermediate build only, the exact variable was
 blank as false, accepted `true`/`1` and `false`/`0`, and rejected other values. Do not use that
 variable to operate current production. Deploy one immutable current SHA instead.
 
-The legacy path shares the persistent main Pi session, transcript, and context. It therefore does
-not provide the privacy or execution isolation required by the redesigned chat. It does not,
-however, intentionally run concurrently with an active main-Pi turn: the durable queue permits one
-active attempt per Companion, and dispatch requires Pi to be idle with no queued messages. A
-legacy attempt that loses the main Pi reports `Pi restarted while the turn was active`.
+The legacy path shares the persistent main Pi session, transcript, context, and main scheduling
+lane. It therefore neither provides the required privacy nor runs concurrently with a main-Pi turn.
+Current isolated runs use their own broker, Pi process, and routine lease; the Box is bounded to the
+main daemon plus one routine process. Same-lane work remains serial.
 
 The distinct error `The routine Pi session changed while the run was active` is emitted only by
 the isolated consumer. Seeing it while an intermediate runtime's isolation variable is off means
@@ -88,15 +94,16 @@ teardown.
 
 ## Ordered Railway cutover
 
-1. Record the exact target Git SHA and confirm that it includes migration 0137, the final #466
+1. Record the exact target Git SHA and confirm that it includes migrations 0137 and 0139, the final #466
    isolation implementation, #472, and the already-running prepare recovery. Do not deploy a
    moving branch independently to each service.
 2. Disable the target routine in the product so its cron cannot enqueue more validation turns.
    For a full runtime cutover, set `COMPANION_COMPANIONS_ENABLED=false` on web, API, worker, and
    runtime, deploy all four, and wait for active work to reach its safe interrupted checkpoint.
 3. Take the normal production backup. Deploy the Railway `release` service at the exact target
-   SHA. Require a `Completed` result before deploying application services; this applies migration
-   0137 and its role grants.
+   SHA. Require a `Completed` result before deploying application services; this applies migrations
+   0137 and 0139 and their role grants. Protocol-3 runtimes may finish current claims after this
+   point but do not claim more work.
 4. Confirm the default branch has not advanced past the recorded SHA. Configure
    `COMPANION_COMPANIONS_ENABLED=true` and the same non-empty
    `COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS` on web, API, worker, and runtime. Do not add
@@ -109,6 +116,9 @@ teardown.
    the Runtime v2 runbook.
 7. Clean the old validation turns using the procedure below. Re-enable the routine only after the
    queue is clear and all services report the same release.
+
+The Companions feature flag and Runtime v2 database gate are the rollback and containment gates for
+this scheduling change. Do not add or operate a routine-parallelism flag.
 
 The redacted diagnostic helpers may be used to confirm Railway deployment status, Runtime health,
 the database gate, and routine projections:
@@ -139,6 +149,23 @@ After one fire, verify:
 - the private routine transcript contains the isolated task and tool call; and
 - the main thread gains one ordinary assistant entry containing `Hello World` at its next durable
   ordinal, and the notification is emitted. Notify does not wake or dispatch the main Pi.
+
+Then validate scheduling concurrency with a routine that remains active long enough to observe:
+
+- while the isolated run is `running`, send an ordinary message and require the main Pi to accept
+  and answer it before the routine settles;
+- repeat while the routine is `needs_input`; the main message must still run and must not answer or
+  supersede the routine decision;
+- while an ordinary main turn is `running`, fire the routine and require both attempts to remain
+  active under different lease lanes;
+- take over one lane in a controlled test environment and confirm the other lane's token, renewal,
+  and process are unchanged; and
+- Retry or Cancel the routine and confirm the active main turn remains authorized, then validate the
+  inverse for a main turn while a routine is active.
+
+A `relay` return enters the ordinary main queue. It may wait behind another main turn, but it does
+not wait merely for routine settlement. Routine context and any parent-memory snapshot remain
+read-only; the isolated run has only run-local writable memory.
 
 To validate silent completion separately, use a routine prompt that finishes without calling
 `surface_to_main`. Expect `succeeded` with outcome `no_output`, no surface mode, no main entry, and
@@ -171,7 +198,7 @@ If isolated routine execution fails after cutover:
    product services—and deploy so new work stops and active work reaches the safe interrupted
    checkpoint.
 2. Cancel only the affected interrupted and queued turns through the product/API procedure above.
-3. Preserve migration 0137 and every durable `routine_isolated` pin. Do not down-migrate, force a
+3. Preserve migrations 0137 and 0139 and every durable `routine_isolated` pin. Do not down-migrate, force a
    run onto the legacy main Pi, delete the Box, or use a full Box restart as automatic repair.
 4. Roll forward to a compatible fixed Runtime v2 SHA. Re-run release first if that SHA contains a
    migration, deploy runtime before the producers, verify health and grants, then restore the

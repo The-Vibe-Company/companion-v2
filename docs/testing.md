@@ -24,7 +24,7 @@ simulator; lifecycle commands must never execute against the CI host.
 | A due Companion routine fires exactly once per scheduled instant | Duplicate turn after worker retry, catch-up after flag-off, or pileup on an in-flight routine turn | Core + worker + PostgreSQL | Drop uuidv5 stamping, skip-missed grace, or the active-turn fence |
 | A Companion response notifies only its still-authorized durable author | Cross-user preview disclosure, duplicate push, stale-device delivery, or cancelled-turn alert | Contracts + HTTP + worker + PostgreSQL + iOS | Skip claim-time ACL revalidation or event uniqueness |
 | The API persists runtime intent but never contacts Box/Pi | Lost work after `202`, request-held lifecycle, or duplicate executor | HTTP + provider spy + PostgreSQL | Construct the Box adapter in an API route |
-| Only one attempt runs per Companion while later turns stay ordered | Concurrent prompts or queue reordering | Runtime unit + PostgreSQL + simulator | Remove running-attempt uniqueness or queue ordering |
+| One main attempt and one isolated routine attempt may run together, while each lane stays ordered and independently fenced | Main messages blocked by routines, same-lane concurrent prompts, cross-lane takeover, or queue reordering | Runtime unit + PostgreSQL + simulator | Merge lane leases, remove per-lane uniqueness, or broaden retry/cancel/preemption |
 | Runtime lease epoch fences stale writers | A dead replica checkpoints or settles after takeover | Two runtime replicas + PostgreSQL | Remove epoch from checkpoint/settle predicate |
 | Runtime images have one durable builder and never publish an unready snapshot | Concurrent or stale builders publish conflicting state, retry too early, or exhaust permanently | Runtime unit + PostgreSQL + simulator | Remove the image claim fence or treat a non-ready bake as ready |
 | Ambiguous prompt dispatch is never auto-replayed | Duplicate external side effects after missing ACK | Broker + runtime + fault injection | Drop ACK after prompt write and permit retry |
@@ -98,7 +98,7 @@ and takeover around the installed-tree checkpoint.
   cooldown. Provider-delete failure must retain `build_box_id` for takeover reconciliation.
   An accepted image-builder deletion persists its provider operation id, treats `blocked` as
   incomplete, and resumes polling without a second `DELETE`.
-- Cover multiple pending operations but one running operation, one active attempt, ordered turns,
+- Cover multiple pending operations but one running operation, one active attempt per lane, ordered turns,
   idempotent `client_message_id`, unique `retry_id`, configuration revision ordering, and kill-switch
   claims.
 - Replay migrations from an historical snapshot and test legacy purge report, dry-run, confirmation,

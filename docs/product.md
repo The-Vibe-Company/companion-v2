@@ -74,11 +74,12 @@ surface. Disabled means routes, navigation, and new runtime claims fail closed.
 
 Each Companion has exactly one thread, one Box, and one Pi daemon. The API persists messages, turns,
 decisions, settings, and lifecycle operations and returns `202`; it never contacts Box or Pi. A
-dedicated runtime service serializes work per Companion, revalidates current authority and selected
+dedicated runtime service serializes work per Companion execution lane, revalidates current authority and selected
 resources, and owns every provider side effect.
 
 Sending is the only normal wake path. There is no Wake button and no keystroke prewarm. Pi must be
-idle before dispatch, only one attempt may be active, and queued turns preserve order. An attempt
+idle before main dispatch, only one attempt may be active per lane, and queued turns preserve lane
+order. One isolated routine attempt may run alongside one ordinary main attempt. An attempt
 without a provable Pi acknowledgement becomes `interrupted` and is never replayed automatically.
 Retry creates a new attempt; Cancel releases the queue. Full Box restart is always an explicit,
 confirmed Editor/Owner action. Automatic repair may recycle Pi only.

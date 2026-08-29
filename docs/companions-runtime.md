@@ -117,8 +117,10 @@ queued → starting → dispatching → running ↔ needs_input
                                       └→ succeeded | failed | interrupted | cancelled
 ```
 
-Only one turn attempt may be active per Companion. Later turns remain queued in PostgreSQL.
-`interrupted` blocks that queue until an Owner/Editor chooses Retry or Cancel.
+There are two serial execution lanes per Companion: `main` for ordinary turns and `routine` for
+isolated routine-origin turns. At most one attempt is active in each lane, so one main attempt and
+one routine attempt may run together. FIFO ordering and the `interrupted` Retry/Cancel block apply
+within the affected lane; neither lane blocks the other.
 
 ### Attempt
 
@@ -146,7 +148,7 @@ apply, and permanent delete. Multiple operations may be `pending`; a partial uni
 allows only one `running` operation per Companion. Checkpoints make idempotent provider work
 resumable without pretending external side effects are transactional.
 
-Work precedence is:
+Main-lane work precedence is:
 
 1. permanent delete;
 2. explicit stop or restart;
@@ -156,11 +158,16 @@ Work precedence is:
 6. next queued turn;
 7. health observation.
 
+The routine lane handles a routine decision or active attempt, then the next routine-origin turn.
+Explicit main lifecycle work waits for routine completion before it claims shared Box mutation; a
+routine Retry never preempts or recycles the main Pi.
+
 ### Lease
 
-`companion_runtime_leases` stores claim token, epoch, executor id, and expiration. Runtime sweeps
-every two seconds, claims for 30 seconds, and renews every ten seconds. Eight Companions may execute
-concurrently by default.
+`companion_runtime_leases` stores independently fenced `main` and `routine` leases per Companion,
+each with claim token, epoch, executor id, and expiration. A shared instance write epoch allocates
+monotonically increasing epochs across both lanes. Runtime sweeps every two seconds, claims for 30
+seconds, and renews every ten seconds. Eight work items may execute concurrently by default.
 
 Every checkpoint and terminal update includes the exact token and epoch in its predicate. Once a
 lease expires, its old holder cannot commit database progress. Provider calls are not fenceable, so
@@ -637,11 +644,18 @@ reply without falsely calling it `no_output` or storing a second copy.
 
 The final execution path keeps the existing worker boundary: `apps/worker` only persists the
 exactly-once routine-origin turn and never contacts Box or Pi. `apps/runtime` claims that turn under
-the Companion's existing single-work lease, revalidates the Owner and current capabilities, and
-launches the same Pi binary with the same tools and configuration in a run-scoped session directory.
-The main Pi session remains idle and receives neither the routine prompt nor its private transcript.
-This is session isolation inside the one Companion runtime, not a second harness, Box, or concurrent
-runtime owner.
+the Companion's `routine` lease, revalidates the Owner and current capabilities, and launches the
+same Pi binary with the same tools and configuration in a run-scoped session directory. The `main`
+lease may concurrently dispatch an ordinary turn to the persistent main Pi. This is two fenced
+scheduling lanes inside one runtime owner and one Box, not a second harness or provider. Box
+concurrency is bounded to two Pi processes: the main daemon and one isolated routine process.
+
+Shared Box lifecycle and staging stays on the main lane and waits for the routine lane to be
+quiescent. An active or interrupted routine therefore prevents Pi recycle, Box restart, settings
+apply, health repair, or deletion from racing its run root. Routine takeover, Retry, Cancel, and
+settlement address only the exact routine invocation and never stop the main Pi. The routine context
+substrate is a pinned read-only view of the main conversation; routine-local memory remains private
+to the run, so concurrency introduces no second writer to parent memory.
 
 The isolated invocation is pinned separately from the main Pi identity at dispatch write intent.
 Runtime validates that pinned value for broker reads, durable projection, terminal acknowledgement,
@@ -659,7 +673,7 @@ The routine-only `surface_to_main` tool is a terminal return, never a conversati
 - `notify` atomically writes one visible Companion entry to main-thread history and creates no turn,
   so the main Pi does not answer it;
 - `relay` atomically writes the same kind of visible entry and queues an idempotent main-Pi turn that
-  reads and responds to it;
+  enters the ordinary main lane, even while the routine is still settling;
 - the first accepted return wins and runtime terminates the run-scoped Pi immediately; later broker
   events cannot produce work or another bridge;
 - a routine Pi that settles normally without calling the tool succeeds as `no_output`, with no

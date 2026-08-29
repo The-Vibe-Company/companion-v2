@@ -1053,7 +1053,8 @@ export const companionTurns = pgTable(
     uniqueOrgCompanionId: unique("companion_turns_org_companion_id_uq").on(t.orgId, t.companionId, t.id),
     clientMessageUnique: unique("companion_turns_client_message_uq").on(t.companionId, t.clientMessageId),
     queueSequenceUnique: unique("companion_turns_queue_sequence_uq").on(t.companionId, t.queueSequence),
-    oneActive: uniqueIndex("companion_turns_one_active_uq").on(t.companionId).where(sql`${t.status} in ('starting','dispatching','running','needs_input')`),
+    oneActiveMain: uniqueIndex("companion_turns_one_active_main_uq").on(t.companionId).where(sql`${t.status} in ('starting','dispatching','running','needs_input') and ${t.routineSnapshotId} is null`),
+    oneActiveRoutine: uniqueIndex("companion_turns_one_active_routine_uq").on(t.companionId).where(sql`${t.status} in ('starting','dispatching','running','needs_input') and ${t.routineSnapshotId} is not null`),
     queued: index("companion_turns_queue_idx").on(t.companionId, t.queueSequence).where(sql`${t.status} = 'queued'`),
     deadline: index("companion_turns_deadline_idx").on(t.coldStartDeadlineAt, t.inactivityDeadlineAt, t.absoluteDeadlineAt).where(sql`${t.status} in ('starting','dispatching','running','needs_input')`),
     runtimeInstanceFk: foreignKey({ columns: [t.orgId, t.companionId], foreignColumns: [companionRuntimeInstances.orgId, companionRuntimeInstances.companionId], name: "companion_turns_runtime_instance_fk" }).onDelete("cascade"),
@@ -1188,6 +1189,8 @@ export const companionTurnAttempts = pgTable(
     mcpCredentialRefs: jsonb("mcp_credential_refs")
       .$type<Array<{ account_id: string; credential_generation: string }>>(),
     claimEpoch: bigint("claim_epoch", { mode: "number" }),
+    /** Independent serial lane: ordinary main Pi or the one isolated routine Pi. */
+    executionLane: text("execution_lane").notNull().default("main"),
     status: companionAttemptStatusEnum("status").notNull().default("starting"),
     checkpoint: text("checkpoint").notNull().default("starting"),
     checkpointSequence: bigint("checkpoint_sequence", { mode: "number" }).notNull().default(0),
@@ -1217,13 +1220,14 @@ export const companionTurnAttempts = pgTable(
     uniqueOrgTurnId: unique("companion_turn_attempts_org_companion_turn_id_uq").on(t.orgId, t.companionId, t.turnId, t.id),
     attemptNumberUnique: unique("companion_turn_attempts_number_uq").on(t.turnId, t.attemptNumber),
     retryUnique: uniqueIndex("companion_turn_attempts_retry_uq").on(t.companionId, t.retryId).where(sql`${t.retryId} is not null`),
-    oneActive: uniqueIndex("companion_turn_attempts_one_active_uq").on(t.companionId).where(sql`${t.status} in ('starting','dispatching','running','needs_input')`),
+    oneActiveLane: uniqueIndex("companion_turn_attempts_one_active_lane_uq").on(t.companionId, t.executionLane).where(sql`${t.status} in ('starting','dispatching','running','needs_input')`),
     invocation: index("companion_turn_attempts_invocation_idx").on(t.companionId, t.piInvocationId).where(sql`${t.piInvocationId} is not null`),
     runtimeInstanceFk: foreignKey({ columns: [t.orgId, t.companionId], foreignColumns: [companionRuntimeInstances.orgId, companionRuntimeInstances.companionId], name: "companion_turn_attempts_runtime_instance_fk" }).onDelete("cascade"),
     turnFk: foreignKey({ columns: [t.orgId, t.companionId, t.turnId], foreignColumns: [companionTurns.orgId, companionTurns.companionId, companionTurns.id], name: "companion_turn_attempts_turn_fk" }).onDelete("cascade"),
     numberCheck: check("companion_turn_attempts_number_check", sql`${t.attemptNumber} >= 1`),
     actorCheck: check("companion_turn_attempts_actor_check", sql`char_length(${t.actorId}) between 1 and 200 and ${t.actorId} !~ E'[\\n\\r]'`),
     runtimeCheck: check("companion_turn_attempts_runtime_check", sql`${t.runtimeGeneration} between 1 and 2147483647 and ${t.settingsRevision} >= 1 and ${t.skillsRevision} >= 1 and (${t.claimEpoch} is null or ${t.claimEpoch} >= 1)`),
+    executionLaneCheck: check("companion_turn_attempts_execution_lane_check", sql`${t.executionLane} in ('main','routine')`),
     resourceSnapshotCheck: check("companion_turn_attempts_resource_snapshot_check", sql`(${t.modelId} is null or (char_length(${t.modelId}) between 1 and 200 and ${t.modelId} !~ E'[\\n\\r]')) and (${t.persona} is null or char_length(${t.persona}) <= 280) and jsonb_typeof(${t.providerIds}) = 'array' and jsonb_typeof(${t.selectedSkillIds}) = 'array' and jsonb_typeof(${t.skillRefs}) = 'array' and jsonb_typeof(${t.selectedMcpAccountIds}) = 'array'`),
     credentialSnapshotCheck: check("companion_turn_attempts_credential_snapshot_check", sql`
       (${t.providerCredentialRefs} is null or (jsonb_typeof(${t.providerCredentialRefs}) = 'array' and octet_length(${t.providerCredentialRefs}::text) <= 262144))
@@ -1466,7 +1470,9 @@ export const companionRuntimeLeases = pgTable(
   "companion_runtime_leases",
   {
     orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "restrict" }),
-    companionId: uuid("companion_id").primaryKey().notNull(),
+    companionId: uuid("companion_id").notNull(),
+    /** One independently fenced lease for main work and one for the isolated routine lane. */
+    lane: text("lane").notNull().default("main"),
     claimToken: uuid("claim_token"),
     claimEpoch: bigint("claim_epoch", { mode: "number" }).notNull().default(0),
     gateEpoch: bigint("gate_epoch", { mode: "number" }),
@@ -1480,10 +1486,12 @@ export const companionRuntimeLeases = pgTable(
     updatedAt: updatedAt(),
   },
   (t) => ({
-    uniqueOrgCompanion: unique("companion_runtime_leases_org_companion_uq").on(t.orgId, t.companionId),
+    primary: primaryKey({ columns: [t.companionId, t.lane], name: "companion_runtime_leases_pkey" }),
+    uniqueOrgCompanionLane: unique("companion_runtime_leases_org_companion_lane_uq").on(t.orgId, t.companionId, t.lane),
     expiry: index("companion_runtime_leases_expiry_idx").on(t.expiresAt).where(sql`${t.claimToken} is not null`),
     runtimeInstanceFk: foreignKey({ columns: [t.orgId, t.companionId], foreignColumns: [companionRuntimeInstances.orgId, companionRuntimeInstances.companionId], name: "companion_runtime_leases_runtime_instance_fk" }).onDelete("cascade"),
     epochCheck: check("companion_runtime_leases_epoch_check", sql`${t.claimEpoch} >= 0 and (${t.gateEpoch} is null or ${t.gateEpoch} >= 1)`),
+    laneCheck: check("companion_runtime_leases_lane_check", sql`${t.lane} in ('main','routine')`),
     executorCheck: check("companion_runtime_leases_executor_check", sql`${t.executorId} is null or (char_length(${t.executorId}) between 1 and 200 and ${t.executorId} !~ E'[\\n\\r]')`),
     claimCheck: check("companion_runtime_leases_claim_check", sql`(${t.claimToken} is null and ${t.gateEpoch} is null and ${t.executorId} is null and ${t.workKind} is null and ${t.workId} is null and ${t.claimedAt} is null and ${t.renewedAt} is null and ${t.expiresAt} is null) or (${t.claimToken} is not null and ${t.claimEpoch} >= 1 and ${t.gateEpoch} is not null and ${t.executorId} is not null and ${t.workKind} is not null and ${t.workId} is not null and ${t.claimedAt} is not null and ${t.renewedAt} is not null and ${t.expiresAt} is not null and ${t.expiresAt} > ${t.renewedAt})`),
   }),
