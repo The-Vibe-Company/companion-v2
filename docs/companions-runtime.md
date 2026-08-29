@@ -161,8 +161,10 @@ Main-lane work precedence is:
 7. health observation.
 
 The routine lane handles a routine decision or active attempt, then the next routine-origin turn.
-Explicit main lifecycle work waits for routine completion before it claims shared Box mutation; a
-routine Retry never preempts or recycles the main Pi.
+Explicit main lifecycle work waits for routine completion before it claims shared Box mutation;
+permanent delete is the exception and may claim first, fence/settle the routine lane, and terminate
+its exact run-scoped Pi invocation before provider deletion. A routine Retry never preempts or
+recycles the main Pi.
 
 ### Lease
 
@@ -281,7 +283,8 @@ Stop snapshots/archives the Box. A later send queues wake after stop reaches a s
 checkpoint; it does not race Pi start against an in-flight archive. Restart Pi keeps the Box and
 replaces only the daemon invocation. Full Box restart is never automatic and requires explicit
 Owner/Editor confirmation because it interrupts all Box work. Permanent delete is Owner-only
-cleanup, never healing.
+cleanup, never healing; it may preempt an active or interrupted isolated routine, and runtime
+terminates that exact run-scoped Pi invocation before issuing provider DELETE.
 
 Automatic recovery may recycle Pi for a proven daemon/protocol failure. Immediately before a new
 prompt write intent, this includes one recycle when the broker still reports an active attempt or an
@@ -678,7 +681,9 @@ concurrency is bounded to two Pi processes: the main daemon and one isolated rou
 
 Shared Box lifecycle and staging stays on the main lane and waits for the routine lane to be
 quiescent. An active or interrupted routine therefore prevents Pi recycle, Box restart, settings
-apply, health repair, or deletion from racing its run root. Routine takeover, Retry, Cancel, and
+apply, health repair, or other shared lifecycle work from racing its run root. Permanent delete is
+the exception: its claim fences and settles the routine lane, then termination addresses only the
+captured run-scoped invocation before provider deletion. Routine takeover, Retry, Cancel, and
 settlement address only the exact routine invocation and never stop the main Pi. The routine context
 substrate is a pinned read-only view of the main conversation; routine-local memory remains private
 to the run, so concurrency introduces no second writer to parent memory.

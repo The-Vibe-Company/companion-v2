@@ -856,6 +856,46 @@ async function handleIsolatedRoutineRetry(
   return runtimeSucceeded;
 }
 
+/**
+ * Permanent deletion is the one main-lane operation that may preempt an isolated routine. The
+ * claim transaction stores the routine turn as the delete source, and v2 authorization resolves
+ * that turn to the exact attempt-bound invocation. Keep the identity check here as the last local
+ * guard before the run-scoped terminate call; a routine id or invocation from another run must
+ * never be sent to Pi.
+ */
+async function terminateCapturedRoutineForDelete(
+  context: OperationContext,
+  authorization: RuntimeAuthorization,
+): Promise<void> {
+  const runId = authorization.turnId;
+  const invocationId = authorization.commandPiInvocationId;
+  if (!runId || !invocationId) return;
+
+  const routine = context.deps.pi.routineSession;
+  if (!routine) {
+    throw new RuntimeInvariantError({
+      code: "routine_session_unavailable",
+      message: "The isolated routine session control is unavailable.",
+      action: "retry",
+    });
+  }
+  if (!invocationId.startsWith(`routine:${runId}:`)) {
+    throw new RuntimeInvariantError({
+      code: "routine_session_invocation_mismatch",
+      message: "The permanent delete routine identity did not match its run.",
+      action: "retry",
+    });
+  }
+
+  await lifecycle(context, "stop_pi", async ({ signal }) =>
+    await routine.terminate({
+      boxId: requiredBoxId(context.session),
+      runId,
+      expectedInvocationId: invocationId,
+      signal,
+    }));
+}
+
 async function handleRestartBox(context: OperationContext): Promise<RuntimeWorkDisposition> {
   for (;;) {
     const authorization = await context.session.reauthorize();
@@ -992,10 +1032,15 @@ async function handleApplySettings(context: OperationContext): Promise<RuntimeWo
 }
 
 async function handleDelete(context: OperationContext): Promise<RuntimeWorkDisposition> {
+  let routineTerminationComplete = false;
   for (;;) {
     const authorization = await context.session.reauthorize();
     switch (authorization.workCheckpoint) {
       case "pending": {
+        if (!routineTerminationComplete) {
+          await terminateCapturedRoutineForDelete(context, authorization);
+          routineTerminationComplete = true;
+        }
         let boxId = authorization.boxId;
         if (!boxId) {
           const discovery = await discover(context);
@@ -1029,6 +1074,10 @@ async function handleDelete(context: OperationContext): Promise<RuntimeWorkDispo
         break;
       }
       case "box_absence_observed": {
+        if (!routineTerminationComplete) {
+          await terminateCapturedRoutineForDelete(context, authorization);
+          routineTerminationComplete = true;
+        }
         requirePollingBudget(
           context,
           "box_delete_deadline_exceeded",

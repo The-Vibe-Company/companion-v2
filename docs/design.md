@@ -183,7 +183,9 @@ latest sweep is unhealthy.
 Main-lane precedence is permanent delete, explicit stop/restart, main decision response, active main
 attempt, configuration apply, next main turn, then health observation. The routine lane independently
 orders its decision response, active attempt, and next routine turn. Main lifecycle work waits for a
-quiescent routine lane without preempting its renewal; a routine Retry addresses only that run.
+quiescent routine lane without preempting its renewal; permanent delete is the exception: its claim
+fences and settles an active/interrupted routine lane, then runtime terminates that exact run-scoped
+Pi invocation before contacting the provider. A routine Retry addresses only that run.
 Lifecycle calls that are known
 idempotent retry network, `429`, and `5xx` failures up to five times with jittered
 1/2/5/10/30-second backoff. Epoch predicates prevent an expired executor from committing after a
@@ -267,9 +269,11 @@ same staged tools, skills, plugins, model, and provider material under a run-sco
 and broker socket. The Box runs at most the main daemon plus one routine Pi. PostgreSQL, rather than
 the ephemeral Box session directory, is the durable routine-history authority.
 
-Shared Box mutation remains single-owner: settings and lifecycle work wait for the routine lane to
-be quiescent, and an interrupted routine must be retried or cancelled before those operations
-proceed. Routine context is pinned and read-only; run-local memory cannot write parent memory. A
+Shared Box mutation remains single-owner: settings and lifecycle work other than permanent delete
+wait for the routine lane to be quiescent, and an interrupted routine must be retried or cancelled
+before those operations proceed. Permanent delete atomically fences and settles the routine lane,
+then terminates its exact run-scoped Pi invocation before provider deletion. Routine context is
+pinned and read-only; run-local memory cannot write parent memory. A
 `relay` return enters the ordinary main queue and does not inherit routine-lane ordering.
 
 The runtime instance and the run-scoped broker intentionally have different Pi invocation

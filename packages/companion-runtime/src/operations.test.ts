@@ -1252,6 +1252,73 @@ describe("runtime lifecycle operations", () => {
     return { claim, store };
   }
 
+  function deleteClaimWithCapturedRoutine() {
+    const claim = {
+      ...operationClaim(),
+      clientSurface: null,
+      operationKind: "delete",
+      turnId: TURN_ID,
+      targetSettingsRevision: null,
+      targetSkillsRevision: null,
+    } as OperationRuntimeClaim;
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        boxId: BOX_ID,
+        boxState: "ready",
+        piState: "idle",
+        piInvocationId: PI_INVOCATION_ID,
+        workCheckpoint: "pending",
+        workCheckpointSequence: 0n,
+        operationKind: "delete",
+        turnId: TURN_ID,
+        commandPiInvocationId: `routine:${TURN_ID}:dispatch-v2:captured`,
+      }),
+      material: attemptMaterial({
+        routineId: ROUTINE_SNAPSHOT_ID,
+        routineName: "Parallel routine",
+        routineIsolated: true,
+      }),
+    });
+    return { claim, store };
+  }
+
+  it("terminates the captured isolated routine before issuing permanent delete", async () => {
+    const { claim, store } = deleteClaimWithCapturedRoutine();
+    const ports = fakePorts(store);
+    ports.box.requestPermanentDeletion = async ({ boxId }) => {
+      store.effectLog.push(`delete:${boxId}`);
+      return { outcome: "accepted", operationId: "delete-op-after-routine" };
+    };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(ports.routineTerminates).toEqual([TURN_ID]);
+    expect(store.effectLog).toEqual(["routine-terminate", `delete:${BOX_ID}`]);
+  });
+
+  it("blocks provider delete when the captured routine cannot be terminated", async () => {
+    const { claim, store } = deleteClaimWithCapturedRoutine();
+    const ports = fakePorts(store);
+    let deleteRequests = 0;
+    ports.pi.routineSession!.terminate = async () => {
+      throw new Error("routine process did not stop");
+    };
+    ports.box.requestPermanentDeletion = async () => {
+      deleteRequests += 1;
+      return { outcome: "accepted", operationId: "unexpected-delete" };
+    };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("failed");
+    expect(deleteRequests).toBe(0);
+    expect(store.settlements[0]?.error).toMatchObject({
+      code: "runtime_execution_failed",
+      action: "retry",
+    });
+  });
+
   it.each(["pending", "processing", "blocked"] as const)(
     "defers provider delete status %s without settling",
     async (status) => {
