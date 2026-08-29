@@ -350,7 +350,7 @@ struct CompanionListView: View {
     private func companionRow(_ companion: CompanionSummary) -> some View {
         let busy = rosterActionCompanionIDs.contains(companion.id)
             || deletingCompanionIDs.contains(companion.id)
-        NavigationLink(value: CompanionRoute.details(companion.id)) {
+        NavigationLink(value: CompanionRoute.chat(companion.id)) {
             CompanionRow(
                 companion: companion,
                 deletionOperation: effectiveDeletion(for: companion)
@@ -397,6 +397,11 @@ struct CompanionListView: View {
 
     @ViewBuilder
     private func companionContextMenu(for companion: CompanionSummary, busy: Bool) -> some View {
+        Button("Settings", systemImage: "gearshape") {
+            path = [.details(companion.id)]
+        }
+        .disabled(busy)
+
         if companion.access.canDeleteCompanion {
             Button("Duplicate", systemImage: "plus.square.on.square") {
                 Task { await duplicate(companion) }

@@ -22,13 +22,13 @@ The native roster groups Companions into collapsible, owner-scoped sections and 
 the bottom. Every section uses flat 36pt-mark rows with a title, one-line preview, hierarchical
 timestamp, and unread dot; there is no automatic grid threshold. Native
 Move to/New Section flows use the shared section API. Deleting a section only unassigns its members.
-Long press exposes Duplicate, Move to, and Delete; trailing swipe exposes Move,
+Single tap opens the chat. Long press exposes Settings, Duplicate, Move to, and Delete; trailing swipe exposes Move,
 member-private notification mute, and owner-only delete.
 
 The native roster can request Owner-only durable deletion. A confirmed deletion removes the Companion from the
 local roster immediately while the durable request runs; request failure restores the row, and a
 later roster poll may honestly reintroduce a Companion the control plane still returns. Each roster
-row opens the Companion's one details page directly. That page owns the character,
+row opens the Companion's chat directly; Settings in its long-press menu opens the one details page. That page owns the character,
 name, instructions, provider and model, routines and run history, notifications, Skills, plugins,
 selected MCP accounts, triggers, runtime restart controls, and Owner-only deletion. The chat header
 pill opens the same page, while its explicit **Open chat** action replaces the detail route so chat
