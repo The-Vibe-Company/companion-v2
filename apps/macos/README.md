@@ -5,12 +5,17 @@ CompanionMac is a native SwiftUI client for macOS 14 and later. It shares the ze
 `/v1` API. It is a desktop-shaped first-party client, not a port of the phone layout and not a
 reduced capability surface.
 
-The initial app uses a macOS `NavigationSplitView`: a searchable Companion roster remains visible
-beside the selected durable chat, with native toolbars, menus, context menus, hover states, and
-keyboard commands. Chat supports the shared transcript, queued/interrupted work, Markdown,
-reasoning disclosures, tool cards, bounded message attachments, and the Owner/Editor versus Viewer
-permission contract. Essential Companion, member, provider, and plugin settings use the existing
-shared routes.
+The main window uses a Mac-native three-zone layout. The left sidebar renders the shared owner
+section projection and Companion rows, the center keeps the selected durable chat, and a persistent
+right inspector renders that Companion's identity, character, Intelligence, routines and private
+run history, Skills, triggers, connected accounts, instructions, notifications, and runtime
+controls. Compact windows may collapse the inspector from the chat header. The window restores its
+frame, while SwiftUI's split and inspector columns retain native resizing behavior.
+
+Both native clients use the same `CompanionKit` theme, vector `CharacterMark`, status projection,
+link policy, models, and API routes. The Mac chat follows the iOS two-sided 18-point bubble grammar,
+approval/file/link cards, terse composer, and green/replying/gray/error dots without adding a
+second visual or capability contract. The Appearance menu switches between System and Black OLED.
 
 ## Desktop access
 
@@ -32,9 +37,9 @@ Open `apps/ios/Companion.xcworkspace` and select the `CompanionMac` scheme. Debu
 
 The repository's local Apple tooling policy requires XcodeBuildMCP for interactive discovery,
 build, test, launch, screenshot, and UI inspection. Apple CI continues to use native `swift test`
-and `xcodebuild` commands. This bootstrap intentionally does not edit CI workflows; the follow-up
-CI scope change should build and test `CompanionMac` on the existing Apple Quality macOS runner
-after the repository owner approves that workflow change.
+and `xcodebuild` commands. Changes under `apps/macos/` select the Mac path in the existing five-minute
+Apple Quality job, which tests `CompanionKit` and the `CompanionMac` scheme without booting a
+simulator or running UI tests.
 
 ## Distribution follow-up
 
@@ -43,10 +48,3 @@ bundle identifier, Developer ID Application certificate, hardened runtime, App S
 entitlements review, notarization credentials, signed archive/export automation, and Gatekeeper
 validation. Mac App Store/TestFlight distribution, APNs, widgets, and menu bar extras are outside
 this bootstrap.
-
-## Proposed PR split
-
-If review size warrants stacking the next iteration, keep this PR as the cross-platform
-`CompanionKit` desktop contract plus visible macOS roster/chat/desktop shape. Follow with a stacked
-PR for deeper settings parity, screenshot/UI automation coverage, approved Apple Quality scope,
-and distribution preparation.

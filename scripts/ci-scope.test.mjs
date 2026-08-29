@@ -19,6 +19,7 @@ test("documentation-only changes avoid application jobs", () => {
     dependencies: false,
     skill: false,
     ios: false,
+    macos: false,
     full: false,
   });
 });
@@ -68,9 +69,23 @@ test("API changes run database, browser, and container checks", () => {
   assert.equal(result.ios, true);
 });
 
-test("iOS changes request the native macOS lane", () => {
+test("iOS app changes request only the iOS native lane", () => {
   const result = classifyFiles(["apps/ios/Companion/Screens/LoginView.swift"]);
   assert.equal(result.ios, true);
+  assert.equal(result.macos, false);
+  assert.equal(result.quality, true);
+});
+
+test("CompanionKit changes exercise both native clients", () => {
+  const result = classifyFiles(["apps/ios/CompanionKit/Sources/CompanionKit/Models.swift"]);
+  assert.equal(result.ios, true);
+  assert.equal(result.macos, true);
+});
+
+test("macOS app changes request the native Mac lane without an iOS build", () => {
+  const result = classifyFiles(["apps/macos/CompanionMac/MacChatView.swift"]);
+  assert.equal(result.macos, true);
+  assert.equal(result.ios, false);
   assert.equal(result.quality, true);
 });
 

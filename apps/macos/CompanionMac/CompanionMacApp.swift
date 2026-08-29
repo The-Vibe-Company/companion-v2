@@ -1,10 +1,12 @@
 import CompanionKit
+import AppKit
 import SwiftUI
 
 @main
 struct CompanionMacApp: App {
     @State private var sessionStore: SessionStore
     @State private var desktopWindow = CompanionMacDesktopWindowState()
+    @AppStorage(CompanionPreferenceKeys.appearance) private var appearanceValue = CompanionAppearancePreference.system.rawValue
 
     init() {
         let callbackScheme = CompanionMacAppConfig.callbackScheme
@@ -21,7 +23,10 @@ struct CompanionMacApp: App {
             CompanionMacRootView()
                 .environment(sessionStore)
                 .environment(desktopWindow)
+                .preferredColorScheme(preferredColorScheme)
+                .background(CompanionMacWindowFrameAutosaver())
         }
+        .defaultSize(width: 1_440, height: 900)
         .commands {
             CompanionMacCommands()
         }
@@ -34,8 +39,15 @@ struct CompanionMacApp: App {
         .defaultSize(width: 1_280, height: 800)
         .windowResizability(.contentSize)
     }
+
+    private var preferredColorScheme: ColorScheme? {
+        let appearance = CompanionAppearancePreference(rawValue: appearanceValue) ?? .system
+        return appearance.forcesBlackPalette ? .dark : nil
+    }
 }
 struct CompanionMacCommands: Commands {
+    @AppStorage(CompanionPreferenceKeys.appearance) private var appearanceValue = CompanionAppearancePreference.system.rawValue
+
     var body: some Commands {
         CommandGroup(after: .newItem) {
             Button("New Companion") {
@@ -63,6 +75,36 @@ struct CompanionMacCommands: Commands {
                 NotificationCenter.default.post(name: .companionMacDeleteSelected, object: nil)
             }
             .keyboardShortcut(.delete, modifiers: [.command])
+        }
+
+        CommandMenu("Appearance") {
+            ForEach(CompanionAppearancePreference.allCases, id: \.self) { preference in
+                Button {
+                    appearanceValue = preference.rawValue
+                } label: {
+                    if appearanceValue == preference.rawValue {
+                        Label(preference.label, systemImage: "checkmark")
+                    } else {
+                        Text(preference.label)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct CompanionMacWindowFrameAutosaver: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        FrameAutosaveView()
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) { }
+
+    private final class FrameAutosaveView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            window?.setFrameAutosaveName("CompanionMac.MainWindow")
+            window?.minSize = NSSize(width: 860, height: 620)
         }
     }
 }

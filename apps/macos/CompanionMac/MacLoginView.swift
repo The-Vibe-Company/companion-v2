@@ -145,11 +145,11 @@ struct CompanionMacLoginView: View {
                     callbackScheme: CompanionMacAppConfig.callbackScheme
                 )
             } catch CompanionMacGoogleSignInError.cancelled {
-                error = nil
+                self.error = nil
             } catch let apiError as APIError where apiError.status == 0 {
-                error = "The server could not be reached. Check the Conductor stack or API URL."
+                self.error = "The server could not be reached. Check the Conductor stack or API URL."
             } catch {
-                error = "Google sign-in is unavailable. Try again later."
+                self.error = "Google sign-in is unavailable. Try again later."
             }
             googleBusy = false
         }

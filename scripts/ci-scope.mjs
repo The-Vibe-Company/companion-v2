@@ -15,6 +15,7 @@ const OUTPUT_KEYS = [
   "dependencies",
   "skill",
   "ios",
+  "macos",
   "full",
 ];
 
@@ -192,7 +193,21 @@ export function classifyFiles(files, { forceFull = false } = {}) {
         "scripts/ios-",
       ]));
 
-  return { docs, design, quality, build, database, runtime, browser, containers, dependencies, skill, ios, full };
+  const macos =
+    full ||
+    uniqueFiles.some((file) =>
+      !isDocumentation(file) && matchesAny(file, [
+        "apps/macos/",
+        "apps/ios/CompanionKit/",
+        "apps/api/",
+        "packages/auth/",
+        "packages/contracts/",
+        "packages/core/",
+        "packages/companion-runtime/",
+        "scripts/macos-",
+      ]));
+
+  return { docs, design, quality, build, database, runtime, browser, containers, dependencies, skill, ios, macos, full };
 }
 
 function readArguments(argv) {

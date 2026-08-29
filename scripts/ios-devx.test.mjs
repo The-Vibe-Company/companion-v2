@@ -322,7 +322,9 @@ test("Companion status dots share the runtime projection and reduced-motion cont
   const status = read(
     "apps/ios/CompanionKit/Sources/CompanionKit/CompanionStatusIndicator.swift",
   );
-  const dot = read("apps/ios/Companion/DesignSystem/CompanionStatusDot.swift");
+  const dot = read(
+    "apps/ios/CompanionKit/Sources/CompanionKit/CompanionStatusDot.swift",
+  );
   const roster = read("apps/ios/Companion/Screens/CompanionListView.swift");
   const chat = read("apps/ios/Companion/Screens/ChatView.swift");
   const models = read("apps/ios/CompanionKit/Sources/CompanionKit/Models.swift");
@@ -346,7 +348,8 @@ test("Companion status dots share the runtime projection and reduced-motion cont
   assert.match(status, /self == \.replying && !reduceMotion/);
   assert.match(dot, /@Environment\(\\\.accessibilityReduceMotion\)/);
   assert.match(dot, /TimelineView\(\.animation/);
-  assert.match(dot, /frame\(width: 8, height: 8\)/);
+  assert.match(dot, /static let dotSize: CGFloat = 8/);
+  assert.match(dot, /frame\(width: Self\.dotSize, height: Self\.dotSize\)/);
   assert.match(dot, /case \.live: return CompanionIOSTheme\.toggleGreen/);
   assert.match(dot, /case \.inactive: return CompanionIOSTheme\.textSecondary/);
   assert.match(dot, /case \.error: return CompanionIOSTheme\.danger/);
@@ -870,7 +873,7 @@ test("CI keeps Apple Quality valuable, native, and under five minutes", () => {
   assert.match(appleQuality, /^    timeout-minutes: 5$/m);
   assert.match(
     appleQuality,
-    /if: needs\.scope\.outputs\.skill == 'true' \|\| needs\.scope\.outputs\.ios == 'true'/,
+    /if: needs\.scope\.outputs\.skill == 'true' \|\| needs\.scope\.outputs\.ios == 'true' \|\| needs\.scope\.outputs\.macos == 'true'/,
   );
   assert.match(appleQuality, /Test bundled Companion skill guards/);
   assert.match(appleQuality, /run: bash scripts\/run-skill-guards\.sh/);
@@ -878,7 +881,8 @@ test("CI keeps Apple Quality valuable, native, and under five minutes", () => {
   assert.match(appleQuality, /xcodebuild build/);
   assert.match(appleQuality, /-destination "generic\/platform=iOS Simulator"/);
   assert.match(appleQuality, /CODE_SIGNING_ALLOWED=NO/);
-  assert.doesNotMatch(appleQuality, /xcodebuild test|CompanionUITests|only-testing:/);
+  assert.match(appleQuality, /xcodebuild test[\s\S]*?-scheme CompanionMac[\s\S]*?-destination "platform=macOS"/);
+  assert.doesNotMatch(appleQuality, /CompanionUITests|only-testing:/);
   assert.doesNotMatch(appleQuality, /simctl|Select an available simulator|retry-tests-on-failure/);
   assert.doesNotMatch(ci, /xcodebuildmcp/i);
   assert.doesNotMatch(ci, /^  skill-guards-macos:$/m);

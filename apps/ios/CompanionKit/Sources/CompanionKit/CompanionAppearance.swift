@@ -16,8 +16,8 @@ public enum CompanionAppearancePreference: String, CaseIterable, Codable, Equata
     public var forcesBlackPalette: Bool { self == .black }
 }
 
-/// Approved RGB values from `docs/ios-design.md`. Keeping these values in one palette makes the
-/// SwiftUI theme testable without importing UIKit into CompanionKit.
+/// Approved RGB values from `docs/ios-design.md`. Keeping these numeric values in one palette
+/// lets the shared SwiftUI theme bridge to UIKit/AppKit without duplicating platform literals.
 public enum CompanionAppearancePalette {
     public enum Light {
         public static let canvas: UInt32 = 0xFFFFFF

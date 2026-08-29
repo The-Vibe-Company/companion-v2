@@ -1,6 +1,7 @@
 import AppKit
 import CompanionKit
 import Observation
+import QuickLook
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -197,9 +198,7 @@ struct CompanionMacChatView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider()
             transcript
-            Divider()
             composer
         }
         .background(Color.companionMacCanvas)
@@ -224,27 +223,40 @@ struct CompanionMacChatView: View {
     }
 
     private var header: some View {
-        HStack(spacing: CompanionMacMetrics.space * 2) {
+        HStack(spacing: 10) {
             CompanionMacAvatar(
                 name: model.companion.name,
                 icon: model.companion.icon,
-                size: 38,
+                size: 36,
                 thinking: model.isReplying
             )
-            VStack(alignment: .leading, spacing: CompanionMacMetrics.space / 2) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(model.companion.name)
-                    .font(.headline)
+                    .font(.system(size: 17, weight: .semibold))
                     .lineLimit(1)
-                Text(model.statusLine)
-                    .font(.caption)
-                    .foregroundStyle(Color.companionMacMuted)
+                HStack(spacing: 6) {
+                    CompanionStatusDot(
+                        status: CompanionStatusIndicatorState(
+                            runtimeState: model.companion.runtime.state,
+                            isReplying: model.isReplying
+                        )
+                    )
+                    Text(CompanionStatusIndicatorState(
+                        runtimeState: model.companion.runtime.state,
+                        isReplying: model.isReplying
+                    ).accessibilityLabel)
+                        .font(.system(size: 13))
+                        .foregroundStyle(CompanionIOSTheme.textSecondary)
+                }
             }
-            Spacer(minLength: CompanionMacMetrics.space * 2)
-            CompanionMacStatusBadge(runtime: model.companion.runtime)
+            Spacer(minLength: 12)
             if model.companion.access.canEditCompanionSettings {
                 Button("Open Desktop", systemImage: "display") {
                     onOpenDesktop(model.companion)
                 }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.plain)
+                .frame(width: 36, height: 36)
                 .disabled(!CompanionMacDesktopEligibility.evaluate(
                     access: model.companion.access,
                     runtimeState: model.companion.runtime.state
@@ -258,17 +270,21 @@ struct CompanionMacChatView: View {
             Button("Settings", systemImage: "gearshape") {
                 onSettings(model.companion)
             }
+            .labelStyle(.iconOnly)
+            .buttonStyle(.plain)
+            .frame(width: 36, height: 36)
+            .help("Toggle details")
             .accessibilityIdentifier("chat.settings")
         }
-        .padding(.horizontal, CompanionMacMetrics.space * 5)
-        .padding(.vertical, CompanionMacMetrics.space * 3)
-        .background(Color.companionMacSurface)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+        .background(CompanionIOSTheme.canvas)
     }
 
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: CompanionMacMetrics.space * 4) {
+                LazyVStack(alignment: .leading, spacing: 12) {
                     if model.loading && model.thread == nil {
                         ProgressView("Loading conversation…")
                             .frame(maxWidth: .infinity, minHeight: 180)
@@ -324,8 +340,8 @@ struct CompanionMacChatView: View {
                 }
                 .frame(maxWidth: Self.contentMaxWidth)
                 .frame(maxWidth: .infinity)
-                .padding(.horizontal, CompanionMacMetrics.space * 6)
-                .padding(.vertical, CompanionMacMetrics.space * 5)
+                .padding(.horizontal, 24)
+                .padding(.vertical, 20)
             }
             .defaultScrollAnchor(.bottom)
             .scrollIndicators(.automatic)
@@ -340,13 +356,13 @@ struct CompanionMacChatView: View {
     }
 
     private var emptyConversation: some View {
-        VStack(spacing: CompanionMacMetrics.space * 3) {
+        VStack(spacing: 12) {
             CompanionMacAvatar(name: model.companion.name, icon: model.companion.icon, size: 72)
-            Text("Start a conversation")
-                .font(.title3.weight(.semibold))
-            Text("Send a message to wake the Companion when its Box is asleep.")
-                .font(.callout)
-                .foregroundStyle(Color.companionMacMuted)
+            Text("Say hello")
+                .font(.system(size: 20, weight: .semibold))
+            Text("A message wakes this Bot when needed.")
+                .font(.system(size: 15))
+                .foregroundStyle(CompanionIOSTheme.textSecondary)
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity)
@@ -354,7 +370,7 @@ struct CompanionMacChatView: View {
     }
 
     private var composer: some View {
-        VStack(alignment: .leading, spacing: CompanionMacMetrics.space * 2) {
+        VStack(alignment: .leading, spacing: 8) {
             if model.thread?.readOnly == true || !model.canSend {
                 Label("Viewer access is read-only. Sending a message will not contact this Box.", systemImage: "eye")
                     .font(.callout)
@@ -391,12 +407,13 @@ struct CompanionMacChatView: View {
                         .font(.caption)
                         .foregroundStyle(Color.companionMacDanger)
                 }
-                HStack(alignment: .bottom, spacing: CompanionMacMetrics.space * 2) {
+                HStack(alignment: .bottom, spacing: 8) {
                     Button("Attach files", systemImage: "paperclip") {
                         presentOpenPanel()
                     }
                     .labelStyle(.iconOnly)
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.plain)
+                    .frame(width: 36, height: 36)
                     .disabled(attachments.count >= companionMessageAttachmentMaximumCount || model.sending)
                     .accessibilityIdentifier("chat.attach")
 
@@ -405,10 +422,8 @@ struct CompanionMacChatView: View {
                         .focused($composerFocused)
                         .textFieldStyle(.plain)
                         .disabled(model.sending)
-                        .padding(.horizontal, CompanionMacMetrics.space * 3)
-                        .padding(.vertical, CompanionMacMetrics.space * 2)
-                        .background(Color.companionMacRaised, in: RoundedRectangle(cornerRadius: 7))
-                        .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color.companionMacDivider, lineWidth: 1))
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 8)
                         .accessibilityIdentifier("chat.composer")
 
                     Button {
@@ -424,22 +439,29 @@ struct CompanionMacChatView: View {
                         if model.sending {
                             ProgressView().controlSize(.small)
                         } else {
-                            Image(systemName: "arrow.up.circle.fill")
+                            Image(systemName: "arrow.up")
+                                .font(.system(size: 14, weight: .bold))
+                                .frame(width: 34, height: 34)
+                                .foregroundStyle(CompanionIOSTheme.primaryCTAText)
+                                .background(CompanionIOSTheme.primaryCTA, in: Circle())
                         }
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.plain)
                     .keyboardShortcut(.return, modifiers: [.command])
                     .disabled(model.sending || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments.isEmpty)
                     .accessibilityLabel(model.sending ? "Sending message" : "Send message")
                     .accessibilityIdentifier("chat.send")
                 }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .background(CompanionIOSTheme.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
         }
         .frame(maxWidth: Self.contentMaxWidth)
         .frame(maxWidth: .infinity)
-        .padding(.horizontal, CompanionMacMetrics.space * 6)
-        .padding(.vertical, CompanionMacMetrics.space * 3)
-        .background(Color.companionMacSurface)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 12)
+        .background(CompanionIOSTheme.canvas)
     }
 
     private static let contentMaxWidth: CGFloat = CompanionMacMetrics.transcriptMaxWidth
@@ -496,27 +518,28 @@ private struct CompanionMacTranscriptEntry: View {
     @Binding var reasoningExpanded: Bool
 
     var body: some View {
-        HStack(alignment: .top, spacing: CompanionMacMetrics.space * 2) {
-            if isUser { Spacer(minLength: 80) }
-            VStack(alignment: .leading, spacing: CompanionMacMetrics.space * 2) {
-                HStack(spacing: CompanionMacMetrics.space * 1.5) {
-                    if !isUser {
-                        CompanionMacAvatar(name: companion.name, icon: companion.icon, size: 26, thinking: false)
-                    }
-                    Text(isUser ? (entry.authorName ?? "You") : companion.name)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(Color.companionMacMuted)
-                    Text(entry.createdAt.macShortDate)
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(Color.companionMacMuted)
+        HStack(alignment: .bottom, spacing: 8) {
+            if isUser { Spacer(minLength: 72) }
+            if !isUser {
+                CompanionMacAvatar(name: companion.name, icon: companion.icon, size: 26, thinking: false)
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                if let routine = entry.routine {
+                    Label("Routine: \(routine.name)", systemImage: "clock")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(linkColor)
+                } else if entry.role == "user", !isUser, let author = entry.authorName {
+                    Text(author)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(secondaryTextColor)
                 }
                 if !entry.content.isEmpty {
-                    CompanionMacMarkdownText(markdown: entry.content)
+                    CompanionMacMarkdownText(markdown: entry.content, foreground: primaryTextColor, link: linkColor)
                 }
                 if entry.queued {
                     Label("Queued", systemImage: "clock")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(Color.companionMacMuted)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(secondaryTextColor)
                         .accessibilityLabel("Message queued")
                 }
                 if let decision = entry.decision {
@@ -531,8 +554,8 @@ private struct CompanionMacTranscriptEntry: View {
                 if let reasoning = entry.reasoning, !reasoning.isEmpty {
                     DisclosureGroup("Reasoning", isExpanded: $reasoningExpanded) {
                         Text(reasoning)
-                            .font(.callout.monospaced())
-                            .foregroundStyle(Color.companionMacMuted)
+                            .font(.system(size: 13, design: .monospaced))
+                            .foregroundStyle(secondaryTextColor)
                             .textSelection(.enabled)
                             .padding(.top, CompanionMacMetrics.space)
                     }
@@ -552,15 +575,15 @@ private struct CompanionMacTranscriptEntry: View {
                         }
                     }
                 }
+                Text(entry.createdAt.macShortDate)
+                    .font(.system(size: 11))
+                    .foregroundStyle(secondaryTextColor)
             }
-            .padding(CompanionMacMetrics.space * 3)
-            .background(isUser ? Color.companionMacAccent.opacity(0.14) : Color.companionMacSurface)
-            .overlay {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(isUser ? Color.companionMacAccent.opacity(0.38) : Color.companionMacDivider, lineWidth: 1)
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            if !isUser { Spacer(minLength: 80) }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+            .background(bubbleColor, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .frame(maxWidth: 620, alignment: isUser ? .trailing : .leading)
+            if !isUser { Spacer(minLength: 72) }
         }
         .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
         .accessibilityIdentifier("chat.entry.\(entry.eventID)")
@@ -569,27 +592,93 @@ private struct CompanionMacTranscriptEntry: View {
     private var isUser: Bool {
         entry.role == "user" && entry.authorID == viewerID
     }
+
+    private var bubbleColor: Color {
+        isUser ? CompanionIOSTheme.userBubble : CompanionIOSTheme.botBubble
+    }
+
+    private var primaryTextColor: Color {
+        isUser ? CompanionIOSTheme.userBubbleText : CompanionIOSTheme.textPrimary
+    }
+
+    private var secondaryTextColor: Color {
+        primaryTextColor.opacity(0.68)
+    }
+
+    private var linkColor: Color {
+        isUser ? CompanionIOSTheme.userBubbleLink : CompanionIOSTheme.linkBlue
+    }
 }
 
 private struct CompanionMacMarkdownText: View {
     let markdown: String
+    let foreground: Color
+    let link: Color
 
+    @ViewBuilder
     var body: some View {
-        Text(attributedMarkdown)
-            .font(.body)
-            .foregroundStyle(Color.companionMacInk)
-            .textSelection(.enabled)
-            .environment(
-                \.openURL,
-                OpenURLAction { url in
-                    CompanionLinkPolicy.isAllowed(url) ? .systemAction : .discarded
+        if let standaloneLink {
+            Button {
+                guard CompanionLinkPolicy.isAllowed(standaloneLink) else { return }
+                NSWorkspace.shared.open(standaloneLink)
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "link")
+                        .font(.system(size: 15, weight: .semibold))
+                        .frame(width: 34, height: 34)
+                        .background(CompanionIOSTheme.card, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(standaloneLink.host(percentEncoded: false) ?? "Link")
+                            .font(.system(size: 14, weight: .semibold))
+                        Text(standaloneLink.absoluteString)
+                            .font(.system(size: 12))
+                            .foregroundStyle(link)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 4)
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: 12, weight: .semibold))
                 }
-            )
+                .foregroundStyle(foreground)
+                .padding(10)
+                .background(CompanionIOSTheme.innerBubble, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .contextMenu {
+                Button("Open Link") { NSWorkspace.shared.open(standaloneLink) }
+                Button("Copy Link") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(standaloneLink.absoluteString, forType: .string)
+                }
+            }
+        } else {
+            Text(attributedMarkdown)
+                .font(.body)
+                .foregroundStyle(foreground)
+                .tint(link)
+                .textSelection(.enabled)
+                .environment(
+                    \.openURL,
+                    OpenURLAction { url in
+                        CompanionLinkPolicy.isAllowed(url) ? .systemAction : .discarded
+                    }
+                )
+        }
+    }
+
+    private var standaloneLink: URL? {
+        let trimmed = markdown.trimmingCharacters(in: .whitespacesAndNewlines)
+        let links = CompanionMessageLinkDetector.detect(in: trimmed)
+        guard links.count == 1,
+              links[0].utf16Location == 0,
+              links[0].utf16Length == (trimmed as NSString).length else { return nil }
+        return links[0].url
     }
 
     private var attributedMarkdown: AttributedString {
+        var attributed: AttributedString
         do {
-            return try AttributedString(
+            attributed = try AttributedString(
                 markdown: markdown,
                 options: .init(
                     interpretedSyntax: .full,
@@ -597,8 +686,17 @@ private struct CompanionMacMarkdownText: View {
                 )
             )
         } catch {
-            return AttributedString(markdown)
+            attributed = AttributedString(markdown)
         }
+        let rendered = String(attributed.characters)
+        for detected in CompanionMessageLinkDetector.detect(in: rendered) {
+            guard let stringRange = Range(detected.nsRange, in: rendered),
+                  let lower = AttributedString.Index(stringRange.lowerBound, within: attributed),
+                  let upper = AttributedString.Index(stringRange.upperBound, within: attributed)
+            else { continue }
+            attributed[lower..<upper].link = detected.url
+        }
+        return attributed
     }
 }
 
@@ -626,9 +724,8 @@ private struct CompanionMacToolCard: View {
                 }
             }
         }
-        .padding(CompanionMacMetrics.space * 2)
-        .background(Color.companionMacRaised, in: RoundedRectangle(cornerRadius: 6))
-        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.companionMacDivider, lineWidth: 1))
+        .padding(12)
+        .background(CompanionIOSTheme.innerBubble, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Tool \(tool.title), \(tool.status.rawValue)")
     }
@@ -653,6 +750,26 @@ private struct CompanionMacToolCard: View {
     }
 }
 
+private struct CompanionMacPrimaryCapsuleButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 15, weight: .semibold))
+            .foregroundStyle(CompanionIOSTheme.primaryCTAText)
+            .frame(maxWidth: .infinity, minHeight: 42)
+            .background(CompanionIOSTheme.primaryCTA.opacity(configuration.isPressed ? 0.72 : 1), in: Capsule())
+    }
+}
+
+private struct CompanionMacSecondaryCapsuleButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 15, weight: .semibold))
+            .foregroundStyle(CompanionIOSTheme.textPrimary)
+            .frame(maxWidth: .infinity, minHeight: 42)
+            .background(CompanionIOSTheme.card.opacity(configuration.isPressed ? 0.72 : 1), in: Capsule())
+    }
+}
+
 private struct CompanionMacDecisionCard: View {
     let decision: CompanionDecision
     let canAct: Bool
@@ -661,8 +778,8 @@ private struct CompanionMacDecisionCard: View {
     @State private var submitting = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: CompanionMacMetrics.space * 2) {
-            HStack(spacing: CompanionMacMetrics.space * 1.5) {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
                 Image(systemName: symbol)
                     .foregroundStyle(statusColor)
                 Text(decision.title)
@@ -675,19 +792,19 @@ private struct CompanionMacDecisionCard: View {
             if let detail = decision.detail, !detail.isEmpty {
                 Text(detail)
                     .font(.callout)
-                    .foregroundStyle(Color.companionMacMuted)
+                    .foregroundStyle(CompanionIOSTheme.textPrimary)
                     .lineLimit(8)
                     .textSelection(.enabled)
             }
             if let proposal = proposalSummary {
                 Text(proposal)
                     .font(.caption.monospaced())
-                    .foregroundStyle(Color.companionMacMuted)
+                    .foregroundStyle(CompanionIOSTheme.textPrimary)
                     .lineLimit(6)
             }
             if decision.status == .pending {
                 if decision.kind == .question {
-                    TextField("Answer", text: $answer, axis: .vertical)
+                    TextField("Type an answer", text: $answer, axis: .vertical)
                         .lineLimit(2...5)
                         .textFieldStyle(.roundedBorder)
                 }
@@ -696,14 +813,15 @@ private struct CompanionMacDecisionCard: View {
                         Button("Answer") {
                             submit(.answer(answer.trimmingCharacters(in: .whitespacesAndNewlines)))
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(CompanionMacPrimaryCapsuleButtonStyle())
                         .disabled(!canAct || answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || submitting)
                     } else {
-                        Button("Allow") { submit(.allow) }
-                            .buttonStyle(.borderedProminent)
+                        Button("Approve") { submit(.allow) }
+                            .buttonStyle(CompanionMacPrimaryCapsuleButtonStyle())
                             .disabled(!canAct || submitting)
                     }
-                    Button("Deny", role: .destructive) { submit(.deny) }
+                    Button("Deny") { submit(.deny) }
+                        .buttonStyle(CompanionMacSecondaryCapsuleButtonStyle())
                         .disabled(!canAct || submitting)
                     if !canAct {
                         Label("Read-only", systemImage: "eye")
@@ -717,13 +835,9 @@ private struct CompanionMacDecisionCard: View {
                     .foregroundStyle(Color.companionMacMuted)
             }
         }
-        .padding(CompanionMacMetrics.space * 3)
+        .padding(14)
         .frame(maxWidth: 640, alignment: .leading)
-        .background(Color.companionMacAccent.opacity(0.09), in: RoundedRectangle(cornerRadius: 8))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(Color.companionMacAccent.opacity(0.32), lineWidth: 1)
-        }
+        .background(CompanionIOSTheme.botBubble, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("chat.decision.\(decision.requestID)")
     }
@@ -793,25 +907,43 @@ private struct CompanionMacAttachmentView: View {
     let attachment: CompanionAttachment
     let companionID: String
     @State private var image: NSImage?
+    @State private var previewURL: URL?
+    @State private var opening = false
+    @State private var errorMessage: String?
 
     var body: some View {
-        HStack(spacing: CompanionMacMetrics.space * 2) {
-            if let image {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: 220, maxHeight: 140)
-            } else {
-                Image(systemName: attachment.contentType.isImage ? "photo" : "doc.text")
-                    .foregroundStyle(Color.companionMacAccent)
+        Button {
+            Task { await openPreview() }
+        } label: {
+            HStack(spacing: 10) {
+                if let image {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: 220, maxHeight: 140)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                } else {
+                    Image(systemName: "doc.text.fill")
+                        .font(.system(size: 18))
+                        .foregroundStyle(CompanionIOSTheme.textPrimary)
+                        .frame(width: 36, height: 36)
+                        .background(CompanionIOSTheme.card, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(attachment.filename)
+                        .font(.system(size: 14, weight: .semibold))
+                        .lineLimit(1)
+                    Text(ByteCountFormatter.string(fromByteCount: Int64(attachment.byteSize), countStyle: .file))
+                        .font(.system(size: 12).monospacedDigit())
+                        .foregroundStyle(CompanionIOSTheme.textSecondary)
+                }
+                if opening { ProgressView().controlSize(.small) }
             }
-            Text(attachment.filename)
-                .font(.caption)
-                .lineLimit(1)
-            Text(ByteCountFormatter.string(fromByteCount: Int64(attachment.byteSize), countStyle: .file))
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(Color.companionMacMuted)
+            .padding(10)
+            .background(CompanionIOSTheme.innerBubble, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
+        .buttonStyle(.plain)
+        .disabled(opening)
         .task {
             guard attachment.kind == .piOutput, attachment.contentType.isImage else { return }
             guard let data = try? await sessionStore.attachmentData(
@@ -820,8 +952,49 @@ private struct CompanionMacAttachmentView: View {
             ) else { return }
             image = NSImage(data: data)
         }
+        .quickLookPreview($previewURL)
+        .alert("Couldn’t Open File", isPresented: Binding(
+            get: { errorMessage != nil },
+            set: { if !$0 { errorMessage = nil } }
+        )) {
+            Button("Try Again") { Task { await openPreview() } }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text(errorMessage ?? "The attachment could not be opened.")
+        }
+        .onDisappear { removePreviewFile() }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Attachment \(attachment.filename)")
+        .accessibilityHint("Opens a file preview")
+    }
+
+    private func openPreview() async {
+        opening = true
+        defer { opening = false }
+        do {
+            let data = try await sessionStore.attachmentData(
+                companionID: companionID,
+                attachmentID: attachment.id
+            )
+            removePreviewFile()
+            let safeName = URL(fileURLWithPath: attachment.filename).lastPathComponent
+            let directory = FileManager.default.temporaryDirectory.appending(
+                path: "companion-mac-preview-\(UUID().uuidString)",
+                directoryHint: .isDirectory
+            )
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let url = directory.appending(path: safeName)
+            try data.write(to: url, options: .atomic)
+            previewURL = url
+        } catch {
+            errorMessage = companionMacErrorMessage(error, fallback: "The attachment could not be opened.")
+        }
+    }
+
+    private func removePreviewFile() {
+        guard let previewURL else { return }
+        try? FileManager.default.removeItem(at: previewURL.deletingLastPathComponent())
+        self.previewURL = nil
     }
 }
 
