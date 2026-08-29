@@ -17,6 +17,7 @@ const HYGIENE_TESTS = [
   "scripts/ci-gate.test.mjs",
   "scripts/lint-anti-slop.test.mjs",
   "scripts/ios-devx.test.mjs",
+  "scripts/macos-devx.test.mjs",
   "scripts/ios-release.test.mjs",
   "scripts/ios-e2e-fixture.test.mjs",
   "scripts/verify-change.test.mjs",

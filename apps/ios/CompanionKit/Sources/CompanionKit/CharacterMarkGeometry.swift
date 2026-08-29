@@ -32,6 +32,21 @@ public enum CharacterMarkPathCommand: Equatable, Sendable {
 public enum CharacterMarkGeometry {
     public static let supportedSizes = [20, 36, 64, 80, 96]
 
+    /// The transport keeps the original icon indexes, but native rendering has one stable
+    /// fallback for values from older or malformed projections.
+    public static let defaultShapeIndex = CharacterMarkShape.blob.rawValue
+    public static let defaultColorIndex = 2
+
+    public static func normalizedShapeIndex(_ value: Int) -> Int {
+        CharacterMarkShape(rawValue: value)?.rawValue ?? defaultShapeIndex
+    }
+
+    public static func normalizedColorIndex(_ value: Int) -> Int {
+        CompanionAppearancePalette.characterMarks.indices.contains(value)
+            ? value
+            : defaultColorIndex
+    }
+
     public static let eyeSegments: [(start: CharacterMarkPoint, end: CharacterMarkPoint)] = [
         (.init(0.385, 0.375), .init(0.425, 0.285)),
         (.init(0.555, 0.375), .init(0.595, 0.285)),

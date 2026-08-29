@@ -40,6 +40,7 @@ jobs:
       dependencies: ${{ steps.scope.outputs.dependencies }}
       skill: ${{ steps.scope.outputs.skill }}
       ios: ${{ steps.scope.outputs.ios }}
+      macos: ${{ steps.scope.outputs.macos }}
       full: ${{ steps.scope.outputs.full }}
     steps:
       - name: Checkout
@@ -93,7 +94,7 @@ jobs:
           fetch-depth: 0
 
       - name: Test CI scope classifier and local verifier
-        run: node --test scripts/agent-browser-box-center.test.mjs scripts/companions-env-defaults.test.mjs scripts/railway-config.test.mjs scripts/ci-scope.test.mjs scripts/ci-playwright-policy.test.mjs scripts/ci-gate.test.mjs scripts/ios-devx.test.mjs scripts/ios-release.test.mjs scripts/ios-e2e-fixture.test.mjs scripts/lint-anti-slop.test.mjs scripts/verify-change.test.mjs
+        run: node --test scripts/agent-browser-box-center.test.mjs scripts/companions-env-defaults.test.mjs scripts/railway-config.test.mjs scripts/ci-scope.test.mjs scripts/ci-playwright-policy.test.mjs scripts/ci-gate.test.mjs scripts/ios-devx.test.mjs scripts/macos-devx.test.mjs scripts/ios-release.test.mjs scripts/ios-e2e-fixture.test.mjs scripts/lint-anti-slop.test.mjs scripts/verify-change.test.mjs
 
       - name: Validate GitHub Actions workflows
         run: >-
@@ -164,7 +165,7 @@ jobs:
     name: Apple Quality
     runs-on: macos-26
     needs: scope
-    if: needs.scope.outputs.skill == 'true' || needs.scope.outputs.ios == 'true'
+    if: needs.scope.outputs.skill == 'true' || needs.scope.outputs.ios == 'true' || needs.scope.outputs.macos == 'true'
     timeout-minutes: 5
     steps:
       - name: Checkout
@@ -183,7 +184,7 @@ jobs:
         run: bash scripts/run-skill-guards.sh
 
       - name: Test CompanionKit
-        if: needs.scope.outputs.ios == 'true'
+        if: needs.scope.outputs.ios == 'true' || needs.scope.outputs.macos == 'true'
         run: swift test --package-path apps/ios/CompanionKit
 
       - name: Build native app
@@ -195,6 +196,17 @@ jobs:
           -configuration Debug
           -destination "generic/platform=iOS Simulator"
           -derivedDataPath "$RUNNER_TEMP/companion-derived-data"
+          CODE_SIGNING_ALLOWED=NO
+
+      - name: Test native Mac app
+        if: needs.scope.outputs.macos == 'true'
+        run: >-
+          xcodebuild test
+          -workspace apps/ios/Companion.xcworkspace
+          -scheme CompanionMac
+          -configuration Debug
+          -destination "platform=macOS"
+          -derivedDataPath "$RUNNER_TEMP/companion-mac-derived-data"
           CODE_SIGNING_ALLOWED=NO
 
   quality:

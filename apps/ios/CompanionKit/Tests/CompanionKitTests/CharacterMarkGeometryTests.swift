@@ -39,3 +39,31 @@ func characterMarkEyesArePairedObliqueStrokesInUpperThird() {
 func characterMarkSupportsEveryApprovedDisplaySize() {
     #expect(CharacterMarkGeometry.supportedSizes == [20, 36, 64, 80, 96])
 }
+
+@Test
+func characterMarkIndexesClampToStableNativeDefaults() {
+    #expect(CharacterMarkGeometry.defaultShapeIndex == CharacterMarkShape.blob.rawValue)
+    #expect(CharacterMarkGeometry.defaultColorIndex == 2)
+
+    for shape in CharacterMarkShape.allCases {
+        #expect(CharacterMarkGeometry.normalizedShapeIndex(shape.rawValue) == shape.rawValue)
+    }
+    #expect(
+        CharacterMarkGeometry.normalizedShapeIndex(-1) == CharacterMarkGeometry.defaultShapeIndex
+    )
+    #expect(
+        CharacterMarkGeometry.normalizedShapeIndex(CharacterMarkShape.allCases.count)
+            == CharacterMarkGeometry.defaultShapeIndex
+    )
+
+    for color in CompanionAppearancePalette.characterMarks.indices {
+        #expect(CharacterMarkGeometry.normalizedColorIndex(color) == color)
+    }
+    #expect(
+        CharacterMarkGeometry.normalizedColorIndex(-1) == CharacterMarkGeometry.defaultColorIndex
+    )
+    #expect(
+        CharacterMarkGeometry.normalizedColorIndex(CompanionAppearancePalette.characterMarks.count)
+            == CharacterMarkGeometry.defaultColorIndex
+    )
+}

@@ -37,6 +37,35 @@ test("the native macOS target shares CompanionKit without a reduced API surface"
   assert.doesNotMatch(chatView, /let files = attachments\s+draft = ""/);
 });
 
+test("the Mac redesign keeps three native zones and the shared Grok Bot grammar", () => {
+  const app = read("apps/macos/CompanionMac/CompanionMacApp.swift");
+  const workspace = read("apps/macos/CompanionMac/MacWorkspaceView.swift");
+  const chat = read("apps/macos/CompanionMac/MacChatView.swift");
+  const inspector = read("apps/macos/CompanionMac/MacInspectorView.swift");
+  const design = read("apps/macos/CompanionMac/MacDesignSystem.swift");
+  const ci = read(".github/workflows/ci.yml");
+
+  assert.match(workspace, /NavigationSplitView[\s\S]*?\.inspector\(isPresented: inspectorBinding\)/);
+  assert.match(workspace, /ForEach\(model\.homeSections\)/);
+  assert.match(workspace, /CompanionStatusDot\(status: statusState\)/);
+  assert.match(workspace, /let next = try await sessionStore\.listCompanions\(\)[\s\S]*?switch await sectionsRequest/);
+  assert.match(chat, /CompanionIOSTheme\.userBubble[\s\S]*?CompanionIOSTheme\.botBubble/);
+  assert.match(chat, /RoundedRectangle\(cornerRadius: 18/);
+  assert.match(inspector, /CharacterMarkShape\.allCases/);
+  assert.match(inspector, /Intelligence[\s\S]*?Routines[\s\S]*?Skills & triggers[\s\S]*?Connected accounts/);
+  assert.match(inspector, /\.onChange\(of: companion\)[\s\S]*?model\.reconcile\(updated\)/);
+  assert.match(inspector, /let accepted = try await sessionStore\.restartCompanion[\s\S]*?operation = accepted[\s\S]*?await poll/);
+  assert.match(inspector, /\.onChange\(of: companion\.runtime\.latestOperation\)[\s\S]*?adopt\(latest\)/);
+  assert.match(inspector, /latest\.kind == \.restartPi \|\| latest\.kind == \.restartBox[\s\S]*?latest\.isActive[\s\S]*?await poll/);
+  assert.doesNotMatch(inspector, /try\? await sessionStore\.restartCompanion/);
+  assert.match(inspector, /memberTimezone: model\.sessionStore\.memberTimezone \?\? TimeZone\.current\.identifier/);
+  assert.match(design, /CharacterMark\(/);
+  assert.doesNotMatch(design, /mouth|accessory|sparkle/);
+  assert.match(app, /CompanionMacWindowFrameAutosaver/);
+  assert.match(app, /CommandMenu\("Appearance"\)/);
+  assert.match(ci, /xcodebuild test[\s\S]*?-scheme CompanionMac[\s\S]*?-destination "platform=macOS"/);
+});
+
 test("the macOS bootstrap keeps credentials, mutations, and native inputs lifecycle-safe", () => {
   const packageJSON = read("package.json");
   const project = read("apps/macos/CompanionMac.xcodeproj/project.pbxproj");

@@ -866,7 +866,7 @@ test("CI keeps Apple Quality valuable, native, and under five minutes", () => {
   assert.match(appleQuality, /^    timeout-minutes: 5$/m);
   assert.match(
     appleQuality,
-    /if: needs\.scope\.outputs\.skill == 'true' \|\| needs\.scope\.outputs\.ios == 'true'/,
+    /if: needs\.scope\.outputs\.skill == 'true' \|\| needs\.scope\.outputs\.ios == 'true' \|\| needs\.scope\.outputs\.macos == 'true'/,
   );
   assert.match(appleQuality, /Test bundled Companion skill guards/);
   assert.match(appleQuality, /run: bash scripts\/run-skill-guards\.sh/);
@@ -874,7 +874,8 @@ test("CI keeps Apple Quality valuable, native, and under five minutes", () => {
   assert.match(appleQuality, /xcodebuild build/);
   assert.match(appleQuality, /-destination "generic\/platform=iOS Simulator"/);
   assert.match(appleQuality, /CODE_SIGNING_ALLOWED=NO/);
-  assert.doesNotMatch(appleQuality, /xcodebuild test|CompanionUITests|only-testing:/);
+  assert.match(appleQuality, /xcodebuild test[\s\S]*?-scheme CompanionMac[\s\S]*?-destination "platform=macOS"/);
+  assert.doesNotMatch(appleQuality, /CompanionUITests|only-testing:/);
   assert.doesNotMatch(appleQuality, /simctl|Select an available simulator|retry-tests-on-failure/);
   assert.doesNotMatch(ci, /xcodebuildmcp/i);
   assert.doesNotMatch(ci, /^  skill-guards-macos:$/m);

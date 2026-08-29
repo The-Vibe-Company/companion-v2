@@ -4,32 +4,24 @@ import XCTest
 @testable import CompanionMac
 
 final class MacProjectionTests: XCTestCase {
-    func testRosterProjectionPreservesServerOrderAndSeparatesHiddenRows() throws {
+    func testMacRosterUsesSharedOwnerSectionsAndOmitsHiddenRows() throws {
         let companions = try makeCompanions()
-        let projection = CompanionMacRosterProjection(
-            companions: companions,
-            query: "",
-            hiddenExpanded: false
-        )
+        let sections = try JSONDecoder().decode([CompanionSection].self, from: Data(#"""
+        [{"id":"section-a","org_id":"org","owner_id":"owner","name":"Work","position":0,"created_at":"2026-08-26T12:00:00Z","updated_at":"2026-08-26T12:00:00Z"}]
+        """#.utf8))
+        var store = CompanionSectionStore()
+        store.reconcile(with: sections)
 
-        XCTAssertEqual(projection.sections.pinned.map(\.name), ["Pinned"])
-        XCTAssertEqual(projection.sections.unpinned.map(\.name), ["Visible"])
-        XCTAssertEqual(projection.sections.hidden.map(\.name), ["Hidden"])
-        XCTAssertEqual(projection.visibleCompanions.map(\.name), ["Pinned", "Visible"])
-        XCTAssertEqual(projection.totalMatchCount, 3)
+        let groups = store.groups(companions: companions)
+        XCTAssertEqual(groups.map(\.name), ["Unassigned"])
+        XCTAssertEqual(groups.flatMap(\.companions).map(\.name), ["Pinned", "Visible"])
+        XCTAssertFalse(groups.flatMap(\.companions).contains(where: { $0.name == "Hidden" }))
     }
 
-    func testRosterProjectionSearchesNamePersonaAndLastMessageAndExpandsHidden() throws {
+    func testSharedStatusProjectionMatchesMacDots() throws {
         let companions = try makeCompanions()
-
-        let personaMatch = CompanionMacRosterProjection(companions: companions, query: "review")
-        XCTAssertEqual(personaMatch.visibleCompanions.map(\.name), ["Visible"])
-
-        let messageMatch = CompanionMacRosterProjection(companions: companions, query: "deploy")
-        XCTAssertEqual(messageMatch.visibleCompanions.map(\.name), ["Hidden"])
-
-        let expanded = CompanionMacRosterProjection(companions: companions, hiddenExpanded: true)
-        XCTAssertEqual(expanded.visibleCompanions.map(\.name), ["Pinned", "Visible", "Hidden"])
+        XCTAssertEqual(CompanionStatusIndicatorState(runtime: companions[0].runtime), .live)
+        XCTAssertEqual(CompanionStatusIndicatorState(runtime: companions[1].runtime), .inactive)
     }
 
     func testDesktopEligibilityRequiresOwnerOrEditorAndRunningBox() {
