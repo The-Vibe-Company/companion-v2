@@ -33,8 +33,10 @@ import {
   CompanionRuntimeForbiddenError,
   CompanionRuntimeTransitionError,
   CompanionRoutineInvalidError,
+  CompanionRoutineDecisionUpdateError,
   CompanionRoutineNotFoundError,
   CompanionRoutineRunNotFoundError,
+  CompanionTriggerDecisionUpdateError,
   CompanionTriggerNotFoundError,
   CompanionDecisionConflictError,
   CompanionDecisionNotFoundError,
@@ -492,6 +494,10 @@ function databaseErrorCode<T>(error: T): string | null {
   return null;
 }
 function errorStatus<T>(error: T): number {
+  if (error instanceof CompanionRoutineDecisionUpdateError
+      || error instanceof CompanionTriggerDecisionUpdateError) {
+    return error.httpStatus;
+  }
   const databaseCode = databaseErrorCode(error);
   if (databaseCode === "42501") return 403;
   if (databaseCode === "P0002" || databaseCode === "02000") return 404;
@@ -532,6 +538,58 @@ function errorStatus<T>(error: T): number {
   }
   if (error instanceof z.ZodError) return 400;
   return 400;
+}
+
+type ProposalDecisionMutation = "decision" | "routine" | "trigger";
+
+function proposalDecisionDatabaseFailure(error: Error): boolean {
+  if (error instanceof CompanionRoutineDecisionUpdateError
+      || error instanceof CompanionTriggerDecisionUpdateError) return true;
+  // Routine schedule validation and decision-domain errors expose short application codes too.
+  // They must retain the normal route status/message rather than being mistaken for SQLSTATEs.
+  if (error instanceof CompanionRoutineInvalidError
+      || error instanceof CompanionDecisionConflictError
+      || error instanceof CompanionDecisionNotFoundError
+      || error instanceof z.ZodError) return false;
+  const code = databaseErrorCode(error);
+  if (code !== null && /^[0-9A-Z]{5}$/.test(code)) return true;
+  // Keep lightweight route doubles and driver errors without a SQLSTATE bounded as well. The
+  // normal validation/domain errors do not use these database-specific terms.
+  return error instanceof Error
+    && /failed query|database|postgres|sql|query|connection/i.test(error.message);
+}
+
+function proposalDecisionFailureResponse(
+  c: Context,
+  mutation: ProposalDecisionMutation,
+  error: Error,
+): Response {
+  const custom = mutation === "routine"
+    ? error instanceof CompanionRoutineDecisionUpdateError ? error : null
+    : error instanceof CompanionTriggerDecisionUpdateError ? error : null;
+  const code = databaseErrorCode(error);
+  const status = custom?.httpStatus
+    ?? (code === "42501"
+      ? 403
+      : code === "P0002" || code === "02000"
+        ? 404
+        : code === "23505" || code === "40001" || code === "55000"
+          ? 409
+          : code === "22023" || code === "P0001"
+            ? 400
+            : 500);
+  const stableCode = mutation === "routine"
+    ? "routine_update_failed"
+    : mutation === "trigger"
+      ? "trigger_update_failed"
+      : "decision_update_failed";
+  const message = mutation === "routine"
+    ? "Unable to apply the routine proposal. Please try again."
+    : mutation === "trigger"
+      ? "Unable to apply the trigger proposal. Please try again."
+      : "Unable to apply the decision. Please try again.";
+  // SAFETY: the finite status calculation above only produces Hono-supported HTTP status codes.
+  return c.json({ ok: false, error: message, code: stableCode }, status as never);
 }
 
 function routeError<T>(c: Context, error: T): Response {
@@ -1938,6 +1996,7 @@ export function registerCompanionRoutes(
   });
 
   app.post("/v1/companions/:id/decisions/:requestId", async (c) => {
+    let proposalDecisionMutation: ProposalDecisionMutation | null = null;
     try {
       const companionId = companionIdSchema.parse(c.req.param("id"));
       const requestId = z.string().min(1).max(200).parse(c.req.param("requestId"));
@@ -1998,6 +2057,7 @@ export function registerCompanionRoutes(
           if (body.action === "answer") {
             throw new Error("Companion routine proposals cannot be answered with free text");
           }
+          proposalDecisionMutation = "routine";
           await answerCompanionRoutineDecisionV2({
             orgId,
             companionId,
@@ -2009,6 +2069,7 @@ export function registerCompanionRoutes(
           if (body.action === "answer") {
             throw new Error("Companion trigger proposals cannot be answered with free text");
           }
+          proposalDecisionMutation = "trigger";
           await answerCompanionTriggerDecisionV2({
             orgId,
             companionId,
@@ -2031,8 +2092,15 @@ export function registerCompanionRoutes(
           transcriptionAvailable,
         );
       });
+      proposalDecisionMutation = null;
       return c.json({ thread }, 202);
     } catch (error) {
+      if (error instanceof Error
+          && proposalDecisionDatabaseFailure(error)) {
+        // A failed preflight cannot reveal the proposal kind safely, but it is still a decision
+        // request. Keep that response bounded with a generic code until the kind is known.
+        return proposalDecisionFailureResponse(c, proposalDecisionMutation ?? "decision", error);
+      }
       return routeError(c, error);
     }
   });

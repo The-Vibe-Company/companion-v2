@@ -18,6 +18,10 @@ import {
 } from "@companion/contracts";
 import type { Db } from "@companion/db";
 
+import {
+  CompanionDecisionConflictError,
+  CompanionDecisionNotFoundError,
+} from "./companions";
 import { getCompanionDecisionV2 } from "./companionRuntimeApi";
 import {
   computeNextFireAt,
@@ -44,6 +48,59 @@ function hasDatabaseErrorCode(error: Error, expected: string): boolean {
     current = parsed.data.cause;
   }
   return false;
+}
+
+function databaseErrorCode(error: Error): string | null {
+  const seen = new Set<Error>();
+  let current: Error | undefined = error;
+  while (current !== undefined && !seen.has(current)) {
+    const parsed = databaseErrorSchema.safeParse(current);
+    if (!parsed.success) return null;
+    seen.add(current);
+    if (parsed.data.code) return parsed.data.code;
+    current = parsed.data.cause;
+  }
+  return null;
+}
+
+/** Validation errors contain no SQL diagnostics and retain their ordinary public shape. */
+function isRoutineDecisionDomainError(error: Error): boolean {
+  return error instanceof z.ZodError
+    || error instanceof CompanionDecisionConflictError
+    || error instanceof CompanionDecisionNotFoundError
+    || error instanceof CompanionRoutineInvalidError;
+}
+
+export class CompanionRoutineDecisionUpdateError extends Error {
+  readonly code = "routine_update_failed" as const;
+  readonly httpStatus: 400 | 403 | 404 | 409 | 500;
+
+  constructor(options?: {
+    cause?: unknown;
+    httpStatus?: 400 | 403 | 404 | 409 | 500;
+  }) {
+    super("Unable to apply the routine proposal. Please try again.", options);
+    this.name = "CompanionRoutineDecisionUpdateError";
+    this.httpStatus = options?.httpStatus ?? 500;
+  }
+}
+
+function routineDecisionError(error: Error): Error {
+  if (isRoutineDecisionDomainError(error)
+      || error instanceof CompanionRoutineDecisionUpdateError) {
+    return error instanceof Error ? error : new Error(String(error));
+  }
+  const code = databaseErrorCode(error);
+  const httpStatus = code === "42501"
+    ? 403
+    : code === "P0002" || code === "02000"
+      ? 404
+      : code === "23505" || code === "40001" || code === "55000"
+        ? 409
+        : code === "22023" || code === "P0001"
+          ? 400
+          : 500;
+  return new CompanionRoutineDecisionUpdateError({ cause: error, httpStatus });
 }
 
 export class CompanionRoutineNotFoundError extends Error {
@@ -269,30 +326,45 @@ export async function answerCompanionRoutineDecisionV2(input: {
   requestId: string;
   decision: "allow" | "deny";
   database: Db;
-}): Promise<void> {
+}): Promise<CompanionRoutine | null> {
   let routineId: string | null = null;
   let nextFireAt: Date | null = null;
   if (input.decision === "allow") {
-    const pending = await getCompanionDecisionV2({
-      orgId: input.orgId,
-      companionId: input.companionId,
-      requestId: input.requestId,
-      database: input.database,
-    });
+    let pending: Awaited<ReturnType<typeof getCompanionDecisionV2>>;
+    try {
+      pending = await getCompanionDecisionV2({
+        orgId: input.orgId,
+        companionId: input.companionId,
+        requestId: input.requestId,
+        database: input.database,
+      });
+    } catch (error) {
+      throw routineDecisionError(
+        error instanceof Error ? error : new Error("Companion routine decision failed"),
+      );
+    }
     const proposal = companionRoutineProposalSchema.parse(pending.proposal);
     nextFireAt = scheduleNextFire(proposal.cron, proposal.timezone, true);
     routineId = randomUUID();
   }
-  await input.database.execute(sql`
-    select * from public.companion_api_answer_routine_decision(
-      ${input.orgId}::uuid,
-      ${input.companionId}::uuid,
-      ${input.requestId},
-      ${input.decision},
-      ${routineId}::uuid,
-      ${instant(nextFireAt)}::timestamptz
-    )
-  `);
+  try {
+    const result = await input.database.execute<{ routine: unknown }>(sql`
+      select * from public.companion_api_answer_routine_decision(
+        ${input.orgId}::uuid,
+        ${input.companionId}::uuid,
+        ${input.requestId},
+        ${input.decision},
+        ${routineId}::uuid,
+        ${instant(nextFireAt)}::timestamptz
+      )
+    `);
+    const [row] = rows<{ routine: unknown }>(result);
+    return row?.routine == null ? null : companionRoutineSchema.parse(row.routine);
+  } catch (error) {
+    throw routineDecisionError(
+      error instanceof Error ? error : new Error("Companion routine decision failed"),
+    );
+  }
 }
 
 export async function claimDueCompanionRoutines(input: {

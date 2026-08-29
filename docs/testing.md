@@ -121,7 +121,8 @@ Run API + worker + runtime + web + migrated PostgreSQL + Box/Pi simulator and pr
   re-evaluated only after it reaches the head;
 - a success and each new pending decision fan out once to the author's active devices, while a
   queued cancellation creates no delivery;
-- `propose_routine` projects a card, approve creates the row, and deny/expiry leave none;
+- `propose_routine` projects a card, approval updates a case-insensitive same-name row in place or
+  creates a different-name row, and deny/expiry leave routines unchanged;
 - provider failure, Pi silence, crash loop, unknown event, and oversized line end visibly;
 - a vision model reads the checked-in image fixture and a text-only model fails explicitly;
 - stop then send, explicit Pi restart, explicit Full Box restart, and deletion during a queue obey

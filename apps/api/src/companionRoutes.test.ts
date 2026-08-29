@@ -6,6 +6,7 @@ import type { ApiVariables } from "./context";
 import type { CompanionThread } from "@companion/contracts";
 import {
   CompanionMcpBrokerAuthorizationError,
+  CompanionTriggerDecisionUpdateError,
   CompanionTriggerNotFoundError,
   composeTriggerPrompt,
   triggerFireMessageId,
@@ -354,7 +355,7 @@ describe("Companions Runtime v2 API", () => {
     storageMocks.deleteStorageObject.mockResolvedValue(undefined);
     storageMocks.getSkillArchive.mockResolvedValue(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
     coreMocks.answerCompanionConfigDecisionV2.mockResolvedValue(undefined);
-    coreMocks.answerCompanionRoutineDecisionV2.mockResolvedValue(undefined);
+    coreMocks.answerCompanionRoutineDecisionV2.mockResolvedValue(null);
     coreMocks.listCompanionRoutinesV2.mockResolvedValue([]);
     coreMocks.listCompanionRoutineRunsV2.mockResolvedValue({ runs: [], next_cursor: null });
     coreMocks.answerCompanionTriggerDecisionV2.mockResolvedValue(undefined);
@@ -1361,6 +1362,56 @@ describe("Companions Runtime v2 API", () => {
     expect(coreMocks.answerCompanionDecisionV2).not.toHaveBeenCalled();
   });
 
+  it("bounds routine proposal persistence failures without reflecting SQL diagnostics", async () => {
+    const leakedId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    coreMocks.getCompanionDecisionV2.mockResolvedValue({
+      requestKey: "routine-failure",
+      requestKind: "routine_proposal",
+      decisionStatus: "pending",
+      proposal: {
+        kind: "routine",
+        name: "Standup",
+        prompt: "Write the standup.",
+        cron: "0 9 * * 1-5",
+        timezone: "UTC",
+      },
+      expiresAt: NOW,
+    });
+    coreMocks.answerCompanionRoutineDecisionV2.mockRejectedValueOnce(
+      new Error(`Failed query with bound routine id ${leakedId}`),
+    );
+
+    const response = await appWithRoutes().request(
+      jsonPost(`/v1/companions/${COMPANION_ID}/decisions/routine-failure`, {
+        action: "allow",
+      }),
+    );
+    const body = await response.text();
+    expect(response.status).toBe(500);
+    expect(body).toContain('"code":"routine_update_failed"');
+    expect(body).not.toContain("Failed query");
+    expect(body).not.toContain(leakedId);
+  });
+
+  it("bounds decision preflight failures before the proposal kind is known", async () => {
+    const leakedId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    coreMocks.getCompanionDecisionV2.mockRejectedValueOnce(
+      new Error(`Failed query with bound decision id ${leakedId}`),
+    );
+
+    const response = await appWithRoutes().request(
+      jsonPost(`/v1/companions/${COMPANION_ID}/decisions/preflight-failure`, {
+        action: "allow",
+      }),
+    );
+    const body = await response.text();
+    expect(response.status).toBe(500);
+    expect(body).toContain('"code":"decision_update_failed"');
+    expect(body).toContain("Unable to apply the decision. Please try again.");
+    expect(body).not.toContain("Failed query");
+    expect(body).not.toContain(leakedId);
+  });
+
   it("treats deny as successful when expiry already closed the decision", async () => {
     coreMocks.getCompanionDecisionV2.mockResolvedValue({
       requestKey: "routine-expired",
@@ -1530,6 +1581,38 @@ describe("Companions Runtime v2 API", () => {
     expect(coreMocks.answerCompanionConfigDecisionV2).not.toHaveBeenCalled();
     expect(coreMocks.answerCompanionRoutineDecisionV2).not.toHaveBeenCalled();
     expect(coreMocks.answerCompanionDecisionV2).not.toHaveBeenCalled();
+  });
+
+  it("bounds trigger proposal persistence failures without reflecting SQL diagnostics", async () => {
+    const leakedId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    coreMocks.getCompanionDecisionV2.mockResolvedValue({
+      requestKey: "trigger-failure",
+      requestKind: "trigger_proposal",
+      decisionStatus: "pending",
+      proposal: {
+        kind: "trigger",
+        name: "CI failed on main",
+        prompt: "Investigate the failing workflow.",
+        provider: "github",
+      },
+      expiresAt: NOW,
+    });
+    coreMocks.answerCompanionTriggerDecisionV2.mockRejectedValueOnce(
+      new CompanionTriggerDecisionUpdateError({
+        cause: new Error(`Failed query with bound trigger id ${leakedId}`),
+      }),
+    );
+
+    const response = await appWithRoutes().request(
+      jsonPost(`/v1/companions/${COMPANION_ID}/decisions/trigger-failure`, {
+        action: "allow",
+      }),
+    );
+    const body = await response.text();
+    expect(response.status).toBe(500);
+    expect(body).toContain('"code":"trigger_update_failed"');
+    expect(body).not.toContain("Failed query");
+    expect(body).not.toContain(leakedId);
   });
 
   it("refuses free text on a trigger proposal card", async () => {
