@@ -2095,6 +2095,55 @@ button.chat-box:focus-visible {
   outline-offset: 2px;
 }
 
+.chat-routine-notify-group {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 4px;
+  margin: 0 0 4px;
+  padding: 4px 8px 4px 4px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chat-routine-notify-group:hover {
+  color: var(--color-fg);
+  background: var(--color-surface-raised);
+}
+
+.chat-routine-notify-group:focus-visible {
+  outline: 2px solid var(--color-accent-ring);
+  outline-offset: 2px;
+}
+
+.chat-routine-notify-history {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 12px 18px;
+  padding-left: 10px;
+  border-left: 1px solid var(--color-line);
+}
+
+.chat-routine-notify-history .chat-routine-header {
+  justify-self: start;
+}
+
+.chat-routine-notify-history__reply {
+  margin: 0 0 8px;
+  color: var(--color-fg);
+  white-space: pre-wrap;
+}
+
+@media (pointer: coarse) {
+  .chat-routine-notify-group {
+    min-height: 44px;
+  }
+}
+
 /* Routine history is a detail drawer over the current thread. The server projection stays the
    authority; opening this layer performs only bounded PostgreSQL-backed reads and never wakes Box. */
 .routine-history-layer {

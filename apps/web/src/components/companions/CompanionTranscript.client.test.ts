@@ -823,6 +823,66 @@ describe("a permission card in the thread", () => {
     expect(container.textContent).toContain("Standup drafted.");
   });
 
+  it("expands earlier server-grouped notify updates inline", () => {
+    const onOpenRoutineRun = vi.fn();
+    const routine = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      name: "Skills Hub",
+      run_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    };
+    const hiddenMarker = entry({
+      role: "user",
+      event_id: "msg:routine-old",
+      ordinal: 1,
+      content: "Private scheduled prompt",
+      author_id: "user-1",
+      routine: { ...routine, run_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" },
+    });
+    const hiddenReply = entry({
+      event_id: "routine-return:old",
+      ordinal: 2,
+      content: "Skills Hub: companion 1.85.0 → 1.86.0.",
+    });
+    const container = mount(thread([
+      entry({
+        ...hiddenMarker,
+        event_id: "msg:routine-latest",
+        ordinal: 3,
+        routine,
+      }),
+      entry({
+        event_id: "routine-return:latest",
+        ordinal: 4,
+        content: "Skills Hub: companion 1.86.0 → 1.88.0.",
+        routine_notify_group: {
+          routine_name: "Skills Hub",
+          total_count: 2,
+          hidden_entries: [hiddenMarker, hiddenReply],
+        },
+      }),
+    ]), undefined, async () => true, { onOpenRoutineRun });
+
+    const disclosure = Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.textContent?.includes("Skills Hub · 2 updates"));
+    expect(disclosure?.getAttribute("aria-expanded")).toBe("false");
+    expect(container.textContent).not.toContain("1.85.0");
+    expect(container.textContent).toContain("1.88.0");
+
+    click(disclosure!);
+
+    const expandedDisclosure = Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.textContent?.includes("Skills Hub · 2 updates"));
+    expect(expandedDisclosure?.getAttribute("aria-expanded")).toBe("true");
+    expect(container.textContent).toContain("1.85.0");
+    expect(container.textContent).not.toContain("Private scheduled prompt");
+
+    const hiddenRun = container.querySelector<HTMLButtonElement>(
+      ".chat-routine-notify-history button[aria-label='Open Skills Hub routine run']",
+    );
+    click(hiddenRun!);
+    expect(onOpenRoutineRun).toHaveBeenCalledWith(hiddenMarker.routine);
+  });
+
   it("opens a routine run from its durable marker without exposing the prompt", () => {
     const onOpenRoutineRun = vi.fn();
     const routine = {

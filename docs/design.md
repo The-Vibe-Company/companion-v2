@@ -302,8 +302,11 @@ receives it as `--append-system-prompt`. The brief describes the runtime contrac
 the thread, the durable disk, turn bounds, tools, routines, triggers, and the ask/propose surface —
 including that ordinary assistant text is immediately visible and is reserved for the user-facing
 answer rather than tool selection, internal planning, progress narration, or self-talk. Structured
-reasoning remains a separate collapsible thread part. These are delivery semantics, not a prescribed
-voice.
+reasoning remains a separate collapsible thread part. Delivery is intentionally concise: an update
+is one short sentence, an acknowledgement can be one word, and neither carries process narration,
+apology, a `btw` prefix, or filler. These are delivery semantics, not a prescribed voice. The runtime
+does not project an assistant `message_end` that contains a Pi tool call; the later no-tool assistant
+message is the visible answer, while tool and decision cards keep their own durable projections.
 The owner's persona remains one operator-authored line rather than a system prompt, and it is
 appended last so it has the final word on voice.
 

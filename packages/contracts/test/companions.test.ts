@@ -456,6 +456,54 @@ describe("Companion chat contracts", () => {
     expect(thread.entries[0]?.turn_id).toBeNull();
   });
 
+  it("carries earlier routine notifications inside the latest server-projected group", () => {
+    const parsed = companionTranscriptEntrySchema.parse({
+      event_id: "routine-return:22222222-2222-4222-8222-222222222222",
+      ordinal: 3,
+      role: "assistant",
+      content: "Skills Hub: 1.87.0 → 1.88.0.",
+      author_id: null,
+      author_name: null,
+      routine_notify_group: {
+        routine_name: "Skills Hub",
+        total_count: 2,
+        hidden_entries: [{
+          event_id: "msg:routine-1",
+          ordinal: 0,
+          role: "user",
+          content: "Check for updates.",
+          author_id: "user-1",
+          author_name: "Owner",
+          routine: {
+            id: "11111111-1111-4111-8111-111111111111",
+            name: "Skills Hub",
+            run_id: "33333333-3333-4333-8333-333333333333",
+          },
+          turn_id: "33333333-3333-4333-8333-333333333333",
+          created_at: "2026-08-11T12:00:00.000Z",
+        }, {
+          event_id: "routine-return:33333333-3333-4333-8333-333333333333",
+          ordinal: 1,
+          role: "assistant",
+          content: "Skills Hub: 1.86.0 → 1.87.0.",
+          author_id: null,
+          author_name: null,
+          created_at: "2026-08-11T12:00:01.000Z",
+        }],
+      },
+      created_at: "2026-08-12T12:00:01.000Z",
+    });
+
+    expect(parsed.routine_notify_group).toMatchObject({
+      routine_name: "Skills Hub",
+      total_count: 2,
+    });
+    expect(parsed.routine_notify_group?.hidden_entries.map((entry) => entry.event_id)).toEqual([
+      "msg:routine-1",
+      "routine-return:33333333-3333-4333-8333-333333333333",
+    ]);
+  });
+
   it("lets a user message name its queued turn and refuses that on any other role", () => {
     const turnId = "22222222-2222-4222-8222-222222222222";
     expect(companionTranscriptEntrySchema.parse({

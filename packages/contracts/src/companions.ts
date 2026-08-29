@@ -1393,7 +1393,7 @@ export const companionAttachmentUploadSchema = z.object({
 }).strict();
 export type CompanionAttachmentUpload = z.infer<typeof companionAttachmentUploadSchema>;
 
-export const companionTranscriptEntrySchema = z.object({
+const companionTranscriptEntryObjectSchema = z.object({
   event_id: z.string().min(1).max(200),
   ordinal: z.number().int().nonnegative(),
   role: z.enum(["user", "assistant", "system", "tool", "decision"]),
@@ -1452,7 +1452,12 @@ export const companionTranscriptEntrySchema = z.object({
    */
   attachments: z.array(companionAttachmentSchema).default([]),
   created_at: z.string().datetime(),
-}).superRefine((entry, ctx) => {
+});
+
+function validateCompanionTranscriptEntry(
+  entry: z.infer<typeof companionTranscriptEntryObjectSchema>,
+  ctx: z.RefinementCtx,
+) {
   if ((entry.role === "tool") !== (entry.tool !== null)) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -1521,6 +1526,47 @@ export const companionTranscriptEntrySchema = z.object({
       code: z.ZodIssueCode.custom,
       path: ["attachments"],
       message: "attachment positions must be dense and ordered from zero",
+    });
+  }
+}
+
+/**
+ * Earlier marker/update pairs hidden behind the latest routine notification. They deliberately use
+ * the ungrouped entry shape: a projection is one flat deterministic group and can never nest a
+ * second disclosure that each client would have to interpret recursively.
+ */
+const companionRoutineNotifyGroupSchema = z.object({
+  routine_name: companionRoutineNameSchema,
+  total_count: z.number().int().min(2),
+  hidden_entries: z.array(
+    companionTranscriptEntryObjectSchema.superRefine(validateCompanionTranscriptEntry),
+  ).min(2),
+}).strict().superRefine((group, ctx) => {
+  const hiddenUpdates = group.hidden_entries.filter((entry) => entry.role === "assistant").length;
+  if (hiddenUpdates + 1 !== group.total_count) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["total_count"],
+      message: "the total includes every hidden routine update plus the visible latest update",
+    });
+  }
+});
+
+export const companionTranscriptEntrySchema = companionTranscriptEntryObjectSchema.extend({
+  /**
+   * Present only on the latest assistant entry in consecutive same-routine `notify` returns. The
+   * API, not a client, chooses membership and preserves every hidden durable entry in exact order.
+   */
+  routine_notify_group: companionRoutineNotifyGroupSchema.nullable().optional(),
+}).superRefine((entry, ctx) => {
+  validateCompanionTranscriptEntry(entry, ctx);
+  if (entry.routine_notify_group !== undefined
+    && entry.routine_notify_group !== null
+    && entry.role !== "assistant") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["routine_notify_group"],
+      message: "only the latest visible assistant update may carry a routine notify group",
     });
   }
 });

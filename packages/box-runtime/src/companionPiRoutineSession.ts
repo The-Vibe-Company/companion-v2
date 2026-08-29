@@ -72,10 +72,10 @@ export default function companionRoutineSurface(pi: ExtensionAPI) {
     name: "surface_to_main",
     label: "Surface to main",
     description:
-      "Return one terminal result from this routine to the main Companion. The first accepted call ends the routine; use relay when the main Companion should answer and notify when it should only receive the result.",
+      "Return one terse terminal result from this routine to the main Companion. Use one short sentence with no process narration. The first accepted call ends the routine; use relay when the main Companion should answer and notify when it should only receive the result.",
     parameters: Type.Object({
       mode: Type.Union([Type.Literal("relay"), Type.Literal("notify")]),
-      message: Type.String({ maxLength: MAX_MESSAGE, description: "The result to surface, at most 16,384 characters" }),
+      message: Type.String({ maxLength: MAX_MESSAGE, description: "One short owner-facing result with no process narration, at most 16,384 characters" }),
     }),
     executionMode: "sequential",
     async execute(_toolCallId, params) {

@@ -981,6 +981,13 @@
       "when": 1791824800000,
       "tag": "0139_companion_routine_parallel_scheduling",
       "breakpoints": true
+    },
+    {
+      "idx": 140,
+      "version": "7",
+      "when": 1791911200000,
+      "tag": "0140_companion_routine_notify_projection",
+      "breakpoints": true
     }
   ]
 }

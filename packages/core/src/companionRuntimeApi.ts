@@ -551,7 +551,100 @@ type ThreadReadRow = {
   last_message_at: Date | string | null;
   previous_last_read_ordinal: number | string | null;
   hidden_routine_relay_turn_ids: unknown;
+  routine_notify_returns: unknown;
 };
+
+export type RoutineNotifyReturn = {
+  run_id: string;
+  routine_id: string;
+  routine_name: string;
+  main_entry_event_id: string;
+};
+
+const routineNotifyReturnSchema = z.object({
+  run_id: z.string().uuid(),
+  routine_id: z.string().uuid(),
+  routine_name: z.string().min(1).max(80),
+  main_entry_event_id: z.string().min(1).max(200),
+}).strict();
+
+type RoutineNotifyUnit = {
+  marker: CompanionTranscriptEntry;
+  update: CompanionTranscriptEntry;
+  routineId: string;
+  routineName: string;
+};
+
+/**
+ * Collapse only complete, adjacent marker/update pairs that the routine-history projection proves
+ * are terminal `notify` returns. Storage stays untouched: every earlier entry moves under the
+ * latest update in exact ordinal order, where first-party clients can disclose it inline.
+ */
+export function collapseRoutineNotifyEntries(
+  entries: readonly CompanionTranscriptEntry[],
+  notifyReturns: readonly RoutineNotifyReturn[],
+): CompanionTranscriptEntry[] {
+  const notifyByRun = new Map(notifyReturns.map((returned) => [returned.run_id, returned]));
+  const collapsed: CompanionTranscriptEntry[] = [];
+  let open: RoutineNotifyUnit[] = [];
+
+  const flush = () => {
+    if (open.length === 0) return;
+    if (open.length === 1) {
+      collapsed.push(open[0]!.marker, open[0]!.update);
+      open = [];
+      return;
+    }
+    const latest = open.at(-1)!;
+    collapsed.push(latest.marker, {
+      ...latest.update,
+      routine_notify_group: {
+        routine_name: latest.routineName,
+        total_count: open.length,
+        hidden_entries: open.slice(0, -1).flatMap((unit) => [unit.marker, unit.update]),
+      },
+    });
+    open = [];
+  };
+
+  for (let index = 0; index < entries.length;) {
+    const marker = entries[index]!;
+    const update = entries[index + 1];
+    const runId = marker.routine?.run_id ?? null;
+    const returned = runId ? notifyByRun.get(runId) : undefined;
+    const collapsible = returned !== undefined
+      && marker.role === "user"
+      && marker.routine?.id === returned.routine_id
+      && marker.routine?.name === returned.routine_name
+      && marker.attachments.length === 0
+      && marker.decision === null
+      && update?.event_id === returned.main_entry_event_id
+      && update.role === "assistant"
+      && update.attachments.length === 0
+      && update.decision === null;
+
+    if (!collapsible || !update) {
+      flush();
+      collapsed.push(marker);
+      index += 1;
+      continue;
+    }
+
+    if (open.length > 0 && (
+      open[0]!.routineId !== returned.routine_id
+      || open[0]!.routineName !== returned.routine_name
+    )) flush();
+    open.push({
+      marker,
+      update,
+      routineId: returned.routine_id,
+      routineName: returned.routine_name,
+    });
+    index += 2;
+  }
+  flush();
+  return collapsed;
+}
 
 export async function readCompanionThreadV2(input: {
   actor: ActorContext;
@@ -563,7 +656,10 @@ export async function readCompanionThreadV2(input: {
     select thread_read.*,
       public.companion_api_routine_hidden_relay_turns(
         ${input.orgId}::uuid, ${input.companionId}::uuid
-      ) as hidden_routine_relay_turn_ids
+      ) as hidden_routine_relay_turn_ids,
+      public.companion_api_routine_notify_returns(
+        ${input.orgId}::uuid, ${input.companionId}::uuid
+      ) as routine_notify_returns
     from public.companion_api_read_thread(
       ${input.orgId}::uuid, ${input.companionId}::uuid
     ) thread_read
@@ -573,11 +669,13 @@ export async function readCompanionThreadV2(input: {
   const hiddenRoutineRelayTurnIds = new Set(z.array(z.string().uuid()).parse(
     row.hidden_routine_relay_turn_ids,
   ));
-  const entries = (z.array(companionTranscriptEntrySchema).parse(row.entries) as CompanionTranscriptEntry[])
+  const visibleEntries = (z.array(companionTranscriptEntrySchema).parse(row.entries) as CompanionTranscriptEntry[])
     .filter((entry) => entry.turn_id === null || !hiddenRoutineRelayTurnIds.has(entry.turn_id))
     .map((entry) => entry.routine !== null && entry.turn_id !== null
       ? { ...entry, routine: { ...entry.routine, run_id: entry.turn_id } }
       : entry);
+  const notifyReturns = z.array(routineNotifyReturnSchema).parse(row.routine_notify_returns);
+  const entries = collapseRoutineNotifyEntries(visibleEntries, notifyReturns);
   const activeTurn = parseTurn(row.active_turn);
   const interruptedTurn = parseTurn(row.interrupted_turn);
   const queuedCount = integer(row.queued_count);

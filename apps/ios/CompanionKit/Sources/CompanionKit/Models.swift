@@ -1963,6 +1963,7 @@ public struct TranscriptEntry: Codable, Identifiable, Equatable, Sendable {
     public let decision: CompanionDecision?
     public let tool: CompanionToolRun?
     public let routine: CompanionTranscriptRoutineOrigin?
+    public let routineNotifyGroup: CompanionTranscriptRoutineNotifyGroup?
     public let turnID: String?
     public let queued: Bool
     public let attachments: [CompanionAttachment]
@@ -1981,6 +1982,7 @@ public struct TranscriptEntry: Codable, Identifiable, Equatable, Sendable {
         case decision
         case tool
         case routine
+        case routineNotifyGroup = "routine_notify_group"
         case turnID = "turn_id"
         case queued
         case attachments
@@ -1999,10 +2001,151 @@ public struct TranscriptEntry: Codable, Identifiable, Equatable, Sendable {
         decision = try container.decodeIfPresent(CompanionDecision.self, forKey: .decision)
         tool = try container.decodeIfPresent(CompanionToolRun.self, forKey: .tool)
         routine = try container.decodeIfPresent(CompanionTranscriptRoutineOrigin.self, forKey: .routine)
+        routineNotifyGroup = try container.decodeIfPresent(
+            CompanionTranscriptRoutineNotifyGroup.self,
+            forKey: .routineNotifyGroup
+        )
         turnID = try container.decodeIfPresent(String.self, forKey: .turnID)
         queued = try container.decodeIfPresent(Bool.self, forKey: .queued) ?? false
         attachments = try container.decodeIfPresent([CompanionAttachment].self, forKey: .attachments) ?? []
         createdAt = try container.decode(String.self, forKey: .createdAt)
+    }
+}
+
+/// The server projection for consecutive routine `notify` returns. Earlier marker/update pairs
+/// remain available in their exact order, while the latest assistant entry carries this metadata.
+/// The server guarantees that hidden entries use the ordinary transcript shape and never nest a
+/// second group.
+public struct CompanionTranscriptRoutineNotifyGroup: Codable, Equatable, Sendable {
+    public let routineName: String
+    public let totalCount: Int
+    public let hiddenEntries: [TranscriptEntry]
+
+    public init(
+        routineName: String,
+        totalCount: Int,
+        hiddenEntries: [TranscriptEntry]
+    ) {
+        self.routineName = routineName
+        self.totalCount = totalCount
+        self.hiddenEntries = hiddenEntries
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case routineName = "routine_name"
+        case totalCount = "total_count"
+        case hiddenEntries = "hidden_entries"
+    }
+}
+
+/// A transcript row or a server-projected routine disclosure. Disclosure rows get their own
+/// stable identity so hidden entries can be rendered safely without changing their durable event
+/// IDs or making the client infer groups from ordinary history.
+public struct CompanionTranscriptDisplayItem: Identifiable, Equatable, Sendable {
+    public enum Kind: Equatable, Sendable {
+        case entry(TranscriptEntry)
+        case routineNotifyDisclosure(
+            routineName: String,
+            totalCount: Int,
+            latestAssistantEventID: String
+        )
+    }
+
+    public let id: String
+    public let kind: Kind
+
+    public init(id: String, kind: Kind) {
+        self.id = id
+        self.kind = kind
+    }
+
+    public var transcriptEntry: TranscriptEntry? {
+        guard case .entry(let entry) = kind else { return nil }
+        return entry
+    }
+}
+
+/// Projects the API's already-collapsed routine groups into rows for the chat surface.
+public enum CompanionTranscriptProjection {
+    /// Keeps ordinary entries in order. When a grouped assistant has its latest routine marker
+    /// immediately before it, the disclosure (and, when requested, hidden entries) is emitted
+    /// before that marker/update pair. A malformed or partial response still gets a disclosure
+    /// immediately before its grouped assistant rather than causing unrelated entries to move.
+    public static func displayItems(
+        from entries: [TranscriptEntry],
+        expandedRoutineNotifyEventIDs: Set<String> = []
+    ) -> [CompanionTranscriptDisplayItem] {
+        var items: [CompanionTranscriptDisplayItem] = []
+        items.reserveCapacity(entries.count)
+
+        var index = 0
+        while index < entries.count {
+            let entry = entries[index]
+            if let update = entries[safe: index + 1],
+               entry.routine != nil,
+               entry.role == "user",
+               update.role == "assistant",
+               let group = update.routineNotifyGroup {
+                appendDisclosure(
+                    for: update,
+                    group: group,
+                    expanded: expandedRoutineNotifyEventIDs.contains(update.eventID),
+                    to: &items
+                )
+                append(entry: entry, to: &items)
+                append(entry: update, to: &items)
+                index += 2
+                continue
+            }
+
+            if let group = entry.routineNotifyGroup {
+                appendDisclosure(
+                    for: entry,
+                    group: group,
+                    expanded: expandedRoutineNotifyEventIDs.contains(entry.eventID),
+                    to: &items
+                )
+            }
+            append(entry: entry, to: &items)
+            index += 1
+        }
+        return items
+    }
+
+    private static func appendDisclosure(
+        for latestAssistant: TranscriptEntry,
+        group: CompanionTranscriptRoutineNotifyGroup,
+        expanded: Bool,
+        to items: inout [CompanionTranscriptDisplayItem]
+    ) {
+        items.append(CompanionTranscriptDisplayItem(
+            id: "routine-notify.\(latestAssistant.eventID).disclosure",
+            kind: .routineNotifyDisclosure(
+                routineName: group.routineName,
+                totalCount: group.totalCount,
+                latestAssistantEventID: latestAssistant.eventID
+            )
+        ))
+        guard expanded else { return }
+        for (index, entry) in group.hiddenEntries.enumerated() {
+            items.append(CompanionTranscriptDisplayItem(
+                id: "routine-notify.\(latestAssistant.eventID).hidden.\(index).\(entry.eventID)",
+                kind: .entry(entry)
+            ))
+        }
+    }
+
+    private static func append(
+        entry: TranscriptEntry,
+        to items: inout [CompanionTranscriptDisplayItem]
+    ) {
+        items.append(CompanionTranscriptDisplayItem(id: entry.eventID, kind: .entry(entry)))
+    }
+}
+
+private extension Array {
+    subscript(safe index: Index) -> Element? {
+        indices.contains(index) ? self[index] : nil
     }
 }
 

@@ -148,6 +148,7 @@ struct ChatView: View {
     @State private var pendingMessages: [PendingMessage] = []
     @State private var markdownByEventID: [String: CachedMarkdownDocument] = [:]
     @State private var expandedReasoningEventIDs: Set<String> = []
+    @State private var expandedRoutineNotifyEventIDs: Set<String> = []
     @State private var threadMutationGate = CompanionThreadMutationGate()
     @State private var decisionCatalog = CompanionDecisionCatalog.empty
     @State private var decisionCatalogLoaded = false
@@ -199,7 +200,10 @@ struct ChatView: View {
 
     var body: some View {
         let visibleEntries = entries
-        let renderedEntries = visibleEntries
+        let renderedItems = CompanionTranscriptProjection.displayItems(
+            from: visibleEntries,
+            expandedRoutineNotifyEventIDs: expandedRoutineNotifyEventIDs
+        )
         let queuedEntries = queuedEntries(in: thread)
         let renderedScrollRevision = scrollContentRevision
         ZStack {
@@ -224,58 +228,109 @@ struct ChatView: View {
                                         loadEarlierButton
                                     }
 
-                                    ForEach(Array(renderedEntries.enumerated()), id: \.element.eventID) { index, entry in
-                                        let startsDay = startsNewDay(
-                                            entry,
-                                            after: index > 0 ? renderedEntries[index - 1] : nil
-                                        )
-                                        if startsDay {
-                                            dayMarker(for: transcriptDate(entry.createdAt) ?? .now)
-                                                .padding(.top, index == 0 ? 0 : 8)
-                                                .padding(.bottom, 16)
-                                        }
-                                        TranscriptRowView(
-                                            input: transcriptRowInput(for: entry),
-                                            onDecide: { action in
-                                                guard let decision = entry.decision else { return }
-                                                try await decide(
-                                                    requestID: decision.requestID,
-                                                    action: action
-                                                )
-                                            },
-                                            onAnswerFocusChange: { focused in
-                                                guard let decision = entry.decision else { return }
-                                                decisionAnswerFocusChanged(
-                                                    focused,
-                                                    requestID: decision.requestID,
-                                                    eventID: entry.eventID
-                                                )
-                                            },
-                                            onOpenPlugins: onOpenPlugins,
-                                            onReasoningExpansionChange: { isExpanded in
-                                                setReasoningExpanded(isExpanded, for: entry.eventID)
-                                            },
-                                            onOpenToolDetails: { selectedToolDetail = $0 },
-                                            onOpenRoutineRun: { routine in
-                                                guard let runID = routine.runID else { return }
-                                                routineHistoryTarget = CompanionRoutineHistoryTarget(
-                                                    routineID: routine.id,
-                                                    runID: runID,
-                                                    name: routine.name
-                                                )
+                                    ForEach(Array(renderedItems.enumerated()), id: \.element.id) { index, item in
+                                        if case let .routineNotifyDisclosure(
+                                            routineName,
+                                            totalCount,
+                                            latestAssistantEventID
+                                        ) = item.kind {
+                                            let previousEntry = previousTranscriptEntry(
+                                                in: renderedItems,
+                                                before: index
+                                            )
+                                            let nextEntry = nextTranscriptEntry(
+                                                in: renderedItems,
+                                                after: index
+                                            )
+                                            let startsDay = nextEntry.map {
+                                                startsNewDay($0, after: previousEntry)
+                                            } ?? false
+                                            if startsDay {
+                                                dayMarker(for: transcriptDate(nextEntry?.createdAt ?? "") ?? .now)
+                                                    .padding(.top, index == 0 ? 0 : 8)
+                                                    .padding(.bottom, 16)
                                             }
-                                        )
-                                        .equatable()
-                                        .padding(
-                                            .top,
-                                            startsDay
-                                                ? 0
-                                                : transcriptSpacing(
-                                                    after: index > 0 ? renderedEntries[index - 1] : nil,
-                                                    before: entry
-                                                )
-                                        )
-                                        .id(entry.id)
+                                            CompanionRoutineNotifyDisclosure(
+                                                routineName: routineName,
+                                                totalCount: totalCount,
+                                                latestAssistantEventID: latestAssistantEventID,
+                                                isExpanded: expandedRoutineNotifyEventIDs.contains(
+                                                    latestAssistantEventID
+                                                ),
+                                                onToggle: {
+                                                    toggleRoutineNotifyDisclosure(
+                                                        for: latestAssistantEventID
+                                                    )
+                                                }
+                                            )
+                                            .padding(
+                                                .top,
+                                                startsDay
+                                                    ? 0
+                                                    : routineNotifyDisclosureSpacing(
+                                                        after: previousEntry,
+                                                        before: nextEntry,
+                                                        index: index
+                                                    )
+                                            )
+                                            .id(item.id)
+                                        } else if case let .entry(entry) = item.kind {
+                                            let previousEntry = previousTranscriptEntry(
+                                                in: renderedItems,
+                                                before: index
+                                            )
+                                            let followsDisclosure = index > 0
+                                                && isRoutineNotifyDisclosure(renderedItems[index - 1])
+                                            let startsDay = !followsDisclosure
+                                                && startsNewDay(entry, after: previousEntry)
+                                            if startsDay {
+                                                dayMarker(for: transcriptDate(entry.createdAt) ?? .now)
+                                                    .padding(.top, index == 0 ? 0 : 8)
+                                                    .padding(.bottom, 16)
+                                            }
+                                            TranscriptRowView(
+                                                input: transcriptRowInput(for: entry),
+                                                onDecide: { action in
+                                                    guard let decision = entry.decision else { return }
+                                                    try await decide(
+                                                        requestID: decision.requestID,
+                                                        action: action
+                                                    )
+                                                },
+                                                onAnswerFocusChange: { focused in
+                                                    guard let decision = entry.decision else { return }
+                                                    decisionAnswerFocusChanged(
+                                                        focused,
+                                                        requestID: decision.requestID,
+                                                        eventID: entry.eventID
+                                                    )
+                                                },
+                                                onOpenPlugins: onOpenPlugins,
+                                                onReasoningExpansionChange: { isExpanded in
+                                                    setReasoningExpanded(isExpanded, for: entry.eventID)
+                                                },
+                                                onOpenToolDetails: { selectedToolDetail = $0 },
+                                                onOpenRoutineRun: { routine in
+                                                    guard let runID = routine.runID else { return }
+                                                    routineHistoryTarget = CompanionRoutineHistoryTarget(
+                                                        routineID: routine.id,
+                                                        runID: runID,
+                                                        name: routine.name
+                                                    )
+                                                }
+                                            )
+                                            .equatable()
+                                            .padding(
+                                                .top,
+                                                startsDay || followsDisclosure
+                                                    ? 0
+                                                    : transcriptSpacing(
+                                                        after: previousEntry,
+                                                        before: entry
+                                                    )
+                                            )
+                                            .id(item.id)
+                                        }
                                     }
 
                                     if let interruptedTurn = thread?.interruptedTurn {
@@ -656,6 +711,36 @@ struct ChatView: View {
         )
     }
 
+    private func previousTranscriptEntry(
+        in items: [CompanionTranscriptDisplayItem],
+        before index: Int
+    ) -> TranscriptEntry? {
+        guard index > 0 else { return nil }
+        return items[..<index].reversed().compactMap { $0.transcriptEntry }.first
+    }
+
+    private func nextTranscriptEntry(
+        in items: [CompanionTranscriptDisplayItem],
+        after index: Int
+    ) -> TranscriptEntry? {
+        guard index + 1 < items.count else { return nil }
+        return items[(index + 1)...].compactMap { $0.transcriptEntry }.first
+    }
+
+    private func isRoutineNotifyDisclosure(_ item: CompanionTranscriptDisplayItem) -> Bool {
+        if case .routineNotifyDisclosure = item.kind { return true }
+        return false
+    }
+
+    private func routineNotifyDisclosureSpacing(
+        after previous: TranscriptEntry?,
+        before next: TranscriptEntry?,
+        index: Int
+    ) -> CGFloat {
+        guard let next else { return index == 0 ? 0 : 8 }
+        return index == 0 ? 0 : transcriptSpacing(after: previous, before: next)
+    }
+
     private func transcriptBubbleKind(_ entry: TranscriptEntry) -> CompanionChatBubbleKind {
         if entry.decision != nil { return .card }
         if entry.role == "tool" { return .tool }
@@ -812,6 +897,23 @@ struct ChatView: View {
         }
     }
 
+    private func toggleRoutineNotifyDisclosure(for latestAssistantEventID: String) {
+        let update = {
+            if expandedRoutineNotifyEventIDs.contains(latestAssistantEventID) {
+                expandedRoutineNotifyEventIDs.remove(latestAssistantEventID)
+            } else {
+                expandedRoutineNotifyEventIDs.insert(latestAssistantEventID)
+            }
+        }
+        if reduceMotion {
+            update()
+        } else {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                update()
+            }
+        }
+    }
+
     private func transcriptRowInput(for entry: TranscriptEntry) -> TranscriptRowInput {
         TranscriptRowInput(
             entry: entry,
@@ -852,7 +954,12 @@ struct ChatView: View {
 
     private func reload(silently: Bool = false, isPolling: Bool = false) async {
         if silently, loadingEarlier { return }
-        if !isPolling { cancelAssistantTailReveal() }
+        // A navigation/manual reload returns to the deterministic collapsed projection. Background
+        // polling keeps an open disclosure usable while the same grouped entry remains on screen.
+        if !isPolling {
+            expandedRoutineNotifyEventIDs.removeAll()
+            cancelAssistantTailReveal()
+        }
         let generation = refreshGate.begin()
         let previousThread = threadProjection.thread
         let hasPreviousThread = previousThread != nil
@@ -870,6 +977,12 @@ struct ChatView: View {
 
             let previousEntries = previousThread.map { transcriptEntries(in: $0) } ?? []
             let nextEntries = transcriptEntries(in: next)
+            if isPolling {
+                let currentGroupEventIDs = Set(nextEntries.compactMap { entry in
+                    entry.routineNotifyGroup == nil ? nil : entry.eventID
+                })
+                expandedRoutineNotifyEventIDs.formIntersection(currentGroupEventIDs)
+            }
             var nextWindow = transcriptWindow
             let restoration = previousThread == nil ? pendingReadingPosition : nil
             let restorationAnchorIndex = restoration.flatMap { position in
@@ -1021,7 +1134,10 @@ struct ChatView: View {
     private func renderedMarkdown(
         for entries: [TranscriptEntry]
     ) async -> [String: CachedMarkdownDocument] {
-        let sources = entries.lazy
+        let projectedEntries = entries.flatMap { entry in
+            [entry] + (entry.routineNotifyGroup?.hiddenEntries ?? [])
+        }
+        let sources = projectedEntries.lazy
             .filter { $0.role == "assistant" || $0.role == "user" }
             .map { MarkdownDocumentSource(eventID: $0.eventID, content: $0.content) }
         return await MarkdownDocumentRenderer.render(
@@ -1450,6 +1566,7 @@ struct ChatView: View {
         unseenCount = 0
         pendingMessages = []
         markdownByEventID = [:]
+        expandedRoutineNotifyEventIDs = []
         decisionCatalog = .empty
         decisionCatalogLoaded = false
         selectedToolDetail = nil
@@ -1551,6 +1668,7 @@ struct ChatView: View {
         let mutationID = "decision:\(requestID)"
         guard await threadMutationGate.acquire(mutationID: mutationID) else { return }
         cancelAssistantTailReveal()
+        expandedRoutineNotifyEventIDs.removeAll()
         refreshGate.invalidate()
 
         do {
@@ -1615,6 +1733,7 @@ struct ChatView: View {
         let mutationID = "cancel:\(turnID)"
         guard await threadMutationGate.acquire(mutationID: mutationID) else { return }
         cancelAssistantTailReveal()
+        expandedRoutineNotifyEventIDs.removeAll()
         refreshGate.invalidate()
         do {
             let next: CompanionThread
@@ -2124,6 +2243,50 @@ private struct CompanionRoutineOriginMarker: View {
         .padding(.horizontal, 12)
         .companionMaterial(radius: 12)
         .contentShape(Rectangle())
+    }
+}
+
+private struct CompanionRoutineNotifyDisclosure: View {
+    let routineName: String
+    let totalCount: Int
+    let latestAssistantEventID: String
+    let isExpanded: Bool
+    let onToggle: () -> Void
+
+    private var title: String {
+        "\(routineName) · \(totalCount) updates"
+    }
+
+    var body: some View {
+        Button(action: onToggle) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .frame(width: 24, height: 44)
+                    .accessibilityHidden(true)
+
+                Text(title)
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(CompanionIOSTheme.textSecondary)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .layoutPriority(1)
+
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(CompanionIOSTheme.textSecondary)
+        .accessibilityLabel(title)
+        .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+        .accessibilityHint(
+            isExpanded
+                ? "Double tap to hide earlier routine updates."
+                : "Double tap to show earlier routine updates."
+        )
+        .accessibilityIdentifier("chat.routine-notify.\(latestAssistantEventID)")
     }
 }
 

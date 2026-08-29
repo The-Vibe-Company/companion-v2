@@ -1483,6 +1483,16 @@ describe("default Pi packages on the Box disk", () => {
 });
 
 describe("staged Companion instructions", () => {
+  it("stages the concise delivery contract for chats and routine returns", () => {
+    for (const text of [composedInstructions(), composedRoutineInstructions()]) {
+      expect(text).toContain("Give updates in one short sentence.");
+      expect(text).toContain("Skills Hub: companion 1.86.0 → 1.88.0. Everything else was already current.");
+      expect(text).toContain("Use one-word acknowledgements such as Done or Sent.");
+      expect(text).toContain("Never narrate process, apologize, prefix a reply");
+      expect(text).toContain("with btw, or add filler when nothing changed beyond that fact.");
+    }
+  });
+
   it("always asks for direct links to specific resources", () => {
     for (const surface of ["web", "mobile_web", "native_mobile"] as const) {
       const text = composedInstructions(null, surface);
@@ -1522,7 +1532,7 @@ describe("staged Companion instructions", () => {
       expect(text).toContain("propose_trigger");
     }
     const native = composedInstructions(null, "native_mobile");
-    expect(native).not.toContain("Skills Hub");
+    expect(native).not.toContain("- The Skills Hub:");
     expect(native).not.toContain("config-catalog.json");
     expect(native).not.toContain("- Plugins:");
     expect(native).not.toContain("- Skills:");
@@ -1899,6 +1909,7 @@ describe("isolated routine Pi sessions", () => {
       { path: paths.extension, content: COMPANION_PI_ROUTINE_SURFACE_EXTENSION_SOURCE },
     ]);
     expect(files[1]?.content).toContain('name: "surface_to_main"');
+    expect(files[1]?.content).toContain("Use one short sentence with no process narration.");
     expect(files[1]?.content).toContain('Type.Literal("relay")');
     expect(files[1]?.content).toContain('Type.Literal("notify")');
     expect(files.some((file) => file.path === `.companion/pi/extensions/${COMPANION_PI_ROUTINE_SURFACE_EXTENSION_FILE}`))

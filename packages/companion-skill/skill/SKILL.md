@@ -32,7 +32,11 @@ current turn. After a plugin connection is approved, the human finishes it in th
 may propose attaching that account on a later turn. After a trigger is approved, the human copies its
 webhook URL from the Triggers panel and pastes it into the external service; a proposed trigger never
 fires in the turn that proposed it. Approved routines and triggers fire as ordinary turns whose
-prompt is hidden in the thread. Agent Auth clients must not call those tools.
+prompt is hidden in the thread. Their hosted operating brief uses terse delivery semantics: one short
+sentence for an update, one word for an acknowledgement, and no process narration or filler; the
+owner's persona still owns voice. Consecutive attachment-free notify returns from one routine may be
+collapsed by the thread projection while their durable entries and routine history remain complete.
+Agent Auth clients must not call those tools.
 
 Treat runtime provider/model settings, provider credentials, MCP accounts, and Companion
 Owner/Editor/Viewer sharing as browser-session workspace administration. Never request, read, store,
@@ -1377,7 +1381,7 @@ skills view shows the correct status and version. Report the version from this s
 `companion.json.version`:
 
 ```sh
-printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.95.0","agent":"<your assistant name>"}}' \
+printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.96.0","agent":"<your assistant name>"}}' \
   | node scripts/companion-agent-client.mjs
 ```
 

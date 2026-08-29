@@ -347,13 +347,13 @@ export default function companionPermissionBroker(pi: ExtensionAPI) {
     name: "propose_routine",
     label: "Propose routine",
     description:
-      "Propose a scheduled Companion routine for Owner/Editor approval. This only proposes; never claim a routine is active without approval. Approved routines fire as ordinary turns whose prompt is hidden in the thread.",
+      "Propose a scheduled Companion routine for Owner/Editor approval. This only proposes; never claim a routine is active without approval. Keep confirm copy to one short sentence. Approved routines fire as ordinary turns whose prompt is hidden in the thread.",
     parameters: Type.Object({
       name: Type.String({ description: "Short unique name, max 80 characters" }),
       prompt: Type.String({ description: "The prompt the Companion will run on each fire" }),
       cron: Type.String({ description: "Five- or six-field cron expression" }),
       timezone: Type.String({ description: "IANA timezone, for example America/New_York" }),
-      summary: Type.Optional(Type.String({ description: "One-line confirm copy for the human" })),
+      summary: Type.Optional(Type.String({ description: "One short confirm sentence with no setup or process narration" })),
     }),
     executionMode: "sequential",
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -381,7 +381,7 @@ export default function companionPermissionBroker(pi: ExtensionAPI) {
           details: { proposal, confirmed: null },
         };
       }
-      const summary = (summaryArg || \`Schedule \${name} (\${cron} \${timezone})\`).slice(0, CONFIG_SUMMARY_MAX);
+      const summary = (summaryArg || \`\${name}: \${cron} · \${timezone}.\`).slice(0, CONFIG_SUMMARY_MAX);
       const confirmed = await ctx.ui.confirm(
         routineTitle(name),
         JSON.stringify({ summary, proposal }),
