@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import type {
+  BoxLabPreparedProcessIdentity,
   BoxLabProcessIdentity,
   BoxLabProcessObservation,
 } from "../src/processIdentity";
@@ -14,20 +15,30 @@ import {
   boxLabWorkspaceLockDirectory,
 } from "../src/workspaceLock";
 
-const CURRENT_PID = 42_424;
+const CURRENT_OWNER_PID = 41_414;
+const CURRENT_BEACON_PID = 42_424;
 const CURRENT_NONCE = "a".repeat(32);
 const OLD_NONCE = "b".repeat(32);
 const TOKEN = "c".repeat(32);
 
+const PREPARED_IDENTITY: BoxLabPreparedProcessIdentity = {
+  ownerPid: CURRENT_OWNER_PID,
+  beaconPid: CURRENT_BEACON_PID,
+  nonce: CURRENT_NONCE,
+};
+
+function defaultObservation(pid: number): BoxLabProcessObservation {
+  return pid === CURRENT_BEACON_PID
+    ? { state: "live", nonce: CURRENT_NONCE }
+    : { state: "live", nonce: null };
+}
+
 function fakeIdentity(
-  observe: (pid: number) => BoxLabProcessObservation = () => ({
-    state: "live",
-    nonce: CURRENT_NONCE,
-  }),
-  prepare: () => Promise<void> = async () => undefined,
+  observe: (pid: number) => BoxLabProcessObservation = defaultObservation,
+  prepare: () => Promise<BoxLabPreparedProcessIdentity> = async () => PREPARED_IDENTITY,
 ): BoxLabProcessIdentity {
   return {
-    pid: CURRENT_PID,
+    ownerPid: CURRENT_OWNER_PID,
     nonce: CURRENT_NONCE,
     prepare,
     observe: async (pid) => observe(pid),
@@ -41,21 +52,30 @@ async function temporaryWorkspace(): Promise<{ lockDirectory: string; stateDirec
 }
 
 describe("Box Lab workspace leases", () => {
-  it("reclaims a lease when its PID now belongs to a different process session", async () => {
+  it("reclaims a lease when its beacon PID now belongs to a different process session", async () => {
     const { lockDirectory, stateDirectory } = await temporaryWorkspace();
+    const oldOwnerPid = 51_515;
+    const reusedBeaconPid = 52_525;
     let resetLease: Awaited<ReturnType<typeof acquireBoxLabResetLease>> | undefined;
     try {
       await mkdir(lockDirectory, { recursive: true });
       await writeFile(
-        `${lockDirectory}/activity-v2-${CURRENT_PID}-${OLD_NONCE}-${TOKEN}.lease`,
-        `${CURRENT_PID} ${OLD_NONCE}\n`,
+        `${lockDirectory}/activity-v3-${oldOwnerPid}-${reusedBeaconPid}-${OLD_NONCE}-${TOKEN}.lease`,
+        `${oldOwnerPid} ${reusedBeaconPid} ${OLD_NONCE}\n`,
       );
+      const identity = fakeIdentity((pid) => {
+        if (pid === reusedBeaconPid) return { state: "live", nonce: CURRENT_NONCE };
+        if (pid === oldOwnerPid) return { state: "dead" };
+        return defaultObservation(pid);
+      });
 
-      resetLease = await acquireBoxLabResetLease(stateDirectory, fakeIdentity());
+      resetLease = await acquireBoxLabResetLease(stateDirectory, identity);
 
       const names = await readdir(lockDirectory);
       expect(names).toHaveLength(1);
-      expect(names[0]).toMatch(new RegExp(`^reset-v2-${CURRENT_PID}-${CURRENT_NONCE}-`));
+      expect(names[0]).toMatch(new RegExp(
+        `^reset-v3-${CURRENT_OWNER_PID}-${CURRENT_BEACON_PID}-${CURRENT_NONCE}-`,
+      ));
     } finally {
       await resetLease?.release();
       await rm(lockDirectory, { recursive: true, force: true });
@@ -63,33 +83,86 @@ describe("Box Lab workspace leases", () => {
     }
   });
 
-  it("keeps a live lease when PID and process-session nonce both match", async () => {
+  it("keeps a lease when a reused beacon PID belongs to another process but its owner is live", async () => {
     const { lockDirectory, stateDirectory } = await temporaryWorkspace();
+    const ownerPid = 51_515;
+    const reusedBeaconPid = 52_525;
     try {
-      const activePath =
-        `${lockDirectory}/activity-v2-${CURRENT_PID}-${CURRENT_NONCE}-${TOKEN}.lease`;
+      const activeName = `activity-v3-${ownerPid}-${reusedBeaconPid}-${OLD_NONCE}-${TOKEN}.lease`;
       await mkdir(lockDirectory, { recursive: true });
-      await writeFile(activePath, `${CURRENT_PID} ${CURRENT_NONCE}\n`);
+      await writeFile(
+        `${lockDirectory}/${activeName}`,
+        `${ownerPid} ${reusedBeaconPid} ${OLD_NONCE}\n`,
+      );
+      const identity = fakeIdentity((pid) => {
+        if (pid === reusedBeaconPid) return { state: "live", nonce: CURRENT_NONCE };
+        if (pid === ownerPid) return { state: "live", nonce: null };
+        return defaultObservation(pid);
+      });
 
-      await expect(acquireBoxLabResetLease(stateDirectory, fakeIdentity()))
+      await expect(acquireBoxLabResetLease(stateDirectory, identity))
         .rejects.toMatchObject({ code: "box_lab_workspace_active" });
-      await expect(readdir(lockDirectory)).resolves.toEqual([activePath.split("/").at(-1)]);
+      await expect(readdir(lockDirectory)).resolves.toEqual([activeName]);
     } finally {
       await rm(lockDirectory, { recursive: true, force: true });
       await rm(join(stateDirectory, ".."), { recursive: true, force: true });
     }
   });
 
-  it("fails closed when a current-format lease owner cannot be inspected", async () => {
+  it("keeps a live lease when beacon PID and process-session nonce both match", async () => {
     const { lockDirectory, stateDirectory } = await temporaryWorkspace();
-    const unknownPid = 52_525;
     try {
-      const activeName = `activity-v2-${unknownPid}-${OLD_NONCE}-${TOKEN}.lease`;
+      const activeName =
+        `activity-v3-${CURRENT_OWNER_PID}-${CURRENT_BEACON_PID}-${CURRENT_NONCE}-${TOKEN}.lease`;
       await mkdir(lockDirectory, { recursive: true });
-      await writeFile(`${lockDirectory}/${activeName}`, `${unknownPid} ${OLD_NONCE}\n`);
-      const identity = fakeIdentity((pid) => pid === CURRENT_PID
-        ? { state: "live", nonce: CURRENT_NONCE }
-        : { state: "unknown" });
+      await writeFile(
+        `${lockDirectory}/${activeName}`,
+        `${CURRENT_OWNER_PID} ${CURRENT_BEACON_PID} ${CURRENT_NONCE}\n`,
+      );
+
+      await expect(acquireBoxLabResetLease(stateDirectory, fakeIdentity()))
+        .rejects.toMatchObject({ code: "box_lab_workspace_active" });
+      await expect(readdir(lockDirectory)).resolves.toEqual([activeName]);
+    } finally {
+      await rm(lockDirectory, { recursive: true, force: true });
+      await rm(join(stateDirectory, ".."), { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when a current-format lease beacon cannot be inspected", async () => {
+    const { lockDirectory, stateDirectory } = await temporaryWorkspace();
+    const unknownBeaconPid = 52_525;
+    try {
+      const activeName =
+        `activity-v3-51515-${unknownBeaconPid}-${OLD_NONCE}-${TOKEN}.lease`;
+      await mkdir(lockDirectory, { recursive: true });
+      await writeFile(`${lockDirectory}/${activeName}`, `51515 ${unknownBeaconPid} ${OLD_NONCE}\n`);
+      const identity = fakeIdentity((pid) => pid === unknownBeaconPid
+        ? { state: "unknown" }
+        : defaultObservation(pid));
+
+      await expect(acquireBoxLabResetLease(stateDirectory, identity))
+        .rejects.toMatchObject({ code: "box_lab_workspace_active" });
+      await expect(readdir(lockDirectory)).resolves.toEqual([activeName]);
+    } finally {
+      await rm(lockDirectory, { recursive: true, force: true });
+      await rm(join(stateDirectory, ".."), { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a lease whose beacon died unexpectedly while its owner remains live", async () => {
+    const { lockDirectory, stateDirectory } = await temporaryWorkspace();
+    const ownerPid = 51_515;
+    const deadBeaconPid = 52_525;
+    try {
+      const activeName = `activity-v3-${ownerPid}-${deadBeaconPid}-${OLD_NONCE}-${TOKEN}.lease`;
+      await mkdir(lockDirectory, { recursive: true });
+      await writeFile(`${lockDirectory}/${activeName}`, `${ownerPid} ${deadBeaconPid} ${OLD_NONCE}\n`);
+      const identity = fakeIdentity((pid) => {
+        if (pid === deadBeaconPid) return { state: "dead" };
+        if (pid === ownerPid) return { state: "live", nonce: null };
+        return defaultObservation(pid);
+      });
 
       await expect(acquireBoxLabResetLease(stateDirectory, identity))
         .rejects.toMatchObject({ code: "box_lab_workspace_active" });
@@ -112,9 +185,9 @@ describe("Box Lab workspace leases", () => {
       const legacyName = `activity-${legacyPid}-${TOKEN}.lease`;
       await mkdir(lockDirectory, { recursive: true });
       await writeFile(`${lockDirectory}/${legacyName}`, `${legacyPid}\n`);
-      const identity = fakeIdentity((pid) => pid === CURRENT_PID
-        ? { state: "live", nonce: CURRENT_NONCE }
-        : observation);
+      const identity = fakeIdentity((pid) => pid === legacyPid
+        ? observation
+        : defaultObservation(pid));
 
       if (blocks) {
         await expect(acquireBoxLabResetLease(stateDirectory, identity))
@@ -126,6 +199,26 @@ describe("Box Lab workspace leases", () => {
       }
     } finally {
       await resetLease?.release();
+      await rm(lockDirectory, { recursive: true, force: true });
+      await rm(join(stateDirectory, ".."), { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a live v2 process-title lease during migration", async () => {
+    const { lockDirectory, stateDirectory } = await temporaryWorkspace();
+    const ownerPid = 62_626;
+    try {
+      const v2Name = `activity-v2-${ownerPid}-${OLD_NONCE}-${TOKEN}.lease`;
+      await mkdir(lockDirectory, { recursive: true });
+      await writeFile(`${lockDirectory}/${v2Name}`, `${ownerPid} ${OLD_NONCE}\n`);
+      const identity = fakeIdentity((pid) => pid === ownerPid
+        ? { state: "live", nonce: null }
+        : defaultObservation(pid));
+
+      await expect(acquireBoxLabResetLease(stateDirectory, identity))
+        .rejects.toMatchObject({ code: "box_lab_workspace_active" });
+      await expect(readdir(lockDirectory)).resolves.toEqual([v2Name]);
+    } finally {
       await rm(lockDirectory, { recursive: true, force: true });
       await rm(join(stateDirectory, ".."), { recursive: true, force: true });
     }
