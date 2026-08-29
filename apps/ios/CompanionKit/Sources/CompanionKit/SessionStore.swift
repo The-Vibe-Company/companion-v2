@@ -1197,13 +1197,16 @@ public final class SessionStore {
     ) async throws -> Value {
         let capturedScope = expectedScope ?? currentSession.flatMap(Self.cacheScope(for:))
         let capturedSessionScopeGeneration = expectedSessionScopeGeneration ?? sessionScopeGeneration
+        let capturedAuthorityCookie = currentSession?.cookie
         do {
             let value = try await operation()
             await persistRollingAuthority()
             return value
         } catch let error as APIError where error.status == 401 {
+            let activeAuthorityCookie = await client.currentAuthority()?.cookie
             if sessionScopeGeneration != capturedSessionScopeGeneration
-                || currentSession.flatMap(Self.cacheScope(for:)) != capturedScope {
+                || currentSession.flatMap(Self.cacheScope(for:)) != capturedScope
+                || activeAuthorityCookie != capturedAuthorityCookie {
                 throw CancellationError()
             }
             await clearLocalSession()

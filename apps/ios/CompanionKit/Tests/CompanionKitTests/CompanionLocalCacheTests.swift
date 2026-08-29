@@ -237,20 +237,30 @@ private final class SuspendedRosterSyncURLProtocol: URLProtocol, @unchecked Send
 
 private final class StaleUnauthorizedThreadURLProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var releaseResponse = DispatchSemaphore(value: 0)
+    nonisolated(unsafe) static var releaseWhoAmI = DispatchSemaphore(value: 0)
     private static let lock = NSLock()
     private nonisolated(unsafe) static var oldRequestDidStart = false
+    private nonisolated(unsafe) static var whoAmIRequestDidStart = false
 
     static func reset() {
         lock.lock()
         oldRequestDidStart = false
+        whoAmIRequestDidStart = false
         lock.unlock()
         releaseResponse = DispatchSemaphore(value: 0)
+        releaseWhoAmI = DispatchSemaphore(value: 0)
     }
 
     static var hasStartedOldRequest: Bool {
         lock.lock()
         defer { lock.unlock() }
         return oldRequestDidStart
+    }
+
+    static var hasStartedWhoAmIRequest: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return whoAmIRequestDidStart
     }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -276,6 +286,20 @@ private final class StaleUnauthorizedThreadURLProtocol: URLProtocol, @unchecked 
             }
             return
         }
+        if path == "/v1/auth/whoami" {
+            Self.lock.lock()
+            Self.whoAmIRequestDidStart = true
+            Self.lock.unlock()
+            DispatchQueue.global().async { [weak self] in
+                _ = Self.releaseWhoAmI.wait(timeout: .now() + 5)
+                self?.finish(
+                    statusCode: 200,
+                    headers: ["Content-Type": "application/json"],
+                    payload: #"{"userId":"user-2","email":"new@example.com","name":"New","timezone":"UTC","org":{"org_id":"org-2","name":"New workspace"},"onboarded":true,"needsOnboarding":false}"#
+                )
+            }
+            return
+        }
         let statusCode: Int
         let headers: [String: String]?
         let payload: String
@@ -287,10 +311,6 @@ private final class StaleUnauthorizedThreadURLProtocol: URLProtocol, @unchecked 
             statusCode = 200
             headers = ["Set-Cookie": "better-auth.session_token=new-session; Path=/; HttpOnly"]
             payload = "{}"
-        } else if path == "/v1/auth/whoami" {
-            statusCode = 200
-            headers = ["Content-Type": "application/json"]
-            payload = #"{"userId":"user-2","email":"new@example.com","name":"New","timezone":"UTC","org":{"org_id":"org-2","name":"New workspace"},"onboarded":true,"needsOnboarding":false}"#
         } else {
             statusCode = 404
             headers = ["Content-Type": "application/json"]
@@ -577,15 +597,26 @@ func staleUnauthorizedThreadResponseDoesNotClearNewAccount() async throws {
     }
     #expect(StaleUnauthorizedThreadURLProtocol.hasStartedOldRequest)
 
-    try await store.signIn(email: "new@example.com", password: "password")
-    let newSynchronization = try await store.synchronizeThread(companionID: companionID)
-    #expect(newSynchronization.value.cursor == "new-thread-fresh")
+    let signIn = Task {
+        try await store.signIn(email: "new@example.com", password: "password")
+    }
+    for _ in 0..<500 where !StaleUnauthorizedThreadURLProtocol.hasStartedWhoAmIRequest {
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+    #expect(StaleUnauthorizedThreadURLProtocol.hasStartedWhoAmIRequest)
+
     StaleUnauthorizedThreadURLProtocol.releaseResponse.signal()
     do {
         _ = try await oldSynchronization.value
         Issue.record("The stale unauthorized response should be cancelled")
     } catch is CancellationError {}
 
+    #expect(store.currentSession?.user.id == "user-1")
+    #expect(store.phase != .signedOut)
+    StaleUnauthorizedThreadURLProtocol.releaseWhoAmI.signal()
+    try await signIn.value
+    let newSynchronization = try await store.synchronizeThread(companionID: companionID)
+    #expect(newSynchronization.value.cursor == "new-thread-fresh")
     #expect(store.currentSession?.user.id == "user-2")
     #expect(store.cachedThread(companionID: companionID)?.cursor == "new-thread-fresh")
     #expect(store.phase != .signedOut)
