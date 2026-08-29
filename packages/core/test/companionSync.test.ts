@@ -317,4 +317,40 @@ describe("Companion stateless sync projections", () => {
     expect(next.changed_entries).toEqual(corrected);
     expect(next.deleted_event_ids).toEqual([]);
   });
+
+  it("resets when a long thread shrinks across the cached-tail boundary", () => {
+    const entries = Array.from({ length: 500 }, (_, index) =>
+      entry(`event:${index}`, index, `message ${index}`));
+    const initial = buildCompanionThreadDelta({
+      orgId: ORG_ID,
+      actorId: OWNER_ID,
+      companionId: COMPANION_ID,
+      thread: thread(entries),
+    });
+    const shortened = entries.slice(0, 300);
+
+    const next = buildCompanionThreadDelta({
+      orgId: ORG_ID,
+      actorId: OWNER_ID,
+      companionId: COMPANION_ID,
+      thread: thread(shortened),
+      cursor: initial.cursor,
+    });
+
+    expect(next.reset_entries).toBe(true);
+    expect(next.changed_entries).toEqual(shortened);
+    expect(next.deleted_event_ids).toEqual([]);
+  });
+
+  it("rejects a thread too large for a valid sync cursor", () => {
+    const entries = Array.from({ length: 20_001 }, (_, index) =>
+      entry(`event:${index}`, index, `message ${index}`));
+
+    expect(() => buildCompanionThreadDelta({
+      orgId: ORG_ID,
+      actorId: OWNER_ID,
+      companionId: COMPANION_ID,
+      thread: thread(entries),
+    })).toThrow(CompanionSyncCursorError);
+  });
 });

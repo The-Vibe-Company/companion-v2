@@ -1474,9 +1474,8 @@ struct ChatView: View {
                 snapshot = completeThread
                 historyIsPartial = false
                 threadProjection.update(completeThread)
-                expandedWindow.refresh(
-                    totalCount: transcriptEntries(in: completeThread).count,
-                    preservingCurrentEntries: true
+                expandedWindow.revealCompleteHistory(
+                    totalCount: transcriptEntries(in: completeThread).count
                 )
             } catch {
                 self.error = error.localizedDescription

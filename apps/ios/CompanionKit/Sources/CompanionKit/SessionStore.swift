@@ -84,6 +84,7 @@ public final class SessionStore {
     ] = [:]
     private var rosterSyncGeneration = 0
     private var threadSyncGenerations: [String: Int] = [:]
+    private var companionsMarkedRead: Set<String> = []
     /// Full foreground projections live only for this process; SQLite intentionally keeps a tail.
     private var liveThreadSnapshots: [String: CompanionThreadSnapshot] = [:]
 
@@ -983,12 +984,17 @@ public final class SessionStore {
         let rosterMarksUnread = initialRosterSnapshot?.companions.first {
             $0.id == companionID
         }?.unread == true
-        if markRead,
-           requestCursor == nil || !response.value.changedEntries.isEmpty || rosterMarksUnread {
-            _ = try? await updateCompanionMemberState(
-                companionID: companionID,
-                patch: CompanionMemberStatePatch(unread: false)
-            )
+        let shouldMarkRead = markRead && (
+            requestCursor == nil
+                || !response.value.changedEntries.isEmpty
+                || (rosterMarksUnread && !companionsMarkedRead.contains(companionID))
+        )
+        if shouldMarkRead,
+           (try? await updateCompanionMemberState(
+               companionID: companionID,
+               patch: CompanionMemberStatePatch(unread: false)
+           )) != nil {
+            companionsMarkedRead.insert(companionID)
         }
         if let cache {
             try await Task.detached(priority: .utility) {
@@ -1101,6 +1107,7 @@ public final class SessionStore {
         if currentSession.flatMap(Self.cacheScope(for:)) != Self.cacheScope(for: session) {
             liveThreadSnapshots.removeAll()
             threadSyncGenerations.removeAll()
+            companionsMarkedRead.removeAll()
         }
         phase = nextPhase
     }
@@ -1141,6 +1148,8 @@ public final class SessionStore {
         persistedSession = nil
         initialRosterSnapshot = nil
         liveThreadSnapshots.removeAll()
+        threadSyncGenerations.removeAll()
+        companionsMarkedRead.removeAll()
         await client.setAuthority(nil)
         bootstrapError = nil
         phase = .signedOut

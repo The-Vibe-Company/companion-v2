@@ -310,6 +310,9 @@ function threadCursor(input: {
   const orderedEntries = [...input.entries].sort(
     (left, right) => left.ordinal - right.ordinal || compareStrings(left.event_id, right.event_id),
   );
+  if (orderedEntries.length > COMPANION_SYNC_CURSOR_MAX_RECORDS) {
+    throw new CompanionSyncCursorError("Companion thread is too large for a sync cursor");
+  }
   // Validate the complete projection before reducing it to a bounded cursor. Transcript ordinals
   // are unique and monotonic; keeping the newest 250 exact digests covers every mutable/live entry,
   // while a prefix digest detects any exceptional historical edit or deletion and forces a reset.
@@ -461,7 +464,9 @@ export function buildCompanionThreadDelta(input: {
   const previousPrefix = previousThread
     ? orderedEntries.slice(0, previousThread.prefix_count)
     : [];
+  const currentPrefixCount = Math.max(0, orderedEntries.length - 250);
   const prefixStillMatches = previousThread !== undefined
+    && currentPrefixCount >= previousThread.prefix_count
     && previousPrefix.length === previousThread.prefix_count
     && companionSyncDigest(entryDigestRecords(previousPrefix)) === previousThread.prefix_digest;
   const resetEntries = previousThread === undefined || !prefixStillMatches;

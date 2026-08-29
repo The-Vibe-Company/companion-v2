@@ -91,7 +91,7 @@ private final class OneShotDisplayFrame: NSObject {
         _ = OneShotDisplayFrame(action: action)
     }
 
-    @objc private func fired() {
+    @MainActor @objc private func fired() {
         displayLink?.invalidate()
         displayLink = nil
         action()

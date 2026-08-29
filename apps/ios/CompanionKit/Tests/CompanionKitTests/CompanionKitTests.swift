@@ -1986,6 +1986,21 @@ func transcriptWindowRefreshCanPreserveEntriesWhileReadingHistory() {
 }
 
 @Test
+func transcriptWindowRevealsOlderPageAfterReplacingCachedTailWithCompleteHistory() {
+    var window = CompanionTranscriptWindow(totalCount: 250)
+    while window.loadEarlier() {}
+
+    window.revealCompleteHistory(totalCount: 1_000)
+
+    #expect(window.exposedCount == 250)
+    #expect(window.visibleRange == (750..<1_000))
+    #expect(window.hasEarlierEntries)
+    #expect(window.loadEarlier())
+    #expect(window.exposedCount == 300)
+    #expect(window.visibleRange == (700..<1_000))
+}
+
+@Test
 func chatReadingPositionsRemainIsolatedByCompanion() {
     var store = CompanionChatReadingPositionStore()
     let luna = CompanionChatReadingPosition(

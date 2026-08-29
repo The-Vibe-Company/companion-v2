@@ -591,6 +591,14 @@ public struct CompanionTranscriptWindow: Equatable, Sendable {
         }
     }
 
+    /// Replaces a cached partial-history count with the complete server count without treating
+    /// the newly discovered historical prefix as appended tail content.
+    public mutating func revealCompleteHistory(totalCount: Int) {
+        let count = max(0, totalCount)
+        self.totalCount = count
+        exposedCount = min(exposedCount, count)
+    }
+
     /// Restores a previously exposed window and keeps its anchor renderable after tail growth.
     public mutating func restore(
         totalCount: Int,
