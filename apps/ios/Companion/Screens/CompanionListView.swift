@@ -244,6 +244,14 @@ struct CompanionListView: View {
                     companionCount: companions.count
                 )
             }
+            // Time the transcript from the moment a chat becomes the visible route. A row push, a
+            // notification, and the details-to-chat replacement all reach chat this way, and a
+            // gesture on the row itself competes with the NavigationLink for the same touch.
+            .onChange(of: path) { previous, next in
+                guard next.last != previous.last,
+                      case .chat(let companionID)? = next.last else { return }
+                CompanionPerformanceTelemetry.chatTapped(companionID: companionID)
+            }
             .onChange(of: notifications.pendingDestination) { _, _ in
                 openPendingNotificationIfPossible()
             }
@@ -427,9 +435,6 @@ struct CompanionListView: View {
             )
         }
         .buttonStyle(.plain)
-        .simultaneousGesture(TapGesture().onEnded {
-            CompanionPerformanceTelemetry.chatTapped(companionID: companion.id)
-        })
         .disabled(busy)
         .accessibilityIdentifier("companion.row.\(companion.id)")
         .contextMenu { companionContextMenu(for: companion, busy: busy) }
