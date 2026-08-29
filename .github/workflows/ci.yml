@@ -216,6 +216,7 @@ jobs:
         shell: bash
         run: |
           xcodebuild build \
+            -quiet \
             -workspace apps/ios/Companion.xcworkspace \
             -scheme Companion \
             -configuration Debug \
@@ -225,6 +226,7 @@ jobs:
           ios_pid=$!
 
           xcodebuild test \
+            -quiet \
             -workspace apps/ios/Companion.xcworkspace \
             -scheme CompanionMac \
             -configuration Debug \
