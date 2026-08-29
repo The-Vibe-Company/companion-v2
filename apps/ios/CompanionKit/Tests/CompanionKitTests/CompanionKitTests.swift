@@ -313,6 +313,17 @@ func keepsTheLinkSchemeAllowlistCaseInsensitiveAndFailClosed() throws {
 }
 
 @Test
+func detectsBareMessageURLsWithoutTrailingPunctuationOrBlockedSchemes() throws {
+    let source = "See 😀 https://github.com/The-Vibe-Company/companion-v2, then ftp://example.com/file."
+    let links = CompanionMessageLinkDetector.detect(in: source)
+
+    let link = try #require(links.first)
+    #expect(links.count == 1)
+    #expect(link.url.absoluteString == "https://github.com/The-Vibe-Company/companion-v2")
+    #expect((source as NSString).substring(with: link.nsRange) == link.url.absoluteString)
+}
+
+@Test
 func routesOnlyPendingExternalOAuthCallbackShapes() throws {
     let googleScheme = "dev.companion.mobile.dev"
     let googleState = "native-state"

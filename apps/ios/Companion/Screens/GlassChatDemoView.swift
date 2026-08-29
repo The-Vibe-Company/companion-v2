@@ -182,7 +182,7 @@ struct GlassChatDemoView: View {
 
     private var markdownSources: [MarkdownDocumentSource] {
         messages.compactMap { message in
-            guard message.kind == .assistant, message.tool == nil else { return nil }
+            guard message.tool == nil else { return nil }
             return MarkdownDocumentSource(eventID: message.eventID, content: message.content)
         }
     }
@@ -526,8 +526,10 @@ private struct DemoMessage: Identifiable {
 
             Le rendu garde **la hiérarchie**, l’*emphase*, le ~~contenu obsolète~~ et le `code inline`.
 
+            Le code `https://example.com/not-a-link` reste du code.
+
             - La réponse reste lisible avec Dynamic Type.
-            - Les messages des membres restent littéraux.
+            - Les messages des membres gardent aussi leur Markdown.
 
             > Les contenus distants restent non fiables et ne sont jamais chargés automatiquement.
 
@@ -554,6 +556,11 @@ private struct DemoMessage: Identifiable {
             kind: .assistant,
             author: "Companion",
             timestamp: "09:43"
+        ),
+        .init(
+            content: "🔗 Le suivi est sur https://github.com/The-Vibe-Company/companion-v2 et [le ticket](https://example.com/ticket).",
+            kind: .mine,
+            timestamp: "09:44"
         ),
     ]
 }

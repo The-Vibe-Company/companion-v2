@@ -565,16 +565,49 @@ final class CompanionUITests: XCTestCase {
         ).firstMatch.exists)
 
         XCTAssertTrue(app.links["Documentation sûre"].exists)
+        XCTAssertTrue(app.links["https://github.com/The-Vibe-Company/companion-v2"].exists)
+        XCTAssertTrue(app.links["le ticket"].exists)
+        XCTAssertFalse(app.links["https://example.com/not-a-link"].exists)
         XCTAssertFalse(app.links["Lien refusé"].exists)
         XCTAssertTrue(app.staticTexts["Lien refusé"].exists)
         XCTAssertFalse(app.images["preuve distante"].exists)
+        try captureScreenshot(named: "chat-links-light.png")
 
         let composer = app.descendants(matching: .any)["demo.composer"]
         let send = app.buttons["demo.send"]
         composer.tap()
-        composer.typeText("**Message membre littéral**")
+        composer.typeText("**Message membre enrichi**")
         send.tap()
-        XCTAssertTrue(app.staticTexts["**Message membre littéral**"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["Message membre enrichi"].waitForExistence(timeout: 3))
+    }
+
+    @MainActor
+    func testMessageLinkLongPressOffersOpenAndCopy() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-glass-chat-demo"]
+        app.launch()
+
+        let link = app.links["https://github.com/The-Vibe-Company/companion-v2"]
+        XCTAssertTrue(link.waitForExistence(timeout: 5))
+        XCTAssertTrue(link.isHittable)
+        link.press(forDuration: 1.2)
+
+        XCTAssertTrue(app.buttons["Open"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.buttons["Copy"].exists)
+    }
+
+    @MainActor
+    func testMessageLinksRemainVisibleInBlackAppearance() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-glass-chat-demo", "-markdown-table-dark-demo"]
+        app.launch()
+
+        let bareLink = app.links["https://github.com/The-Vibe-Company/companion-v2"]
+        let markdownLink = app.links["le ticket"]
+        XCTAssertTrue(bareLink.waitForExistence(timeout: 5))
+        XCTAssertTrue(markdownLink.exists)
+        XCTAssertTrue(bareLink.isHittable)
+        try captureScreenshot(named: "chat-links-black.png")
     }
 
     @MainActor
