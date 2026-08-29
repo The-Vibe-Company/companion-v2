@@ -291,7 +291,7 @@ private final class StaleUnauthorizedThreadURLProtocol: URLProtocol, @unchecked 
             Self.whoAmIRequestDidStart = true
             Self.lock.unlock()
             DispatchQueue.global().async { [weak self] in
-                _ = Self.releaseWhoAmI.wait(timeout: .now() + 5)
+                Self.releaseWhoAmI.wait()
                 self?.finish(
                     statusCode: 200,
                     headers: ["Content-Type": "application/json"],
@@ -563,6 +563,10 @@ func sessionScopeChangesFenceInFlightCacheRefreshes() async throws {
 @Test @MainActor
 func staleUnauthorizedThreadResponseDoesNotClearNewAccount() async throws {
     StaleUnauthorizedThreadURLProtocol.reset()
+    defer {
+        StaleUnauthorizedThreadURLProtocol.releaseResponse.signal()
+        StaleUnauthorizedThreadURLProtocol.releaseWhoAmI.signal()
+    }
     let fixture = try cacheFixture()
     defer { try? FileManager.default.removeItem(at: fixture.directory) }
     let oldSession = testSession()
