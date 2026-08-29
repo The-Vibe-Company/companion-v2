@@ -40,6 +40,33 @@ describe("Box Lab reset", () => {
     }
   });
 
+  it("surfaces state access errors before provider or filesystem cleanup and releases its lease", async () => {
+    const { config, stateRoot } = await temporaryConfig("state-access-error");
+    const lockDirectory = boxLabWorkspaceLockDirectory(config.stateDirectory);
+    let activity: Awaited<ReturnType<typeof acquireBoxLabActivityLease>> | undefined;
+    let resetCalls = 0;
+    try {
+      await mkdir(config.diagnosticsDirectory, { recursive: true });
+      const sentinel = `${config.diagnosticsDirectory}/must-survive.log`;
+      await writeFile(sentinel, "must-survive\n");
+      const accessDenied = Object.assign(new Error("state access denied"), { code: "EACCES" });
+
+      await expect(resetBoxLab(
+        config,
+        { reset: async () => { resetCalls += 1; } },
+        { accessState: async () => { throw accessDenied; } },
+      )).rejects.toBe(accessDenied);
+      expect(resetCalls).toBe(0);
+      await expect(readFile(sentinel, "utf8")).resolves.toBe("must-survive\n");
+
+      activity = await acquireBoxLabActivityLease(config.stateDirectory);
+    } finally {
+      await activity?.release();
+      await rm(stateRoot, { recursive: true, force: true });
+      await rm(lockDirectory, { recursive: true, force: true });
+    }
+  });
+
   it("refuses reset without touching active workspace state or provider resources", async () => {
     const { config, stateRoot } = await temporaryConfig("active-reset");
     const activity = await acquireBoxLabActivityLease(config.stateDirectory);

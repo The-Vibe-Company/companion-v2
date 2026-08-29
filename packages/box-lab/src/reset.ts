@@ -8,15 +8,25 @@ import { acquireBoxLabResetLease } from "./workspaceLock";
 
 export type BoxLabResetResult = "removed" | "already_clean";
 
+interface BoxLabResetOptions {
+  accessState?: (path: string) => Promise<void>;
+}
+
 export async function resetBoxLab(
   config: BoxLabConfig,
   driver: Pick<BoxLabDriver, "reset"> = createBoxLabDriver(config),
+  options: BoxLabResetOptions = {},
 ): Promise<BoxLabResetResult> {
   const lease = await acquireBoxLabResetLease(config.stateDirectory);
   try {
     const statePath = new BoxLabStateStore(config.stateDirectory, config.workspaceScope).path;
     let knownState = true;
-    try { await access(statePath); } catch { knownState = false; }
+    try {
+      await (options.accessState ?? access)(statePath);
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+      knownState = false;
+    }
 
     try {
       await driver.reset();

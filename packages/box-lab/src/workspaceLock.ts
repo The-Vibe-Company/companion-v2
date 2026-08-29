@@ -2,6 +2,11 @@ import { randomBytes } from "node:crypto";
 import { mkdir, readdir, unlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
+import {
+  hostBoxLabProcessIdentity,
+  type BoxLabProcessIdentity,
+} from "./processIdentity";
+
 type BoxLabWorkspaceLeaseKind = "activity" | "reset";
 
 interface LiveLease {
@@ -23,7 +28,15 @@ export class BoxLabWorkspaceLockError extends Error {
   }
 }
 
-const LEASE_NAME = /^(activity|reset)-([1-9][0-9]*)-([a-f0-9]{32})\.lease$/;
+const CURRENT_LEASE_NAME =
+  /^(activity|reset)-v2-([1-9][0-9]*)-([a-f0-9]{32})-([a-f0-9]{32})\.lease$/;
+const LEGACY_LEASE_NAME = /^(activity|reset)-([1-9][0-9]*)-([a-f0-9]{32})\.lease$/;
+
+interface ParsedLease {
+  kind: BoxLabWorkspaceLeaseKind;
+  nonce: string | null;
+  pid: number;
+}
 
 export function boxLabWorkspaceLockDirectory(stateDirectory: string): string {
   // Keep the lock beside the state directory: reset deletes stateDirectory while its own lease
@@ -31,16 +44,22 @@ export function boxLabWorkspaceLockDirectory(stateDirectory: string): string {
   return `${resolve(stateDirectory)}.lock`;
 }
 
-function processIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ESRCH") return false;
-    // EPERM means the process exists but is owned by another user. Any unfamiliar failure is also
-    // treated as live so reset fails closed instead of deleting a potentially active workspace.
-    return true;
+function parsedLease(name: string): ParsedLease | undefined {
+  const current = CURRENT_LEASE_NAME.exec(name);
+  if (current) {
+    const kind = current[1];
+    const pid = current[2];
+    const nonce = current[3];
+    if ((kind === "activity" || kind === "reset") && pid !== undefined && nonce !== undefined) {
+      return { kind, nonce, pid: Number(pid) };
+    }
   }
+  const legacy = LEGACY_LEASE_NAME.exec(name);
+  if (!legacy) return undefined;
+  const kind = legacy[1];
+  const pid = legacy[2];
+  if ((kind !== "activity" && kind !== "reset") || pid === undefined) return undefined;
+  return { kind, nonce: null, pid: Number(pid) };
 }
 
 async function removeLease(path: string): Promise<void> {
@@ -51,7 +70,10 @@ async function removeLease(path: string): Promise<void> {
   }
 }
 
-async function liveLeases(lockDirectory: string): Promise<LiveLease[]> {
+async function liveLeases(
+  lockDirectory: string,
+  processIdentity: BoxLabProcessIdentity,
+): Promise<LiveLease[]> {
   let names: string[];
   try {
     names = await readdir(lockDirectory);
@@ -62,19 +84,22 @@ async function liveLeases(lockDirectory: string): Promise<LiveLease[]> {
 
   const live: LiveLease[] = [];
   for (const name of names) {
-    const match = LEASE_NAME.exec(name);
-    if (!match) continue;
-    const kind = match[1];
-    if (kind !== "activity" && kind !== "reset") continue;
+    const lease = parsedLease(name);
+    if (!lease) continue;
     const path = resolve(lockDirectory, name);
-    const pid = Number(match[2]);
-    if (!processIsAlive(pid)) {
+    const observation = await processIdentity.observe(lease.pid);
+    const staleCurrentLease = lease.nonce !== null
+      && observation.state === "live"
+      && observation.nonce !== lease.nonce;
+    if (observation.state === "dead" || staleCurrentLease) {
       // Lease names are unique and never reused, so removing one dead owner's exact path cannot
       // unlink a successor's lease even when several cleanup attempts run concurrently.
       await removeLease(path);
       continue;
     }
-    live.push({ kind, path });
+    // Legacy leases have no process-session identity. A live or unknown PID must therefore block.
+    // Unknown observations for current leases also block so reset fails closed on host errors.
+    live.push({ kind: lease.kind, path });
   }
   return live;
 }
@@ -82,12 +107,20 @@ async function liveLeases(lockDirectory: string): Promise<LiveLease[]> {
 async function createLease(
   stateDirectory: string,
   kind: BoxLabWorkspaceLeaseKind,
+  processIdentity: BoxLabProcessIdentity,
 ): Promise<BoxLabWorkspaceLease & { path: string }> {
+  await processIdentity.prepare();
   const lockDirectory = boxLabWorkspaceLockDirectory(stateDirectory);
   await mkdir(lockDirectory, { recursive: true, mode: 0o700 });
   const token = randomBytes(16).toString("hex");
-  const path = resolve(lockDirectory, `${kind}-${process.pid}-${token}.lease`);
-  await writeFile(path, `${process.pid}\n`, { flag: "wx", mode: 0o600 });
+  const path = resolve(
+    lockDirectory,
+    `${kind}-v2-${processIdentity.pid}-${processIdentity.nonce}-${token}.lease`,
+  );
+  await writeFile(path, `${processIdentity.pid} ${processIdentity.nonce}\n`, {
+    flag: "wx",
+    mode: 0o600,
+  });
   let released = false;
   return {
     path,
@@ -101,9 +134,11 @@ async function createLease(
 
 export async function acquireBoxLabActivityLease(
   stateDirectory: string,
+  processIdentity: BoxLabProcessIdentity = hostBoxLabProcessIdentity,
 ): Promise<BoxLabWorkspaceLease> {
+  await processIdentity.prepare();
   const lockDirectory = boxLabWorkspaceLockDirectory(stateDirectory);
-  const resettingBeforeRegistration = (await liveLeases(lockDirectory))
+  const resettingBeforeRegistration = (await liveLeases(lockDirectory, processIdentity))
     .some((lease) => lease.kind === "reset");
   if (resettingBeforeRegistration) {
     throw new BoxLabWorkspaceLockError(
@@ -112,10 +147,10 @@ export async function acquireBoxLabActivityLease(
     );
   }
 
-  const lease = await createLease(stateDirectory, "activity");
+  const lease = await createLease(stateDirectory, "activity", processIdentity);
   let resettingAfterRegistration: boolean;
   try {
-    resettingAfterRegistration = (await liveLeases(lockDirectory))
+    resettingAfterRegistration = (await liveLeases(lockDirectory, processIdentity))
       .some((candidate) => candidate.kind === "reset");
   } catch (error) {
     await lease.release();
@@ -133,12 +168,14 @@ export async function acquireBoxLabActivityLease(
 
 export async function acquireBoxLabResetLease(
   stateDirectory: string,
+  processIdentity: BoxLabProcessIdentity = hostBoxLabProcessIdentity,
 ): Promise<BoxLabWorkspaceLease> {
+  await processIdentity.prepare();
   const lockDirectory = boxLabWorkspaceLockDirectory(stateDirectory);
-  const lease = await createLease(stateDirectory, "reset");
+  const lease = await createLease(stateDirectory, "reset", processIdentity);
   let leases: LiveLease[];
   try {
-    leases = await liveLeases(lockDirectory);
+    leases = await liveLeases(lockDirectory, processIdentity);
   } catch (error) {
     await lease.release();
     throw error;

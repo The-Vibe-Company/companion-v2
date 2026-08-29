@@ -316,17 +316,27 @@ export class BoxLabService {
       operation.attemptCount += 1;
       await this.#persist();
       let retryDelayMs: number | undefined;
+      let operationFailed = false;
+      let operationFailure: unknown;
       try {
         await this.#driver.delete(resourceName);
         state.boxes = state.boxes.filter((candidate) => candidate.id !== boxId);
         operation.status = "completed";
         operation.completedAt = new Date().toISOString();
       } catch (error) {
+        operationFailed = true;
+        operationFailure = error;
         operation.status = "blocked";
         retryDelayMs = deletionRetryDelay(operation.attemptCount - windowStartAttemptCount);
-        throw error;
-      } finally {
+      }
+      let persistenceFailed = false;
+      let persistenceFailure: unknown;
+      try {
         await this.#persist();
+      } catch (error) {
+        persistenceFailed = true;
+        persistenceFailure = error;
+      } finally {
         if (retryDelayMs === undefined) {
           this.#activeDeletionOperations.delete(operation.id);
         } else {
@@ -339,6 +349,8 @@ export class BoxLabService {
           );
         }
       }
+      if (operationFailed) throw operationFailure;
+      if (persistenceFailed) throw persistenceFailure;
     });
   }
 

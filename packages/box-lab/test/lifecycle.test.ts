@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
@@ -102,6 +102,7 @@ class FailingSnapshotDriver extends BlockingLifecycleDriver {
 
 class TransientDeleteDriver extends BlockingLifecycleDriver {
   remainingFailures: number;
+  onFailure: (() => void) | undefined;
 
   constructor(failures: number) {
     super();
@@ -112,6 +113,7 @@ class TransientDeleteDriver extends BlockingLifecycleDriver {
     if (this.remainingFailures > 0) {
       this.remainingFailures -= 1;
       this.deleteCalls += 1;
+      this.onFailure?.();
       throw new ProcessExecutionError("process_failed", "Contained deletion failed transiently");
     }
     await super.delete(resourceName);
@@ -454,6 +456,48 @@ describe("Box Lab lifecycle serialization", () => {
 });
 
 describe("Box Lab deletion recovery", () => {
+  it("keeps a retry scheduled when persisting a driver failure initially fails", async () => {
+    const directory = await mkdtemp(resolve(tmpdir(), "companion-box-lab-lifecycle-"));
+    const driver = new TransientDeleteDriver(1);
+    const store = new OneShotFailingStateStore(directory, WORKSPACE_SCOPE);
+    const service = new BoxLabService({
+      driver,
+      store,
+      resourcePrefix: RESOURCE_PREFIX,
+      diagnosticsDirectory: resolve(directory, "diagnostics"),
+    });
+    const persistenceFailure = new Error("Final deletion persistence failed");
+    try {
+      await service.initialize();
+      const boxId = await runningBox(service);
+      driver.onFailure = () => {
+        store.nextFailure = persistenceFailure;
+      };
+
+      const requested = await service.requestDeletion(boxId);
+      const completed = await completedDeletion(service, requested);
+      await service.close();
+
+      expect(completed).toMatchObject({ status: "completed", attemptCount: 2 });
+      expect(driver.deleteCalls).toBe(2);
+      expect(driver.resources.size).toBe(0);
+      const diagnostic: unknown = JSON.parse(await readFile(
+        resolve(directory, "diagnostics", "latest.json"),
+        "utf8",
+      ));
+      expect(diagnostic).toMatchObject({
+        operation: "delete_box",
+        cause: {
+          code: "process_failed",
+          message: "Contained deletion failed transiently",
+        },
+      });
+    } finally {
+      await service.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("releases a failed initial persistence so the same deletion can be requested again", async () => {
     const directory = await mkdtemp(resolve(tmpdir(), "companion-box-lab-lifecycle-"));
     const driver = new BlockingLifecycleDriver();
