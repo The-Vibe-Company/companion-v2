@@ -532,14 +532,18 @@ struct ChatView: View {
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(CompanionIOSTheme.textPrimary)
                         .lineLimit(1)
+                        .layoutPriority(1)
+                    CompanionStatusDot(runtime: currentCompanion.runtime)
                 }
                 .padding(.leading, 10)
-                .padding(.trailing, 14)
+                .padding(.trailing, 10)
                 .frame(minHeight: 36)
                 .background(CompanionIOSTheme.card, in: Capsule())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Details for \(currentCompanion.name)")
+            .accessibilityLabel(
+                "\(currentCompanion.name), \(currentStatus.accessibilityLabel). Opens details."
+            )
             .accessibilityIdentifier("chat.details")
         }
 
@@ -558,6 +562,10 @@ struct ChatView: View {
                 )
             }
         }
+    }
+
+    private var currentStatus: CompanionStatusIndicatorState {
+        CompanionStatusIndicatorState(runtime: currentCompanion.runtime)
     }
 
     private func chatHeaderButton(

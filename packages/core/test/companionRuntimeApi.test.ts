@@ -221,6 +221,18 @@ describe("Runtime v2 Companion projection", () => {
     expect(projected.runtime.state).toBe("stopped");
   });
 
+  it("normalizes an archived Box to the stopped client projection", () => {
+    const projected = projectCompanionRuntimeV2(companion, runtime({
+      box_id: "bx_23456789",
+      box_state: "archived",
+      pi_state: "stopped",
+    }));
+
+    expect(projected.runtime.state).toBe("stopped");
+    expect(projected.runtime.daemon_state).toBe("stopped");
+    expect(projected.runtime.replying).toBe(false);
+  });
+
   it("projects the latest lifecycle failure without exposing its detail to Viewers", () => {
     const failed = operation({
       kind: "restart_pi",

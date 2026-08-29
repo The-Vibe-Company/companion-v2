@@ -304,6 +304,7 @@ test("chat uses the approved two-sided bubbles and morphing composer", () => {
     chat.indexOf("private var loadEarlierButton"),
   );
   assert.doesNotMatch(chatHeader, /CompanionStatusBadge|systemName: "ellipsis"/);
+  assert.match(chatHeader, /CompanionStatusDot\(runtime: currentCompanion\.runtime\)/);
   assert.doesNotMatch(decisionCard, /pending \? accent\.opacity/);
   assert.doesNotMatch(glassDemoBubbles, /accent:|tint:/);
   assert.doesNotMatch(queuedDemoBubbles, /accent:|tint:/);
@@ -311,6 +312,46 @@ test("chat uses the approved two-sided bubbles and morphing composer", () => {
     glassChatDemo,
     /\.navigationBarTitleDisplayMode\(\.inline\)\s*\.tint\(visualTheme\.accent\)/,
   );
+});
+
+test("Companion status dots share the runtime projection and reduced-motion contract", () => {
+  const status = read(
+    "apps/ios/CompanionKit/Sources/CompanionKit/CompanionStatusIndicator.swift",
+  );
+  const dot = read("apps/ios/Companion/DesignSystem/CompanionStatusDot.swift");
+  const roster = read("apps/ios/Companion/Screens/CompanionListView.swift");
+  const chat = read("apps/ios/Companion/Screens/ChatView.swift");
+  const models = read("apps/ios/CompanionKit/Sources/CompanionKit/Models.swift");
+  const coreProjection = read("packages/core/src/companionRuntimeApi.ts");
+  const coreTests = read("packages/core/test/companionRuntimeApi.test.ts");
+  const kitTests = read(
+    "apps/ios/CompanionKit/Tests/CompanionKitTests/CompanionKitTests.swift",
+  );
+  const readme = read("apps/ios/README.md");
+  const design = read("docs/ios-design.md");
+
+  assert.match(models, /let runtime: Runtime/);
+  assert.match(models, /case daemonState = "daemon_state"/);
+  assert.match(models, /replying = try container\.decodeIfPresent\(Bool\.self/);
+  assert.match(coreProjection, /replying: row\.is_replying === true/);
+  assert.match(coreProjection, /if \(row\.box_state === "archived"\) return "stopped"/);
+  assert.match(coreTests, /normalizes an archived Box to the stopped client projection/);
+  assert.match(status, /case inactive[\s\S]*case live[\s\S]*case replying[\s\S]*case error/);
+  assert.match(status, /case \.running:[\s\S]{0,80}?self = \.live/);
+  assert.match(status, /case \.error:[\s\S]{0,80}?self = \.error/);
+  assert.match(status, /self == \.replying && !reduceMotion/);
+  assert.match(dot, /@Environment\(\\\.accessibilityReduceMotion\)/);
+  assert.match(dot, /TimelineView\(\.animation/);
+  assert.match(dot, /frame\(width: 8, height: 8\)/);
+  assert.match(dot, /case \.live: return CompanionIOSTheme\.toggleGreen/);
+  assert.match(dot, /case \.inactive: return CompanionIOSTheme\.textSecondary/);
+  assert.match(dot, /case \.error: return CompanionIOSTheme\.danger/);
+  assert.match(roster, /CompanionStatusDot\(runtime: companion\.runtime\)/);
+  assert.match(chat, /CompanionStatusDot\(runtime: currentCompanion\.runtime\)/);
+  assert.match(kitTests, /mapsEveryRuntimeStateToTheCompactStatusIndicator/);
+  assert.match(kitTests, /replyingIndicatorFallsBackToAStaticLiveDotForReducedMotion/);
+  assert.match(readme, /add no fetch or polling loop/);
+  assert.match(design, /archived Boxes are normalized to stopped by the API/);
 });
 
 test("computer view is immersive and keeps the desktop handoff ephemeral", () => {

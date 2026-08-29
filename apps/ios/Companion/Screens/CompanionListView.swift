@@ -974,8 +974,18 @@ private enum CompanionRosterDemoFixtures {
         guard showsThreeCompanions else { return [companion(access: access)] }
         return [
             companion(access: access),
-            companion(id: secondCompanionID, name: "Nova", access: access),
-            companion(id: thirdCompanionID, name: "Orbit", access: access),
+            companion(
+                id: secondCompanionID,
+                name: "Nova",
+                access: access,
+                replying: true
+            ),
+            companion(
+                id: thirdCompanionID,
+                name: "Orbit",
+                access: access,
+                runtimeState: .error
+            ),
         ]
     }
 
@@ -985,7 +995,9 @@ private enum CompanionRosterDemoFixtures {
         access: CompanionAccess,
         pinned: Bool = false,
         hidden: Bool = false,
-        unread: Bool = false
+        unread: Bool = false,
+        runtimeState: CompanionRuntimeState = .running,
+        replying: Bool = false
     ) -> CompanionSummary {
         decode(#"""
         {
@@ -1000,7 +1012,7 @@ private enum CompanionRosterDemoFixtures {
           "hidden":\#(hidden),
           "unread":\#(unread),
           "last_message":{"preview":"Release notes are ready.","role":"assistant","created_at":"2026-08-25T08:00:00.000Z"},
-          "runtime":{"state":"running","replying":false,"last_error":null,"provider_ids":["anthropic"],"latest_operation":null}
+          "runtime":{"state":"\#(runtimeState.rawValue)","replying":\#(replying),"last_error":null,"provider_ids":["anthropic"],"latest_operation":null}
         }
         """#)
     }
@@ -1017,7 +1029,7 @@ private enum CompanionRosterDemoFixtures {
     }
 
     static func chatServices(access: CompanionAccess) -> ChatServices {
-        let currentCompanion = companion(access: access)
+        let currentCompanion = companion(access: access, replying: true)
         let baseThread: CompanionThread = decode(#"""
         {
           "companion_id":"c96ab360-00f3-4497-a51a-51442db8add1",
@@ -1162,9 +1174,12 @@ private struct CompanionRow: View {
                         .foregroundStyle(CompanionIOSTheme.textPrimary)
                         .lineLimit(1)
                     Spacer(minLength: 8)
-                    Text(timeLabel)
-                        .font(.system(size: 13))
-                        .foregroundStyle(CompanionIOSTheme.textSecondary)
+                    HStack(spacing: 5) {
+                        CompanionStatusDot(runtime: companion.runtime)
+                        Text(timeLabel)
+                            .font(.system(size: 13))
+                            .foregroundStyle(CompanionIOSTheme.textSecondary)
+                    }
                 }
 
                 HStack(alignment: .center, spacing: 8) {
@@ -1185,7 +1200,9 @@ private struct CompanionRow: View {
         .padding(.vertical, 6)
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(companion.name), \(statusLabel), \(preview)\(companion.unread ? ", unread" : "")")
+        .accessibilityLabel(
+            "\(companion.name), \(status.accessibilityLabel), \(preview)\(companion.unread ? ", unread" : "")"
+        )
     }
 
     private var preview: String {
@@ -1197,30 +1214,8 @@ private struct CompanionRow: View {
         return companion.lastMessage?.preview ?? companion.persona ?? "No messages yet"
     }
 
-    private var statusLabel: String {
-        if companion.runtime.replying { return "replying" }
-        switch companion.runtime.state {
-        case .running: return "online"
-        case .provisioning: return "starting"
-        case .stopping: return "stopping"
-        case .error: return "needs attention"
-        case .notCreated, .stopped: return "asleep"
-        case .unknown: return "unknown status"
-        }
-    }
-
-    private var statusColor: Color {
-        if companion.runtime.replying { return visualTheme.accent }
-        switch companion.runtime.state {
-        case .running: return .companionSuccess
-        case .provisioning, .stopping: return .companionWarning
-        case .error: return .companionDanger
-        case .notCreated, .stopped, .unknown: return .companionMuted
-        }
-    }
-
-    private var visualTheme: CompanionVisualTheme {
-        CompanionVisualTheme(icon: companion.icon)
+    private var status: CompanionStatusIndicatorState {
+        CompanionStatusIndicatorState(runtime: companion.runtime)
     }
 
     private var timeLabel: String {
