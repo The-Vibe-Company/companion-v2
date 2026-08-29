@@ -78,11 +78,13 @@ final class MacProjectionTests: XCTestCase {
     }
 
     private func makeCompanions() throws -> [CompanionSummary] {
-        let payload = #"[
+        let payload = #"""
+        [
           {"id":"pinned","name":"Pinned","persona":"Operations","model_id":"model","selected_skill_ids":[],"selected_mcp_account_ids":[],"icon":{"shape":1,"mouth":1,"accessory":1,"color":2},"access":"owner","pinned":true,"hidden":false,"unread":false,"last_message":{"preview":"Ready","role":"assistant","created_at":"2026-08-26T12:00:00Z"},"runtime":{"state":"running","daemon_state":"running","replying":false,"provider_ids":["provider"]}},
           {"id":"visible","name":"Visible","persona":"Review queue","model_id":"model","selected_skill_ids":[],"selected_mcp_account_ids":[],"icon":{"shape":1,"mouth":1,"accessory":1,"color":2},"access":"editor","pinned":false,"hidden":false,"unread":true,"last_message":{"preview":"No new messages","role":"user","created_at":"2026-08-26T12:00:00Z"},"runtime":{"state":"stopped","daemon_state":"stopped","replying":false,"provider_ids":["provider"]}},
           {"id":"hidden","name":"Hidden","persona":"Maintenance","model_id":"model","selected_skill_ids":[],"selected_mcp_account_ids":[],"icon":{"shape":1,"mouth":1,"accessory":1,"color":2},"access":"owner","pinned":false,"hidden":true,"unread":false,"last_message":{"preview":"Deploy complete","role":"assistant","created_at":"2026-08-26T12:00:00Z"},"runtime":{"state":"running","daemon_state":"running","replying":false,"provider_ids":["provider"]}}
-        ]"#
+        ]
+        """#
         return try JSONDecoder().decode([CompanionSummary].self, from: Data(payload.utf8))
     }
 }
