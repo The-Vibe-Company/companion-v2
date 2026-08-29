@@ -188,7 +188,7 @@ jobs:
         run: swift test --package-path apps/ios/CompanionKit
 
       - name: Build native app
-        if: needs.scope.outputs.ios == 'true'
+        if: needs.scope.outputs.ios == 'true' && needs.scope.outputs.macos != 'true'
         run: >-
           xcodebuild build
           -workspace apps/ios/Companion.xcworkspace
@@ -199,7 +199,7 @@ jobs:
           CODE_SIGNING_ALLOWED=NO
 
       - name: Test native Mac app
-        if: needs.scope.outputs.macos == 'true'
+        if: needs.scope.outputs.macos == 'true' && needs.scope.outputs.ios != 'true'
         run: >-
           xcodebuild test
           -workspace apps/ios/Companion.xcworkspace
@@ -208,6 +208,34 @@ jobs:
           -destination "platform=macOS"
           -derivedDataPath "$RUNNER_TEMP/companion-mac-derived-data"
           CODE_SIGNING_ALLOWED=NO
+
+      # CompanionKit changes exercise both native clients. Keep them inside the same capped Apple
+      # job, but use independent derived-data trees so the two platform builds can run concurrently.
+      - name: Validate native apps
+        if: needs.scope.outputs.ios == 'true' && needs.scope.outputs.macos == 'true'
+        shell: bash
+        run: |
+          xcodebuild build \
+            -workspace apps/ios/Companion.xcworkspace \
+            -scheme Companion \
+            -configuration Debug \
+            -destination "generic/platform=iOS Simulator" \
+            -derivedDataPath "$RUNNER_TEMP/companion-derived-data" \
+            CODE_SIGNING_ALLOWED=NO &
+          ios_pid=$!
+
+          xcodebuild test \
+            -workspace apps/ios/Companion.xcworkspace \
+            -scheme CompanionMac \
+            -configuration Debug \
+            -destination "platform=macOS" \
+            -derivedDataPath "$RUNNER_TEMP/companion-mac-derived-data" \
+            CODE_SIGNING_ALLOWED=NO &
+          macos_pid=$!
+
+          if wait "$ios_pid"; then ios_status=0; else ios_status=$?; fi
+          if wait "$macos_pid"; then macos_status=0; else macos_status=$?; fi
+          if (( ios_status != 0 || macos_status != 0 )); then exit 1; fi
 
   quality:
     name: Quality Node 22
