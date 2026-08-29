@@ -5,6 +5,9 @@ struct RootView: View {
     private static let notificationInstallationID = NotificationInstallationIdentifier.current(
         bundleIdentifier: Bundle.main.bundleIdentifier ?? "dev.companion.mobile.dev"
     )
+    private static let snapshotCache: SQLiteCompanionSnapshotCache? = try? SQLiteCompanionSnapshotCache(
+        url: CompanionCacheLocation.applicationSupport()
+    )
 
     @Environment(NotificationCoordinator.self) private var notifications
     @AppStorage(CompanionPreferenceKeys.notifications) private var notificationsEnabled = true
@@ -12,7 +15,8 @@ struct RootView: View {
     @State private var sessionStore = SessionStore(
         apiURL: AppConfig.apiURL,
         storage: KeychainSessionStorage(service: "\(AppConfig.callbackScheme).session"),
-        notificationInstallationID: RootView.notificationInstallationID
+        notificationInstallationID: RootView.notificationInstallationID,
+        cache: RootView.snapshotCache
     )
     @State private var externalOAuth = ExternalOAuthCoordinator()
     @State private var notificationTransitions = NotificationTransitionQueue()
@@ -174,7 +178,10 @@ struct RootView: View {
             case .onboarding(let session):
                 OnboardingRequiredView(email: session.user.email)
             case .active(let session):
-                CompanionListView(session: session)
+                CompanionListView(
+                    session: session,
+                    initialSnapshot: sessionStore.initialRosterSnapshot
+                )
             }
         }
     }

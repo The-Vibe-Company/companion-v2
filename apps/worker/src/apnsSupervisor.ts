@@ -42,6 +42,7 @@ export interface ApnsSender {
 export interface CompanionApnsPayload {
   aps: {
     alert: { title: string; body: string };
+    "content-available": 1;
     sound: "default";
     "thread-id": string;
     "mutable-content"?: 1;
@@ -117,6 +118,7 @@ export function apnsPayload(claim: CompanionNotificationDeliveryClaim): Companio
   const payload: CompanionApnsPayload = {
     aps: {
       alert: { title: claim.title, body: plainTextNotificationBody(claim.body) },
+      "content-available": 1,
       sound: "default",
       "thread-id": claim.companionId,
     },

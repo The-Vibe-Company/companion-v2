@@ -172,8 +172,13 @@ public actor APIClient {
     private var companionPluginOAuthState: String?
     private var companionPluginOAuthCallbackURL: URL?
 
-    public init(baseURL: URL, session: URLSession? = nil) {
+    public init(
+        baseURL: URL,
+        session: URLSession? = nil,
+        initialAuthority: Session? = nil
+    ) {
         self.baseURL = baseURL
+        authority = initialAuthority
         self.redirectDelegateFactory = .production
         if let session {
             self.session = session
@@ -380,6 +385,15 @@ public actor APIClient {
 
     public func listCompanions() async throws -> [CompanionSummary] {
         try await decode(CompanionListEnvelope.self, path: "/v1/companions").companions
+    }
+
+    public func synchronizeCompanionRoster(
+        cursor: String?
+    ) async throws -> CompanionSyncMeasurement<CompanionRosterDelta> {
+        try await decodeMeasured(
+            CompanionRosterDelta.self,
+            path: Self.cursorPath("/v1/companions/sync", cursor: cursor)
+        )
     }
 
     public func listCompanionSections() async throws -> [CompanionSection] {
@@ -1023,6 +1037,17 @@ public actor APIClient {
         return try await decode(ThreadEnvelope.self, path: "/v1/companions/\(id)/thread").thread
     }
 
+    public func synchronizeCompanionThread(
+        companionID: String,
+        cursor: String?
+    ) async throws -> CompanionSyncMeasurement<CompanionThreadDelta> {
+        let id = Self.encodedPathComponent(companionID)
+        return try await decodeMeasured(
+            CompanionThreadDelta.self,
+            path: Self.cursorPath("/v1/companions/\(id)/thread-delta", cursor: cursor)
+        )
+    }
+
     public func decideCompanionDecision(
         companionID: String,
         requestID: String,
@@ -1152,6 +1177,27 @@ public actor APIClient {
         }
     }
 
+    private func decodeMeasured<T: Decodable & Sendable>(
+        _ type: T.Type,
+        path: String
+    ) async throws -> CompanionSyncMeasurement<T> {
+        let startedAt = ContinuousClock.now
+        let (data, _) = try await perform(path: path, method: "GET", body: nil)
+        do {
+            return CompanionSyncMeasurement(
+                value: try decoder.decode(type, from: data),
+                receivedBytes: data.count,
+                networkMilliseconds: companionMilliseconds(from: startedAt.duration(to: .now))
+            )
+        } catch {
+            throw APIError(
+                status: 500,
+                code: "invalid_response",
+                message: "The server returned an unreadable response."
+            )
+        }
+    }
+
     private func providerOAuthHeaders() throws -> [String: String] {
         guard let providerOAuthCookie else {
             throw APIError(
@@ -1242,6 +1288,10 @@ public actor APIClient {
                 let redirectDelegate = redirectDelegateFactory.make(followRedirects: followRedirects)
                 (data, response) = try await session.data(for: request, delegate: redirectDelegate)
             }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()
         } catch {
             throw APIError(status: 0, code: "network_error", message: "The server could not be reached.")
         }
@@ -1534,6 +1584,14 @@ public actor APIClient {
     private static func encodedPathComponent(_ value: String) -> String {
         let unreserved = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
         return value.addingPercentEncoding(withAllowedCharacters: unreserved) ?? value
+    }
+
+    private static func cursorPath(_ path: String, cursor: String?) -> String {
+        guard let cursor else { return path }
+        var components = URLComponents()
+        components.path = path
+        components.queryItems = [URLQueryItem(name: "cursor", value: cursor)]
+        return components.string ?? path
     }
 
     private static func encodedQueryComponent(_ value: String) -> String {

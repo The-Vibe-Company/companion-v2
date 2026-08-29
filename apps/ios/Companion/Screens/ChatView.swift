@@ -138,6 +138,7 @@ struct ChatView: View {
     let onOpenPlugins: () -> Void
     let onReadingPositionChange: (CompanionChatReadingPosition) -> Void
     private let readingPosition: CompanionChatReadingPosition?
+    private let renderedFromCache: Bool
     private let services: ChatServices?
     @State private var currentCompanion: CompanionSummary
     @State private var threadProjection = CompanionThreadProjection()
@@ -157,6 +158,7 @@ struct ChatView: View {
     @State private var unseenTracker = CompanionTranscriptUnseenTracker()
     @State private var unseenCount = 0
     @State private var loadingEarlier = false
+    @State private var historyIsPartial: Bool
     @State private var scrollContentRevision = 0
     @State private var pendingReadingPosition: CompanionChatReadingPosition?
     @State private var lastReportedReadingPosition: CompanionChatReadingPosition?
@@ -175,6 +177,7 @@ struct ChatView: View {
 
     init(
         companion: CompanionSummary,
+        initialSnapshot: CompanionThreadSnapshot? = nil,
         readingPosition: CompanionChatReadingPosition? = nil,
         onOpenPlugins: @escaping () -> Void = {},
         services: ChatServices? = nil,
@@ -183,17 +186,26 @@ struct ChatView: View {
     ) {
         self.companion = companion
         self.readingPosition = readingPosition
+        renderedFromCache = initialSnapshot != nil
         self.onOpenPlugins = onOpenPlugins
         self.services = services
         self.onReadingPositionChange = onReadingPositionChange
         self.onDetails = onDetails
+        let cachedThread = initialSnapshot?.thread
         _currentCompanion = State(initialValue: companion)
+        _threadProjection = State(initialValue: CompanionThreadProjection(thread: cachedThread))
+        _loading = State(initialValue: cachedThread == nil)
+        _historyIsPartial = State(initialValue: initialSnapshot?.isPartial == true)
+        _transcriptWindow = State(initialValue: CompanionTranscriptWindow(
+            totalCount: cachedThread?.entries.filter { !$0.queued }.count ?? 0
+        ))
         _pendingReadingPosition = State(initialValue: readingPosition)
         _scrollCoordinator = State(
             initialValue: CompanionScrollCoordinator(
                 followState: readingPosition?.isFollowingTail == false
                     ? .userReading
-                    : .followingTail
+                    : .followingTail,
+                lastActualTailSnapshot: cachedThread.map { CompanionScrollTailSnapshot(thread: $0) }
             )
         )
     }
@@ -215,7 +227,7 @@ struct ChatView: View {
                     ScrollView {
                         VStack(spacing: 16) {
                             LazyVStack(spacing: 0) {
-                                if loading && thread == nil {
+                                if loading && threadProjection.needsBlockingLoader {
                                     ProgressView("Loading conversation…")
                                         .padding(.top, 80)
                                 } else if let error, thread == nil {
@@ -224,7 +236,7 @@ struct ChatView: View {
                                             && thread?.interruptedTurn == nil {
                                     emptyState
                                 } else {
-                                    if transcriptWindow.hasEarlierEntries {
+                                    if transcriptWindow.hasEarlierEntries || historyIsPartial {
                                         loadEarlierButton
                                     }
 
@@ -531,10 +543,20 @@ struct ChatView: View {
             }
         }
         .task(id: companion.id) {
-            await reload()
+            await reload(silently: thread != nil)
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(4))
                 if !Task.isCancelled { await reload(silently: true, isPolling: true) }
+            }
+        }
+        .onAppear { recordTranscriptFrameIfAvailable() }
+        .onChange(of: thread != nil) { _, available in
+            if available { recordTranscriptFrameIfAvailable() }
+        }
+        .task(id: companion.id) {
+            for await _ in sessionStore.companionInvalidations(companionID: companion.id) {
+                guard !Task.isCancelled else { continue }
+                await reload(silently: true, isPolling: true)
             }
         }
         .task(id: decisionCatalogTaskID) {
@@ -969,9 +991,24 @@ struct ChatView: View {
             if let services {
                 next = try await services.thread(companion.id)
             } else {
-                next = try await sessionStore.thread(companionID: companion.id)
+                let measurement = try await sessionStore.synchronizeThread(
+                    companionID: companion.id,
+                    markRead: true
+                )
+                next = measurement.value.thread
+                CompanionPerformanceTelemetry.syncCompleted(
+                    surface: "thread",
+                    bytes: measurement.receivedBytes,
+                    milliseconds: measurement.networkMilliseconds
+                )
             }
             guard refreshGate.accepts(generation) else { return }
+            let nextHistoryIsPartial = services == nil
+                ? sessionStore.cachedThread(companionID: companion.id)?.isPartial == true
+                : false
+            if historyIsPartial != nextHistoryIsPartial {
+                historyIsPartial = nextHistoryIsPartial
+            }
             reconcileInputFocus(from: previousThread, to: next)
             let readerWasNearBottom = isNearBottom
 
@@ -1009,6 +1046,7 @@ struct ChatView: View {
             )
             let transcriptChanged = previousThread == nil || !pollDiff.isIdentical
             let visibleTranscriptChanged = previousThread == nil
+                || markdownByEventID.isEmpty
                 || pollDiff.hasVisibleChanges
                 || transcriptWindow != nextWindow
             let renderedMarkdown = visibleTranscriptChanged
@@ -1109,6 +1147,8 @@ struct ChatView: View {
                     cancelAssistantTailReveal()
                 }
             }
+        } catch is CancellationError {
+            return
         } catch {
             guard refreshGate.accepts(generation) else { return }
             self.error = "The conversation could not be refreshed."
@@ -1118,7 +1158,7 @@ struct ChatView: View {
         if let services {
             refreshed = try? await services.listCompanions().first(where: { $0.id == companion.id })
         } else {
-            refreshed = try? await sessionStore.listCompanions().first(where: { $0.id == companion.id })
+            refreshed = nil
         }
         if let refreshed {
             guard refreshGate.accepts(generation) else { return }
@@ -1354,6 +1394,15 @@ struct ChatView: View {
         threadProjection.thread
     }
 
+    private func recordTranscriptFrameIfAvailable() {
+        guard let thread else { return }
+        CompanionPerformanceTelemetry.transcriptWillRender(
+            companionID: companion.id,
+            entryCount: thread.entries.count,
+            cached: renderedFromCache
+        )
+    }
+
     private var decisionCatalogTaskID: String? {
         entries.contains { entry in
             guard let decision = entry.decision else { return false }
@@ -1401,15 +1450,43 @@ struct ChatView: View {
     }
 
     private func loadEarlier() async {
-        guard !loadingEarlier, transcriptWindow.hasEarlierEntries,
+        guard !loadingEarlier,
+              transcriptWindow.hasEarlierEntries || historyIsPartial,
               let firstEventID = entries.first?.eventID,
-              let snapshot = thread else { return }
+              var snapshot = thread else { return }
 
         var expandedWindow = transcriptWindow
-        guard expandedWindow.loadEarlier() else { return }
         cancelAssistantTailReveal()
         loadingEarlier = true
         refreshGate.invalidate()
+        if !expandedWindow.hasEarlierEntries, historyIsPartial {
+            do {
+                let completeThread: CompanionThread
+                if let services {
+                    completeThread = try await services.thread(companion.id)
+                } else {
+                    completeThread = try await sessionStore.thread(companionID: companion.id)
+                }
+                guard thread?.entries == snapshot.entries else {
+                    loadingEarlier = false
+                    return
+                }
+                snapshot = completeThread
+                historyIsPartial = false
+                threadProjection.update(completeThread)
+                expandedWindow.revealCompleteHistory(
+                    totalCount: transcriptEntries(in: completeThread).count
+                )
+            } catch {
+                self.error = error.localizedDescription
+                loadingEarlier = false
+                return
+            }
+        }
+        guard expandedWindow.loadEarlier() else {
+            loadingEarlier = false
+            return
+        }
         let snapshotEntries = transcriptEntries(in: snapshot)
         let visibleRange = expandedWindow.visibleRange(for: snapshotEntries.count)
         let renderedMarkdown = await renderedMarkdown(
@@ -1573,6 +1650,7 @@ struct ChatView: View {
         inputFocusCoordinator.reset()
         loading = true
         loadingEarlier = false
+        historyIsPartial = false
         scrollCoordinator.reset(
             followState: pendingReadingPosition?.isFollowingTail == false
                 ? .userReading
@@ -1587,7 +1665,7 @@ struct ChatView: View {
     }
 
     private func send(content: String, attachments: [CompanionMessageAttachment]) {
-        guard !content.isEmpty, !sending else { return }
+        guard thread?.canSend == true, !content.isEmpty, !sending else { return }
         let message = PendingMessage(
             id: UUID(),
             content: content,

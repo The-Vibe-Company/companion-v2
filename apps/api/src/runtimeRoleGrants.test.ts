@@ -159,6 +159,7 @@ describe("Skills Hub runtime-role grants", () => {
       "companion_api_read_runtime(uuid,uuid)",
       "companion_api_list_runtime(uuid)",
       "companion_api_read_thread(uuid,uuid)",
+      "companion_api_sync_thread(uuid,uuid)",
       "companion_api_enqueue_operation(uuid,uuid,uuid,public.companion_operation_kind,public.companion_client_surface)",
       "companion_api_retry_turn(uuid,uuid,uuid,uuid,public.companion_client_surface)",
       "companion_api_cancel_turn(uuid,uuid,uuid)",

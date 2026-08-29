@@ -62,7 +62,9 @@ slash-separated, multi-assigned, and may exist without skills.
 8. When Companions are enabled, create a named Companion with one connected provider/model, selected
    Skills, and selected member MCP accounts; send work and leave while it continues.
 9. Return to a durable thread that truthfully shows queued, active, input-needed, completed, failed,
-   interrupted, or cancelled work, and explicitly Retry or Cancel an ambiguous attempt.
+   interrupted, or cancelled work, and explicitly Retry or Cancel an ambiguous attempt. Native iOS
+   restores the latest roster and bounded transcript tail locally so returning to the product stays
+   immediate and readable offline while fresh authority and projection deltas arrive.
 10. See and create routine schedules, open each run's private transcript from its compact chat
     marker, and distinguish terminal relay, notify, no-output, and error outcomes on web and native
     Apple clients. Time references render in the member's stored timezone.

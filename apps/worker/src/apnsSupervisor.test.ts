@@ -83,6 +83,7 @@ describe("APNs delivery", () => {
     expect(payload).toEqual({
       aps: {
         alert: { title: "Luna replied", body: "The release is ready." },
+        "content-available": 1,
         sound: "default",
         "thread-id": claim.companionId,
         "mutable-content": 1,
@@ -106,6 +107,7 @@ describe("APNs delivery", () => {
         event,
       });
       expect(payload.aps["mutable-content"]).toBeUndefined();
+      expect(payload.aps["content-available"]).toBe(1);
       expect(payload.companion_name).toBeUndefined();
       expect(payload.companion_icon).toBeUndefined();
     },

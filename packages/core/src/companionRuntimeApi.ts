@@ -646,24 +646,38 @@ export function collapseRoutineNotifyEntries(
   return collapsed;
 }
 
-export async function readCompanionThreadV2(input: {
+async function readCompanionThreadProjection(input: {
   actor: ActorContext;
   orgId: string;
   companionId: string;
   database: Db;
+  markRead: boolean;
 }): Promise<CompanionThread> {
-  const result = await input.database.execute(sql`
-    select thread_read.*,
-      public.companion_api_routine_hidden_relay_turns(
+  const result = input.markRead
+    ? await input.database.execute(sql`
+      select thread_read.*,
+        public.companion_api_routine_hidden_relay_turns(
+          ${input.orgId}::uuid, ${input.companionId}::uuid
+        ) as hidden_routine_relay_turn_ids,
+        public.companion_api_routine_notify_returns(
+          ${input.orgId}::uuid, ${input.companionId}::uuid
+        ) as routine_notify_returns
+      from public.companion_api_read_thread(
         ${input.orgId}::uuid, ${input.companionId}::uuid
-      ) as hidden_routine_relay_turn_ids,
-      public.companion_api_routine_notify_returns(
+      ) thread_read
+    `)
+    : await input.database.execute(sql`
+      select thread_read.*,
+        public.companion_api_routine_hidden_relay_turns(
+          ${input.orgId}::uuid, ${input.companionId}::uuid
+        ) as hidden_routine_relay_turn_ids,
+        public.companion_api_routine_notify_returns(
+          ${input.orgId}::uuid, ${input.companionId}::uuid
+        ) as routine_notify_returns
+      from public.companion_api_sync_thread(
         ${input.orgId}::uuid, ${input.companionId}::uuid
-      ) as routine_notify_returns
-    from public.companion_api_read_thread(
-      ${input.orgId}::uuid, ${input.companionId}::uuid
-    ) thread_read
-  `);
+      ) thread_read
+    `);
   const [row] = rows<ThreadReadRow>(result);
   if (!row) throw new Error("companion thread projection is unavailable");
   const hiddenRoutineRelayTurnIds = new Set(z.array(z.string().uuid()).parse(
@@ -694,6 +708,26 @@ export async function readCompanionThreadV2(input: {
       ? null
       : integer(row.previous_last_read_ordinal),
   };
+}
+
+/** Opening the thread advances this member's unread watermark. */
+export async function readCompanionThreadV2(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  database: Db;
+}): Promise<CompanionThread> {
+  return readCompanionThreadProjection({ ...input, markRead: true });
+}
+
+/** Background delta reads preserve unread state while returning the identical projection shape. */
+export async function syncCompanionThreadV2(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  database: Db;
+}): Promise<CompanionThread> {
+  return readCompanionThreadProjection({ ...input, markRead: false });
 }
 
 export async function enqueueCompanionTurnV2(input: {

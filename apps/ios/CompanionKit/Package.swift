@@ -13,7 +13,10 @@ let package = Package(
         .library(name: "CompanionNotificationAvatar", targets: ["CompanionNotificationAvatar"]),
     ],
     targets: [
-        .target(name: "CompanionKit"),
+        .target(
+            name: "CompanionKit",
+            linkerSettings: [.linkedLibrary("sqlite3")]
+        ),
         .target(name: "CompanionNotificationAvatar", dependencies: ["CompanionKit"]),
         .testTarget(name: "CompanionKitTests", dependencies: ["CompanionKit"]),
         .testTarget(

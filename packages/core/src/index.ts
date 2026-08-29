@@ -12,6 +12,7 @@ export * from "./deploymentRelease";
 export * from "./companions";
 export * from "./companionSections";
 export * from "./companionRuntimeApi";
+export * from "./companionSync";
 export * from "./companionRoutines";
 export * from "./companionRoutineFireId";
 export * from "./companionRoutinesApi";

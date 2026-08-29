@@ -68,6 +68,7 @@ const coreMocks = {
   fireCompanionTrigger: vi.fn<typeof coreModule.fireCompanionTrigger>(),
   failCompanionTriggerFire: vi.fn<typeof coreModule.failCompanionTriggerFire>(),
   readCompanionThreadV2: vi.fn<typeof coreModule.readCompanionThreadV2>(),
+  syncCompanionThreadV2: vi.fn<typeof coreModule.syncCompanionThreadV2>(),
   retryCompanionTurnV2: vi.fn<typeof coreModule.retryCompanionTurnV2>(),
   setCompanionProviderV2: vi.fn<typeof coreModule.setCompanionProviderV2>(),
   setCompanionWorkspaceShareV2: vi.fn<typeof coreModule.setCompanionWorkspaceShareV2>(),
@@ -219,6 +220,30 @@ const projectedThread = {
   transcription_available: true,
 };
 
+function threadEntry(
+  eventId: string,
+  ordinal: number,
+  content: string,
+) {
+  return {
+    event_id: eventId,
+    ordinal,
+    role: "user" as const,
+    content,
+    reasoning: null,
+    author_id: owner.id,
+    author_name: owner.name,
+    tool: null,
+    decision: null,
+    routine: null,
+    trigger: null,
+    turn_id: null,
+    queued: false,
+    attachments: [],
+    created_at: NOW,
+  };
+}
+
 const operatorTurnError = {
   code: "provider_account_revoked",
   message: "Provider account acct_internal_42 rejected credential generation 17.",
@@ -320,6 +345,7 @@ describe("Companions Runtime v2 API", () => {
     coreMocks.assignCompanionSection.mockResolvedValue({ ...companion, section_id: SECTION_ID });
     coreMocks.getCompanionV2.mockResolvedValue(companion);
     coreMocks.readCompanionThreadV2.mockResolvedValue(thread);
+    coreMocks.syncCompanionThreadV2.mockResolvedValue(thread);
     coreMocks.createCompanionV2.mockResolvedValue(companion);
     coreMocks.duplicateCompanionV2.mockResolvedValue(companion);
     coreMocks.updateCompanionV2.mockResolvedValue(companion);
@@ -665,6 +691,80 @@ describe("Companions Runtime v2 API", () => {
     }
   });
 
+  it("serves the complete roster initially and an empty replay-safe delta when unchanged", async () => {
+    const app = appWithRoutes();
+    const initialResponse = await app.request("/v1/companions/sync");
+    // SAFETY: The route returns the object shape asserted by the local response fixture below.
+    const initial = await initialResponse.json() as {
+      cursor: string;
+      changed_companions: typeof companion[];
+      deleted_companion_ids: string[];
+      changed_sections: typeof section[];
+      deleted_section_ids: string[];
+    };
+
+    expect(initialResponse.status).toBe(200);
+    expect(initial.changed_companions).toEqual([companion]);
+    expect(initial.changed_sections).toEqual([section]);
+    expect(initial.deleted_companion_ids).toEqual([]);
+    expect(initial.deleted_section_ids).toEqual([]);
+    expect(initialResponse.headers.get("cache-control")).toBe("private, no-store");
+
+    const unchangedResponse = await app.request(
+      `/v1/companions/sync?cursor=${encodeURIComponent(initial.cursor)}`,
+    );
+    expect(unchangedResponse.status).toBe(200);
+    await expect(unchangedResponse.json()).resolves.toEqual({
+      cursor: initial.cursor,
+      changed_companions: [],
+      deleted_companion_ids: [],
+      companion_ids: [COMPANION_ID],
+      changed_sections: [],
+      deleted_section_ids: [],
+      section_ids: [SECTION_ID],
+    });
+  });
+
+  it("returns roster upserts and section/Companion tombstones from the cursor snapshot", async () => {
+    const app = appWithRoutes();
+    // SAFETY: The route's successful JSON response always carries the opaque cursor string.
+    const initial = await (await app.request("/v1/companions/sync")).json() as { cursor: string };
+    const updatedCompanion = {
+      ...companion,
+      name: "Research updated",
+      updated_at: "2026-08-29T00:01:00.000Z",
+    };
+    coreMocks.listCompanionsV2.mockResolvedValue([updatedCompanion]);
+    coreMocks.listCompanionSections.mockResolvedValue([]);
+
+    const response = await app.request(
+      `/v1/companions/sync?cursor=${encodeURIComponent(initial.cursor)}`,
+    );
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      changed_companions: [updatedCompanion],
+      deleted_companion_ids: [],
+      companion_ids: [COMPANION_ID],
+      changed_sections: [],
+      deleted_section_ids: [SECTION_ID],
+      section_ids: [],
+    });
+  });
+
+  it("rejects malformed and oversized roster cursors before reading projections", async () => {
+    const app = appWithRoutes();
+    const malformed = await app.request("/v1/companions/sync?cursor=not-a-cursor");
+    expect(malformed.status).toBe(400);
+    expect(coreMocks.listCompanionsV2).not.toHaveBeenCalled();
+    expect(coreMocks.listCompanionSections).not.toHaveBeenCalled();
+
+    const oversized = await app.request(
+      `/v1/companions/sync?cursor=${"a".repeat(256 * 1024 + 1)}`,
+    );
+    expect(oversized.status).toBe(400);
+    expect(coreMocks.listCompanionsV2).not.toHaveBeenCalled();
+  });
+
   it("serves the API-projected routine notify group without flattening hidden history", async () => {
     const runId = "88888888-8888-4888-8888-888888888888";
     const groupedThread: CompanionThread = {
@@ -762,6 +862,61 @@ describe("Companions Runtime v2 API", () => {
     });
   });
 
+  it("serves thread deltas with current metadata and deterministic entry ordering", async () => {
+    const app = appWithRoutes();
+    const firstThread: CompanionThread = {
+      ...thread,
+      entries: [
+        threadEntry("event:one", 2, "one"),
+        threadEntry("event:two", 4, "two"),
+      ],
+    };
+    coreMocks.syncCompanionThreadV2.mockResolvedValue(firstThread);
+    const initialResponse = await app.request(`/v1/companions/${COMPANION_ID}/thread-delta`);
+    // SAFETY: This test controls the route fixture and reads its successful JSON response shape.
+    const initial = await initialResponse.json() as {
+      cursor: string;
+      reset_entries: boolean;
+      changed_entries: unknown[];
+      thread: object;
+    };
+    expect(initialResponse.status).toBe(200);
+    expect(initial.reset_entries).toBe(true);
+    expect(initial.changed_entries).toHaveLength(2);
+    expect(initial.thread).not.toHaveProperty("entries");
+
+    const nextThread: CompanionThread = {
+      ...firstThread,
+      last_message_at: "2026-08-29T00:02:00.000Z",
+      entries: [
+        threadEntry("event:one", 2, "one updated"),
+        threadEntry("event:three", 1, "three"),
+      ],
+    };
+    coreMocks.syncCompanionThreadV2.mockResolvedValue(nextThread);
+    const nextResponse = await app.request(
+      `/v1/companions/${COMPANION_ID}/thread-delta?cursor=${encodeURIComponent(initial.cursor)}`,
+    );
+    expect(nextResponse.status).toBe(200);
+    // SAFETY: This test controls the route fixture and reads its successful JSON response shape.
+    const next = await nextResponse.json() as {
+      reset_entries: boolean;
+      changed_entries: Array<{ event_id: string; ordinal: number }>;
+      deleted_event_ids: string[];
+      thread: CompanionThread;
+    };
+    expect(next.reset_entries).toBe(false);
+    expect(next.changed_entries.map((entry) => entry.event_id)).toEqual(["event:three", "event:one"]);
+    expect(next.deleted_event_ids).toEqual(["event:two"]);
+    expect(next.thread).not.toHaveProperty("entries");
+    expect(next.thread.last_message_at).toBe("2026-08-29T00:02:00.000Z");
+
+    const replayResponse = await app.request(
+      `/v1/companions/${COMPANION_ID}/thread-delta?cursor=${encodeURIComponent(initial.cursor)}`,
+    );
+    await expect(replayResponse.json()).resolves.toEqual(next);
+  });
+
   it("replaces Viewer turn and attempt diagnostics with one generic non-actionable error", async () => {
     const viewerThread = threadWithInterruptedTurn("viewer");
     coreMocks.readCompanionThreadV2.mockResolvedValue(viewerThread);
@@ -815,6 +970,15 @@ describe("Companions Runtime v2 API", () => {
     );
     expect(response.status).toBe(404);
     expect(coreMocks.readCompanionThreadV2).not.toHaveBeenCalled();
+    expect(coreMocks.syncCompanionThreadV2).not.toHaveBeenCalled();
+  });
+
+  it("rejects a malformed thread delta cursor before contacting the thread projection", async () => {
+    const response = await appWithRoutes().request(
+      `/v1/companions/${COMPANION_ID}/thread-delta?cursor=not-a-cursor`,
+    );
+    expect(response.status).toBe(400);
+    expect(coreMocks.syncCompanionThreadV2).not.toHaveBeenCalled();
   });
 
   it("persists a send through the v2 enqueue boundary and returns only a bounded 202 ACK", async () => {

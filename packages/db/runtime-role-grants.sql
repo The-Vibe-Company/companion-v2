@@ -481,6 +481,11 @@ BEGIN
         'public.companion_api_answer_decision(uuid,uuid,text,text,text)'::regprocedure,
         'public.companion_api_bump_skill_revision(uuid,uuid)'::regprocedure
       ];
+      IF pg_catalog.to_regprocedure('public.companion_api_sync_thread(uuid,uuid)') IS NOT NULL THEN
+        companion_api_functions := companion_api_functions || ARRAY[
+          'public.companion_api_sync_thread(uuid,uuid)'::regprocedure
+        ];
+      END IF;
       IF pg_catalog.to_regprocedure('public.companion_api_list_sections(uuid)') IS NOT NULL THEN
         companion_api_functions := companion_api_functions || ARRAY[
           'public.companion_api_list_sections(uuid)'::regprocedure,
