@@ -1293,18 +1293,13 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
-    func testRosterAndChatUseOneDetailsRoute() throws {
+    func testRosterTapOpensChatAndHeaderPillOpensDetails() throws {
         let app = launchCompanionRoster(access: "owner")
         let row = app.descendants(matching: .any)[
             "companion.row.c96ab360-00f3-4497-a51a-51442db8add1"
         ]
 
         row.tap()
-        XCTAssertTrue(app.staticTexts["Bot details"].waitForExistence(timeout: 5))
-        XCTAssertFalse(app.buttons["chat.details"].exists)
-        XCTAssertTrue(app.buttons["companion.details.open-chat"].waitForExistence(timeout: 2))
-
-        app.buttons["companion.details.open-chat"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["chat.transcript"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["chat.details"].exists)
 
@@ -1380,15 +1375,17 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
-    func testRosterContextMenuHasNoHiddenDetailsShortcut() throws {
+    func testRosterContextMenuOpensSettings() throws {
         let app = launchCompanionRoster(access: "editor")
         let row = app.descendants(matching: .any)[
             "companion.row.c96ab360-00f3-4497-a51a-51442db8add1"
         ]
         openRosterContextMenu(for: row, in: app)
 
-        XCTAssertFalse(app.buttons["Settings"].exists)
-        XCTAssertFalse(app.buttons["Details"].exists)
+        let settings = app.buttons["Settings"]
+        XCTAssertTrue(settings.exists)
+        settings.tap()
+        XCTAssertTrue(app.staticTexts["Bot details"].waitForExistence(timeout: 5))
     }
 
     @MainActor
@@ -1700,12 +1697,12 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
-    func testEditorRosterOffersDetailsWithoutDelete() throws {
+    func testEditorRosterOffersSettingsWithoutDelete() throws {
         assertRosterContextMenu(access: "editor", canDelete: false)
     }
 
     @MainActor
-    func testViewerRosterOffersDetailsWithoutDelete() throws {
+    func testViewerRosterOffersSettingsWithoutDelete() throws {
         assertRosterContextMenu(access: "viewer", canDelete: false)
     }
 
@@ -1765,6 +1762,7 @@ final class CompanionUITests: XCTestCase {
         let row = app.descendants(matching: .any)["companion.row.c96ab360-00f3-4497-a51a-51442db8add1"]
         openRosterContextMenu(for: row, in: app)
 
+        XCTAssertTrue(app.buttons["Settings"].exists)
         XCTAssertEqual(app.buttons["Delete Companion"].exists, canDelete)
     }
 
@@ -1790,9 +1788,6 @@ final class CompanionUITests: XCTestCase {
     @MainActor
     private func openChatFromRoster(_ row: XCUIElement, in app: XCUIApplication) {
         row.tap()
-        let openChat = app.buttons["companion.details.open-chat"]
-        XCTAssertTrue(openChat.waitForExistence(timeout: 5))
-        openChat.tap()
         XCTAssertTrue(app.descendants(matching: .any)["chat.transcript"].waitForExistence(timeout: 5))
     }
 

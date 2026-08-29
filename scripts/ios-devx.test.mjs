@@ -174,7 +174,7 @@ test("home and simplified chat header keep the approved 44-point actions", () =>
   assert.doesNotMatch(chatHeader, /CompanionStatusBadge/);
   assert.doesNotMatch(chatHeader, /background\(CompanionIOSTheme\.card, in: Circle\(\)\)/);
   assert.match(design, /bare search and \+ icons/);
-  assert.match(design, /chat header is a centered CharacterMark-and-name pill/);
+  assert.match(design, /chat header remains a centered CharacterMark-and-name pill/);
 });
 
 test("home renders three-companion sections as list rows and keeps move errors human-readable", () => {
@@ -908,12 +908,12 @@ test("iOS navigation has one Companion details route and no legacy resource page
 
   assert.match(roster, /case chat\(String\)\s*\n\s*case details\(String\)/);
   assert.doesNotMatch(roster, /case settings\(|case identity\(/);
-  assert.match(roster, /NavigationLink\(value: CompanionRoute\.details\(companion\.id\)\)/);
+  assert.match(roster, /NavigationLink\(value: CompanionRoute\.chat\(companion\.id\)\)/);
   const contextMenu = roster.slice(
     roster.indexOf("private func companionContextMenu"),
     roster.indexOf("private func reload", roster.indexOf("private func companionContextMenu")),
   );
-  assert.doesNotMatch(contextMenu, /Button\("(?:Details|Settings)"/);
+  assert.match(contextMenu, /Button\("Settings", systemImage: "gearshape"\)[\s\S]*?path = \[\.details\(companion\.id\)\]/);
   assert.match(chat, /accessibilityIdentifier\("chat\.details"\)/);
   const chatHeader = chat.slice(
     chat.indexOf("private var headerToolbar"),
