@@ -145,6 +145,72 @@ private final class BackgroundRefreshURLProtocol: URLProtocol, @unchecked Sendab
     override func stopLoading() {}
 }
 
+private final class SuspendedRosterSyncURLProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var releaseResponse = DispatchSemaphore(value: 0)
+    private static let lock = NSLock()
+    private nonisolated(unsafe) static var rosterRequestDidStart = false
+
+    static func reset() {
+        lock.lock()
+        rosterRequestDidStart = false
+        lock.unlock()
+        releaseResponse = DispatchSemaphore(value: 0)
+    }
+
+    static var hasStartedRosterRequest: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return rosterRequestDidStart
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let path = request.url?.path ?? ""
+        let statusCode: Int
+        let headers: [String: String]?
+        let payload: String
+        switch path {
+        case "/v1/companions/sync":
+            Self.lock.lock()
+            Self.rosterRequestDidStart = true
+            Self.lock.unlock()
+            _ = Self.releaseResponse.wait(timeout: .now() + 5)
+            statusCode = 200
+            headers = ["Content-Type": "application/json"]
+            payload = #"{"cursor":"old-fresh","changed_companions":[],"deleted_companion_ids":[],"companion_ids":[],"changed_sections":[],"deleted_section_ids":[],"section_ids":[]}"#
+        case "/v1/auth/logout":
+            statusCode = 200
+            headers = nil
+            payload = "{}"
+        case "/v1/auth/login":
+            statusCode = 200
+            headers = ["Set-Cookie": "better-auth.session_token=new-session; Path=/; HttpOnly"]
+            payload = "{}"
+        case "/v1/auth/whoami":
+            statusCode = 200
+            headers = ["Content-Type": "application/json"]
+            payload = #"{"userId":"user-2","email":"new@example.com","name":"New","timezone":"UTC","org":{"org_id":"org-2","name":"New workspace"},"onboarded":true,"needsOnboarding":false}"#
+        default:
+            statusCode = 404
+            headers = ["Content-Type": "application/json"]
+            payload = #"{"code":"not_found","message":"Unexpected test request"}"#
+        }
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: statusCode,
+            httpVersion: nil,
+            headerFields: headers
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(payload.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
 @Test
 func sqliteCachePersistsRestoresScopesAndBoundedThreadTail() throws {
     let directory = FileManager.default.temporaryDirectory
@@ -237,6 +303,87 @@ func offlineSessionRestoresRosterWithoutWaitingForNetwork() throws {
     #expect(restored.companions == snapshot.companions)
     #expect(restored.sections == snapshot.sections)
     #expect((store.initialCacheRestoreMilliseconds ?? .infinity) < 50)
+}
+
+@Test @MainActor
+func sessionScopeChangesFenceInFlightRosterRefreshes() async throws {
+    let fixture = try cacheFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    do {
+        SuspendedRosterSyncURLProtocol.reset()
+        let session = testSession()
+        let cached = CompanionRosterSnapshot(
+            cursor: "old-cursor",
+            companions: [try companionSummary()],
+            sections: []
+        )
+        try fixture.cache.saveRoster(cached, scope: "org-1:user-1")
+        let store = SessionStore(
+            apiURL: URL(string: "https://example.test")!,
+            storage: FixedSessionStorage(data: try JSONEncoder().encode(session)),
+            cache: fixture.cache,
+            apiClient: suspendedRosterClient(initialAuthority: session)
+        )
+        let synchronization = Task { try await store.synchronizeRoster() }
+        for _ in 0..<500 where !SuspendedRosterSyncURLProtocol.hasStartedRosterRequest {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        #expect(SuspendedRosterSyncURLProtocol.hasStartedRosterRequest)
+
+        await store.signOut()
+        SuspendedRosterSyncURLProtocol.releaseResponse.signal()
+        do {
+            _ = try await synchronization.value
+            Issue.record("The signed-out session roster refresh should be cancelled")
+        } catch is CancellationError {}
+
+        #expect(store.phase == .signedOut)
+        #expect(store.initialRosterSnapshot == nil)
+        #expect(try fixture.cache.roster(scope: "org-1:user-1") == nil)
+    }
+
+    do {
+        SuspendedRosterSyncURLProtocol.reset()
+        let oldSession = testSession()
+        let oldRoster = CompanionRosterSnapshot(
+            cursor: "old-cursor",
+            companions: [try companionSummary(name: "Old account")],
+            sections: []
+        )
+        let newRoster = CompanionRosterSnapshot(
+            cursor: "new-cursor",
+            companions: [try companionSummary(
+                id: "33333333-3333-4333-8333-333333333333",
+                name: "New account"
+            )],
+            sections: []
+        )
+        try fixture.cache.saveRoster(oldRoster, scope: "org-1:user-1")
+        try fixture.cache.saveRoster(newRoster, scope: "org-2:user-2")
+        let store = SessionStore(
+            apiURL: URL(string: "https://example.test")!,
+            storage: FixedSessionStorage(data: try JSONEncoder().encode(oldSession)),
+            cache: fixture.cache,
+            apiClient: suspendedRosterClient(initialAuthority: oldSession)
+        )
+        let synchronization = Task { try await store.synchronizeRoster() }
+        for _ in 0..<500 where !SuspendedRosterSyncURLProtocol.hasStartedRosterRequest {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        #expect(SuspendedRosterSyncURLProtocol.hasStartedRosterRequest)
+
+        try await store.signIn(email: "new@example.com", password: "password")
+        #expect(store.initialRosterSnapshot?.cursor == "new-cursor")
+        SuspendedRosterSyncURLProtocol.releaseResponse.signal()
+        do {
+            _ = try await synchronization.value
+            Issue.record("The old account roster refresh should be cancelled")
+        } catch is CancellationError {}
+
+        #expect(store.currentSession?.user.id == "user-2")
+        #expect(store.initialRosterSnapshot?.cursor == "new-cursor")
+        #expect(store.initialRosterSnapshot?.companions.map(\.name) == ["New account"])
+    }
 }
 
 @Test @MainActor
@@ -341,7 +488,28 @@ func companionInvalidationReachesTheVisibleThreadConsumer() async throws {
 }
 
 @Test @MainActor
-func aVisibleDifferentCompanionDoesNotSuppressBackgroundCacheRefresh() async throws {
+func preRegistrationInvalidationIsCoalescedAndReplayedToTheMatchingConsumer() async throws {
+    let session = testSession()
+    let store = SessionStore(
+        apiURL: URL(string: "https://offline.invalid")!,
+        storage: FixedSessionStorage(data: try JSONEncoder().encode(session))
+    )
+    let companionID = "companion-y"
+
+    store.invalidateCompanion(companionID: companionID)
+    store.invalidateCompanion(companionID: companionID)
+    let stream = store.companionInvalidations(companionID: companionID)
+    let received = Task { @MainActor in
+        for await _ in stream { return true }
+        return false
+    }
+
+    #expect(await received.value)
+    #expect(store.hasVisibleInvalidationConsumer(companionID: companionID))
+}
+
+@Test @MainActor
+func explicitBackgroundRefreshUpdatesRosterAndThreadCache() async throws {
     BackgroundRefreshURLProtocol.reset()
     let fixture = try cacheFixture()
     defer { try? FileManager.default.removeItem(at: fixture.directory) }
@@ -359,22 +527,11 @@ func aVisibleDifferentCompanionDoesNotSuppressBackgroundCacheRefresh() async thr
         cache: fixture.cache,
         apiClient: client
     )
-    let visibleX = store.companionInvalidations(companionID: "companion-x")
-    defer { withExtendedLifetime(visibleX) {} }
-
     let companionY = "33333333-3333-4333-8333-333333333333"
-    store.invalidateCompanion(companionID: companionY)
-    for _ in 0..<500 where BackgroundRefreshURLProtocol.requestsStarted < 2 {
-        try? await Task.sleep(nanoseconds: 10_000_000)
-    }
-    #expect(BackgroundRefreshURLProtocol.requestsStarted >= 2)
-    for _ in 0..<500 {
-        let rosterIsFresh = store.initialRosterSnapshot?.companions.map(\.id) == [companionY]
-        let threadIsFresh = store.cachedThread(companionID: companionY)?.cursor == "fresh-thread"
-        if rosterIsFresh && threadIsFresh { break }
-        try? await Task.sleep(nanoseconds: 10_000_000)
-    }
+    let result = await store.refreshInvalidatedCompanion(companionID: companionY)
 
+    #expect(result == .newData)
+    #expect(BackgroundRefreshURLProtocol.requestsStarted >= 2)
     #expect(store.initialRosterSnapshot?.companions.map(\.id) == [companionY])
     #expect(store.cachedThread(companionID: companionY)?.cursor == "fresh-thread")
 }
@@ -388,6 +545,16 @@ private func cacheFixture() throws -> (directory: URL, cache: SQLiteCompanionSna
         try SQLiteCompanionSnapshotCache(
             url: directory.appending(path: "cache.sqlite3", directoryHint: .notDirectory)
         )
+    )
+}
+
+private func suspendedRosterClient(initialAuthority: Session) -> APIClient {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [SuspendedRosterSyncURLProtocol.self]
+    return APIClient(
+        baseURL: URL(string: "https://example.test")!,
+        session: URLSession(configuration: configuration),
+        initialAuthority: initialAuthority
     )
 }
 

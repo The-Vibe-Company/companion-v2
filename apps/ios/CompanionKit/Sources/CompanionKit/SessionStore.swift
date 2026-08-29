@@ -82,6 +82,7 @@ public final class SessionStore {
     private var invalidationContinuations: [
         String: [UUID: AsyncStream<Void>.Continuation]
     ] = [:]
+    private var pendingCompanionInvalidations: Set<String> = []
     private var rosterSyncGeneration = 0
     private var threadSyncGenerations: [String: Int] = [:]
     private var companionsMarkedRead: Set<String> = []
@@ -266,6 +267,9 @@ public final class SessionStore {
         let streamID = UUID()
         return AsyncStream { continuation in
             invalidationContinuations[companionID, default: [:]][streamID] = continuation
+            if pendingCompanionInvalidations.remove(companionID) != nil {
+                continuation.yield()
+            }
             continuation.onTermination = { @Sendable [weak self] _ in
                 Task { @MainActor in
                     guard let self,
@@ -282,14 +286,13 @@ public final class SessionStore {
     public func invalidateCompanion(companionID: String) {
         if hasVisibleInvalidationConsumer(companionID: companionID),
            let matchingContinuations = invalidationContinuations[companionID] {
+            pendingCompanionInvalidations.remove(companionID)
             for continuation in matchingContinuations.values {
                 continuation.yield()
             }
             return
         }
-        Task { [weak self] in
-            _ = await self?.refreshInvalidatedCompanion(companionID: companionID)
-        }
+        pendingCompanionInvalidations.insert(companionID)
     }
 
     func hasVisibleInvalidationConsumer(companionID: String) -> Bool {
@@ -395,13 +398,19 @@ public final class SessionStore {
             )
             snapshot = try response.value.applying(to: nil)
         }
-        guard generation == rosterSyncGeneration else { throw CancellationError() }
+        guard generation == rosterSyncGeneration,
+              currentSession.flatMap(Self.cacheScope(for:)) == scope else {
+            throw CancellationError()
+        }
         if let cache {
             try await Task.detached(priority: .utility) {
                 try cache.saveRoster(snapshot, scope: scope)
             }.value
         }
-        guard generation == rosterSyncGeneration else { throw CancellationError() }
+        guard generation == rosterSyncGeneration,
+              currentSession.flatMap(Self.cacheScope(for:)) == scope else {
+            throw CancellationError()
+        }
         initialRosterSnapshot = snapshot
         return CompanionSyncMeasurement(
             value: snapshot,
@@ -1110,10 +1119,19 @@ public final class SessionStore {
     private func publish(_ session: Session) {
         let nextPhase = session.needsOnboarding ? Phase.onboarding(session) : .active(session)
         guard phase != nextPhase else { return }
-        if currentSession.flatMap(Self.cacheScope(for:)) != Self.cacheScope(for: session) {
+        let previousScope = currentSession.flatMap(Self.cacheScope(for:))
+        let nextScope = Self.cacheScope(for: session)
+        if previousScope != nextScope {
+            rosterSyncGeneration &+= 1
+            if let nextScope {
+                initialRosterSnapshot = (try? cache?.roster(scope: nextScope)) ?? nil
+            } else {
+                initialRosterSnapshot = nil
+            }
             liveThreadSnapshots.removeAll()
             threadSyncGenerations.removeAll()
             companionsMarkedRead.removeAll()
+            pendingCompanionInvalidations.removeAll()
         }
         phase = nextPhase
     }
@@ -1164,6 +1182,7 @@ public final class SessionStore {
 
     private func clearLocalSession() async {
         let scope = currentSession.flatMap { Self.cacheScope(for: $0) }
+        rosterSyncGeneration &+= 1
         try? storage.remove()
         if let scope { try? cache?.remove(scope: scope) }
         persistedSession = nil
@@ -1171,6 +1190,7 @@ public final class SessionStore {
         liveThreadSnapshots.removeAll()
         threadSyncGenerations.removeAll()
         companionsMarkedRead.removeAll()
+        pendingCompanionInvalidations.removeAll()
         await client.setAuthority(nil)
         bootstrapError = nil
         phase = .signedOut
