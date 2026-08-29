@@ -368,8 +368,11 @@ func aVisibleDifferentCompanionDoesNotSuppressBackgroundCacheRefresh() async thr
         try? await Task.sleep(nanoseconds: 10_000_000)
     }
     #expect(BackgroundRefreshURLProtocol.requestsStarted >= 2)
-    for _ in 0..<100 where store.cachedThread(companionID: companionY) == nil {
-        await Task.yield()
+    for _ in 0..<500 {
+        let rosterIsFresh = store.initialRosterSnapshot?.companions.map(\.id) == [companionY]
+        let threadIsFresh = store.cachedThread(companionID: companionY)?.cursor == "fresh-thread"
+        if rosterIsFresh && threadIsFresh { break }
+        try? await Task.sleep(nanoseconds: 10_000_000)
     }
 
     #expect(store.initialRosterSnapshot?.companions.map(\.id) == [companionY])
