@@ -15,6 +15,11 @@ public final class CompanionNotificationInvalidationQueue {
         let companionID: String
     }
 
+    private struct ActiveBackgroundRefresh {
+        let id: UUID
+        let task: Task<CompanionCacheRefreshResult, Never>
+    }
+
     private var installedScopeID: String?
     private var handler: Handler?
     private var backgroundRefreshHandler: BackgroundRefreshHandler?
@@ -22,6 +27,7 @@ public final class CompanionNotificationInvalidationQueue {
     private var pendingRequestSet: Set<Request> = []
     private var pendingBackgroundRequests: [Request] = []
     private var pendingBackgroundRequestSet: Set<Request> = []
+    private var activeBackgroundRefreshes: [Request: ActiveBackgroundRefresh] = [:]
 
     public init() {}
 
@@ -31,22 +37,24 @@ public final class CompanionNotificationInvalidationQueue {
         _ handler: @escaping Handler,
         backgroundRefresh: BackgroundRefreshHandler? = nil
     ) {
+        cancelActiveBackgroundRefreshes()
         installedScopeID = scopeID
         self.handler = handler
         backgroundRefreshHandler = backgroundRefresh
         let pending = pendingRequests.filter { $0.scopeID == scopeID }
         let pendingBackground = pendingBackgroundRequests.filter { $0.scopeID == scopeID }
-        pendingRequests.removeAll(keepingCapacity: true)
-        pendingRequestSet.removeAll(keepingCapacity: true)
-        pendingBackgroundRequests.removeAll(keepingCapacity: true)
-        pendingBackgroundRequestSet.removeAll(keepingCapacity: true)
+        pendingRequests.removeAll { $0.scopeID == scopeID }
+        pendingBackgroundRequests.removeAll { $0.scopeID == scopeID }
+        for request in pending { pendingRequestSet.remove(request) }
+        for request in pendingBackground { pendingBackgroundRequestSet.remove(request) }
         for request in pending {
             handler(request.companionID)
         }
-        if let backgroundRefresh {
+        if backgroundRefresh != nil {
             for request in pendingBackground {
-                Task { @MainActor in
-                    _ = await backgroundRefresh(request.companionID)
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    _ = await self.runBackgroundRefresh(request)
                 }
             }
         } else {
@@ -58,6 +66,7 @@ public final class CompanionNotificationInvalidationQueue {
 
     /// Removes closures that capture a signed-out session and discards its pending work.
     public func uninstall() {
+        cancelActiveBackgroundRefreshes()
         installedScopeID = nil
         handler = nil
         backgroundRefreshHandler = nil
@@ -74,7 +83,6 @@ public final class CompanionNotificationInvalidationQueue {
             handler(companionID)
             return
         }
-        guard installedScopeID == nil else { return }
         enqueue(Request(scopeID: scopeID, companionID: companionID))
     }
 
@@ -86,10 +94,13 @@ public final class CompanionNotificationInvalidationQueue {
         // active session. Give that launch race a short, bounded window without holding a callback
         // indefinitely when the owner is signed out.
         for attempt in 0..<20 {
-            if installedScopeID == scopeID, let backgroundRefreshHandler {
-                return await backgroundRefreshHandler(companionID)
+            if installedScopeID == scopeID, backgroundRefreshHandler != nil {
+                return await runBackgroundRefresh(request)
             }
-            if installedScopeID != nil { return .failed }
+            if installedScopeID != nil {
+                enqueueBackground(request)
+                return .failed
+            }
             guard attempt < 19 else { break }
             do {
                 try await Task.sleep(for: .milliseconds(50))
@@ -111,5 +122,32 @@ public final class CompanionNotificationInvalidationQueue {
     private func enqueueBackground(_ request: Request) {
         guard pendingBackgroundRequestSet.insert(request).inserted else { return }
         pendingBackgroundRequests.append(request)
+    }
+
+    private func runBackgroundRefresh(
+        _ request: Request
+    ) async -> CompanionCacheRefreshResult {
+        if let active = activeBackgroundRefreshes[request] {
+            return await active.task.value
+        }
+        guard installedScopeID == request.scopeID,
+              let backgroundRefreshHandler else { return .failed }
+        let id = UUID()
+        let task = Task { @MainActor in
+            await backgroundRefreshHandler(request.companionID)
+        }
+        activeBackgroundRefreshes[request] = ActiveBackgroundRefresh(id: id, task: task)
+        let result = await task.value
+        if activeBackgroundRefreshes[request]?.id == id {
+            activeBackgroundRefreshes[request] = nil
+        }
+        return result
+    }
+
+    private func cancelActiveBackgroundRefreshes() {
+        for active in activeBackgroundRefreshes.values {
+            active.task.cancel()
+        }
+        activeBackgroundRefreshes.removeAll(keepingCapacity: true)
     }
 }

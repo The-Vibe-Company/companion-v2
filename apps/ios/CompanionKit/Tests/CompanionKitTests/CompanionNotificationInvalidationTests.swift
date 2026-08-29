@@ -91,6 +91,33 @@ struct CompanionNotificationInvalidationTests {
         #expect(recorder.companionIDs == ["companion-background"])
     }
 
+    @Test("overlapping background deliveries share one delta refresh")
+    func overlappingBackgroundDeliveriesCoalesce() async {
+        let queue = CompanionNotificationInvalidationQueue()
+        let refresh = SuspendedBackgroundRefresh()
+        queue.install(
+            scopeID: "org-a",
+            { _ in },
+            backgroundRefresh: { companionID in
+                await refresh.run(companionID: companionID)
+            }
+        )
+
+        let first = Task {
+            await queue.refresh(scopeID: "org-a", companionID: "companion-background")
+        }
+        for _ in 0..<20 where refresh.startCount == 0 { await Task.yield() }
+        let second = Task {
+            await queue.refresh(scopeID: "org-a", companionID: "companion-background")
+        }
+        for _ in 0..<20 { await Task.yield() }
+
+        #expect(refresh.startCount == 1)
+        refresh.release()
+        #expect(await first.value == .newData)
+        #expect(await second.value == .newData)
+    }
+
     @Test("a timed-out cold delivery reports failure but retains its invalidation")
     func timedOutBackgroundDeliveryRetainsInvalidation() async {
         let queue = CompanionNotificationInvalidationQueue()
@@ -131,8 +158,8 @@ struct CompanionNotificationInvalidationTests {
         #expect(await refresh.value == .noData)
     }
 
-    @Test("a notification for another organization cannot reach the active session")
-    func mismatchedOrganizationFailsClosed() async {
+    @Test("a notification waits until its matching organization is active")
+    func mismatchedOrganizationFailsClosedUntilMatchingSessionBinds() async {
         let queue = CompanionNotificationInvalidationQueue()
         let recorder = InvalidationRecorder()
         queue.install(
@@ -146,6 +173,20 @@ struct CompanionNotificationInvalidationTests {
 
         #expect(recorder.companionIDs.isEmpty)
         #expect(result == .failed)
+
+        queue.install(
+            scopeID: "org-b",
+            { recorder.record("foreground:\($0)") },
+            backgroundRefresh: { companionID in
+                recorder.record("background:\(companionID)")
+                return .noData
+            }
+        )
+        for _ in 0..<20 where recorder.companionIDs.count < 2 { await Task.yield() }
+        #expect(recorder.companionIDs == [
+            "foreground:companion-b",
+            "background:companion-b"
+        ])
     }
 
     @Test("uninstall drops closures and pending work from the signed-out session")
@@ -203,5 +244,25 @@ private final class StreamInvalidationRecorder {
 
     func record() {
         count += 1
+    }
+}
+
+@MainActor
+private final class SuspendedBackgroundRefresh {
+    private(set) var startCount = 0
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+
+    func run(companionID: String) async -> CompanionCacheRefreshResult {
+        startCount += 1
+        await withCheckedContinuation { continuation in
+            continuations.append(continuation)
+        }
+        return .newData
+    }
+
+    func release() {
+        let waiting = continuations
+        continuations.removeAll()
+        for continuation in waiting { continuation.resume() }
     }
 }

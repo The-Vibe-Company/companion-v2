@@ -851,6 +851,11 @@ test("notification entry narrowly invalidates the local-first transcript before 
     chat,
     /companionInvalidations\([\s\S]*?replayPending: false[\s\S]*?await reload\(silently: thread != nil\)[\s\S]*?for await _ in invalidations/,
   );
+  assert.match(
+    chat,
+    /Task\.sleep\(for: \.seconds\(4\)\)[\s\S]*?reloadInBackground\(\)[\s\S]*?for await _ in invalidations[\s\S]*?reloadInBackground\(\)/,
+  );
+  assert.match(chat, /beginBackgroundRefresh\(\)[\s\S]*?completeBackgroundRefresh\(\)/);
   assert.match(invalidations, /pendingRequestSet\.insert\(request\)\.inserted/);
   assert.match(invalidations, /pendingBackgroundRequestSet\.insert\(request\)\.inserted/);
   assert.match(read("apps/ios/Companion/Support/Info.plist"), /remote-notification/);
