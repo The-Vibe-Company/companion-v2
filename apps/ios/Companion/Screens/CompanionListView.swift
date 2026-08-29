@@ -1168,18 +1168,17 @@ private struct CompanionRow: View {
             CharacterMark(name: companion.name, icon: companion.icon, size: 36)
 
             VStack(alignment: .leading, spacing: 3) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                HStack(alignment: .center, spacing: 0) {
                     Text(companion.name)
                         .font(.system(size: 17, weight: .semibold))
                         .foregroundStyle(CompanionIOSTheme.textPrimary)
                         .lineLimit(1)
                     Spacer(minLength: 8)
-                    HStack(spacing: 5) {
-                        CompanionStatusDot(runtime: companion.runtime)
-                        Text(timeLabel)
-                            .font(.system(size: 13))
-                            .foregroundStyle(CompanionIOSTheme.textSecondary)
-                    }
+                    Text(timeLabel)
+                        .font(.system(size: 13))
+                        .foregroundStyle(CompanionIOSTheme.textSecondary)
+                    CompanionStatusDot(runtime: companion.runtime)
+                        .frame(width: 18, alignment: .leading)
                 }
 
                 HStack(alignment: .center, spacing: 8) {

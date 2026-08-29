@@ -187,6 +187,10 @@ test("home renders three-companion sections as list rows and keeps move errors h
   assert.match(roster, /ForEach\(section\.companions\)\s*\{\s*companionRow\(\$0\)\s*\}/);
   assert.match(roster, /Text\(preview\)[\s\S]*?lineLimit\(1\)/);
   assert.match(roster, /Text\(timeLabel\)/);
+  assert.match(
+    roster,
+    /Text\(timeLabel\)[\s\S]{0,180}?CompanionStatusDot\(runtime: companion\.runtime\)[\s\S]{0,80}?frame\(width: 18, alignment: \.leading\)/,
+  );
   assert.match(roster, /COMPANION_ROSTER_DEMO_THREE/);
   assert.doesNotMatch(rosterState, /usesPinnedGrid/);
   assert.equal(management.includes('hasPrefix("{")'), true);
