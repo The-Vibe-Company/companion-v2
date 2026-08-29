@@ -5811,6 +5811,227 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     }
   });
 
+  it("lets permanent delete preempt and recover past an interrupted isolated routine", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const fixture = await createCompanion({
+      boxReady: true,
+      selectedSkillIds: [],
+      selectedMcpAccountIds: [],
+    });
+    const routineId = randomUUID();
+    const routineExecutor = `${executorId}-delete-routine`;
+    const deleteExecutor = `${executorId}-delete-main`;
+    const takeoverExecutor = `${executorId}-delete-takeover`;
+    const routineLeaseBlocker = postgres(runtimeUrl.toString(), { max: 1 });
+    let routineLeaseBlockerOpen = false;
+    let routineClaim: Claim | undefined;
+    let deleteClaim: Claim | undefined;
+    try {
+      await sql`
+        update companion_turn_attempts
+        set status = 'cancelled', settled_at = now(), updated_at = now()
+        where id = ${fixture.attemptId}::uuid
+      `;
+      await sql`
+        update companion_turns
+        set status = 'cancelled', settled_at = now(), state_changed_at = now(), updated_at = now()
+        where id = ${fixture.turnId}::uuid
+      `;
+      await sql`
+        update companion_runtime_instances
+        set material_pi_invocation_id = pi_invocation_id, material_client_surface = 'web',
+          material_expires_at = now() + interval '6 hours', last_observed_at = now()
+        where companion_id = ${fixture.companionId}::uuid
+      `;
+      await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          select public.companion_api_create_routine(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid, ${routineId}::uuid,
+            'Delete preemption routine', 'Wait for deletion.', '0 9 * * *', 'UTC', true,
+            now() + interval '1 hour'
+          )
+        `,
+      });
+      await sql`
+        update companion_routines set next_fire_at = now() - interval '1 second'
+        where id = ${routineId}::uuid
+      `;
+      const [due] = await asWorker((tx) => tx<Array<{ scheduledFor: Date }>>`
+        select scheduled_for as "scheduledFor"
+        from public.companion_claim_due_routines('delete-preemption-worker', 1, 60)
+        where routine_id = ${routineId}::uuid
+      `);
+      if (!due) throw new Error("expected the delete preemption routine to become due");
+      expect(await asWorker((tx) => tx<Array<{ outcome: string }>>`
+        select outcome from public.companion_fire_routine(
+          'delete-preemption-worker', ${ids.orgA}::uuid, ${routineId}::uuid,
+          ${randomUUID()}::uuid, ${due.scheduledFor.toISOString()}::timestamptz,
+          now() + interval '1 hour'
+        )
+      `)).toEqual([{ outcome: "fired" }]);
+
+      const [routineTurn] = await sql<Array<{ turnId: string }>>`
+        select id::text as "turnId" from companion_turns
+        where companion_id = ${fixture.companionId}::uuid
+          and routine_snapshot_id = ${routineId}::uuid
+      `;
+      if (!routineTurn) throw new Error("expected a routine-origin turn");
+      [routineClaim] = await claimWorkRows(1, routineExecutor);
+      if (!routineClaim) throw new Error("expected the routine attempt claim");
+      expect(routineClaim).toMatchObject({
+        companionId: fixture.companionId,
+        workKind: "attempt",
+      });
+      const routineInvocation = `routine:${routineTurn.turnId}:dispatch-v2:delete-preemption`;
+      await sql`
+        update companion_turns
+        set status = 'running', state_changed_at = now(), updated_at = now()
+        where id = ${routineTurn.turnId}::uuid
+      `;
+      await sql`
+        update companion_turn_attempts
+        set status = 'running', checkpoint = 'running', dispatch_state = 'accepted',
+          provider_credential_refs = '[]'::jsonb, mcp_credential_refs = '[]'::jsonb,
+          command_id = ${randomUUID()}::uuid, pi_invocation_id = ${routineInvocation},
+          dispatch_accepted_at = now(), last_activity_at = now(), updated_at = now()
+        where id = ${routineClaim.workId}::uuid
+      `;
+
+      const deleteRequestId = randomUUID();
+      const [deletion] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ operation: { id: string } }>>`
+          select * from public.companion_api_enqueue_operation(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid,
+            ${deleteRequestId}::uuid, 'delete', 'web'
+          )
+        `,
+      });
+      if (!deletion) throw new Error("expected the delete operation");
+
+      // A routine renewal/checkpoint locks its lane lease before the shared instance. Delete must
+      // skip this claim opportunity instead of locking the instance and forming the opposite side
+      // of a deadlock. The next sweep claims immediately after the short routine transaction ends.
+      await routineLeaseBlocker`begin`;
+      routineLeaseBlockerOpen = true;
+      await routineLeaseBlocker`
+        select 1 from companion_runtime_leases
+        where companion_id = ${fixture.companionId}::uuid and lane = 'routine'
+        for update
+      `;
+      expect(await claimWorkRows(1, deleteExecutor)).toEqual([]);
+      await routineLeaseBlocker`rollback`;
+      routineLeaseBlockerOpen = false;
+
+      [deleteClaim] = await claimWorkRows(1, deleteExecutor);
+      if (!deleteClaim) throw new Error("expected the permanent delete claim");
+      expect(deleteClaim).toMatchObject({
+        companionId: fixture.companionId,
+        workKind: "operation",
+        workId: deletion.operation.id,
+        checkpoint: "pending",
+      });
+      const [preempted] = await sql<Array<{
+        turnStatus: string;
+        attemptStatus: string;
+        errorCode: string | null;
+        errorAction: string | null;
+        sourceTurnId: string | null;
+        routineClaimToken: string | null;
+        routineClaimEpoch: string;
+      }>>`
+        select turn_row.status::text as "turnStatus",
+          attempt.status::text as "attemptStatus",
+          attempt.last_error_code as "errorCode",
+          attempt.last_error_action::text as "errorAction",
+          operation.source_turn_id::text as "sourceTurnId",
+          lease.claim_token::text as "routineClaimToken",
+          lease.claim_epoch::text as "routineClaimEpoch"
+        from companion_turns turn_row
+        join companion_turn_attempts attempt on attempt.turn_id = turn_row.id
+        join companion_operations operation on operation.id = ${deletion.operation.id}::uuid
+        join companion_runtime_leases lease
+          on lease.companion_id = turn_row.companion_id and lease.lane = 'routine'
+        where turn_row.id = ${routineTurn.turnId}::uuid
+          and attempt.id = ${routineClaim.workId}::uuid
+      `;
+      expect(preempted).toMatchObject({
+        turnStatus: "interrupted",
+        attemptStatus: "interrupted",
+        errorCode: "runtime_lifecycle_preempted",
+        errorAction: "none",
+        sourceTurnId: routineTurn.turnId,
+        routineClaimToken: null,
+        routineClaimEpoch: deleteClaim!.claimEpoch,
+      });
+      expect(await authorizeClaim(routineClaim, routineExecutor)).toEqual({
+        authorized: false,
+        denialCode: "lease_lost",
+      });
+      const [deleteAuthorization] = await asRuntime((tx) => tx<Array<{
+        authorized: boolean;
+        turnId: string | null;
+        commandPiInvocationId: string | null;
+      }>>`
+        select authorized, turn_id::text as "turnId",
+          command_pi_invocation_id as "commandPiInvocationId"
+        from public.companion_runtime_renew_and_authorize_v2(
+          ${deleteClaim!.orgId}::uuid, ${deleteClaim!.companionId}::uuid,
+          ${deleteClaim!.claimToken}::uuid, ${deleteClaim!.claimEpoch}::bigint,
+          ${deleteClaim!.gateEpoch}::bigint, ${deleteExecutor}, 'operation',
+          ${deleteClaim!.workId}::uuid, 30
+        )
+      `);
+      expect(deleteAuthorization).toEqual({
+        authorized: true,
+        turnId: routineTurn.turnId,
+        commandPiInvocationId: routineInvocation,
+      });
+
+      await release(deleteClaim, deleteExecutor);
+      deleteClaim = undefined;
+      [deleteClaim] = await claimWorkRows(1, takeoverExecutor);
+      expect(deleteClaim).toMatchObject({
+        workKind: "operation",
+        workId: deletion.operation.id,
+        checkpoint: "pending",
+      });
+      const [recovered] = await sql<Array<{
+        retirementState: string;
+        turnStatus: string;
+        sourceTurnId: string | null;
+        attemptCount: number;
+      }>>`
+        select instance.retirement_state::text as "retirementState",
+          turn_row.status::text as "turnStatus",
+          operation.source_turn_id::text as "sourceTurnId",
+          operation.attempt_count as "attemptCount"
+        from companion_runtime_instances instance
+        join companion_operations operation
+          on operation.companion_id = instance.companion_id
+          and operation.id = ${deletion.operation.id}::uuid
+        join companion_turns turn_row on turn_row.id = operation.source_turn_id
+        where instance.companion_id = ${fixture.companionId}::uuid
+      `;
+      expect(recovered).toEqual({
+        retirementState: "requested",
+        turnStatus: "interrupted",
+        sourceTurnId: routineTurn.turnId,
+        attemptCount: 2,
+      });
+    } finally {
+      if (routineLeaseBlockerOpen) await routineLeaseBlocker`rollback`;
+      await routineLeaseBlocker.end();
+      if (deleteClaim) await release(deleteClaim, takeoverExecutor);
+      if (routineClaim) await release(routineClaim, routineExecutor);
+      await sql`delete from companion_routines where companion_id = ${fixture.companionId}::uuid`;
+      await removeCompanion(fixture.companionId);
+    }
+  });
+
   it("pins routine context and projects private events through one replay-safe terminal return", async () => {
     if (!sql) throw new Error("runtime executor database is not initialized");
     const fixture = await createCompanion();

@@ -200,6 +200,9 @@ Run API + worker + runtime + web + migrated PostgreSQL + Box/Pi simulator and pr
   leaves no runtime slot occupied during 5/15/30/60-second PostgreSQL backoff, survives runtime
   takeover with the same provider operation id, and removes the aggregate once on `completed` or
   provider `404` without an Owner clicking Retry;
+- permanent delete claims ahead of an active or interrupted isolated routine, atomically fences and
+  settles that routine lane, denies its stale fence, and terminates the captured run-scoped Pi before
+  issuing provider `DELETE`; other shared lifecycle/settings/health work remains routine-quiescent;
 - a prompt response lost after Pi ACK is recovered from the fsynced ledger with the same
   `command_id`, including after executor takeover, and produces exactly one Pi prompt; missing,
   conflicting, or invocation-mismatched ledger proof yields `interrupted`, blocks later turns, and
