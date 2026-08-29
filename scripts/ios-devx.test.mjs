@@ -815,6 +815,62 @@ test("reply notifications embed the locally rendered avatar service extension", 
   assert.match(entitlements, /com\.apple\.developer\.usernotifications\.communication/);
 });
 
+test("notification entry narrowly invalidates the local-first transcript before routing", () => {
+  const coordinator = read("apps/ios/Companion/Support/NotificationCoordinator.swift");
+  const roster = read("apps/ios/Companion/Screens/CompanionListView.swift");
+  const root = read("apps/ios/Companion/Navigation/RootView.swift");
+  const invalidations = read(
+    "apps/ios/CompanionKit/Sources/CompanionKit/CompanionNotificationInvalidation.swift",
+  );
+  const chat = read("apps/ios/Companion/Screens/ChatView.swift");
+
+  const foregroundDelivery = coordinator.slice(
+    coordinator.indexOf("willPresent notification"),
+    coordinator.indexOf("didReceive response"),
+  );
+  assert.match(foregroundDelivery, /requestTranscriptInvalidation\(for: destination\)/);
+
+  const notificationRoute = roster.slice(
+    roster.indexOf("private func openPendingNotificationIfPossible"),
+    roster.indexOf("@ViewBuilder", roster.indexOf("private func openPendingNotificationIfPossible")),
+  );
+  assert.match(
+    notificationRoute,
+    /companions\.contains[\s\S]*?activeCompanionID == destination\.companionID[\s\S]*?requestTranscriptInvalidation\(for: destination\)[\s\S]*?path = \[\.chat\(destination\.companionID\)\]/,
+  );
+  assert.match(
+    root,
+    /installTranscriptInvalidationHandler\(scopeID: orgID\)[\s\S]*?sessionStore\.invalidateCompanion\(companionID: companionID\)/,
+  );
+  assert.match(
+    root,
+    /backgroundRefresh:[\s\S]*?sessionStore\.refreshInvalidatedCompanion\(companionID: companionID\)/,
+  );
+  assert.match(
+    coordinator,
+    /didReceiveRemoteNotification[\s\S]*?refreshTranscriptInBackground[\s\S]*?backgroundFetchResult/,
+  );
+  assert.match(
+    chat,
+    /companionInvalidations\([\s\S]*?replayPending: false[\s\S]*?await reload\(silently: thread != nil\)[\s\S]*?for await _ in invalidations/,
+  );
+  assert.match(
+    chat,
+    /Task\.sleep\(for: \.seconds\(4\)\)[\s\S]*?reloadInBackground\(\)[\s\S]*?for await _ in invalidations[\s\S]*?reloadInBackground\(\)/,
+  );
+  const backgroundReload = chat.slice(
+    chat.indexOf("private func reloadInBackground"),
+    chat.indexOf("private func renderedMarkdown", chat.indexOf("private func reloadInBackground")),
+  );
+  assert.match(
+    backgroundReload,
+    /guard refreshGate\.beginBackgroundRefresh\(\)[\s\S]*?guard refreshGate\.completeBackgroundRefresh\(\)/,
+  );
+  assert.match(invalidations, /pendingRequestSet\.insert\(request\)\.inserted/);
+  assert.match(invalidations, /pendingBackgroundRequestSet\.insert\(request\)\.inserted/);
+  assert.match(read("apps/ios/Companion/Support/Info.plist"), /remote-notification/);
+});
+
 test("the Expo client and its repository-local skills are gone", () => {
   assert.equal(existsSync(resolve(ROOT, "apps/mobile")), false);
   assert.equal(existsSync(resolve(ROOT, "skills-lock.json")), false);

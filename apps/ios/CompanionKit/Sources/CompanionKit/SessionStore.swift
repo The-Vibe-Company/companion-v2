@@ -264,11 +264,14 @@ public final class SessionStore {
 
     /// A narrow push/foreground invalidation seam. Consumers choose whether the matching resource
     /// is open; yielding does not mutate an observed thread or roster projection by itself.
-    public func companionInvalidations(companionID: String) -> AsyncStream<Void> {
+    public func companionInvalidations(
+        companionID: String,
+        replayPending: Bool = true
+    ) -> AsyncStream<Void> {
         let streamID = UUID()
         return AsyncStream { continuation in
             invalidationContinuations[companionID, default: [:]][streamID] = continuation
-            if pendingCompanionInvalidations.remove(companionID) != nil {
+            if pendingCompanionInvalidations.remove(companionID) != nil, replayPending {
                 continuation.yield()
             }
             continuation.onTermination = { @Sendable [weak self] _ in

@@ -562,6 +562,9 @@ struct CompanionListView: View {
             notifications.discardPendingDestination()
             return
         }
+        if notifications.activeCompanionID == destination.companionID {
+            notifications.requestTranscriptInvalidation(for: destination)
+        }
         path = [.chat(destination.companionID)]
         notifications.consume(destination)
     }

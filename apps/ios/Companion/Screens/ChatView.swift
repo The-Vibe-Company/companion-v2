@@ -61,6 +61,8 @@ private struct AssistantTailChange: Equatable, Sendable {
 /// Fences overlapping refresh tasks without making each poll a SwiftUI-observed state mutation.
 private final class ChatRefreshGate {
     private var revision = 0
+    private var backgroundRefreshActive = false
+    private var backgroundRefreshQueued = false
 
     func begin() -> Int {
         revision += 1
@@ -73,6 +75,29 @@ private final class ChatRefreshGate {
 
     func accepts(_ refresh: Int) -> Bool {
         refresh == revision
+    }
+
+    func beginBackgroundRefresh() -> Bool {
+        if backgroundRefreshActive {
+            backgroundRefreshQueued = true
+            return false
+        }
+        backgroundRefreshActive = true
+        return true
+    }
+
+    func completeBackgroundRefresh() -> Bool {
+        if backgroundRefreshQueued {
+            backgroundRefreshQueued = false
+            return true
+        }
+        backgroundRefreshActive = false
+        return false
+    }
+
+    func cancelBackgroundRefresh() {
+        backgroundRefreshActive = false
+        backgroundRefreshQueued = false
     }
 }
 
@@ -543,21 +568,28 @@ struct ChatView: View {
             }
         }
         .task(id: companion.id) {
+            // Subscribe before the initial delta sync. A retained notification is subsumed by that
+            // sync, while notifications arriving during it remain buffered for a follow-up sync.
+            let invalidations = sessionStore.companionInvalidations(
+                companionID: companion.id,
+                replayPending: false
+            )
             await reload(silently: thread != nil)
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(4))
-                if !Task.isCancelled { await reload(silently: true, isPolling: true) }
+            let polling = Task { @MainActor in
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(4))
+                    if !Task.isCancelled { await reloadInBackground() }
+                }
+            }
+            defer { polling.cancel() }
+            for await _ in invalidations {
+                guard !Task.isCancelled else { continue }
+                await reloadInBackground()
             }
         }
         .onAppear { recordTranscriptFrameIfAvailable() }
         .onChange(of: thread != nil) { _, available in
             if available { recordTranscriptFrameIfAvailable() }
-        }
-        .task(id: companion.id) {
-            for await _ in sessionStore.companionInvalidations(companionID: companion.id) {
-                guard !Task.isCancelled else { continue }
-                await reload(silently: true, isPolling: true)
-            }
         }
         .task(id: decisionCatalogTaskID) {
             guard decisionCatalogTaskID != nil else { return }
@@ -1169,6 +1201,19 @@ struct ChatView: View {
         if refreshGate.accepts(generation), loading {
             loading = false
         }
+    }
+
+    private func reloadInBackground() async {
+        guard refreshGate.beginBackgroundRefresh() else { return }
+        while !Task.isCancelled {
+            await reload(silently: true, isPolling: true)
+            guard !Task.isCancelled else {
+                refreshGate.cancelBackgroundRefresh()
+                return
+            }
+            guard refreshGate.completeBackgroundRefresh() else { return }
+        }
+        refreshGate.cancelBackgroundRefresh()
     }
 
     private func renderedMarkdown(
