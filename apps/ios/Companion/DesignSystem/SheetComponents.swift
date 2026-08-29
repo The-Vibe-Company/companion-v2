@@ -1,3 +1,4 @@
+import CompanionKit
 import SwiftUI
 
 struct CompanionSheetCanvas<Content: View>: View {

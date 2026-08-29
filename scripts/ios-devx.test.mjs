@@ -318,7 +318,9 @@ test("Companion status dots share the runtime projection and reduced-motion cont
   const status = read(
     "apps/ios/CompanionKit/Sources/CompanionKit/CompanionStatusIndicator.swift",
   );
-  const dot = read("apps/ios/Companion/DesignSystem/CompanionStatusDot.swift");
+  const dot = read(
+    "apps/ios/CompanionKit/Sources/CompanionKit/CompanionStatusDot.swift",
+  );
   const roster = read("apps/ios/Companion/Screens/CompanionListView.swift");
   const chat = read("apps/ios/Companion/Screens/ChatView.swift");
   const models = read("apps/ios/CompanionKit/Sources/CompanionKit/Models.swift");
@@ -342,7 +344,8 @@ test("Companion status dots share the runtime projection and reduced-motion cont
   assert.match(status, /self == \.replying && !reduceMotion/);
   assert.match(dot, /@Environment\(\\\.accessibilityReduceMotion\)/);
   assert.match(dot, /TimelineView\(\.animation/);
-  assert.match(dot, /frame\(width: 8, height: 8\)/);
+  assert.match(dot, /static let dotSize: CGFloat = 8/);
+  assert.match(dot, /frame\(width: Self\.dotSize, height: Self\.dotSize\)/);
   assert.match(dot, /case \.live: return CompanionIOSTheme\.toggleGreen/);
   assert.match(dot, /case \.inactive: return CompanionIOSTheme\.textSecondary/);
   assert.match(dot, /case \.error: return CompanionIOSTheme\.danger/);

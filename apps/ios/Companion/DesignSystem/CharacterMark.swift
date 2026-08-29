@@ -1,5 +1,3 @@
 import CompanionKit
 
-/// Source-compatibility alias. The public vector renderer, including the no-mouth/no-accessory
-/// projection, lives in CompanionKit.CharacterMark.
-typealias CharacterMark = CompanionKit.CharacterMark
+// CharacterMark is implemented by CompanionKit and imported directly by its call sites.
