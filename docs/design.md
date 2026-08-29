@@ -289,6 +289,14 @@ the latest accepted main-Pi compaction summary plus a deterministic recent trans
 runtime-only material, never a public API resource. Its source, 4,000-token budget, refresh rules,
 and takeover contract are specified in [Routine Pi context substrate](routine-pi-context-substrate.md).
 
+It also receives a private Box-side snapshot of the parent Companion's regular `MEMORY.md` and
+daily-log files through its run-scoped `PI_MEMORY_DIR`. The snapshot has no linked path back to
+`~/.companion/runtime/memory`; routine writes remain disposable, while the main Pi stays the only
+durable memory writer. qmd also receives a run-local collection config, SQLite index, and explicit
+named-index wrapper, keeping memory search on the snapshot rather than the main daemon's collection
+or a project-local qmd config. Takeover keeps the already-prepared run root, and later parent-memory
+changes appear only in a later routine run.
+
 Staging writes a composed operating brief to `~/.companion/runtime/state/instructions.txt` and Pi
 receives it as `--append-system-prompt`. The brief describes the runtime contract Pi is held to —
 the thread, the durable disk, turn bounds, tools, routines, triggers, and the ask/propose surface —

@@ -2,7 +2,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -1929,6 +1929,149 @@ describe("isolated routine Pi sessions", () => {
         status: 0,
         stderr: "",
       });
+    }
+  });
+
+  it("pins the main Companion memory into the disposable routine root", async () => {
+    const boxHome = mkdtempSync(join(tmpdir(), "companion-routine-memory-"));
+    const parentMemory = join(boxHome, ".companion", "runtime", "memory");
+    const parentDaily = join(parentMemory, "daily");
+    const parentMemoryBytes = "# Durable memory\n\nThe launch code is cobalt.\n";
+    const parentDailyBytes = "# 2026-08-28\n\nValidated the routine boundary.\n";
+    const paths = companionPiRoutineSessionPaths(runId);
+    const parentToolsBin = join(boxHome, ".companion", "tools", "bin");
+    const commands: string[] = [];
+    let preparedResult: ReturnType<typeof spawnSync> | null = null;
+
+    mkdirSync(join(boxHome, ".companion", "pi", "extensions"), { recursive: true });
+    mkdirSync(parentToolsBin, { recursive: true });
+    mkdirSync(parentDaily, { recursive: true });
+    writeFileSync(
+      join(parentToolsBin, "qmd"),
+      "#!/bin/sh\nprintf '%s\\n' \"$QMD_CONFIG_DIR\" \"$INDEX_PATH\" \"$@\"\n",
+      { mode: 0o700 },
+    );
+    writeFileSync(join(parentMemory, "MEMORY.md"), parentMemoryBytes);
+    writeFileSync(join(parentDaily, "2026-08-28.md"), parentDailyBytes);
+
+    try {
+      vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+        const url = String(rawUrl);
+        const body = parseBoxTestBody(init?.body);
+        if (url.endsWith("/files") && init?.method === "PUT") return response({ ok: true });
+        if (url.endsWith("/commands") && init?.method === "POST") {
+          const command = requiredText(body, "command");
+          commands.push(command);
+          if (command.includes("routine-pi-session-prepared")) {
+            const result = spawnSync("bash", ["-c", command], {
+              encoding: "utf8",
+              env: { ...process.env, HOME: boxHome },
+            });
+            preparedResult = result;
+            return response(commandResult(result.stdout));
+          }
+          if (command.includes("routine-pi-session-ready")) {
+            return response(commandResult(`routine-pi-session-ready ${invocationId}\n`));
+          }
+          return response(commandResult());
+        }
+        throw new Error(`unexpected Box request: ${init?.method ?? "GET"} ${url}`);
+      }));
+      const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+      await expect(runtime.startRoutineSession({
+        boxId: "bx_23456789",
+        runId,
+        persona: null,
+        expectedInvocationId: invocationId,
+      })).resolves.toMatchObject({ state: "idle" });
+
+      // Some Linux hosts deny reads of unrelated `/proc/*/environ` files before the shell can apply
+      // the command's stderr redirect. That benign warning must not hide the preparation exit code.
+      expect(preparedResult).toMatchObject({ status: 0 });
+      const routineMemory = join(boxHome, paths.root, "memory");
+      expect(readFileSync(join(routineMemory, "MEMORY.md"), "utf8")).toBe(parentMemoryBytes);
+      expect(readFileSync(join(routineMemory, "daily", "2026-08-28.md"), "utf8"))
+        .toBe(parentDailyBytes);
+
+      // The routine's memory directory is a copied run-local pin, never a link to the parent. Even
+      // if pi-memory writes during the isolated session, the main Pi's authoritative bytes cannot
+      // change and the disposable copy is removed with the run root.
+      writeFileSync(join(routineMemory, "MEMORY.md"), "routine-only mutation\n");
+      writeFileSync(join(routineMemory, "daily", "2026-08-28.md"), "routine-only daily mutation\n");
+      expect(readFileSync(join(parentMemory, "MEMORY.md"), "utf8")).toBe(parentMemoryBytes);
+      expect(readFileSync(join(parentDaily, "2026-08-28.md"), "utf8")).toBe(parentDailyBytes);
+      expect(commands.at(-1)).toContain('export PI_MEMORY_DIR="$routine_root/memory"');
+      expect(commands.at(-1)).toContain('export QMD_CONFIG_DIR="$routine_root/qmd/config"');
+      expect(commands.at(-1)).toContain('export INDEX_PATH="$routine_root/qmd/index.sqlite"');
+      expect(commands.at(-1)).toContain('export PATH="$routine_root/bin:');
+      expect(commands[0]).toContain('if [ -x "$routine_root/tools/bin/qmd" ]; then');
+
+      const routineRoot = join(boxHome, paths.root);
+      const qmd = spawnSync(join(routineRoot, "bin", "qmd"), ["collection", "list"], {
+        encoding: "utf8",
+        env: { ...process.env, COMPANION_PI_ROOT: routineRoot },
+      });
+      expect(qmd).toMatchObject({
+        status: 0,
+        stderr: "",
+        stdout: [
+          join(routineRoot, "qmd", "config"),
+          join(routineRoot, "qmd", "index.sqlite"),
+          "--index",
+          "companion-routine",
+          "collection",
+          "list",
+          "",
+        ].join("\n"),
+      });
+    } finally {
+      rmSync(boxHome, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves qmd unavailable when its best-effort installation is absent", async () => {
+    const boxHome = mkdtempSync(join(tmpdir(), "companion-routine-no-qmd-"));
+    const paths = companionPiRoutineSessionPaths(runId);
+    let preparedResult: ReturnType<typeof spawnSync> | null = null;
+
+    mkdirSync(join(boxHome, ".companion", "pi", "extensions"), { recursive: true });
+
+    try {
+      vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+        const url = String(rawUrl);
+        const body = parseBoxTestBody(init?.body);
+        if (url.endsWith("/files") && init?.method === "PUT") return response({ ok: true });
+        if (url.endsWith("/commands") && init?.method === "POST") {
+          const command = requiredText(body, "command");
+          if (command.includes("routine-pi-session-prepared")) {
+            const result = spawnSync("bash", ["-c", command], {
+              encoding: "utf8",
+              env: { ...process.env, HOME: boxHome },
+            });
+            preparedResult = result;
+            return response(commandResult(result.stdout));
+          }
+          if (command.includes("routine-pi-session-ready")) {
+            return response(commandResult(`routine-pi-session-ready ${invocationId}\n`));
+          }
+          return response(commandResult());
+        }
+        throw new Error(`unexpected Box request: ${init?.method ?? "GET"} ${url}`);
+      }));
+      const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+      await expect(runtime.startRoutineSession({
+        boxId: "bx_23456789",
+        runId,
+        persona: null,
+        expectedInvocationId: invocationId,
+      })).resolves.toMatchObject({ state: "idle" });
+
+      expect(preparedResult).toMatchObject({ status: 0 });
+      expect(existsSync(join(boxHome, paths.root, "bin", "qmd"))).toBe(false);
+    } finally {
+      rmSync(boxHome, { recursive: true, force: true });
     }
   });
 

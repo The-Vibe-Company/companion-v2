@@ -580,6 +580,21 @@ export const COMPANION_ROUTINE_RUN_INSTRUCTIONS = [
   "After an accepted surface_to_main call this session ends immediately.",
 ].join("\n");
 
+export const COMPANION_ROUTINE_MACHINE_INSTRUCTIONS = [
+  "# Your machine",
+  "",
+  "You run on this Companion's persistent Linux box, but this routine has its own disposable Pi",
+  "session directory. Files you create outside the managed runtime paths remain on the Box; running",
+  "processes do not outlive the routine.",
+  "",
+  "Your memory tools read a private snapshot of the main Companion's MEMORY.md and daily logs taken",
+  "when this routine session is prepared. The main Pi is the only owner of durable memory writes.",
+  "Do not use memory_write, memory_forget, memory_restore, or scratchpad to persist routine state:",
+  "changes stay inside this disposable run and never update the main Companion's memory.",
+  "",
+  "The run-scoped Pi and runtime state directories are managed for you. Do not edit them.",
+].join("\n");
+
 export const COMPANION_MACHINE_INSTRUCTIONS = [
   "# Your machine",
   "",
@@ -791,7 +806,7 @@ export function composedRoutineInstructions(persona?: string | null): string {
   const parts = [
     COMPANION_SITUATION_INSTRUCTIONS,
     COMPANION_ROUTINE_RUN_INSTRUCTIONS,
-    COMPANION_MACHINE_INSTRUCTIONS,
+    COMPANION_ROUTINE_MACHINE_INSTRUCTIONS,
     COMPANION_TURN_INSTRUCTIONS,
     COMPANION_FILES_INSTRUCTIONS,
     companionCapabilityInstructions(true),
@@ -1301,12 +1316,43 @@ cleanup_failed_prepare() {
   exit "$status"
 }
 trap cleanup_failed_prepare ERR
-mkdir -p "$routine_root/state" "$routine_root/events" "$routine_root/sessions" "$routine_root/logs" "$routine_root/memory" "$routine_root/tmp" "$routine_root/outbox" "$routine_root/pi" "$routine_root/pi/extensions" "$routine_root/tools"
+mkdir -p "$routine_root/bin" "$routine_root/state" "$routine_root/events" "$routine_root/sessions" "$routine_root/logs" "$routine_root/memory/daily" "$routine_root/memory/recovery" "$routine_root/qmd/config" "$routine_root/tmp" "$routine_root/outbox" "$routine_root/pi" "$routine_root/pi/extensions" "$routine_root/tools"
 cp -a "$HOME/.companion/pi/." "$routine_root/pi/"
 if [ -d "$HOME/.companion/runtime/skills" ]; then cp -a "$HOME/.companion/runtime/skills" "$routine_root/skills"; fi
 if [ -d "$HOME/.companion/tools" ]; then cp -a "$HOME/.companion/tools/." "$routine_root/tools/"; fi
+# qmd discovers project-local configuration before its environment-selected defaults unless an
+# explicit named index is present. Put a private wrapper first on PATH so every pi-memory qmd child
+# uses the run-local config and SQLite paths even if the Box command runner starts below .qmd/. qmd
+# is a best-effort install, so leave it absent when no executable was copied and let pi-memory fall
+# back to plain recall.
+if [ -x "$routine_root/tools/bin/qmd" ]; then
+  cat > "$routine_root/bin/qmd" <<'COMPANION_ROUTINE_QMD'
+#!/bin/sh
+set -eu
+: "\${COMPANION_PI_ROOT:?}"
+export QMD_CONFIG_DIR="$COMPANION_PI_ROOT/qmd/config"
+export INDEX_PATH="$COMPANION_PI_ROOT/qmd/index.sqlite"
+exec "$COMPANION_PI_ROOT/tools/bin/qmd" --index companion-routine "$@"
+COMPANION_ROUTINE_QMD
+  chmod 700 "$routine_root/bin/qmd"
+fi
+# Pin the parent Companion's plain-Markdown memory into this disposable run root. Copying regular
+# files instead of linking the live tree gives the routine the same memory context without granting
+# any path that can mutate the main Pi's authoritative files. Run-local writes are discarded when
+# this root is removed, and takeover keeps using this exact prepared root.
+parent_memory="$HOME/.companion/runtime/memory"
+routine_memory="$routine_root/memory"
+if [ -f "$parent_memory/MEMORY.md" ] && [ ! -L "$parent_memory/MEMORY.md" ]; then
+  cp -- "$parent_memory/MEMORY.md" "$routine_memory/MEMORY.md"
+fi
+if [ -d "$parent_memory/daily" ] && [ ! -L "$parent_memory/daily" ]; then
+  for memory_source in "$parent_memory"/daily/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].md; do
+    [ -f "$memory_source" ] && [ ! -L "$memory_source" ] || continue
+    cp -- "$memory_source" "$routine_memory/daily/\${memory_source##*/}"
+  done
+fi
 ${copies}
-chmod 700 "$routine_root" "$routine_root/state" "$routine_root/events" "$routine_root/sessions" "$routine_root/logs" "$routine_root/memory" "$routine_root/tmp" "$routine_root/outbox" "$routine_root/pi" "$routine_root/pi/extensions" "$routine_root/tools"
+chmod 700 "$routine_root" "$routine_root/bin" "$routine_root/state" "$routine_root/events" "$routine_root/sessions" "$routine_root/logs" "$routine_root/memory" "$routine_root/memory/daily" "$routine_root/memory/recovery" "$routine_root/qmd" "$routine_root/qmd/config" "$routine_root/tmp" "$routine_root/outbox" "$routine_root/pi" "$routine_root/pi/extensions" "$routine_root/tools"
 printf '%s\\n' "$expected_invocation" > "$reservation_file"
 chmod 600 "$reservation_file"
 trap - ERR
@@ -1423,8 +1469,8 @@ if [ -z "$node_bin" ] || [ ! -x "$node_bin" ]; then
   echo 'routine-pi-session Node binary is unavailable' >&2
   exit 1
 fi
-mkdir -p "$routine_root/logs" "$journal" "$routine_root/state" "$routine_root/sessions" "$routine_root/memory" "$routine_root/tmp" "$routine_root/outbox"
-chmod 700 "$routine_root" "$routine_root/state" "$journal" "$routine_root/sessions" "$routine_root/logs" "$routine_root/memory" "$routine_root/tmp" "$routine_root/outbox"
+mkdir -p "$routine_root/logs" "$journal" "$routine_root/state" "$routine_root/sessions" "$routine_root/memory" "$routine_root/qmd/config" "$routine_root/tmp" "$routine_root/outbox"
+chmod 700 "$routine_root" "$routine_root/state" "$journal" "$routine_root/sessions" "$routine_root/logs" "$routine_root/memory" "$routine_root/qmd" "$routine_root/qmd/config" "$routine_root/tmp" "$routine_root/outbox"
 rm -f "$socket"
 provider_env="/run/user/$(id -u)/companion/providers.env"
 if [ -f "$provider_env" ]; then
@@ -1432,9 +1478,15 @@ if [ -f "$provider_env" ]; then
   . "$provider_env"
   set +a
 fi
-export PATH="$(dirname "$pi_bin"):$HOME/.companion/bin:$routine_root/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export PATH="$routine_root/bin:$(dirname "$pi_bin"):$HOME/.companion/bin:$routine_root/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export PI_CODING_AGENT_DIR="$routine_root/pi"
 export PI_MEMORY_DIR="$routine_root/memory"
+# pi-memory always addresses qmd's fixed pi-memory collection. Give the routine both a private
+# collection config and a private SQLite index so search follows the pinned files and can neither
+# query nor reconfigure the main daemon's collection. qmd's model cache stays shared because it
+# contains model assets rather than memory content and avoids downloading them for every routine.
+export QMD_CONFIG_DIR="$routine_root/qmd/config"
+export INDEX_PATH="$routine_root/qmd/index.sqlite"
 export TMPDIR="$routine_root/tmp"
 export JITI_RESPECT_TMPDIR_ENV=1
 export COMPANION_PI_ROOT="$routine_root"

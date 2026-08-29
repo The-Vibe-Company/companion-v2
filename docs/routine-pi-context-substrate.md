@@ -42,6 +42,32 @@ The target routine architecture is:
 This design does not introduce multiple Companions, a second harness, or a worker that contacts Box
 or Pi.
 
+## Parent Companion memory
+
+The conversation substrate and Pi memory solve different continuity problems. The substrate is a
+control-plane projection of the main conversation; `pi-memory` owns the Companion's durable
+Box-side `MEMORY.md` and daily logs under `~/.companion/runtime/memory`.
+
+An isolated routine must receive both without becoming a second memory writer. At run preparation,
+`apps/runtime` pins a private filesystem snapshot of the regular `MEMORY.md` file and regular
+`daily/YYYY-MM-DD.md` files into that run's disposable memory directory. The routine broker exports
+the private directory as `PI_MEMORY_DIR`, so pi-memory's normal turn-start injection and read/search
+tools see the parent's known bytes. Because pi-memory addresses a fixed qmd collection name, the
+broker also assigns the routine a private qmd collection config and SQLite index. Search therefore
+indexes the pin instead of reading or replacing the main daemon's collection. A run-local qmd
+wrapper always passes an explicit named index, preventing qmd's project-local config discovery from
+overriding those private paths. No symlink, bind path, or shared inode points back to the main memory
+tree. Writes by pi-memory, tools, or shell affect only the run copy and are discarded when the run
+root is removed; the main Pi is the sole durable writer.
+
+This is the filesystem pin variant, not another `companion_routine_context_substrates` payload. A
+database snapshot would require mirroring Box-owned memory through a new durable projection even
+though the worker that fires routines must never contact Box. Keeping the pin in the existing
+runtime preparation path preserves that process boundary and avoids a second memory authority. The
+single-Companion lease ensures preparation observes an idle main Pi, and takeover adopts the exact
+prepared run root instead of recopying newer memory. Later main-memory writes affect the next run
+only.
+
 ## Findings
 
 ### Reuse the main Pi's summary
@@ -106,6 +132,7 @@ No browser, Viewer read, worker loop, or ordinary API read obtains or rebuilds t
 | Reasoning | Exclude |
 | Attachments | Include filename/content type only when referenced; never imply bytes were staged |
 | Routine markers and internal routine transcripts | Exclude to prevent recursive growth |
+| Parent `MEMORY.md` and daily logs | Exclude here; pin separately into the run-scoped `PI_MEMORY_DIR` |
 | Prior `relay` and `notify` main entries | Include normally because they are main conversation history |
 | Persona | Stage in the system prompt, not the substrate |
 | Member profile | Include only durable per-run time/timezone metadata |
