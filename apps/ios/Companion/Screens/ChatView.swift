@@ -543,7 +543,19 @@ struct ChatView: View {
             }
         }
         .task(id: companion.id) {
+            // Subscribe before the initial delta sync. A retained notification is subsumed by that
+            // sync, while notifications arriving during it remain buffered for a follow-up sync.
+            let invalidations = sessionStore.companionInvalidations(
+                companionID: companion.id,
+                replayPending: false
+            )
             await reload(silently: thread != nil)
+            for await _ in invalidations {
+                guard !Task.isCancelled else { continue }
+                await reload(silently: true, isPolling: true)
+            }
+        }
+        .task(id: companion.id) {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(4))
                 if !Task.isCancelled { await reload(silently: true, isPolling: true) }
@@ -552,12 +564,6 @@ struct ChatView: View {
         .onAppear { recordTranscriptFrameIfAvailable() }
         .onChange(of: thread != nil) { _, available in
             if available { recordTranscriptFrameIfAvailable() }
-        }
-        .task(id: companion.id) {
-            for await _ in sessionStore.companionInvalidations(companionID: companion.id) {
-                guard !Task.isCancelled else { continue }
-                await reload(silently: true, isPolling: true)
-            }
         }
         .task(id: decisionCatalogTaskID) {
             guard decisionCatalogTaskID != nil else { return }

@@ -93,7 +93,16 @@ struct RootView: View {
             await sessionStore.restore()
         }
         .task(id: activeNotificationSessionID) {
-            guard activeNotificationSessionID != nil else { return }
+            guard case .active(let session) = sessionStore.phase,
+                  let orgID = session.orgID else {
+                notifications.uninstallTranscriptInvalidationHandler()
+                return
+            }
+            notifications.installTranscriptInvalidationHandler(scopeID: orgID) { companionID in
+                sessionStore.invalidateCompanion(companionID: companionID)
+            } backgroundRefresh: { companionID in
+                await sessionStore.refreshInvalidatedCompanion(companionID: companionID)
+            }
             enqueueNotificationTransition(enabled: notificationsEnabled, requestAuthorization: true)
         }
         .onChange(of: notificationsEnabled) { _, enabled in

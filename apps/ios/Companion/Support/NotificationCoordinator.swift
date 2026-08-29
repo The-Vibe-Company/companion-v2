@@ -15,6 +15,7 @@ final class NotificationCoordinator: NSObject, UNUserNotificationCenterDelegate 
     private(set) var deviceToken: String?
     private(set) var pendingDestination: Destination?
     var activeCompanionID: String?
+    private let transcriptInvalidations = CompanionNotificationInvalidationQueue()
 
     override init() {
         super.init()
@@ -28,6 +29,22 @@ final class NotificationCoordinator: NSObject, UNUserNotificationCenterDelegate 
             )
         }
 #endif
+    }
+
+    func installTranscriptInvalidationHandler(
+        scopeID: String,
+        _ handler: @escaping CompanionNotificationInvalidationQueue.Handler,
+        backgroundRefresh: @escaping CompanionNotificationInvalidationQueue.BackgroundRefreshHandler
+    ) {
+        transcriptInvalidations.install(
+            scopeID: scopeID,
+            handler,
+            backgroundRefresh: backgroundRefresh
+        )
+    }
+
+    func uninstallTranscriptInvalidationHandler() {
+        transcriptInvalidations.uninstall()
     }
 
     func requestAuthorizationAndRegister() async {
@@ -68,7 +85,10 @@ final class NotificationCoordinator: NSObject, UNUserNotificationCenterDelegate 
             return []
         }
         guard Self.botNotificationsEnabled(for: destination.companionID) else { return [] }
-        let isOpen = await MainActor.run { activeCompanionID == destination.companionID }
+        let isOpen = await MainActor.run {
+            requestTranscriptInvalidation(for: destination)
+            return activeCompanionID == destination.companionID
+        }
         return isOpen ? [] : [.banner, .list, .sound]
     }
 
@@ -99,6 +119,20 @@ final class NotificationCoordinator: NSObject, UNUserNotificationCenterDelegate 
         guard UserDefaults.standard.object(forKey: key) != nil else { return true }
         return UserDefaults.standard.bool(forKey: key)
     }
+
+    func requestTranscriptInvalidation(for destination: Destination) {
+        transcriptInvalidations.invalidate(
+            scopeID: destination.orgID,
+            companionID: destination.companionID
+        )
+    }
+
+    func refreshTranscriptInBackground(for destination: Destination) async -> CompanionCacheRefreshResult {
+        await transcriptInvalidations.refresh(
+            scopeID: destination.orgID,
+            companionID: destination.companionID
+        )
+    }
 }
 
 @MainActor
@@ -115,5 +149,30 @@ final class NotificationAppDelegate: NSObject, UIApplicationDelegate {
 
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
         notifications.receivedDeviceToken(deviceToken)
+    }
+
+    func application(
+        _ application: UIApplication,
+        didReceiveRemoteNotification userInfo: [AnyHashable: Any],
+        fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
+    ) {
+        guard let destination = NotificationCoordinator.destination(from: userInfo) else {
+            completionHandler(.noData)
+            return
+        }
+        Task { @MainActor [notifications] in
+            let result = await notifications.refreshTranscriptInBackground(for: destination)
+            completionHandler(Self.backgroundFetchResult(for: result))
+        }
+    }
+
+    private static func backgroundFetchResult(
+        for result: CompanionCacheRefreshResult
+    ) -> UIBackgroundFetchResult {
+        switch result {
+        case .newData: return .newData
+        case .noData: return .noData
+        case .failed: return .failed
+        }
     }
 }
