@@ -50,6 +50,59 @@ private final class SuspendedThreadSyncURLProtocol: URLProtocol, @unchecked Send
     override func stopLoading() {}
 }
 
+private final class BackgroundRefreshURLProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var requestsStarted = DispatchSemaphore(value: 0)
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.requestsStarted.signal()
+        let path = request.url?.path ?? ""
+        let payload: String
+        if path == "/v1/companions/sync" {
+            payload = #"""
+            {
+              "cursor":"fresh-roster","changed_companions":[
+                {
+                  "id":"33333333-3333-4333-8333-333333333333","name":"Background",
+                  "persona":"Help","model_id":"model","selected_skill_ids":[],
+                  "selected_mcp_account_ids":[],"icon":null,"section_id":null,"access":"owner",
+                  "pinned":false,"hidden":false,"muted":false,"unread":false,"last_message":null,
+                  "runtime":{"state":"running","daemon_state":"running","replying":false,
+                    "last_error":null,"provider_ids":[],"latest_operation":null}
+                }
+              ],"deleted_companion_ids":[],
+              "companion_ids":["33333333-3333-4333-8333-333333333333"],
+              "changed_sections":[],"deleted_section_ids":[],"section_ids":[]
+            }
+            """#
+        } else {
+            payload = #"""
+            {
+              "cursor":"fresh-thread","changed_entries":[],"deleted_event_ids":[],
+              "thread":{
+                "companion_id":"33333333-3333-4333-8333-333333333333","viewer_id":"user-1",
+                "read_only":false,"can_send":true,"transcription_available":true,
+                "active_turn":null,"queued_count":0,"interrupted_turn":null
+              }
+            }
+            """#
+        }
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(payload.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
 @Test
 func sqliteCachePersistsRestoresScopesAndBoundedThreadTail() throws {
     let directory = FileManager.default.temporaryDirectory
@@ -189,14 +242,52 @@ func companionInvalidationReachesTheVisibleThreadConsumer() async throws {
         apiURL: URL(string: "https://offline.invalid")!,
         storage: FixedSessionStorage(data: try JSONEncoder().encode(session))
     )
-    let stream = store.companionInvalidations()
+    let stream = store.companionInvalidations(companionID: "companion-x")
     let received = Task { @MainActor in
-        for await companionID in stream { return companionID }
-        return nil
+        for await _ in stream { return true }
+        return false
     }
+    #expect(store.hasVisibleInvalidationConsumer(companionID: "companion-x"))
+    #expect(!store.hasVisibleInvalidationConsumer(companionID: "companion-y"))
 
     store.invalidateCompanion(companionID: "companion-x")
-    #expect(await received.value == "companion-x")
+    #expect(await received.value)
+}
+
+@Test @MainActor
+func aVisibleDifferentCompanionDoesNotSuppressBackgroundCacheRefresh() async throws {
+    BackgroundRefreshURLProtocol.requestsStarted = DispatchSemaphore(value: 0)
+    let fixture = try cacheFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let session = testSession()
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [BackgroundRefreshURLProtocol.self]
+    let client = APIClient(
+        baseURL: URL(string: "https://example.test")!,
+        session: URLSession(configuration: configuration),
+        initialAuthority: session
+    )
+    let store = SessionStore(
+        apiURL: URL(string: "https://example.test")!,
+        storage: FixedSessionStorage(data: try JSONEncoder().encode(session)),
+        cache: fixture.cache,
+        apiClient: client
+    )
+    let visibleX = store.companionInvalidations(companionID: "companion-x")
+    defer { withExtendedLifetime(visibleX) {} }
+
+    let companionY = "33333333-3333-4333-8333-333333333333"
+    store.invalidateCompanion(companionID: companionY)
+    await Task.detached {
+        _ = BackgroundRefreshURLProtocol.requestsStarted.wait(timeout: .now() + 5)
+        _ = BackgroundRefreshURLProtocol.requestsStarted.wait(timeout: .now() + 5)
+    }.value
+    for _ in 0..<100 where store.cachedThread(companionID: companionY) == nil {
+        await Task.yield()
+    }
+
+    #expect(store.initialRosterSnapshot?.companions.map(\.id) == [companionY])
+    #expect(store.cachedThread(companionID: companionY)?.cursor == "fresh-thread")
 }
 
 private func cacheFixture() throws -> (directory: URL, cache: SQLiteCompanionSnapshotCache) {

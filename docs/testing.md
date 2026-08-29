@@ -193,6 +193,13 @@ without booting one. Its conditional skill path retains the Darwin-only private-
 XCUITests and rendered UI checks stay local and manual unless the repository owner explicitly
 approves a separate CI job.
 
+Local-first Apple changes cover SQLite scope isolation and restore, bounded transcript tails,
+read-only cached authority, cursor merge ordering/upserts/tombstones without gaps or duplicates,
+offline roster bootstrap, foreground revalidation wiring, push invalidation delivery, and a cached
+thread remaining renderable with no blocking loader while its delta request is suspended. Server
+tests independently prove cursor scope/version bounds, replay determinism, deletion correctness,
+and APNs `content-available` coexistence with ordinary alerts.
+
 Run targeted affected-package tests first, followed by:
 
 ```bash

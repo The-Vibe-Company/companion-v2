@@ -595,7 +595,9 @@ the bounded title. Failure/interruption use their stable expurgated runtime mess
 tools, provider payloads, credentials, and numeric badges are absent. Base application data is
 `{version:1, org_id, companion_id, event}` and APNs `thread-id` is the Companion id. Reply payloads
 add the current `companion_name` and four-index `companion_icon`, and set `mutable-content: 1`;
-other events remain plain alerts. The iOS Notification Service Extension renders the closed blob
+every event alert also sets `content-available: 1` so native iOS can revalidate the affected local
+projection without replacing the visible notification pipeline. Other events remain plain alerts.
+The iOS Notification Service Extension renders the closed blob
 catalog locally into a PNG and uses it as an `INSendMessageIntent` sender image for Apple's
 communication-notification avatar treatment. It performs no download. A failed intent donation
 falls back to the same PNG as a standard attachment, while extension timeout leaves the original
@@ -1053,6 +1055,17 @@ broker writes and reads plus bounded chat-file transfer ride the hosted agent ch
 idempotent calls retain per-call exec fallback; possibly-started broker writes obey the dispatch
 resolution rules above. This changes how runtime operates the Box, not what any member-facing read
 does—control-plane reads remain PostgreSQL-only, never wake a Box, and keep the same polling cadence.
+
+Native iOS persists the latest authorized roster projection and a bounded transcript tail in a
+member-and-organization-scoped SQLite cache. Launch and chat navigation render those presentation
+snapshots first, including offline, while all mutation controls remain disabled until fresh
+authority arrives. Its recurring and foreground reads use opaque stateless cursors through
+`GET /v1/companions/sync` and `GET /v1/companions/:id/thread-delta`: unchanged rows are omitted,
+deletions are tombstoned, roster order is explicit, changed entries retain ordinal order, and current
+thread metadata is always returned. The cursor contains projection digests rather than message text,
+is bound to organization/member/Companion scope, and is bounded before parsing. These endpoints may
+compute the current authorized PostgreSQL projection but send only its delta; they never wake or
+observe Box or Pi. APNs invalidation and app foregrounding reuse the same synchronization path.
 
 ### Native Apple clients
 

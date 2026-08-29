@@ -552,8 +552,8 @@ struct ChatView: View {
             if available { recordTranscriptFrameIfAvailable() }
         }
         .task(id: companion.id) {
-            for await invalidatedID in sessionStore.companionInvalidations() {
-                guard invalidatedID == companion.id, !Task.isCancelled else { continue }
+            for await _ in sessionStore.companionInvalidations(companionID: companion.id) {
+                guard !Task.isCancelled else { continue }
                 await reload(silently: true, isPolling: true)
             }
         }

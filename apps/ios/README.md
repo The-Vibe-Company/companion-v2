@@ -9,8 +9,9 @@ Skills, Plugins, MCP connections, files, routines, triggers, sharing, settings, 
 control-plane workflow. Do not create mobile-only endpoints or send a client-surface discriminator
 to request a smaller capability set.
 
-The app target lives in `Companion/`. Models, networking, authentication, session state, and polling
-belong in the zero-dependency `CompanionKit` Swift package. The committed Xcode project uses
+The app target lives in `Companion/`. Models, networking, authentication, session state,
+synchronization, and on-device projection persistence belong in the zero-dependency `CompanionKit`
+Swift package. The committed Xcode project uses
 file-system-synchronized groups, so adding a Swift file does not require a project-file edit.
 
 The approved iOS visual language and journeys live in `docs/ios-design.md`. The native roster uses
@@ -28,6 +29,18 @@ fields already present in the ordinary Companion list projection and add no fetc
 Move to/New Section flows use the shared section API. Deleting a section only unassigns its members.
 Single tap opens the chat. Long press exposes Settings, Duplicate, Move to, and Delete; trailing swipe exposes Move,
 member-private notification mute, and owner-only delete.
+
+After the first successful roster read, native iOS restores the member-and-organization-scoped
+Companion roster from a protected, backup-excluded SQLite snapshot before its first roster frame.
+The one-time empty-cache path uses stable row skeletons; later launches keep cached rows visible
+offline and revalidate with one `GET /v1/companions/sync` request. Its opaque cursor returns only
+changed Companion/section projections, deletion tombstones, and current ID order. Entering the
+foreground runs the same delta revalidation. The most recently active Companion's bounded 250-entry
+transcript tail is prefetched, and every successfully synchronized thread tail is persisted. Chat
+installs that read-only cached projection immediately, then calls
+`GET /v1/companions/:id/thread-delta`; fresh metadata is required before send, attachment,
+transcription, or decision controls become active. SQLite never stores attachment bytes and is
+purged for that member/workspace scope on logout or invalid session.
 
 The native roster can request Owner-only durable deletion. A confirmed deletion removes the Companion from the
 local roster immediately while the durable request runs; request failure restores the row, and a
@@ -100,6 +113,10 @@ Push Notifications are requested immediately after the first active session. Deb
 production APNs. A tap waits for session and roster restoration, verifies the workspace and current
 access, then opens the existing chat. Foreground alerts include banner, Notification Center list,
 and sound unless that chat is already open. The app deliberately uses no numeric badge.
+Every Companion event alert also carries `content-available: 1`, allowing the application callback
+to invalidate the matching cached roster/thread projection while preserving the existing visible
+alert pipeline. Notification delivery is queued until an active session can bind that invalidation
+to the correct member/workspace cache scope.
 Reply pushes also carry the Companion's four cosmetic icon indexes and `mutable-content: 1`. The
 embedded Notification Service Extension projects `shape` and `color` from the nested
 `companion_icon` dictionary into the same flat CharacterMark geometry used by the app, renders its

@@ -79,7 +79,9 @@ public final class SessionStore {
     private var restored = false
     private var notificationInstallationID: UUID?
     private var persistedSession: Session?
-    private var invalidationContinuations: [UUID: AsyncStream<String>.Continuation] = [:]
+    private var invalidationContinuations: [
+        String: [UUID: AsyncStream<Void>.Continuation]
+    ] = [:]
     private var rosterSyncGeneration = 0
     private var threadSyncGenerations: [String: Int] = [:]
 
@@ -256,28 +258,63 @@ public final class SessionStore {
 
     /// A narrow push/foreground invalidation seam. Consumers choose whether the matching resource
     /// is open; yielding does not mutate an observed thread or roster projection by itself.
-    public func companionInvalidations() -> AsyncStream<String> {
+    public func companionInvalidations(companionID: String) -> AsyncStream<Void> {
         let streamID = UUID()
         return AsyncStream { continuation in
-            invalidationContinuations[streamID] = continuation
+            invalidationContinuations[companionID, default: [:]][streamID] = continuation
             continuation.onTermination = { @Sendable [weak self] _ in
                 Task { @MainActor in
-                    self?.invalidationContinuations[streamID] = nil
+                    guard let self,
+                          var continuations = self.invalidationContinuations[companionID] else { return }
+                    continuations[streamID] = nil
+                    self.invalidationContinuations[companionID] = continuations.isEmpty
+                        ? nil
+                        : continuations
                 }
             }
         }
     }
 
     public func invalidateCompanion(companionID: String) {
-        let hasVisibleConsumer = !invalidationContinuations.isEmpty
-        for continuation in invalidationContinuations.values {
-            continuation.yield(companionID)
+        if hasVisibleInvalidationConsumer(companionID: companionID),
+           let matchingContinuations = invalidationContinuations[companionID] {
+            for continuation in matchingContinuations.values {
+                continuation.yield()
+            }
+            return
         }
-        guard !hasVisibleConsumer else { return }
         Task { [weak self] in
-            guard let self else { return }
-            _ = try? await self.synchronizeRoster()
-            _ = try? await self.synchronizeThread(companionID: companionID)
+            _ = await self?.refreshInvalidatedCompanion(companionID: companionID)
+        }
+    }
+
+    func hasVisibleInvalidationConsumer(companionID: String) -> Bool {
+        invalidationContinuations[companionID]?.isEmpty == false
+    }
+
+    /// Completes the actual roster and transcript cache refresh for an APNs background callback.
+    /// Callers can map the truthful outcome directly to `UIBackgroundFetchResult`.
+    public func refreshInvalidatedCompanion(
+        companionID: String
+    ) async -> CompanionCacheRefreshResult {
+        guard let session = currentSession,
+              let scope = Self.cacheScope(for: session) else { return .failed }
+        let previousRosterCursor = initialRosterSnapshot?.cursor
+            ?? (try? cache?.roster(scope: scope))?.cursor
+        let previousThreadCursor = (try? cache?.thread(
+            scope: scope,
+            companionID: companionID
+        ))?.cursor
+        do {
+            async let roster = synchronizeRoster()
+            async let thread = synchronizeThread(companionID: companionID)
+            let (rosterResult, threadResult) = try await (roster, thread)
+            return rosterResult.value.cursor != previousRosterCursor
+                || threadResult.value.cursor != previousThreadCursor
+                ? .newData
+                : .noData
+        } catch {
+            return .failed
         }
     }
 

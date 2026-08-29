@@ -127,6 +127,12 @@ public enum CompanionSyncMergeError: Error, Equatable {
     case incompleteRoster
 }
 
+public enum CompanionCacheRefreshResult: Equatable, Sendable {
+    case newData
+    case noData
+    case failed
+}
+
 func companionMilliseconds(from duration: Duration) -> Double {
     let parts = duration.components
     return (Double(parts.seconds) * 1_000)
