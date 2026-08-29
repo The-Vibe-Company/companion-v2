@@ -534,6 +534,8 @@ if resolve_dev_box_mode COMPANION_DEV_BOX_MODE=invalid >/dev/null 2>&1; then
 fi
 
 resolve_dev_box_lab_api_key() {
+  # The nested shell expands the sourced helper's positional argument.
+  # shellcheck disable=SC2016
   env -u BOX_LAB_API_KEY "$@" bash -c \
     'source "$1"; companion_dev_box_lab_api_key' _ "$ROOT/scripts/dev-runtime-mode.sh"
 }
@@ -555,9 +557,12 @@ fi
 # The launcher passes the generated value under a role-specific name: the Lab sees only BOX_LAB_*,
 # Runtime sees only COMPANION_BOX_*, and the existing probes above prove sibling roles see neither.
 lab_shared_key="$(resolve_dev_box_lab_api_key)"
+# These variables must expand inside each role-specific child process.
+# shellcheck disable=SC2016
 lab_key_boundary="$(env BOX_LAB_API_KEY="$lab_shared_key" COMPANION_BOX_API_KEY="$lab_shared_key" \
   bash scripts/dev-process.sh box-lab bash -c \
   'printf "%s|%s" "${BOX_LAB_API_KEY:-unset}" "${COMPANION_BOX_API_KEY:-unset}"')"
+# shellcheck disable=SC2016
 runtime_key_boundary="$(env BOX_LAB_API_KEY="$lab_shared_key" COMPANION_BOX_API_KEY="$lab_shared_key" \
   bash scripts/dev-process.sh runtime bash -c \
   'printf "%s|%s" "${BOX_LAB_API_KEY:-unset}" "${COMPANION_BOX_API_KEY:-unset}"')"
@@ -603,6 +608,8 @@ if ! grep -Fq '[scripts.run."Dev (real Pi VM, slow)"]' .conductor/settings.toml 
   printf '[dev-stack-check] Conductor must expose the real Pi VM run locally and explicitly\n' >&2
   exit 1
 fi
+# These source-code probes intentionally match unexpanded launcher variables.
+# shellcheck disable=SC2016
 if ! grep -Fq 'box_lab_workspace_id="${BOX_LAB_WORKSPACE_ID:-${CONDUCTOR_WORKSPACE_ID:-$PROJECT}}"' \
   scripts/dev-conductor.sh \
   || [ "$(grep -Fc 'BOX_LAB_WORKSPACE_ID="${BOX_LAB_WORKSPACE_ID:-${CONDUCTOR_WORKSPACE_ID:-$PROJECT}}"' \
@@ -611,12 +618,12 @@ if ! grep -Fq 'box_lab_workspace_id="${BOX_LAB_WORKSPACE_ID:-${CONDUCTOR_WORKSPA
   exit 1
 fi
 if grep -Eq 'local runtime_cmd=.*BOX_LAB_WORKSPACE_ID' scripts/dev-conductor.sh \
-  || ! grep -Fq 'BOX_LAB_WORKSPACE_ID="$box_lab_workspace_id" pnpm exec concurrently' \
+  || ! grep -Fq "BOX_LAB_WORKSPACE_ID=\"\$box_lab_workspace_id\" pnpm exec concurrently" \
     scripts/dev-conductor.sh; then
   printf '[dev-stack-check] Conductor must pass the workspace identity as data, never shell source\n' >&2
   exit 1
 fi
-if ! grep -Fq 'BOX_LAB_WORKSPACE_ID="$box_lab_workspace_id" \' scripts/dev-runtime.sh; then
+if ! grep -Fq "BOX_LAB_WORKSPACE_ID=\"\$box_lab_workspace_id\" \\" scripts/dev-runtime.sh; then
   printf '[dev-stack-check] the runtime launcher must pass the resolved workspace identity only to Box Lab\n' >&2
   exit 1
 fi
