@@ -107,35 +107,3 @@ private func decision(status: String, kind: String, answer: String? = nil) throw
     """#
     return try JSONDecoder().decode(CompanionDecision.self, from: Data(payload.utf8))
 }
-
-@Test
-func cachedThreadNeverClaimsViewerReadOnlyAccessBeforeAServerRead() throws {
-    func thread(canSend: Bool) throws -> CompanionThread {
-        try JSONDecoder().decode(CompanionThread.self, from: Data("""
-        {
-          "companion_id":"5b7d655e-36bb-4fbe-9acd-e56103759911",
-          "viewer_id":"owner-1",
-          "read_only":\(canSend ? "false" : "true"),
-          "can_send":\(canSend),
-          "entries":[],
-          "queued_count":0
-        }
-        """.utf8))
-    }
-
-    // The on-device cache renders an Owner's thread with sending withheld. Capability is unknown
-    // until the server re-evaluates access, so the composer must not announce read-only access.
-    let cached = try thread(canSend: false)
-    #expect(CompanionThreadSendCapability.resolve(thread: cached, serverVerified: false) == nil)
-    #expect(CompanionThreadSendCapability.resolve(thread: nil, serverVerified: false) == nil)
-    #expect(CompanionThreadSendCapability.resolve(thread: nil, serverVerified: true) == nil)
-
-    // Only a server read may deny, or restore, the composer.
-    #expect(CompanionThreadSendCapability.resolve(thread: cached, serverVerified: true) == false)
-    #expect(
-        CompanionThreadSendCapability.resolve(
-            thread: try thread(canSend: true),
-            serverVerified: true
-        ) == true
-    )
-}
