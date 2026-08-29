@@ -219,6 +219,13 @@ reading-position store restores the first visible message without animated hydra
 tests cover per-Companion isolation and window restoration; the rendered switch-and-return check
 remains available for local interactive verification.
 
+Every persisted user and Companion message is parsed through the same native rich-text renderer.
+It preserves headings, bold/emphasis, inline and block code, lists, quotes, tables, and emoji while
+turning bare HTTP(S) URLs and Markdown links into adaptive system-blue actions. Links open through
+the shared external URL launcher and use the native Open / Copy long-press menu. Black appearance
+uses the lighter dark-surface blue without changing the inverted member-bubble contrast. The
+Computer screen is only the ephemeral remote desktop and does not render a second transcript.
+
 Queued messages stay collapsed above the composer until opened. Owner and Editor can remove an
 unstarted queued turn through the shared cancel route; Viewer remains read-only. The shared `/v1`
 contract does not expose a queued-message edit mutation, so iOS does not offer editing or invent a

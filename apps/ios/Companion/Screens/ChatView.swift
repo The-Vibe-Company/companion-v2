@@ -1014,7 +1014,7 @@ struct ChatView: View {
         for entries: [TranscriptEntry]
     ) async -> [String: CachedMarkdownDocument] {
         let sources = entries.lazy
-            .filter { $0.role == "assistant" }
+            .filter { $0.role == "assistant" || $0.role == "user" }
             .map { MarkdownDocumentSource(eventID: $0.eventID, content: $0.content) }
         return await MarkdownDocumentRenderer.render(
             sources: Array(sources),
@@ -1466,6 +1466,7 @@ struct ChatView: View {
         let message = PendingMessage(
             id: UUID(),
             content: content,
+            markdown: MarkdownDocument(markdown: content),
             attachments: attachments,
             failed: false,
             uploadProgress: attachments.isEmpty ? nil : 0
@@ -1724,7 +1725,7 @@ struct ChatMessageBubble: View {
 
     @ViewBuilder
     var body: some View {
-        if kind == .assistant {
+        if kind == .assistant || markdown?.containsInteractiveLink == true {
             row.accessibilityElement(children: .contain)
         } else {
             row.accessibilityElement(children: .combine)
@@ -1760,7 +1761,8 @@ struct ChatMessageBubble: View {
                 if let streamingBaseMarkdown {
                     MarkdownMessageView(
                         document: streamingBaseMarkdown,
-                        accent: primaryTextColor,
+                        foreground: primaryTextColor,
+                        linkColor: messageLinkColor,
                         allowsTextSelection: false
                     )
                 }
@@ -1770,19 +1772,13 @@ struct ChatMessageBubble: View {
                         .foregroundStyle(primaryTextColor)
                         .lineSpacing(3)
                 }
-            } else if kind == .assistant, let markdown {
-                if usesMarkdownLayout {
-                    MarkdownMessageView(
-                        document: markdown,
-                        accent: primaryTextColor,
-                        allowsTextSelection: false
-                    )
-                } else {
-                    Text(content)
-                        .font(.body)
-                        .foregroundStyle(primaryTextColor)
-                        .lineSpacing(3)
-                }
+            } else if let markdown {
+                MarkdownMessageView(
+                    document: markdown,
+                    foreground: primaryTextColor,
+                    linkColor: messageLinkColor,
+                    allowsTextSelection: false
+                )
             } else {
                 Text(content)
                     .font(.body)
@@ -1842,23 +1838,16 @@ struct ChatMessageBubble: View {
             : CompanionIOSTheme.textSecondary
     }
 
+    private var messageLinkColor: Color {
+        kind == .mine ? CompanionIOSTheme.userBubbleLink : CompanionIOSTheme.linkBlue
+    }
+
     private var displayReasoning: String? {
         guard let reasoning else { return nil }
         guard !reasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         return reasoning
     }
 
-    private var usesMarkdownLayout: Bool {
-        content.contains("\n")
-            || content.contains("**")
-            || content.contains("__")
-            || content.contains("`")
-            || content.contains("[")
-            || content.hasPrefix("#")
-            || content.hasPrefix("- ")
-            || content.hasPrefix("* ")
-            || content.hasPrefix("> ")
-    }
 }
 
 struct CompanionThinkingDisclosure: View {
@@ -2051,7 +2040,7 @@ private struct TranscriptRowView: View, @MainActor Equatable {
                 companionName: input.companionName,
                 companionID: input.companionID,
                 icon: input.companionIcon,
-                markdown: input.entry.role == "assistant" ? input.markdown : nil,
+                markdown: input.markdown,
                 streamingBaseMarkdown: input.tailReveal?.baseMarkdown,
                 streamingDelta: input.tailReveal?.visibleDelta,
                 reasoning: input.entry.role == "assistant" ? input.entry.reasoning : nil,
@@ -2176,6 +2165,7 @@ private func parseCompanionTimestamp(_ value: String) -> Date? {
 private struct PendingMessage: Identifiable, Equatable {
     let id: UUID
     let content: String
+    let markdown: MarkdownDocument
     let attachments: [CompanionMessageAttachment]
     var failed: Bool
     var uploadProgress: Double?
@@ -2194,6 +2184,7 @@ private struct PendingMessageView: View {
                 content: message.content,
                 kind: .mine,
                 timestamp: statusLabel,
+                markdown: message.markdown,
                 localAttachments: message.attachments
             )
 

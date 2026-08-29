@@ -49,6 +49,7 @@ public enum CompanionAppearancePalette {
 
     public static let textSecondary: UInt32 = 0x8E8E93
     public static let actionBlue: UInt32 = 0x007AFF
+    public static let actionBlueBlack: UInt32 = 0x0A84FF
     public static let toggleGreen: UInt32 = 0x34C759
     public static let danger: UInt32 = 0xFF3B30
     public static let warning: UInt32 = 0xFF9500

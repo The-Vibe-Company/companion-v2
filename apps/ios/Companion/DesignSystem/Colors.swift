@@ -18,6 +18,14 @@ enum CompanionIOSTheme {
     static let primaryCTA = adaptive(light: CompanionAppearancePalette.Light.primaryCTA, black: CompanionAppearancePalette.Black.primaryCTA)
     static let primaryCTAText = adaptive(light: CompanionAppearancePalette.Light.primaryCTAText, black: CompanionAppearancePalette.Black.primaryCTAText)
     static let actionBlue = color(CompanionAppearancePalette.actionBlue)
+    static let linkBlue = adaptive(
+        light: CompanionAppearancePalette.actionBlue,
+        black: CompanionAppearancePalette.actionBlueBlack
+    )
+    static let userBubbleLink = adaptive(
+        light: CompanionAppearancePalette.actionBlueBlack,
+        black: CompanionAppearancePalette.actionBlue
+    )
     static let toggleGreen = color(CompanionAppearancePalette.toggleGreen)
     static let danger = color(CompanionAppearancePalette.danger)
     static let warning = color(CompanionAppearancePalette.warning)

@@ -19,7 +19,7 @@ struct MarkdownTableDemoView: View {
 
                                 MarkdownMessageView(
                                     document: fixture.document,
-                                    accent: .companionAccent
+                                    linkColor: .companionAccent
                                 )
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)

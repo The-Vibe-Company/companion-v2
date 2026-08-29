@@ -285,7 +285,7 @@ test("chat uses the approved two-sided bubbles and morphing composer", () => {
   assert.match(bubble, /CompanionIOSTheme\.botBubble/);
   assert.match(
     bubble,
-    /MarkdownMessageView\([\s\S]{0,120}?document: markdown,[\s\S]{0,120}?accent: primaryTextColor/,
+    /MarkdownMessageView\([\s\S]{0,120}?document: markdown,[\s\S]{0,120}?foreground: primaryTextColor,[\s\S]{0,120}?linkColor: messageLinkColor/,
   );
   assert.doesNotMatch(bubble, /var accent\b|accent\.opacity|visualTheme\.accent|tint:/);
   assert.doesNotMatch(chat, /\.toolbar \{ headerToolbar \}\s*\.tint\(visualTheme\.accent\)/);
@@ -422,6 +422,53 @@ test("native message interactions stay accessible without simulator CI", () => {
   assert.match(readme, /Reply or thread\s+actions and regenerate are deliberately out of scope/);
 });
 
+test("chat links auto-detect safely and preserve the complete Markdown renderer", () => {
+  const chat = read("apps/ios/Companion/Screens/ChatView.swift");
+  const markdown = read("apps/ios/Companion/Screens/MarkdownMessageView.swift");
+  const detector = read(
+    "apps/ios/CompanionKit/Sources/CompanionKit/CompanionMessageLinkDetector.swift",
+  );
+  const palette = read(
+    "apps/ios/CompanionKit/Sources/CompanionKit/CompanionAppearance.swift",
+  );
+  const colors = read("apps/ios/Companion/DesignSystem/Colors.swift");
+  const computer = read("apps/ios/Companion/Screens/CompanionComputerView.swift");
+  const uiTests = read("apps/ios/CompanionUITests/CompanionUITests.swift");
+  const design = read("docs/ios-design.md");
+
+  assert.match(chat, /filter \{ \$0\.role == "assistant" \|\| \$0\.role == "user" \}/);
+  assert.match(chat, /markdown: MarkdownDocument\(markdown: content\)/);
+  assert.match(chat, /markdown: input\.markdown,/);
+  assert.doesNotMatch(chat, /markdown: input\.entry\.role == "assistant"/);
+  assert.match(chat, /else if let markdown \{[\s\S]{0,220}?MarkdownMessageView\(/);
+  assert.match(chat, /kind == \.assistant \|\| markdown\?\.containsInteractiveLink == true/);
+  assert.match(detector, /NSDataDetector\([\s\S]{0,120}?CheckingType\.link/);
+  assert.match(detector, /CompanionLinkPolicy\.isAllowed\(url\)/);
+  assert.match(markdown, /run\.inlinePresentationIntent\?\.contains\(\.code\) != true/);
+  assert.match(markdown, /else if !isCode \{[\s\S]{0,160}?CompanionMessageLinkDetector\.detect/);
+  for (const intent of ["stronglyEmphasized", "emphasized", "strikethrough", "code"]) {
+    assert.match(markdown, new RegExp(`contains\\(\\.${intent}\\)`));
+  }
+  for (const block of ["heading", "orderedList", "unorderedList", "codeBlock", "blockQuote", "table"]) {
+    assert.match(markdown, new RegExp(`case \\.${block}`));
+  }
+  assert.match(markdown, /LinkHitTestingTextView: UITextView/);
+  assert.match(markdown, /shouldInteractWith url: URL/);
+  assert.match(markdown, /case \.invokeDefaultAction:[\s\S]{0,100}?CompanionMessageLinkActions\.open\(url\)/);
+  assert.match(markdown, /case \.presentActions, \.preview:\s*return true/);
+  assert.match(markdown, /Button\("Open", systemImage: "arrow\.up\.right\.square"\)/);
+  assert.match(markdown, /Button\("Copy", systemImage: "doc\.on\.doc"\)/);
+  assert.match(markdown, /ExternalURLLauncher\.open\(url\)/);
+  assert.match(palette, /actionBlue: UInt32 = 0x007AFF/);
+  assert.match(palette, /actionBlueBlack: UInt32 = 0x0A84FF/);
+  assert.match(colors, /static let linkBlue = adaptive/);
+  assert.match(colors, /static let userBubbleLink = adaptive/);
+  assert.match(uiTests, /testMessageLinkLongPressOffersOpenAndCopy/);
+  assert.match(uiTests, /testMessageLinksRemainVisibleInBlackAppearance/);
+  assert.match(design, /Bare HTTP\(S\) URLs and Markdown links render in `action\.blue`/);
+  assert.doesNotMatch(computer, /TranscriptEntry|MarkdownMessageView|MarkdownDocument/);
+});
+
 test("external iOS links and OAuth stay browser-owned and callback-scoped", () => {
   const markdown = read("apps/ios/Companion/Screens/MarkdownMessageView.swift");
   const login = read("apps/ios/Companion/Screens/LoginView.swift");
@@ -441,8 +488,8 @@ test("external iOS links and OAuth stay browser-owned and callback-scoped", () =
   const design = read("docs/design.md");
   const authFlow = [markdown, login, plugins, coordinator, launcher, root, kitClient, callbackPolicy].join("\n");
 
-  assert.match(markdown, /UIApplication\.shared\.open\(url/);
-  assert.match(markdown, /case \.conductor:\s*[\s\S]{0,240}?\.systemAction/);
+  assert.match(markdown, /case \.system, \.conductor:[\s\S]{0,160}?CompanionMessageLinkActions\.open\(url\)/);
+  assert.match(markdown, /ExternalURLLauncher\.open\(url\)/);
   assert.match(coordinator, /UIApplication\.shared\.open\(pendingURL/);
   assert.match(coordinator, /guard let activeFlow, phase != \.completing, callbackURL == nil/);
   assert.match(root, /\.onOpenURL\s*\{[\s\S]{0,180}?externalOAuth\.handle/);

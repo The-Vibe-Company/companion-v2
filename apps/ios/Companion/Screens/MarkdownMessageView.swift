@@ -4,6 +4,7 @@ import UIKit
 
 struct MarkdownDocument: Equatable, Sendable {
     let blocks: [MarkdownNode]
+    let containsInteractiveLink: Bool
 
     init(markdown source: String) {
         do {
@@ -15,9 +16,13 @@ struct MarkdownDocument: Equatable, Sendable {
                 )
             )
             let tree = MarkdownTreeBuilder.document(from: parsed)
-            blocks = tree.isEmpty ? [MarkdownNode.plainText(source)] : tree
+            let renderedBlocks = tree.isEmpty ? [MarkdownNode.plainText(source)] : tree
+            blocks = renderedBlocks
+            containsInteractiveLink = renderedBlocks.contains(where: \.containsInteractiveLink)
         } catch {
-            blocks = [MarkdownNode.plainText(source)]
+            let fallback = MarkdownNode.plainText(source)
+            blocks = [fallback]
+            containsInteractiveLink = fallback.containsInteractiveLink
         }
     }
 }
@@ -112,43 +117,67 @@ struct MarkdownNode: Identifiable, Equatable, Sendable {
             children: []
         )
     }
+
+    var containsInteractiveLink: Bool {
+        content.containsInteractiveLink || children.contains(where: \.containsInteractiveLink)
+    }
+}
+
+private extension AttributedString {
+    var containsInteractiveLink: Bool {
+        runs.contains { run in
+            if run.link.map(CompanionLinkPolicy.isAllowed) == true { return true }
+            guard run.inlinePresentationIntent?.contains(.code) != true else { return false }
+            return !CompanionMessageLinkDetector.detect(
+                in: String(self[run.range].characters)
+            ).isEmpty
+        }
+    }
 }
 
 struct MarkdownMessageView: View {
     let document: MarkdownDocument
-    let accent: Color
+    let foreground: Color
+    let linkColor: Color
     let allowsTextSelection: Bool
 
-    init(document: MarkdownDocument, accent: Color, allowsTextSelection: Bool = true) {
+    init(
+        document: MarkdownDocument,
+        foreground: Color = CompanionIOSTheme.textPrimary,
+        linkColor: Color = CompanionIOSTheme.linkBlue,
+        allowsTextSelection: Bool = true
+    ) {
         self.document = document
-        self.accent = accent
+        self.foreground = foreground
+        self.linkColor = linkColor
         self.allowsTextSelection = allowsTextSelection
     }
 
     var body: some View {
         Group {
             if allowsTextSelection {
-                MarkdownNodesView(nodes: document.blocks, accent: accent)
+                MarkdownNodesView(
+                    nodes: document.blocks,
+                    foreground: foreground,
+                    linkColor: linkColor
+                )
                     .textSelection(.enabled)
             } else {
-                MarkdownNodesView(nodes: document.blocks, accent: accent)
+                MarkdownNodesView(
+                    nodes: document.blocks,
+                    foreground: foreground,
+                    linkColor: linkColor
+                )
             }
         }
-        .tint(accent)
+        .tint(linkColor)
         .environment(
                 \.openURL,
                 OpenURLAction { url in
                     switch CompanionLinkPolicy.route(for: url) {
-                    case .system:
-                        // External HTTP(S) and mail links leave the app through the system browser
-                        // or mail client. Keep this explicit so SwiftUI cannot present an
-                        // in-app web surface for assistant-authored links.
-                        UIApplication.shared.open(url, options: [:], completionHandler: nil)
+                    case .system, .conductor:
+                        CompanionMessageLinkActions.open(url)
                         return .handled
-                    case .conductor:
-                        // Companion has no Conductor workspace route, so let iOS hand this URL to
-                        // whichever installed app has registered the explicit scheme.
-                        return .systemAction
                     case .blocked:
                         return .discarded
                     }
@@ -159,12 +188,17 @@ struct MarkdownMessageView: View {
 
 private struct MarkdownNodesView: View {
     let nodes: [MarkdownNode]
-    let accent: Color
+    let foreground: Color
+    let linkColor: Color
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             ForEach(nodes) { node in
-                MarkdownNodeView(node: node, accent: accent)
+                MarkdownNodeView(
+                    node: node,
+                    foreground: foreground,
+                    linkColor: linkColor
+                )
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -173,30 +207,53 @@ private struct MarkdownNodesView: View {
 
 private struct MarkdownNodeView: View {
     let node: MarkdownNode
-    let accent: Color
+    let foreground: Color
+    let linkColor: Color
 
     @ViewBuilder
     var body: some View {
         switch node.kind {
         case .paragraph:
-            MarkdownParagraphView(content: node.content, accent: accent)
+            MarkdownParagraphView(
+                content: node.content,
+                foreground: foreground,
+                linkColor: linkColor
+            )
 
         case .heading(let level):
-            MarkdownText(content: node.content, accent: accent)
-                .font(headingFont(level: level))
+            MarkdownText(
+                content: node.content,
+                foreground: foreground,
+                linkColor: linkColor,
+                typography: .heading(level)
+            )
                 .accessibilityAddTraits(.isHeader)
                 .accessibilityIdentifier("markdown.heading.\(node.id)")
 
         case .orderedList:
-            MarkdownListView(node: node, ordered: true, accent: accent)
+            MarkdownListView(
+                node: node,
+                ordered: true,
+                foreground: foreground,
+                linkColor: linkColor
+            )
                 .accessibilityIdentifier("markdown.list.\(node.id)")
 
         case .unorderedList:
-            MarkdownListView(node: node, ordered: false, accent: accent)
+            MarkdownListView(
+                node: node,
+                ordered: false,
+                foreground: foreground,
+                linkColor: linkColor
+            )
                 .accessibilityIdentifier("markdown.list.\(node.id)")
 
         case .listItem:
-            MarkdownNodesView(nodes: node.children, accent: accent)
+            MarkdownNodesView(
+                nodes: node.children,
+                foreground: foreground,
+                linkColor: linkColor
+            )
 
         case .codeBlock(let language):
             MarkdownCodeBlock(
@@ -211,7 +268,11 @@ private struct MarkdownNodeView: View {
                     .fill(CompanionIOSTheme.separator)
                     .frame(width: 2)
                     .accessibilityHidden(true)
-                MarkdownNodesView(nodes: node.children, accent: accent)
+                MarkdownNodesView(
+                    nodes: node.children,
+                    foreground: foreground,
+                    linkColor: linkColor
+                )
                     .foregroundStyle(CompanionIOSTheme.textSecondary)
             }
             .accessibilityIdentifier("markdown.quote.\(node.id)")
@@ -223,28 +284,27 @@ private struct MarkdownNodeView: View {
                 .accessibilityIdentifier("markdown.divider.\(node.id)")
 
         case .table:
-            MarkdownTableView(node: node, accent: accent)
+            MarkdownTableView(
+                node: node,
+                foreground: foreground,
+                linkColor: linkColor
+            )
                 .accessibilityIdentifier("markdown.table.\(node.id)")
 
         case .tableHeaderRow, .tableRow, .tableCell:
-            MarkdownNodesView(nodes: node.children, accent: accent)
-        }
-    }
-
-    private func headingFont(level: Int) -> Font {
-        switch level {
-        case 1: return .title2.weight(.semibold)
-        case 2: return .title3.weight(.semibold)
-        case 3: return .headline.weight(.semibold)
-        case 4: return .body.weight(.semibold)
-        default: return .subheadline.weight(.semibold)
+            MarkdownNodesView(
+                nodes: node.children,
+                foreground: foreground,
+                linkColor: linkColor
+            )
         }
     }
 }
 
 private struct MarkdownParagraphView: View {
     let content: AttributedString
-    let accent: Color
+    let foreground: Color
+    let linkColor: Color
 
     var body: some View {
         if let link = standaloneLink {
@@ -252,7 +312,7 @@ private struct MarkdownParagraphView: View {
                 HStack(spacing: 12) {
                     Image(systemName: "link")
                         .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(accent)
+                        .foregroundStyle(linkColor)
                         .frame(width: 36, height: 36)
                         .background(CompanionIOSTheme.card, in: RoundedRectangle(cornerRadius: 12))
 
@@ -283,9 +343,21 @@ private struct MarkdownParagraphView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Open \(linkTitle), \(linkDomain(for: link))")
+            .contextMenu {
+                Button("Open", systemImage: "arrow.up.right.square") {
+                    CompanionMessageLinkActions.open(link)
+                }
+                Button("Copy", systemImage: "doc.on.doc") {
+                    CompanionMessageLinkActions.copy(link)
+                }
+            }
         } else {
-            MarkdownText(content: content, accent: accent)
-                .font(.body)
+            MarkdownText(
+                content: content,
+                foreground: foreground,
+                linkColor: linkColor,
+                typography: .body
+            )
                 .lineSpacing(3)
         }
     }
@@ -323,256 +395,306 @@ private struct MarkdownParagraphView: View {
 
 private struct MarkdownText: View {
     let content: AttributedString
-    let accent: Color
+    let foreground: Color
+    let linkColor: Color
+    var typography: MarkdownInlineTypography = .body
     var textAlignment: TextAlignment = .leading
 
     var body: some View {
         text
-            .foregroundStyle(CompanionIOSTheme.textPrimary)
-            .tint(accent)
+            .foregroundStyle(foreground)
+            .tint(linkColor)
             .multilineTextAlignment(textAlignment)
     }
 
     @ViewBuilder
     private var text: some View {
-        if containsConductorLink {
-            MarkdownInlineFlow(
+        if containsLink {
+            MarkdownLinkedTextView(
                 content: content,
-                accent: accent,
+                foreground: foreground,
+                linkColor: linkColor,
+                typography: typography,
                 textAlignment: textAlignment
             )
         } else {
             Text(content)
+                .font(typography.font)
         }
     }
 
-    private var containsConductorLink: Bool {
-        content.runs.contains { run in
-            guard let link = run.link else { return false }
-            return CompanionLinkPolicy.isConductor(link)
+    private var containsLink: Bool {
+        content.containsInteractiveLink
+    }
+}
+
+private enum MarkdownInlineTypography {
+    case body
+    case heading(Int)
+    case tableHeader
+    case tableBody
+
+    var font: Font {
+        switch self {
+        case .body: return .body
+        case .heading(1): return .title2.weight(.semibold)
+        case .heading(2): return .title3.weight(.semibold)
+        case .heading(3): return .headline.weight(.semibold)
+        case .heading(4): return .body.weight(.semibold)
+        case .heading: return .subheadline.weight(.semibold)
+        case .tableHeader: return .subheadline.weight(.semibold)
+        case .tableBody: return .subheadline
+        }
+    }
+
+    @MainActor
+    var uiFont: UIFont {
+        switch self {
+        case .body:
+            return .preferredFont(forTextStyle: .body)
+        case .heading(1):
+            return .preferredFont(forTextStyle: .title2).withWeight(.semibold)
+        case .heading(2):
+            return .preferredFont(forTextStyle: .title3).withWeight(.semibold)
+        case .heading(3):
+            return .preferredFont(forTextStyle: .headline).withWeight(.semibold)
+        case .heading(4):
+            return .preferredFont(forTextStyle: .body).withWeight(.semibold)
+        case .heading:
+            return .preferredFont(forTextStyle: .subheadline).withWeight(.semibold)
+        case .tableHeader:
+            return .preferredFont(forTextStyle: .subheadline).withWeight(.semibold)
+        case .tableBody:
+            return .preferredFont(forTextStyle: .subheadline)
         }
     }
 }
 
-private struct MarkdownInlineRun: Identifiable {
-    let id: Int
-    var content: AttributedString
-    let link: URL?
-
-    var isConductorLink: Bool {
-        guard let link else { return false }
-        return CompanionLinkPolicy.isConductor(link)
-    }
-}
-
-private struct MarkdownInlineFlow: View {
-    let runs: [MarkdownInlineRun]
-    let accent: Color
+private struct MarkdownLinkedTextView: UIViewRepresentable {
+    let content: AttributedString
+    let foreground: Color
+    let linkColor: Color
+    let typography: MarkdownInlineTypography
     let textAlignment: TextAlignment
 
     @Environment(\.layoutDirection) private var layoutDirection
 
-    init(
-        content: AttributedString,
-        accent: Color,
-        textAlignment: TextAlignment
-    ) {
-        self.accent = accent
-        self.textAlignment = textAlignment
-        var inlineRuns: [MarkdownInlineRun] = []
-        for run in content.runs {
-            var fragment = AttributedString(content[run.range])
-            let link = run.link
-            if let link, CompanionLinkPolicy.isConductor(link) {
-                // The native Link below owns the interaction and accessibility semantics.
-                fragment.link = nil
-            }
-            if let lastIndex = inlineRuns.indices.last, inlineRuns[lastIndex].link == link {
-                inlineRuns[lastIndex].content.append(fragment)
-            } else {
-                inlineRuns.append(
-                    MarkdownInlineRun(id: inlineRuns.count, content: fragment, link: link)
-                )
-            }
-        }
-        self.runs = inlineRuns
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
     }
 
-    var body: some View {
-        MarkdownInlineFlowLayout(
-            textAlignment: textAlignment,
-            layoutDirection: layoutDirection
-        ) {
-            ForEach(runs) { run in
-                if run.isConductorLink, let link = run.link {
-                    Link(destination: link) {
-                        Text(run.content)
-                            .foregroundStyle(accent)
-                            .underline()
-                            .frame(minHeight: 44)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .tint(accent)
-                } else {
-                    Text(run.content)
+    func makeUIView(context: Context) -> LinkHitTestingTextView {
+        let textView = LinkHitTestingTextView()
+        textView.backgroundColor = .clear
+        textView.isEditable = false
+        textView.isScrollEnabled = false
+        textView.isSelectable = true
+        textView.adjustsFontForContentSizeCategory = true
+        textView.textContainerInset = .zero
+        textView.textContainer.lineFragmentPadding = 0
+        textView.delegate = context.coordinator
+        textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        textView.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        return textView
+    }
+
+    func updateUIView(_ textView: LinkHitTestingTextView, context: Context) {
+        textView.attributedText = attributedText
+        textView.linkTextAttributes = [
+            .foregroundColor: UIColor(linkColor),
+        ]
+        textView.tintColor = UIColor(linkColor)
+        textView.textAlignment = resolvedTextAlignment
+        textView.invalidateIntrinsicContentSize()
+    }
+
+    func sizeThatFits(
+        _ proposal: ProposedViewSize,
+        uiView: LinkHitTestingTextView,
+        context: Context
+    ) -> CGSize? {
+        guard let width = proposal.width, width.isFinite else { return nil }
+        let measured = uiView.sizeThatFits(
+            CGSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+        )
+        return CGSize(width: width, height: ceil(measured.height))
+    }
+
+    private var attributedText: NSAttributedString {
+        let plainText = String(content.characters)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = resolvedTextAlignment
+        if case .body = typography { paragraph.lineSpacing = 3 }
+
+        let rendered = NSMutableAttributedString(
+            string: plainText,
+            attributes: [
+                .font: typography.uiFont,
+                .foregroundColor: UIColor(foreground),
+                .paragraphStyle: paragraph,
+            ]
+        )
+
+        var utf16Offset = 0
+        for run in content.runs {
+            let fragment = String(content[run.range].characters)
+            let fragmentLength = (fragment as NSString).length
+            let fragmentRange = NSRange(location: utf16Offset, length: fragmentLength)
+            let intent = run.inlinePresentationIntent
+            let isCode = intent?.contains(.code) == true
+            let isStrong = intent?.contains(.stronglyEmphasized) == true
+            let isEmphasized = intent?.contains(.emphasized) == true
+
+            rendered.addAttribute(
+                .font,
+                value: styledFont(
+                    base: typography.uiFont,
+                    code: isCode,
+                    strong: isStrong,
+                    emphasized: isEmphasized
+                ),
+                range: fragmentRange
+            )
+            if isCode {
+                rendered.addAttribute(
+                    .backgroundColor,
+                    value: UIColor.secondarySystemFill,
+                    range: fragmentRange
+                )
+            }
+            if intent?.contains(.strikethrough) == true {
+                rendered.addAttribute(
+                    .strikethroughStyle,
+                    value: NSUnderlineStyle.single.rawValue,
+                    range: fragmentRange
+                )
+            }
+
+            if let link = run.link, CompanionLinkPolicy.isAllowed(link) {
+                rendered.addAttribute(.link, value: link, range: fragmentRange)
+            } else if !isCode {
+                for detected in CompanionMessageLinkDetector.detect(in: fragment) {
+                    let range = NSRange(
+                        location: utf16Offset + detected.utf16Location,
+                        length: detected.utf16Length
+                    )
+                    rendered.addAttribute(.link, value: detected.url, range: range)
                 }
+            }
+            utf16Offset += fragmentLength
+        }
+
+        return rendered
+    }
+
+    private var resolvedTextAlignment: NSTextAlignment {
+        switch textAlignment {
+        case .leading: return layoutDirection == .rightToLeft ? .right : .left
+        case .center: return .center
+        case .trailing: return layoutDirection == .rightToLeft ? .left : .right
+        }
+    }
+
+    private func styledFont(
+        base: UIFont,
+        code: Bool,
+        strong: Bool,
+        emphasized: Bool
+    ) -> UIFont {
+        var font = code
+            ? UIFont.monospacedSystemFont(
+                ofSize: base.pointSize,
+                weight: strong ? .semibold : .regular
+            )
+            : base.withWeight(strong ? .semibold : nil)
+        if emphasized,
+           let descriptor = font.fontDescriptor.withSymbolicTraits(
+               font.fontDescriptor.symbolicTraits.union(.traitItalic)
+           ) {
+            font = UIFont(descriptor: descriptor, size: font.pointSize)
+        }
+        return font
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, UITextViewDelegate {
+        func textView(
+            _ textView: UITextView,
+            shouldInteractWith url: URL,
+            in characterRange: NSRange,
+            interaction: UITextItemInteraction
+        ) -> Bool {
+            switch interaction {
+            case .invokeDefaultAction:
+                CompanionMessageLinkActions.open(url)
+                return false
+            case .presentActions, .preview:
+                return true
+            @unknown default:
+                return false
             }
         }
     }
 }
 
-private struct MarkdownInlineFlowLayout: Layout {
-    let textAlignment: TextAlignment
-    let layoutDirection: LayoutDirection
+private final class LinkHitTestingTextView: UITextView {
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        guard super.point(inside: point, with: event),
+              attributedText.length > 0,
+              let closestTextPosition = closestPosition(to: point)
+        else { return false }
 
-    private struct RawPlacement {
-        let index: Int
-        let size: CGSize
-        let x: CGFloat
-        let line: Int
-    }
+        var characterIndex = offset(from: beginningOfDocument, to: closestTextPosition)
+        if characterIndex == attributedText.length { characterIndex -= 1 }
+        guard characterIndex >= 0, characterIndex < attributedText.length else { return false }
 
-    private struct Placement {
-        let index: Int
-        let size: CGSize
-        let origin: CGPoint
-    }
+        var linkRange = NSRange(location: 0, length: 0)
+        guard attributedText.attribute(
+            .link,
+            at: characterIndex,
+            effectiveRange: &linkRange
+        ) != nil,
+        let start = self.position(from: beginningOfDocument, offset: linkRange.location),
+        let end = self.position(from: start, offset: linkRange.length),
+        let resolvedRange = self.textRange(from: start, to: end)
+        else { return false }
 
-    private struct Result {
-        let placements: [Placement]
-        let size: CGSize
-    }
-
-    func sizeThatFits(
-        proposal: ProposedViewSize,
-        subviews: Subviews,
-        cache: inout ()
-    ) -> CGSize {
-        layout(subviews: subviews, width: proposal.width).size
-    }
-
-    func placeSubviews(
-        in bounds: CGRect,
-        proposal: ProposedViewSize,
-        subviews: Subviews,
-        cache: inout ()
-    ) {
-        let result = layout(subviews: subviews, width: bounds.width)
-        for placement in result.placements {
-            subviews[placement.index].place(
-                at: CGPoint(
-                    x: bounds.minX + placement.origin.x,
-                    y: bounds.minY + placement.origin.y
-                ),
-                anchor: .topLeading,
-                proposal: ProposedViewSize(
-                    width: placement.size.width,
-                    height: placement.size.height
-                )
-            )
+        return selectionRects(for: resolvedRange).contains { selectionRect in
+            selectionRect.rect.insetBy(dx: -4, dy: -4).contains(point)
         }
     }
+}
 
-    private func layout(subviews: Subviews, width proposedWidth: CGFloat?) -> Result {
-        guard !subviews.isEmpty else {
-            return Result(placements: [], size: CGSize(width: proposedWidth ?? 0, height: 0))
-        }
-
-        let width = max(
-            proposedWidth.flatMap { $0.isFinite ? $0 : nil } ?? .greatestFiniteMagnitude,
-            1
-        )
-        var rawPlacements: [RawPlacement] = []
-        var lineHeights: [CGFloat] = []
-        var lineWidths: [CGFloat] = []
-        var lineWidth: CGFloat = 0
-        var lineHeight: CGFloat = 0
-        var line = 0
-        var maxLineWidth: CGFloat = 0
-
-        for (index, subview) in subviews.enumerated() {
-            let idealSize = subview.sizeThatFits(.unspecified)
-            if lineWidth > 0, idealSize.width > width - lineWidth {
-                maxLineWidth = max(maxLineWidth, lineWidth)
-                lineHeights.append(lineHeight)
-                lineWidths.append(lineWidth)
-                line += 1
-                lineWidth = 0
-                lineHeight = 0
-            }
-
-            let availableWidth = max(width - lineWidth, 1)
-            let measuredSize: CGSize
-            if idealSize.width > availableWidth {
-                let fittedSize = subview.sizeThatFits(
-                    ProposedViewSize(width: availableWidth, height: nil)
-                )
-                measuredSize = CGSize(
-                    width: min(fittedSize.width, availableWidth),
-                    height: fittedSize.height
-                )
-            } else {
-                measuredSize = idealSize
-            }
-            rawPlacements.append(
-                RawPlacement(index: index, size: measuredSize, x: lineWidth, line: line)
-            )
-            lineWidth += measuredSize.width
-            lineHeight = max(lineHeight, measuredSize.height)
-        }
-
-        maxLineWidth = max(maxLineWidth, lineWidth)
-        lineHeights.append(lineHeight)
-        lineWidths.append(lineWidth)
-
-        var lineOrigins: [CGFloat] = []
-        var y: CGFloat = 0
-        for height in lineHeights {
-            lineOrigins.append(y)
-            y += height
-        }
-
-        let placements = rawPlacements.map { raw in
-            let lineOffset = horizontalOffset(
-                availableWidth: proposedWidth.flatMap { $0.isFinite ? $0 : nil } ?? maxLineWidth,
-                lineWidth: lineWidths[raw.line]
-            )
-            return Placement(
-                index: raw.index,
-                size: raw.size,
-                origin: CGPoint(
-                    x: raw.x + lineOffset,
-                    y: lineOrigins[raw.line] + (lineHeights[raw.line] - raw.size.height) / 2
-                )
-            )
-        }
-        return Result(
-            placements: placements,
-            size: CGSize(
-                width: proposedWidth.flatMap { $0.isFinite ? $0 : nil } ?? maxLineWidth,
-                height: y
-            )
-        )
+private enum CompanionMessageLinkActions {
+    @MainActor
+    static func open(_ url: URL) {
+        guard CompanionLinkPolicy.isAllowed(url) else { return }
+        ExternalURLLauncher.open(url)
     }
 
-    private func horizontalOffset(availableWidth: CGFloat, lineWidth: CGFloat) -> CGFloat {
-        let remainingWidth = max(availableWidth - lineWidth, 0)
-        switch textAlignment {
-        case .center:
-            return remainingWidth / 2
-        case .leading:
-            return layoutDirection == .rightToLeft ? remainingWidth : 0
-        case .trailing:
-            return layoutDirection == .rightToLeft ? 0 : remainingWidth
-        }
+    @MainActor
+    static func copy(_ url: URL) {
+        UIPasteboard.general.url = url
+        CompanionMessageInteractionFeedback.announce("Link copied")
+    }
+}
+
+private extension UIFont {
+    func withWeight(_ weight: UIFont.Weight?) -> UIFont {
+        guard let weight else { return self }
+        let attributes: [UIFontDescriptor.AttributeName: Any] = [
+            .traits: [UIFontDescriptor.TraitKey.weight: weight.rawValue],
+        ]
+        let descriptor = fontDescriptor.addingAttributes(attributes)
+        return UIFont(descriptor: descriptor, size: pointSize)
     }
 }
 
 private struct MarkdownListView: View {
     let node: MarkdownNode
     let ordered: Bool
-    let accent: Color
+    let foreground: Color
+    let linkColor: Color
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -582,7 +704,11 @@ private struct MarkdownListView: View {
                         .font(.body.monospacedDigit())
                         .foregroundStyle(CompanionIOSTheme.textSecondary)
                         .frame(minWidth: 20, alignment: .trailing)
-                    MarkdownNodesView(nodes: item.children, accent: accent)
+                    MarkdownNodesView(
+                        nodes: item.children,
+                        foreground: foreground,
+                        linkColor: linkColor
+                    )
                 }
                 .accessibilityElement(children: .contain)
             }
@@ -696,7 +822,8 @@ private struct MarkdownCodeBlock: View {
 
 private struct MarkdownTableView: View {
     let node: MarkdownNode
-    let accent: Color
+    let foreground: Color
+    let linkColor: Color
 
     var body: some View {
         ViewThatFits(in: .horizontal) {
@@ -759,7 +886,8 @@ private struct MarkdownTableView: View {
                             rowIndex: rowIndex,
                             isLastRow: rowIndex == rows.count - 1,
                             isLastColumn: column == columns.count - 1,
-                            accent: accent
+                            foreground: foreground,
+                            linkColor: linkColor
                         )
                         .accessibilityIdentifier(
                             "markdown.table.cell.\(rowIndex).\(column)"
@@ -819,7 +947,8 @@ private struct MarkdownTableCell: View {
     let rowIndex: Int
     let isLastRow: Bool
     let isLastColumn: Bool
-    let accent: Color
+    let foreground: Color
+    let linkColor: Color
 
     @ScaledMetric(relativeTo: .body) private var minimumWidth: CGFloat = 104
     @ScaledMetric(relativeTo: .body) private var idealWidth: CGFloat = 144
@@ -828,8 +957,13 @@ private struct MarkdownTableCell: View {
     @ScaledMetric(relativeTo: .body) private var verticalPadding: CGFloat = 8
 
     var body: some View {
-        MarkdownText(content: content, accent: accent, textAlignment: textAlignment)
-            .font(isHeader ? .subheadline.weight(.semibold) : .subheadline)
+        MarkdownText(
+            content: content,
+            foreground: foreground,
+            linkColor: linkColor,
+            typography: isHeader ? .tableHeader : .tableBody,
+            textAlignment: textAlignment
+        )
             .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, horizontalPadding)
             .padding(.vertical, verticalPadding)

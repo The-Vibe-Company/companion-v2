@@ -16,7 +16,7 @@ This document is the single source of truth for the Companion iOS redesign. It c
 ### 2. Color tokens
 Light (default): canvas #FFFFFF; surface.card #F2F2F7 (settings cards, plugin rows); surface.bubble.bot #EFEFF1; surface.bubble.inner #FFFFFF (inner card inside approval container); surface.chip #EFEFF1; bubble.user #0B0B0F; text.primary #111111; text.secondary #8E8E93; separator #E5E5EA (hairlines inside grouped cards only); cta.primary #0B0B0F; action.blue #007AFF (links, Authorize, Add routine, unread dots); toggle.green #34C759 (native toggles ON, connection checkmarks); danger #FF3B30 (destructive only).
 
-Black (Appearance option): canvas #000000; surface.card #1C1C1E; surface.bubble.bot #1C1C1E; bubble.user #FFFFFF with text inverting to #000000; text.primary #F2F2F7; text.secondary #8E8E93; separator #38383A; cta.primary #FFFFFF with #000000 label.
+Black (Appearance option): canvas #000000; surface.card #1C1C1E; surface.bubble.bot #1C1C1E; bubble.user #FFFFFF with text inverting to #000000; text.primary #F2F2F7; text.secondary #8E8E93; separator #38383A; cta.primary #FFFFFF with #000000 label; readable links on dark surfaces lift to system dark-mode blue #0A84FF, while the inverted white member bubble retains #007AFF.
 
 The static launch canvas is always #000000. iOS launch screens cannot read the app's persisted Appearance choice before SwiftUI starts, so a black launch canvas prevents a saved Black preference from flashing white on a system-light device. Once the app root renders, System follows the OS and Black remains true black.
 
@@ -52,6 +52,9 @@ Radii: bubbles & cards 18; inner cards 12; chips & pills = capsule. Header actio
 
 ### Navigation contract
 The roster is the entry point for every Companion: a single row tap opens its chat. Long press exposes Settings alongside Duplicate, Move to, and Delete; Settings opens the one details page. The chat header remains a centered CharacterMark-and-name pill that opens that page too. Details presents character, name, instructions, provider/model, routines and run history, notifications, Skills, plugins and selected MCP accounts, triggers, runtime controls, and Owner-only deletion as peer cards in one scroll. Its explicit Open chat action replaces the detail route, preserving a single chat/details cycle. Member settings remains reachable only from the account avatar; there are no separate connected-resources or legacy Companion-settings destinations. The root NavigationStack installs the native interactive pop plus a supplemental leading-edge capture once, so pushed chat, details, computer, and history surfaces share guarded back behavior without intercepting horizontal content scrolling.
+
+### Chat text contract
+Every user and Companion bubble uses the same rich-text parser. Bare HTTP(S) URLs and Markdown links render in `action.blue`, open through the system browser path, and expose the standard Open / Copy menu on long press. Link color is the only typographic difference: surrounding 16pt body text, emoji, bold, emphasis, inline code, lists, quotes, and tables retain their normal Markdown treatment. Code spans never become links. The Black palette uses its lighter link blue only on dark surfaces so links remain legible against both OLED black and the inverted white member bubble. Computer view embeds the remote desktop only and has no separate transcript renderer.
 
 ## Part IV — Adaptation rules
 Mapping: Bot=Companion; Character (shape+color)=icon_shape 0-7 + icon_color 0-10 (exact match already; drop mouth/accessory from rendering); Sections=companion_sections (NEW backend entity needed); Duplicate=existing server-side duplicate, surfaced in context menu.
