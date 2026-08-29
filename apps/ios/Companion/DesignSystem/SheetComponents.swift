@@ -134,6 +134,7 @@ struct CompanionSheetValueRow: View {
     var value: String?
     var symbol: String?
     var showsChevron = true
+    var showsProgress = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -161,6 +162,11 @@ struct CompanionSheetValueRow: View {
                     .foregroundStyle(CompanionIOSTheme.textSecondary)
                     .multilineTextAlignment(.trailing)
                     .lineLimit(2)
+            }
+            if showsProgress {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityHidden(true)
             }
             if showsChevron {
                 Image(systemName: "chevron.right")

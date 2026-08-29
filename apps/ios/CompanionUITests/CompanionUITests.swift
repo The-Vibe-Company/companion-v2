@@ -1300,8 +1300,16 @@ final class CompanionUITests: XCTestCase {
     func testEditorDetailsKeepOwnerOnlyMCPAndRuntimeRules() throws {
         let app = launchCompanionDetails(access: "editor")
 
-        XCTAssertTrue(app.buttons["companion.details.provider.save"].waitForExistence(timeout: 5))
-        XCTAssertFalse(app.buttons["companion.details.provider.save"].isEnabled)
+        let provider = app.buttons["companion.details.provider"]
+        XCTAssertTrue(provider.waitForExistence(timeout: 5))
+        XCTAssertTrue(provider.isEnabled)
+        XCTAssertEqual(provider.label, "Provider, Claude")
+        let model = app.buttons["companion.details.model"]
+        XCTAssertTrue(model.exists)
+        XCTAssertTrue(model.isEnabled)
+        XCTAssertEqual(model.label, "Model, Sonnet")
+        XCTAssertFalse(app.buttons["companion.details.provider.save"].exists)
+        XCTAssertTrue(app.buttons["companion.details.providers.manage"].exists)
         XCTAssertFalse(app.buttons["companion.details.delete"].exists)
 
         let ownerOnly = app.descendants(matching: .any)["companion.details.plugins.owner-only"]
@@ -1316,7 +1324,13 @@ final class CompanionUITests: XCTestCase {
 
         XCTAssertTrue(app.staticTexts["Bot details"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.descendants(matching: .any)["companion.details.character"].exists)
-        XCTAssertFalse(app.buttons["companion.details.provider.save"].exists)
+        let provider = app.buttons["companion.details.provider"]
+        XCTAssertTrue(provider.exists)
+        XCTAssertFalse(provider.isEnabled)
+        let model = app.buttons["companion.details.model"]
+        XCTAssertTrue(model.exists)
+        XCTAssertFalse(model.isEnabled)
+        XCTAssertFalse(app.buttons["companion.details.providers.manage"].exists)
         XCTAssertFalse(app.buttons["companion.details.delete"].exists)
         XCTAssertFalse(app.buttons["companion.details.plugins.add"].exists)
         XCTAssertFalse(app.buttons["companion.details.restart.companion"].exists)
