@@ -629,7 +629,7 @@ struct CompanionMacProviderManagementView: View {
                     }
                 }
 
-                Section("Connect provider") {
+                Section {
                     Picker("Provider", selection: $selectedProviderID) {
                         Text("Choose provider").tag("")
                         ForEach(response?.catalog ?? []) { provider in
@@ -675,6 +675,8 @@ struct CompanionMacProviderManagementView: View {
                             }
                         }
                     }
+                } header: {
+                    Text("Connect provider")
                 } footer: {
                     Text("Credentials are write-only and encrypted by the control plane. They are never displayed or logged by this client.")
                 }
@@ -870,7 +872,7 @@ struct CompanionMacPluginManagementView: View {
                     }
                 }
 
-                Section("Add custom account") {
+                Section {
                     TextField("Provider", text: $provider)
                     TextField("Account label", text: $label)
                     Picker("Transport", selection: $transport) {
@@ -893,6 +895,8 @@ struct CompanionMacPluginManagementView: View {
                         Task { await save() }
                     }
                     .disabled(!canSave || working)
+                } header: {
+                    Text("Add custom account")
                 } footer: {
                     Text("HTTP credentials use a header name. Command credentials use an environment variable name. Values are encrypted and write-only.")
                 }
