@@ -235,6 +235,76 @@ private final class SuspendedRosterSyncURLProtocol: URLProtocol, @unchecked Send
     override func stopLoading() {}
 }
 
+private final class StaleUnauthorizedThreadURLProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var releaseResponse = DispatchSemaphore(value: 0)
+    private static let lock = NSLock()
+    private nonisolated(unsafe) static var oldRequestDidStart = false
+
+    static func reset() {
+        lock.lock()
+        oldRequestDidStart = false
+        lock.unlock()
+        releaseResponse = DispatchSemaphore(value: 0)
+    }
+
+    static var hasStartedOldRequest: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return oldRequestDidStart
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let path = request.url?.path ?? ""
+        let statusCode: Int
+        let headers: [String: String]?
+        let payload: String
+        if path.hasSuffix("/thread-delta") {
+            let cursor = URLComponents(
+                url: request.url!,
+                resolvingAgainstBaseURL: false
+            )?.queryItems?.first(where: { $0.name == "cursor" })?.value
+            if cursor == "old-thread-unauthorized" {
+                Self.lock.lock()
+                Self.oldRequestDidStart = true
+                Self.lock.unlock()
+                _ = Self.releaseResponse.wait(timeout: .now() + 5)
+                statusCode = 401
+                payload = #"{"code":"unauthorized","message":"Old session expired"}"#
+            } else {
+                statusCode = 200
+                payload = #"{"cursor":"new-thread-fresh","reset_entries":false,"changed_entries":[],"deleted_event_ids":[],"thread":{"companion_id":"22222222-2222-4222-8222-222222222222","viewer_id":"user-2","read_only":false,"can_send":true,"transcription_available":true,"active_turn":null,"queued_count":0,"interrupted_turn":null}}"#
+            }
+            headers = ["Content-Type": "application/json"]
+        } else if path == "/v1/auth/login" {
+            statusCode = 200
+            headers = ["Set-Cookie": "better-auth.session_token=new-session; Path=/; HttpOnly"]
+            payload = "{}"
+        } else if path == "/v1/auth/whoami" {
+            statusCode = 200
+            headers = ["Content-Type": "application/json"]
+            payload = #"{"userId":"user-2","email":"new@example.com","name":"New","timezone":"UTC","org":{"org_id":"org-2","name":"New workspace"},"onboarded":true,"needsOnboarding":false}"#
+        } else {
+            statusCode = 404
+            headers = ["Content-Type": "application/json"]
+            payload = #"{"code":"not_found","message":"Unexpected test request"}"#
+        }
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: statusCode,
+            httpVersion: nil,
+            headerFields: headers
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(payload.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
 @Test
 func sqliteCachePersistsRestoresScopesAndBoundedThreadTail() throws {
     let directory = FileManager.default.temporaryDirectory
@@ -458,6 +528,58 @@ func sessionScopeChangesFenceInFlightCacheRefreshes() async throws {
         #expect(store.cachedThread(companionID: companionID)?.cursor == "new-thread-fresh")
         #expect(store.cachedThread(companionID: companionID)?.thread.viewerID == "user-2")
     }
+
+}
+
+@Test @MainActor
+func staleUnauthorizedThreadResponseDoesNotClearNewAccount() async throws {
+    StaleUnauthorizedThreadURLProtocol.reset()
+    let fixture = try cacheFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let oldSession = testSession()
+    let companionID = "22222222-2222-4222-8222-222222222222"
+    try fixture.cache.saveThread(
+        CompanionThreadSnapshot(
+            cursor: "old-thread-unauthorized",
+            thread: try companionThread(entries: [try transcriptEntry(ordinal: 3)])
+        ),
+        scope: "org-1:user-1",
+        companionID: companionID
+    )
+    try fixture.cache.saveThread(
+        CompanionThreadSnapshot(
+            cursor: "new-thread",
+            thread: try companionThread(entries: [try transcriptEntry(ordinal: 4)])
+        ),
+        scope: "org-2:user-2",
+        companionID: companionID
+    )
+    let store = SessionStore(
+        apiURL: URL(string: "https://example.test")!,
+        storage: FixedSessionStorage(data: try JSONEncoder().encode(oldSession)),
+        cache: fixture.cache,
+        apiClient: staleUnauthorizedThreadClient(initialAuthority: oldSession)
+    )
+    let oldSynchronization = Task {
+        try await store.synchronizeThread(companionID: companionID)
+    }
+    for _ in 0..<500 where !StaleUnauthorizedThreadURLProtocol.hasStartedOldRequest {
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+    #expect(StaleUnauthorizedThreadURLProtocol.hasStartedOldRequest)
+
+    try await store.signIn(email: "new@example.com", password: "password")
+    let newSynchronization = try await store.synchronizeThread(companionID: companionID)
+    #expect(newSynchronization.value.cursor == "new-thread-fresh")
+    StaleUnauthorizedThreadURLProtocol.releaseResponse.signal()
+    do {
+        _ = try await oldSynchronization.value
+        Issue.record("The stale unauthorized response should be cancelled")
+    } catch is CancellationError {}
+
+    #expect(store.currentSession?.user.id == "user-2")
+    #expect(store.cachedThread(companionID: companionID)?.cursor == "new-thread-fresh")
+    #expect(store.phase != .signedOut)
 }
 
 @Test @MainActor
@@ -625,6 +747,16 @@ private func cacheFixture() throws -> (directory: URL, cache: SQLiteCompanionSna
 private func suspendedRosterClient(initialAuthority: Session) -> APIClient {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [SuspendedRosterSyncURLProtocol.self]
+    return APIClient(
+        baseURL: URL(string: "https://example.test")!,
+        session: URLSession(configuration: configuration),
+        initialAuthority: initialAuthority
+    )
+}
+
+private func staleUnauthorizedThreadClient(initialAuthority: Session) -> APIClient {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [StaleUnauthorizedThreadURLProtocol.self]
     return APIClient(
         baseURL: URL(string: "https://example.test")!,
         session: URLSession(configuration: configuration),

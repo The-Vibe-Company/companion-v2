@@ -83,6 +83,7 @@ public final class SessionStore {
         String: [UUID: AsyncStream<Void>.Continuation]
     ] = [:]
     private var pendingCompanionInvalidations: Set<String> = []
+    private var sessionScopeGeneration = 0
     private var rosterSyncGeneration = 0
     private var threadSyncGenerations: [String: Int] = [:]
     private var companionsMarkedRead: Set<String> = []
@@ -373,14 +374,21 @@ public final class SessionStore {
         }
         rosterSyncGeneration &+= 1
         let generation = rosterSyncGeneration
+        let capturedSessionScopeGeneration = sessionScopeGeneration
         let baseline = initialRosterSnapshot ?? (try? cache?.roster(scope: scope))
         var response: CompanionSyncMeasurement<CompanionRosterDelta>
         do {
-            response = try await authenticated {
+            response = try await authenticated(
+                expectedScope: scope,
+                expectedSessionScopeGeneration: capturedSessionScopeGeneration
+            ) {
                 try await client.synchronizeCompanionRoster(cursor: baseline?.cursor)
             }
         } catch let error as APIError where error.status == 400 && baseline?.cursor != nil {
-            response = try await authenticated {
+            response = try await authenticated(
+                expectedScope: scope,
+                expectedSessionScopeGeneration: capturedSessionScopeGeneration
+            ) {
                 try await client.synchronizeCompanionRoster(cursor: nil)
             }
         }
@@ -388,7 +396,10 @@ public final class SessionStore {
         do {
             snapshot = try response.value.applying(to: baseline)
         } catch CompanionSyncMergeError.incompleteRoster where baseline?.cursor != nil {
-            let replacement = try await authenticated {
+            let replacement = try await authenticated(
+                expectedScope: scope,
+                expectedSessionScopeGeneration: capturedSessionScopeGeneration
+            ) {
                 try await client.synchronizeCompanionRoster(cursor: nil)
             }
             response = CompanionSyncMeasurement(
@@ -399,6 +410,7 @@ public final class SessionStore {
             snapshot = try response.value.applying(to: nil)
         }
         guard generation == rosterSyncGeneration,
+              capturedSessionScopeGeneration == sessionScopeGeneration,
               currentSession.flatMap(Self.cacheScope(for:)) == scope else {
             throw CancellationError()
         }
@@ -408,6 +420,7 @@ public final class SessionStore {
             }.value
         }
         guard generation == rosterSyncGeneration,
+              capturedSessionScopeGeneration == sessionScopeGeneration,
               currentSession.flatMap(Self.cacheScope(for:)) == scope else {
             throw CancellationError()
         }
@@ -975,19 +988,26 @@ public final class SessionStore {
         }
         let generation = (threadSyncGenerations[companionID] ?? 0) &+ 1
         threadSyncGenerations[companionID] = generation
+        let capturedSessionScopeGeneration = sessionScopeGeneration
         let baseline = liveThreadSnapshots[companionID]
             ?? (try? cache?.thread(scope: scope, companionID: companionID))
         let requestCursor = baseline?.cursor
         let response: CompanionSyncMeasurement<CompanionThreadDelta>
         do {
-            response = try await authenticated {
+            response = try await authenticated(
+                expectedScope: scope,
+                expectedSessionScopeGeneration: capturedSessionScopeGeneration
+            ) {
                 try await client.synchronizeCompanionThread(
                     companionID: companionID,
                     cursor: requestCursor
                 )
             }
         } catch let error as APIError where error.status == 400 && requestCursor != nil {
-            response = try await authenticated {
+            response = try await authenticated(
+                expectedScope: scope,
+                expectedSessionScopeGeneration: capturedSessionScopeGeneration
+            ) {
                 try await client.synchronizeCompanionThread(
                     companionID: companionID,
                     cursor: nil
@@ -995,6 +1015,7 @@ public final class SessionStore {
             }
         }
         guard threadSyncGenerations[companionID] == generation,
+              capturedSessionScopeGeneration == sessionScopeGeneration,
               currentSession.flatMap(Self.cacheScope(for:)) == scope else {
             throw CancellationError()
         }
@@ -1008,10 +1029,15 @@ public final class SessionStore {
                 || (rosterMarksUnread && !companionsMarkedRead.contains(companionID))
         )
         if shouldMarkRead,
-           (try? await updateCompanionMemberState(
-               companionID: companionID,
-               patch: CompanionMemberStatePatch(unread: false)
-           )) != nil {
+           (try? await authenticated(
+               expectedScope: scope,
+               expectedSessionScopeGeneration: capturedSessionScopeGeneration
+           ) {
+               try await client.updateCompanionMemberState(
+                   companionID: companionID,
+                   patch: CompanionMemberStatePatch(unread: false)
+               )
+           }) != nil {
             companionsMarkedRead.insert(companionID)
         }
         if let cache {
@@ -1020,6 +1046,7 @@ public final class SessionStore {
             }.value
         }
         guard threadSyncGenerations[companionID] == generation,
+              capturedSessionScopeGeneration == sessionScopeGeneration,
               currentSession.flatMap(Self.cacheScope(for:)) == scope else {
             throw CancellationError()
         }
@@ -1128,6 +1155,7 @@ public final class SessionStore {
         let previousScope = currentSession.flatMap(Self.cacheScope(for:))
         let nextScope = Self.cacheScope(for: session)
         if previousScope != nextScope {
+            sessionScopeGeneration &+= 1
             rosterSyncGeneration &+= 1
             if let nextScope {
                 initialRosterSnapshot = (try? cache?.roster(scope: nextScope)) ?? nil
@@ -1162,12 +1190,22 @@ public final class SessionStore {
         return "\(orgID):\(session.user.id)"
     }
 
-    private func authenticated<Value>(_ operation: () async throws -> Value) async throws -> Value {
+    private func authenticated<Value>(
+        expectedScope: String? = nil,
+        expectedSessionScopeGeneration: Int? = nil,
+        _ operation: () async throws -> Value
+    ) async throws -> Value {
+        let capturedScope = expectedScope ?? currentSession.flatMap(Self.cacheScope(for:))
+        let capturedSessionScopeGeneration = expectedSessionScopeGeneration ?? sessionScopeGeneration
         do {
             let value = try await operation()
             await persistRollingAuthority()
             return value
         } catch let error as APIError where error.status == 401 {
+            if sessionScopeGeneration != capturedSessionScopeGeneration
+                || currentSession.flatMap(Self.cacheScope(for:)) != capturedScope {
+                throw CancellationError()
+            }
             await clearLocalSession()
             throw error
         }
@@ -1188,6 +1226,7 @@ public final class SessionStore {
 
     private func clearLocalSession() async {
         let scope = currentSession.flatMap { Self.cacheScope(for: $0) }
+        sessionScopeGeneration &+= 1
         rosterSyncGeneration &+= 1
         try? storage.remove()
         if let scope { try? cache?.remove(scope: scope) }
