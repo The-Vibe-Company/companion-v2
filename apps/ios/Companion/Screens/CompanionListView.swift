@@ -71,19 +71,7 @@ struct CompanionListView: View {
         NavigationStack(path: $path) {
             CompanionIOSTheme.canvas
                 .ignoresSafeArea()
-                .overlay {
-                Group {
-                    if loading && companions.isEmpty {
-                        loadingState
-                    } else if let error, companions.isEmpty {
-                        errorState(error)
-                    } else if matchingCompanions.isEmpty {
-                        emptyState
-                    } else {
-                        roster
-                    }
-                }
-                }
+                .overlay { rosterContent }
             // Install the widened leading-edge capture once for the whole stack so direct and
             // value-based pushes share the same guarded UIKit pop path.
             .companionNavigationSwipeBackEnabled()
@@ -235,16 +223,32 @@ struct CompanionListView: View {
             .onChange(of: notifications.pendingDestination) { _, _ in
                 openPendingNotificationIfPossible()
             }
-            .onChange(of: scenePhase) { _, phase in
-                guard phase == .active else { return }
-                Task { await reload(silently: !companions.isEmpty) }
-            }
+            .onChange(of: scenePhase) { _, phase in reloadOnForeground(phase) }
             .tint(CompanionIOSTheme.textPrimary)
+        }
+    }
+
+    private var rosterContent: some View {
+        Group {
+            if loading && companions.isEmpty {
+                loadingState
+            } else if let error, companions.isEmpty {
+                errorState(error)
+            } else if matchingCompanions.isEmpty {
+                emptyState
+            } else {
+                roster
+            }
         }
     }
 
     private var companions: [CompanionSummary] {
         rosterState.companions
+    }
+
+    private func reloadOnForeground(_ phase: ScenePhase) {
+        guard phase == .active else { return }
+        Task { await reload(silently: !companions.isEmpty) }
     }
 
     private func recordRosterFrame(isLoading: Bool) {
