@@ -582,7 +582,7 @@ run_dev() {
   stop_port_listeners "$WEB_PORT" "$COMPANION_WEB_HOST"
   stop_port_listeners "$API_PORT" "$COMPANION_API_HOST"
   stop_port_listeners "$RUNTIME_PORT" "$COMPANION_RUNTIME_HOST"
-  if companion_dev_uses_box_simulator; then
+  if companion_dev_uses_box_simulator || companion_dev_uses_box_lab; then
     stop_port_listeners "$BOX_SIM_PORT" "127.0.0.1"
   fi
   start_infra

@@ -171,6 +171,18 @@ replaces it with a self-hosted, content-addressed artifact.
   bucket is not public) so a pin cannot merge before its artifact exists; it skips gracefully while
   the sha is still the placeholder or the S3 credentials are not configured.
 
+The deterministic simulator still proves image state, fencing, and fallback call counts, but it
+does not execute this installation. Box Lab supplies that missing boundary with the actual generated
+layout script on isolated Linux `x86_64`: the cold-install scenario exercises the npm fallback from
+a blank Box, and `pnpm box:lab:smoke -- --scenario bundle` builds the pinned archive inside that
+Box, computes its checksum there, injects the resulting plan, and proves download, checksum,
+Node-major validation, extraction, marker identity, start, archive/resume, and snapshot clone. No
+repository or Mac-host archive is mounted into the Box. The local Box Lab smoke uses the
+deterministic model endpoint inside a Lima VM or OCI systemd container; no bundle or lifecycle
+command touches the host service manager. This deliberately slow acceptance is run as the final
+local validation after the fast suites and is not part of CI. The live canary remains responsible
+only for ascii.dev snapshot/API drift.
+
 ## Phase 2 — staged, proven checkpoints
 
 Generalize the `companion_operations.checkpoint` mechanism to staging itself: each
@@ -191,5 +203,7 @@ live in PostgreSQL.
 Phase 1 ships additively: new table, new registry service, builder switched to it,
 baker heuristics retired. No legacy data migration is needed — images rebuild from
 content identity on demand. Phases 2–3 follow incrementally; each phase must keep
-`pnpm verify:change` green including the deterministic Box/Pi E2E matrix covering:
-image ready / building / failed / concurrent create / crash at each checkpoint.
+`pnpm verify:change` green including the deterministic Box/Pi E2E matrix covering image ready /
+building / failed / concurrent create / crash at each checkpoint. A change to the generated layout,
+Pi/bundle pins, image lifecycle adapter, or Box Lab also requires `pnpm box:lab:smoke` as the final
+local validation; the provider canary is not a substitute for that contained installation test.

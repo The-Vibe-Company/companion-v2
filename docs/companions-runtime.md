@@ -10,6 +10,8 @@ removed the legacy orchestration surface:
 
 Pi is the only agent harness. box.ascii.dev is the only Box provider. The product does not expose a
 harness selector, Box marketplace, generic deployment surface, or multi-Bot orchestration.
+Box Lab is a local developer test implementation behind the existing Box API client seam; it is not
+a provider option, public API, Companion setting, or shipped capability.
 
 ## Ownership boundary
 
@@ -286,6 +288,27 @@ prompt write intent, this includes one recycle when the broker still reports an 
 unacknowledged event tail left by earlier terminal work; runtime re-reads idle state before dispatch
 and otherwise fails with `restart_pi`. It may not invoke Full Box, replace a merely unhealthy Box,
 archive/delete to make a test pass, or discard or replay an interrupted turn.
+
+### Test-only Box Lab boundary
+
+Production still uses only box.ascii.dev. For installation and lifecycle acceptance,
+`@companion/box-lab` exposes the subset of Box v1 consumed by the existing maintenance/runtime
+clients and executes the exact generated layout script in isolated Linux `x86_64`. The local VM
+profile uses one Lima/QEMU VM per Box (and is also available explicitly on Linux `x86_64`); the
+local Linux driver uses a disposable OCI container with systemd as PID 1. Box Lab is intentionally
+slow, runs only locally, and is the final validation after the fast simulator and ordinary suites.
+Neither driver may run `systemctl`, `loginctl`, `journalctl`, or lifecycle commands on the host.
+
+The test Box preserves `/home/user` across stop/resume while losing volatile `/run`, and its
+snapshot/clone path preserves the installed layout without preserving running processes or transient
+credentials. This is the boundary that proves Pi installation, daemon restart with a new invocation,
+broker socket mode, archive/resume, and snapshot clone. The deterministic simulator remains the
+default for protocol/fault coverage, while the credentialed live canary remains responsible for
+ascii.dev-only API and machine-image drift.
+
+In Conductor, simulator and Lab are mutually exclusive on `CONDUCTOR_PORT + 8`;
+`COMPANION_DEV_BOX_MODE=lab` is local-only. This test seam does not relax `apps/runtime` ownership,
+add a Box credential to API/worker, or create a second production provider.
 
 ## Layout 14 Pi broker
 
@@ -1214,7 +1237,7 @@ Acceptance bounds:
 - inactivity settlement under ten minutes plus one sweep;
 - absolute settlement under two hours plus one sweep.
 
-The deterministic simulator requirements live in `docs/testing.md`.
+The deterministic simulator and contained Box Lab requirements live in `docs/testing.md`.
 Production cutover, kill-switch, purge, incident, and rollback procedures live in
 `docs/runbooks/companions-runtime.md`.
 

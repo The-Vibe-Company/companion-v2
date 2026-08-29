@@ -23,6 +23,7 @@ packages/skilldb           hosted SQLite execution for declared Skill Databases
 packages/storage           archives, releases, images, logos, database objects
 packages/github            GitHub App and deterministic repository writer
 packages/box-runtime       ascii.dev adapter, layout-14 Pi broker, and default Pi package pins
+packages/box-lab           local developer-only real-Linux acceptance behind the Box API contract
 packages/companion-runtime runtime state machine and operation execution
 packages/companion-skill   bundled delegated Skills Hub workflow
 ```
@@ -239,6 +240,15 @@ box.ascii.dev is the only runtime provider and Pi the only agent harness. Runtim
 Box, installs the controlled disk layout, injects authorized resources, and owns stop/restart/delete.
 Pi sessions and work files stay on snapshotted Box disk. PostgreSQL stores the durable transcript and
 execution projection needed for no-wake reads.
+
+`packages/box-lab` is a test-only implementation of the Box API boundary, not a second product
+provider. The same `AsciiBoxMaintenanceClient` and `AsciiBoxCompanionRuntime` send the actual
+runtime-generated layout script to isolated Linux: Lima/QEMU `x86_64` for the local VM profile and
+an OCI systemd container for local Linux. Linux developers may select Lima explicitly when the host
+supports it. The ordinary simulator remains the fast default. Box Lab is intentionally slow,
+local-only, and run last after the fast suites; it is not part of CI. Box Lab alone may run the real
+service-manager commands, and only inside its guest/container; the host service manager is never
+part of a test. A small live canary remains responsible for drift unique to ascii.dev.
 
 Layout 14 installs a small Node broker under systemd between runtime commands and Pi:
 
@@ -614,6 +624,11 @@ automatic ambiguous-prompt replay, or global learned model-capability table.
 Self-hosted deployments run PostgreSQL, S3-compatible storage, email, API, worker, runtime, and web.
 Only runtime receives `COMPANION_BOX_API_KEY`; its desktop endpoint binds a private network. API,
 worker, and runtime use separate database credentials and least-privilege grants. Conductor and CI
-must start the same four-process topology with the deterministic Box/Pi simulator where applicable.
+must start the same four-process topology with the deterministic Box/Pi simulator by default.
+Conductor additionally exposes an opt-in local Box Lab run; simulator and Lab share workspace port
+offset `+8` and are mutually exclusive. Box Lab runs the same generated Pi installation inside a
+local Lima VM or contained OCI systemd guest rather than contacting ascii.dev or the host service
+manager. It is a deliberately slow final local validation and does not run in CI. This test
+infrastructure changes neither the production provider nor the Companion capability contract.
 The as-built operational sequence, including the owner-only gate transition and rollback boundary,
 is documented in `docs/runbooks/companions-runtime.md`.

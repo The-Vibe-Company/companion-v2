@@ -24,7 +24,7 @@
 #   +5  Mailpit SMTP
 #   +6  Mailpit web UI
 #   +7  Companion runtime (private)
-#   +8  deterministic Box/Pi simulator (when no real Box key is configured)
+#   +8  Box/Pi simulator or opt-in Linux Box Lab
 #   +9  reserved
 # =============================================================================
 
@@ -388,7 +388,7 @@ is_repo_pid() {
     mailpit-smtp|mailpit-ui)
       [ "$(pid_comm "$pid")" = "mailpit" ] && return 0
       ;;
-    api|runtime|web|box-sim)
+    api|runtime|web|box-sim|box-lab)
       case "$cmd" in *"$REPO_ROOT"*|*"@companion/$label"*) return 0 ;; esac
       ;;
   esac
@@ -467,6 +467,16 @@ ensure_runtime_hmac_key() {
 
 check_prerequisites() {
   step "Checking prerequisites"
+  local dev_box_mode
+  if ! dev_box_mode="$(companion_dev_box_mode)"; then
+    die "Invalid COMPANION_DEV_BOX_MODE='${COMPANION_DEV_BOX_MODE:-}'. Expected auto, sim, live, or lab."
+  fi
+  if [ "$dev_box_mode" = "live" ] && [ -z "${COMPANION_BOX_API_KEY:-}" ]; then
+    die "COMPANION_DEV_BOX_MODE=live requires COMPANION_BOX_API_KEY."
+  fi
+  if [ "$dev_box_mode" = "lab" ] && [ "$CONDUCTOR_IS_CLOUD" = true ]; then
+    die "COMPANION_DEV_BOX_MODE=lab is local-only. Run pnpm box:lab:smoke from a local workspace."
+  fi
   require_command node "install Node.js >= 20"
   require_command pnpm "corepack enable && corepack prepare pnpm@9 --activate"
   require_command lsof "$LSOF_INSTALL_HINT"
@@ -482,6 +492,13 @@ check_prerequisites() {
   pnpm install --frozen-lockfile --prefer-offline \
     || die "Workspace dependency sync failed. Check that pnpm-lock.yaml matches the workspace manifests."
   ok "Workspace dependencies ready"
+
+  if [ "$dev_box_mode" = "lab" ]; then
+    BOX_LAB_WORKSPACE_ID="${BOX_LAB_WORKSPACE_ID:-${CONDUCTOR_WORKSPACE_ID:-$PROJECT}}" \
+      bash scripts/dev-process.sh box-lab pnpm box:lab:doctor \
+      || die "Box Lab prerequisites are unavailable. See the doctor output above; host virtualization dependencies are never installed automatically."
+    ok "Box/Pi Linux Lab prerequisites"
+  fi
 
   PG_BIN="$(detect_pg_bin || true)"
   [ -n "$PG_BIN" ] || die "Postgres binaries not found. Install: $POSTGRES_INSTALL_HINT"
@@ -796,13 +813,15 @@ print_header() {
   fi
   printf '  %sAPI%s        %s\n' "$DIM" "$RESET" "$API_URL"
   printf '  %sRuntime%s    %s/healthz (private)\n' "$DIM" "$RESET" "$RUNTIME_URL"
-  if [ -n "${COMPANION_BOX_API_KEY:-}" ]; then
-    printf '  %sBox/Pi%s     configured provider (simulator disabled)\n' "$DIM" "$RESET"
-  elif companion_dev_uses_box_simulator; then
-    printf '  %sBox/Pi%s     deterministic simulator (no provider credential)\n' "$DIM" "$RESET"
-  else
-    printf '  %sBox/Pi%s     not configured (simulator disabled)\n' "$DIM" "$RESET"
-  fi
+  local dev_box_mode
+  dev_box_mode="$(companion_dev_box_mode 2>/dev/null || printf 'invalid')"
+  case "$dev_box_mode" in
+    live) printf '  %sBox/Pi%s     configured provider\n' "$DIM" "$RESET" ;;
+    sim) printf '  %sBox/Pi%s     deterministic simulator (no provider credential)\n' "$DIM" "$RESET" ;;
+    lab) printf '  %sBox/Pi%s     real Pi in a local x86_64 Linux VM\n' "$DIM" "$RESET" ;;
+    disabled) printf '  %sBox/Pi%s     not configured (simulator disabled)\n' "$DIM" "$RESET" ;;
+    *) printf '  %sBox/Pi%s     invalid development mode\n' "$DIM" "$RESET" ;;
+  esac
   printf '  %sPostgres%s   127.0.0.1:%s\n' "$DIM" "$RESET" "$PG_PORT"
   if [ "$HAS_MINIO" = true ]; then
     printf '  %sMinIO%s      %s (console http://127.0.0.1:%s)\n' "$DIM" "$RESET" "$S3_ENDPOINT" "$MINIO_CONSOLE_PORT"
@@ -824,7 +843,8 @@ launch_apps() {
   step "Launching API + worker + runtime + web via concurrently"
 
   # Storage is shared by API uploads, worker cleanup, and runtime skill staging; email remains API-only.
-  local shared_storage_env="" api_email_env
+  local shared_storage_env="" api_email_env box_lab_workspace_id
+  box_lab_workspace_id="${BOX_LAB_WORKSPACE_ID:-${CONDUCTOR_WORKSPACE_ID:-$PROJECT}}"
   if [ "$HAS_MINIO" = true ]; then
     shared_storage_env="S3_ENDPOINT=\"$S3_ENDPOINT\" S3_REGION=us-east-1 S3_ACCESS_KEY_ID=\"$S3_ACCESS_KEY_ID\" S3_SECRET_ACCESS_KEY=\"$S3_SECRET_ACCESS_KEY\" S3_BUCKET_SKILL_ARCHIVES=\"$S3_BUCKET\" S3_FORCE_PATH_STYLE=true"
   fi
@@ -838,7 +858,7 @@ launch_apps() {
   # command line. dev-process.sh strips them from every process that does not own them.
   local api_cmd="COMPANION_API_HOST=127.0.0.1 COMPANION_API_PORT=$API_PORT DATABASE_URL=\"$DATABASE_API_URL\" COMPANION_RUNTIME_PRIVATE_URL=\"$RUNTIME_URL\" BETTER_AUTH_URL=\"$API_URL\" BETTER_AUTH_COOKIE_PREFIX=\"$PROJECT\" COMPANION_WEB_URL=\"$WEB_URL\" COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" COMPANION_SKILL_DATABASES_ENABLED=\"$SKILL_DATABASES_ENABLED\" $shared_storage_env $api_email_env bash scripts/dev-process.sh api pnpm --filter @companion/api dev"
   local worker_cmd="DATABASE_WORKER_URL=\"$DATABASE_WORKER_URL\" COMPANION_WEB_URL=\"$WEB_URL\" $shared_storage_env bash scripts/dev-worker.sh pnpm --filter @companion/worker dev"
-  local runtime_cmd="DATABASE_COMPANION_RUNTIME_URL=\"$DATABASE_COMPANION_RUNTIME_URL\" COMPANION_RUNTIME_HOST=127.0.0.1 COMPANION_RUNTIME_PORT=$RUNTIME_PORT COMPANION_BOX_SIM_PORT=$BOX_SIM_PORT COMPANION_API_URL=\"$API_URL\" $shared_storage_env bash scripts/dev-runtime.sh pnpm --filter @companion/runtime dev"
+  local runtime_cmd="DATABASE_COMPANION_RUNTIME_URL=\"$DATABASE_COMPANION_RUNTIME_URL\" COMPANION_RUNTIME_HOST=127.0.0.1 COMPANION_RUNTIME_PORT=$RUNTIME_PORT COMPANION_BOX_SIM_PORT=$BOX_SIM_PORT BOX_LAB_PORT=$BOX_SIM_PORT COMPANION_API_URL=\"$API_URL\" $shared_storage_env bash scripts/dev-runtime.sh pnpm --filter @companion/runtime dev"
   local web_cmd="COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" bash scripts/dev-process.sh web pnpm --filter @companion/web dev --hostname $WEB_BIND_HOST --port $WEB_PORT"
 
   free_port "$API_PORT" "api"
@@ -846,12 +866,16 @@ launch_apps() {
   free_port "$WEB_PORT" "web"
   if companion_dev_uses_box_simulator; then
     free_port "$BOX_SIM_PORT" "box-sim"
+  elif companion_dev_uses_box_lab; then
+    free_port "$BOX_SIM_PORT" "box-lab"
   fi
 
   # No `exec`: keep this bash alive so the EXIT trap stops native services
   # after concurrently returns (Ctrl+C → SIGINT → concurrently kills the apps
   # → bash exits → trap → pg_ctl stop / kill minio,mailpit).
-  pnpm exec concurrently \
+  # Keep the caller-controlled workspace identity out of concurrently's shell command strings.
+  # Child role wrappers retain it only for the Lab and remove it before Runtime starts.
+  BOX_LAB_WORKSPACE_ID="$box_lab_workspace_id" pnpm exec concurrently \
     --names api,worker,runtime,web \
     --prefix-colors blue,magenta,cyan,green \
     --prefix "[{name}]" \
@@ -886,9 +910,14 @@ cmd_run() {
 }
 
 cmd_archive() {
-  step "Archiving workspace — stopping native services + removing .conductor-pg/"
+  step "Archiving workspace — stopping native services + removing workspace state"
   PG_BIN="$(detect_pg_bin || true)"
   stop_services
+  if [ "$CONDUCTOR_IS_CLOUD" = false ]; then
+    BOX_LAB_WORKSPACE_ID="${BOX_LAB_WORKSPACE_ID:-${CONDUCTOR_WORKSPACE_ID:-$PROJECT}}" \
+      bash scripts/dev-process.sh box-lab pnpm box:lab:reset \
+      || die "Could not remove the Box Lab resources owned by this workspace."
+  fi
   rm -rf "$STATE_DIR"
   ok "Removed $STATE_DIR"
 }

@@ -36,7 +36,9 @@ import {
   COMPANION_PI_BUNDLE,
   companionPiBundleObjectKey,
   companionPiBundleShaShort,
+  type CompanionPiBundlePlan,
 } from "./piBundle";
+import { COMPANION_PI_MODELS_PATH } from "./companionPiModels";
 import {
   COMPANION_PI_ROUTINE_SURFACE_EXTENSION_FILE,
   COMPANION_PI_ROUTINE_SURFACE_EXTENSION_SOURCE,
@@ -932,7 +934,7 @@ describe("default Pi packages on the Box disk", () => {
     mcpCredentials: Array<{ env_key: string; value: string }> = [],
     companionSkillChecksum?: string,
     mcpAccounts: CompanionStagedMcpAccount[] = [],
-    runtimeOptions: { bundleUrlProvider?: () => Promise<string> } = {},
+    runtimeOptions: ConstructorParameters<typeof AsciiBoxCompanionRuntime>[1] = {},
   ): Promise<string> {
     stagedFiles.clear();
     layoutCommands.length = 0;
@@ -1211,6 +1213,36 @@ describe("default Pi packages on the Box disk", () => {
     expect(script).not.toContain("awk 'NF { line=$0 } END { print line }' \"$qmd_log\"");
   });
 
+  it("keeps Pi's credential-bearing configuration directory owner-only", async () => {
+    const script = await stagedLayoutScript();
+    const overlayStart = script.indexOf("companion_layout_apply_overlay() {");
+    const overlayEnd = script.indexOf("\n}", overlayStart);
+    const overlay = script.slice(overlayStart, overlayEnd);
+
+    expect(overlay).toContain('mkdir -p "$HOME/.companion/bin" "$HOME/.companion/pi"');
+    expect(overlay).toContain('chmod 700 "$HOME/.companion/pi"');
+    expect(overlay.indexOf('chmod 700 "$HOME/.companion/pi"'))
+      .toBeLessThan(overlay.indexOf('> "$HOME/.boxignore"'));
+  });
+
+  it("lets a contained runtime inject models.json without changing the production default", async () => {
+    const modelsJsonProvider = vi.fn((providerId: string | undefined, modelId: string) => (
+      `${JSON.stringify({ providers: { local: { providerId, modelId } } })}\n`
+    ));
+
+    await stagedLayoutScript({}, [], undefined, [], { modelsJsonProvider });
+
+    expect(modelsJsonProvider).toHaveBeenCalledExactlyOnceWith(undefined, "glm-4.6");
+    expect(stagedFiles.get(COMPANION_PI_MODELS_PATH)).toBe(
+      `${JSON.stringify({ providers: { local: { modelId: "glm-4.6" } } })}\n`,
+    );
+
+    await stagedLayoutScript();
+    expect(stagedFiles.get(COMPANION_PI_MODELS_PATH)).toBe(
+      `${JSON.stringify({ providers: {} }, null, 2)}\n`,
+    );
+  });
+
   // Full Turbo quality runs many workspaces concurrently; keep the syntax guard deterministic
   // without coupling it to Vitest's five-second default under runner contention.
   it("is a script bash can parse, with and without the optional install", async () => {
@@ -1228,7 +1260,7 @@ describe("default Pi packages on the Box disk", () => {
     }
   }, 15_000);
 
-  it("gives the relayout longer than a turn's own cold start, so the install is never lost", async () => {
+  it("keeps the production relayout deadline fixed while allowing a bounded Box Lab override", async () => {
     await stagedLayoutScript();
 
     // The marker is written only after the install finishes. A budget that stops it short is a Box
@@ -1236,6 +1268,21 @@ describe("default Pi packages on the Box disk", () => {
     expect(layoutCommands).toEqual([
       expect.objectContaining({ timeoutSeconds: 300 }),
     ]);
+
+    await stagedLayoutScript({}, [], undefined, [], {
+      boxLabPiLayoutCommandTimeoutSeconds: 900,
+    });
+    expect(layoutCommands).toEqual([
+      expect.objectContaining({ timeoutSeconds: 900 }),
+    ]);
+  });
+
+  it.each([0, 1.5, 901])("rejects an unsafe Box Lab relayout deadline (%s)", (timeoutSeconds) => {
+    expect(() => new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+    }, {
+      boxLabPiLayoutCommandTimeoutSeconds: timeoutSeconds,
+    })).toThrow("boxLabPiLayoutCommandTimeoutSeconds must be an integer between 1 and 900");
   });
 
   it("stages token-on-demand Git and gh helpers only for one brokered GitHub account", async () => {
@@ -1322,6 +1369,44 @@ describe("default Pi packages on the Box disk", () => {
     + "?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Expires=3600&X-Amz-Signature=deadbeef";
   const BUNDLE_ENV = { COMPANION_PI_BUNDLE_ENABLED: "true" };
   const BUNDLE_OPTIONS = { bundleUrlProvider: async () => BUNDLE_URL };
+
+  it("rejects an injected bundle plan without a contained URL provider", () => {
+    const injectedSha = "b".repeat(64);
+    expect(() => new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box-key",
+    }, {
+      bundlePlan: {
+        objectKey: `pi-bundles/box-lab-${injectedSha}.tar.gz`,
+        manifest: { ...COMPANION_PI_BUNDLE, sha256: injectedSha },
+      },
+    })).toThrow("bundlePlan requires bundleUrlProvider");
+  });
+
+  it("uses an injected bundle plan without enabling the production bundle flag", async () => {
+    const injectedSha = "a".repeat(64);
+    const bundlePlan: CompanionPiBundlePlan = {
+      objectKey: `pi-bundles/box-lab-${injectedSha}.tar.gz`,
+      manifest: {
+        ...COMPANION_PI_BUNDLE,
+        nodeMajor: 23,
+        sha256: injectedSha,
+      },
+    };
+    const script = await stagedLayoutScript(
+      { COMPANION_PI_INSTALL_COMMAND: "curl -fsSL https://pi.test/install | bash" },
+      [],
+      undefined,
+      [],
+      { bundlePlan, bundleUrlProvider: async () => "http://box-lab.test/pi.tar.gz" },
+    );
+
+    expect(script).toContain("bundle_url='http://box-lab.test/pi.tar.gz'");
+    expect(script).toContain(`bundle_sha='${injectedSha}'`);
+    expect(script).toContain("bundle_node_major='23'");
+    expect(script).toContain(`:bundle=${injectedSha.slice(0, 12)}`);
+    expect(script).not.toContain(COMPANION_PI_BUNDLE.sha256);
+    expect(script).not.toContain("https://pi.test/install");
+  });
 
   it("downloads, verifies, and extracts the pinned bundle instead of installing npm at boot", async () => {
     const script = await stagedLayoutScript(BUNDLE_ENV, [], undefined, [], BUNDLE_OPTIONS);
