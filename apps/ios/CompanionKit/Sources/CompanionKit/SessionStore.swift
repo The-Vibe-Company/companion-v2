@@ -660,6 +660,11 @@ public final class SessionStore {
                 companionID: companionID,
                 patch: patch
             )
+            if patch.unread == true {
+                companionsMarkedRead.remove(companionID)
+            } else if patch.unread == false {
+                companionsMarkedRead.insert(companionID)
+            }
             await persistRollingAuthority()
             return companion
         } catch let error as APIError where error.status == 401 {
@@ -942,6 +947,7 @@ public final class SessionStore {
     public func thread(companionID: String) async throws -> CompanionThread {
         do {
             let thread = try await client.thread(companionID: companionID)
+            retainCompleteThread(thread, companionID: companionID)
             await persistRollingAuthority()
             return thread
         } catch let error as APIError where error.status == 401 {
@@ -1110,6 +1116,21 @@ public final class SessionStore {
             companionsMarkedRead.removeAll()
         }
         phase = nextPhase
+    }
+
+    private func retainCompleteThread(_ thread: CompanionThread, companionID: String) {
+        guard thread.companionID == companionID,
+              let session = currentSession,
+              let scope = Self.cacheScope(for: session),
+              let baseline = liveThreadSnapshots[companionID]
+                ?? ((try? cache?.thread(scope: scope, companionID: companionID)) ?? nil),
+              let cursor = baseline.cursor else { return }
+        threadSyncGenerations[companionID] = (threadSyncGenerations[companionID] ?? 0) &+ 1
+        liveThreadSnapshots[companionID] = CompanionThreadSnapshot(
+            cursor: cursor,
+            thread: thread,
+            isPartial: false
+        )
     }
 
     private static func cacheScope(for session: Session) -> String? {
