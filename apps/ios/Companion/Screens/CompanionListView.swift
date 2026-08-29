@@ -229,29 +229,9 @@ struct CompanionListView: View {
                     )
                 }
             }
-            .onAppear {
-                if !loading {
-                    CompanionPerformanceTelemetry.rosterWillRender(
-                        cacheRestoreMilliseconds: sessionStore.initialCacheRestoreMilliseconds,
-                        companionCount: companions.count
-                    )
-                }
-            }
-            .onChange(of: loading) { _, isLoading in
-                guard !isLoading else { return }
-                CompanionPerformanceTelemetry.rosterWillRender(
-                    cacheRestoreMilliseconds: sessionStore.initialCacheRestoreMilliseconds,
-                    companionCount: companions.count
-                )
-            }
-            // Time the transcript from the moment a chat becomes the visible route. A row push, a
-            // notification, and the details-to-chat replacement all reach chat this way, and a
-            // gesture on the row itself competes with the NavigationLink for the same touch.
-            .onChange(of: path) { previous, next in
-                guard next.last != previous.last,
-                      case .chat(let companionID)? = next.last else { return }
-                CompanionPerformanceTelemetry.chatTapped(companionID: companionID)
-            }
+            .onAppear { recordRosterFrame(isLoading: loading) }
+            .onChange(of: loading) { _, isLoading in recordRosterFrame(isLoading: isLoading) }
+            .onChange(of: path) { previous, next in recordChatOpen(from: previous, to: next) }
             .onChange(of: notifications.pendingDestination) { _, _ in
                 openPendingNotificationIfPossible()
             }
@@ -265,6 +245,23 @@ struct CompanionListView: View {
 
     private var companions: [CompanionSummary] {
         rosterState.companions
+    }
+
+    private func recordRosterFrame(isLoading: Bool) {
+        guard !isLoading else { return }
+        CompanionPerformanceTelemetry.rosterWillRender(
+            cacheRestoreMilliseconds: sessionStore.initialCacheRestoreMilliseconds,
+            companionCount: companions.count
+        )
+    }
+
+    /// Times the transcript from the moment a chat becomes the visible route. A row push, a
+    /// notification, and the details-to-chat replacement all arrive here, unlike a gesture on the
+    /// row, which competes with the NavigationLink for the same touch.
+    private func recordChatOpen(from previous: [CompanionRoute], to next: [CompanionRoute]) {
+        guard next.last != previous.last,
+              case .chat(let companionID)? = next.last else { return }
+        CompanionPerformanceTelemetry.chatTapped(companionID: companionID)
     }
 
     private var roster: some View {
