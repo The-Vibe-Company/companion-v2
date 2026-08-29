@@ -693,7 +693,12 @@ The routine-only `surface_to_main` tool is a terminal return, never a conversati
   main-thread message or push.
 
 The return payload appears exactly once in the main thread in both modes and is never duplicated in
-the routine transcript. Failures and interruptions remain safe, bounded run-history status rather
+the routine transcript. A notify payload follows the operating brief's terse delivery contract: one
+short owner-facing result and no process narration. Consecutive attachment-free, decision-free notify
+returns from the same routine are grouped in the thread read projection, without changing durable
+entries or routine history. The latest stays visible and carries the deterministic earlier entries
+for an inline disclosure; any ordinary user or assistant entry, another routine, an attachment, or a
+decision breaks the group. Failures and interruptions remain safe, bounded run-history status rather
 than synthetic chat messages. The main thread shows the routine-origin user projection as a compact
 clickable `Routine: <name>` marker carrying `run_id`; opening it reads the private run transcript.
 Routine rows in connected resources expose the same newest-first history to Owner, Editor, and
@@ -836,7 +841,9 @@ falls back to `UTC`.
 
 **Staged instructions.** Every staging composes `~/.companion/runtime/state/instructions.txt` from a
 constant operating brief plus the owner's persona line. The file carries no credential and no member
-data. Pi receives it as `--append-system-prompt`. It lives at the same path within layout 14, so an
+data. Its delivery contract asks for one short sentence per update, one-word acknowledgements such as
+`Done` or `Sent`, and no process narration, apology, `btw` prefix, or filler. The persona remains last
+and therefore owns voice. Pi receives the file as `--append-system-prompt`. It lives at the same path within layout 14, so an
 existing Box gains the current brief at its next staging (`start`, `restart_pi`, `restart_box`, or
 `apply_settings`). `restart_pi` refreshes the same frozen credentials before it recycles the daemon.
 The full brief is the first-party contract. Only already-persisted Expo turns carrying the deprecated
@@ -845,6 +852,12 @@ send that discriminator. Routines, triggers, `propose_routine`, and `propose_tri
 available in both the full contract and that compatibility path. A flag-off fire is processed by
 the ordinary main Pi session; a newly pinned or already-pinned isolated run remains an ordinary
 durable turn for queueing and exactly-once identity but executes in the run-scoped Pi session above.
+
+The RPC journal may contain an assistant `message_end` that combines narration with a `toolCall`
+before Pi executes that tool batch. Runtime records the tool lifecycle separately and omits that
+assistant event from the chat projection. Only the later assistant message without a tool call is
+shown as the answer, so the thread never exposes pre-tool narration while tool and decision cards
+remain visible and durable.
 
 **Outputs.** The layout-14 broker creates and empties `~/outbox` inside the serialized prompt
 command, after proving Pi idle and immediately before prompt delivery. The positive ACK includes the

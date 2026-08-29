@@ -428,6 +428,11 @@ function assistantProjection(
   const message = event.message as Record<string, unknown>;
   if (message.role !== "assistant") return null;
   const blocks = contentBlocks(message);
+  // Pi emits one completed assistant message before executing each tool batch, then another model
+  // turn after the results. Text beside a tool call is process narration, not the final answer. The
+  // thread keeps the separately projected tool/decision cards and surfaces only the later assistant
+  // message whose content has no tool call, matching Pi's own final-only print mode.
+  if (blocks.some((block) => block.type === "toolCall")) return null;
   const text = (typeof message.content === "string" ? message.content : blocks
     .filter((block) => block.type === "text")
     .map((block) => typeof block.text === "string" ? block.text : "")

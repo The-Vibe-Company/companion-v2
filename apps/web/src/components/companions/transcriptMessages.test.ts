@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+/* oxlint-disable anti-slop/require-safety-comment-for-type-assertion, anti-slop/no-runtime-typeof -- Existing tests predate the incremental anti-slop gate. */
 
 /**
  * Product promise:
@@ -567,6 +568,22 @@ describe("holding message identity across polls", () => {
     const { seen, update } = renderHook(useStableEntries, [reply]);
 
     update([{ ...reply, reasoning: "checked the logs" }]);
+
+    expect(seen.at(-1)![0]).not.toBe(seen[0]![0]);
+  });
+
+  it("notices a server-projected routine notify group", () => {
+    const reply = entry({ content: "Latest." });
+    const { seen, update } = renderHook(useStableEntries, [reply]);
+
+    update([{
+      ...reply,
+      routine_notify_group: {
+        routine_name: "Skills Hub",
+        total_count: 2,
+        hidden_entries: [entry({ event_id: "routine-return:older", content: "Older." })],
+      },
+    }]);
 
     expect(seen.at(-1)![0]).not.toBe(seen[0]![0]);
   });

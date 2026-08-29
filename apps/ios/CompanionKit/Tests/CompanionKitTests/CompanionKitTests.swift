@@ -1189,6 +1189,167 @@ func decodesAssistantReasoningAndPreservesLegacyTranscriptEntries() throws {
 }
 
 @Test
+func decodesRoutineNotifyGroupAndHiddenEntries() throws {
+    let entry = try JSONDecoder().decode(TranscriptEntry.self, from: Data(#"""
+    {
+      "event_id":"routine-return:latest",
+      "ordinal":4,
+      "role":"assistant",
+      "content":"The latest update is ready.",
+      "routine_notify_group":{
+        "routine_name":"Skills Hub",
+        "total_count":2,
+        "hidden_entries":[
+          {
+            "event_id":"msg:routine-old",
+            "ordinal":1,
+            "role":"user",
+            "content":"Check for updates.",
+            "author_id":"owner-1",
+            "author_name":"Owner",
+            "routine":{
+              "id":"11111111-1111-4111-8111-111111111111",
+              "name":"Skills Hub",
+              "run_id":"22222222-2222-4222-8222-222222222222"
+            },
+            "turn_id":"22222222-2222-4222-8222-222222222222",
+            "queued":false,
+            "attachments":[],
+            "created_at":"2026-08-27T12:00:00.000Z"
+          },
+          {
+            "event_id":"routine-return:old",
+            "ordinal":2,
+            "role":"assistant",
+            "content":"The previous update is ready.",
+            "queued":false,
+            "attachments":[],
+            "created_at":"2026-08-27T12:00:01.000Z"
+          }
+        ]
+      },
+      "queued":false,
+      "attachments":[],
+      "created_at":"2026-08-28T12:00:01.000Z"
+    }
+    """#.utf8))
+
+    let group = try #require(entry.routineNotifyGroup)
+    #expect(group.routineName == "Skills Hub")
+    #expect(group.totalCount == 2)
+    #expect(group.hiddenEntries.map(\.eventID) == ["msg:routine-old", "routine-return:old"])
+    #expect(group.hiddenEntries.first?.routine?.runID == "22222222-2222-4222-8222-222222222222")
+    #expect(group.hiddenEntries.allSatisfy { $0.routineNotifyGroup == nil })
+}
+
+@Test
+func routineNotifyDisplayExpansionIsDeterministicAndKeepsLatestMarkerInOrder() throws {
+    func payload(
+        eventID: String,
+        ordinal: Int,
+        role: String,
+        content: String,
+        routine: [String: Any]? = nil,
+        routineNotifyGroup: [String: Any]? = nil
+    ) -> [String: Any] {
+        [
+            "event_id": eventID,
+            "ordinal": ordinal,
+            "role": role,
+            "content": content,
+            "author_id": NSNull(),
+            "author_name": NSNull(),
+            "routine": routine ?? NSNull(),
+            "routine_notify_group": routineNotifyGroup ?? NSNull(),
+            "queued": false,
+            "attachments": [],
+            "created_at": "2026-08-28T12:00:00.000Z",
+        ]
+    }
+
+    let routine: [String: Any] = [
+        "id": "11111111-1111-4111-8111-111111111111",
+        "name": "Morning check",
+        "run_id": "22222222-2222-4222-8222-222222222222",
+    ]
+    let oldMarker = payload(
+        eventID: "marker-old",
+        ordinal: 1,
+        role: "user",
+        content: "",
+        routine: routine
+    )
+    let oldUpdate = payload(
+        eventID: "update-old",
+        ordinal: 2,
+        role: "assistant",
+        content: "Older update"
+    )
+    let latestMarker = payload(
+        eventID: "marker-latest",
+        ordinal: 3,
+        role: "user",
+        content: "",
+        routine: routine
+    )
+    let group: [String: Any] = [
+        "routine_name": "Morning check",
+        "total_count": 2,
+        "hidden_entries": [oldMarker, oldUpdate],
+    ]
+    let latestUpdate = payload(
+        eventID: "update-latest",
+        ordinal: 4,
+        role: "assistant",
+        content: "Latest update",
+        routineNotifyGroup: group
+    )
+    let entries = try [
+        payload(eventID: "before", ordinal: 0, role: "assistant", content: "Before routine"),
+        latestMarker,
+        latestUpdate,
+    ].map { try JSONDecoder().decode(
+        TranscriptEntry.self,
+        from: JSONSerialization.data(withJSONObject: $0)
+    ) }
+
+    let collapsed = CompanionTranscriptProjection.displayItems(from: entries)
+    #expect(collapsed.map(\.id) == [
+        "before",
+        "routine-notify.update-latest.disclosure",
+        "marker-latest",
+        "update-latest",
+    ])
+    guard case let .routineNotifyDisclosure(name, totalCount, latestEventID) = collapsed[1].kind else {
+        Issue.record("Expected a routine notify disclosure")
+        return
+    }
+    #expect(name == "Morning check")
+    #expect(totalCount == 2)
+    #expect(latestEventID == "update-latest")
+
+    let expanded = CompanionTranscriptProjection.displayItems(
+        from: entries,
+        expandedRoutineNotifyEventIDs: ["update-latest"]
+    )
+    #expect(expanded.map(\.id) == [
+        "before",
+        "routine-notify.update-latest.disclosure",
+        "routine-notify.update-latest.hidden.0.marker-old",
+        "routine-notify.update-latest.hidden.1.update-old",
+        "marker-latest",
+        "update-latest",
+    ])
+    #expect(expanded.compactMap { $0.transcriptEntry?.eventID } == [
+        "before", "marker-old", "update-old", "marker-latest", "update-latest",
+    ])
+    #expect(expanded == CompanionTranscriptProjection.displayItems(
+        from: entries,
+        expandedRoutineNotifyEventIDs: ["update-latest"]
+    ))
+}
+
+@Test
 func decodesActiveTurnAndTranscriptTurnIdentity() throws {
     let data = Data(#"""
     {

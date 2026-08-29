@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as contextModule from "./context";
 import type { ApiVariables } from "./context";
+import type { CompanionThread } from "@companion/contracts";
 import {
   CompanionMcpBrokerAuthorizationError,
   CompanionTriggerNotFoundError,
@@ -634,6 +635,88 @@ describe("Companions Runtime v2 API", () => {
     for (const response of responses) {
       expect(response.headers.get("cache-control")).toBe("private, no-store");
     }
+  });
+
+  it("serves the API-projected routine notify group without flattening hidden history", async () => {
+    const runId = "88888888-8888-4888-8888-888888888888";
+    const groupedThread: CompanionThread = {
+      ...thread,
+      entries: [{
+        event_id: `routine-return:${runId}`,
+        ordinal: 3,
+        role: "assistant",
+        content: "Skills Hub: 1.87.0 → 1.88.0.",
+        reasoning: null,
+        author_id: null,
+        author_name: null,
+        tool: null,
+        decision: null,
+        routine: null,
+        trigger: null,
+        turn_id: null,
+        queued: false,
+        attachments: [],
+        created_at: NOW,
+        routine_notify_group: {
+          routine_name: "Skills Hub",
+          total_count: 2,
+          hidden_entries: [
+            {
+              event_id: "msg:77777777-7777-4777-8777-777777777777",
+              ordinal: 0,
+              role: "user",
+              content: "Check for Skills Hub updates.",
+              reasoning: null,
+              author_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+              author_name: "Ada Lovelace",
+              tool: null,
+              decision: null,
+              routine: {
+                id: "99999999-9999-4999-8999-999999999999",
+                name: "Skills Hub",
+                run_id: "77777777-7777-4777-8777-777777777777",
+              },
+              trigger: null,
+              turn_id: "77777777-7777-4777-8777-777777777777",
+              queued: false,
+              attachments: [],
+              created_at: NOW,
+            },
+            {
+              event_id: "routine-return:77777777-7777-4777-8777-777777777777",
+              ordinal: 1,
+              role: "assistant",
+              content: "Skills Hub: 1.86.0 → 1.87.0.",
+              reasoning: null,
+              author_id: null,
+              author_name: null,
+              tool: null,
+              decision: null,
+              routine: null,
+              trigger: null,
+              turn_id: null,
+              queued: false,
+              attachments: [],
+              created_at: NOW,
+            },
+          ],
+        },
+      }],
+    };
+    coreMocks.readCompanionThreadV2.mockResolvedValue(groupedThread);
+
+    const response = await appWithRoutes().request(`/v1/companions/${COMPANION_ID}/thread`);
+    // SAFETY: This test controls the route mock and asserts the exact Companion thread response.
+    const payload = await response.json() as { thread: CompanionThread };
+
+    expect(response.status).toBe(200);
+    expect(payload.thread.entries).toHaveLength(1);
+    expect(payload.thread.entries[0]?.routine_notify_group).toMatchObject({
+      routine_name: "Skills Hub",
+      total_count: 2,
+    });
+    expect(payload.thread.entries[0]?.routine_notify_group?.hidden_entries[1]?.content)
+      .toBe("Skills Hub: 1.86.0 → 1.87.0.");
   });
 
   it("projects transcription as unavailable when the deployment key is absent", async () => {

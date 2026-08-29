@@ -80,6 +80,8 @@ describe("Companion Pi interaction extension", () => {
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain('name: "propose_routine"');
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("companion:routine:");
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("never claim a routine is active");
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("Keep confirm copy to one short sentence");
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("${name}: ${cron} · ${timezone}.");
   });
 
   it("proposes triggers through confirm with a companion:trigger title and the contract providers", () => {

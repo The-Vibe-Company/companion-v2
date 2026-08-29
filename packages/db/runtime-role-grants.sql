@@ -745,6 +745,13 @@ BEGIN
       companion_api_functions := companion_api_functions || ARRAY[
         'public.companion_api_routine_hidden_relay_turns(uuid,uuid)'::regprocedure
       ];
+      IF pg_catalog.to_regprocedure(
+        'public.companion_api_routine_notify_returns(uuid,uuid)'
+      ) IS NOT NULL THEN
+        companion_api_functions := companion_api_functions || ARRAY[
+          'public.companion_api_routine_notify_returns(uuid,uuid)'::regprocedure
+        ];
+      END IF;
       internal_runtime_functions := internal_runtime_functions || ARRAY[
         'public.companion_runtime_surface_routine_return(uuid,uuid,uuid,public.companion_routine_surface_mode,text)'::regprocedure
       ];

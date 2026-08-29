@@ -335,6 +335,11 @@ export function useStableEntries(
         && kept.routine?.name === entry.routine?.name
         && kept.trigger?.id === entry.trigger?.id
         && kept.trigger?.name === entry.trigger?.name
+        && kept.routine_notify_group?.routine_name === entry.routine_notify_group?.routine_name
+        && kept.routine_notify_group?.total_count === entry.routine_notify_group?.total_count
+        && kept.routine_notify_group?.hidden_entries.length === entry.routine_notify_group?.hidden_entries.length
+        && kept.routine_notify_group?.hidden_entries.every((hidden, index) =>
+          hidden.event_id === entry.routine_notify_group?.hidden_entries[index]?.event_id) !== false
         && kept.queued === entry.queued
         && kept.turn_id === entry.turn_id
         // Attachments are written once with the entry and never move afterwards, so identity by

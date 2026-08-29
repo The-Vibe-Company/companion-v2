@@ -334,6 +334,72 @@ describe("Pi journal validation and projection", () => {
     ]));
   });
 
+  it("projects only the final assistant answer, never text beside an intermediate tool call", () => {
+    const page = validatePiJournalRead({
+      value: {
+        events: [
+          {
+            sequence: 1,
+            invocationId: PI_INVOCATION_ID,
+            attemptId: ATTEMPT_ID,
+            kind: "pi_event",
+            event: {
+              type: "message_end",
+              message: {
+                role: "assistant",
+                content: [
+                  { type: "text", text: "I’ll inspect that now." },
+                  { type: "toolCall", id: "call-1", name: "read", arguments: { path: "README.md" } },
+                ],
+              },
+            },
+          },
+          {
+            sequence: 2,
+            invocationId: PI_INVOCATION_ID,
+            attemptId: ATTEMPT_ID,
+            kind: "pi_event",
+            event: {
+              type: "tool_execution_start",
+              toolCallId: "call-1",
+              toolName: "read",
+              args: { path: "README.md" },
+            },
+          },
+          {
+            sequence: 3,
+            invocationId: PI_INVOCATION_ID,
+            attemptId: ATTEMPT_ID,
+            kind: "pi_event",
+            event: {
+              type: "message_end",
+              message: {
+                role: "assistant",
+                content: [{ type: "text", text: "Done" }],
+              },
+            },
+          },
+        ],
+        nextCursor: 3,
+        acknowledgedCursor: 0,
+        hasMore: false,
+      },
+      after: 0n,
+      attemptId: ATTEMPT_ID,
+      invocationId: PI_INVOCATION_ID,
+    });
+
+    const projections = classifyPiJournalPage(page).projections;
+
+    expect(projections.filter((projection) => projection.type === "assistant")).toEqual([
+      expect.objectContaining({ type: "assistant", content: "Done" }),
+    ]);
+    expect(projections).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "tool" }),
+    ]));
+    expect(JSON.stringify(projections, bigintAwareReplacer)).not.toContain("inspect that now");
+  });
+
   it("redacts exact credentials from disclosed tool arguments and results", () => {
     const opaqueSecret = "mF9xOpaqueCredentialValue";
     const page = validatePiJournalRead({

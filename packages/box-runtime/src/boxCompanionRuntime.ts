@@ -566,6 +566,15 @@ export const COMPANION_THREAD_INSTRUCTIONS = [
   "you can no longer see in context still happened for the person you are talking to.",
 ].join("\n");
 
+export const COMPANION_DELIVERY_INSTRUCTIONS = [
+  "# Delivery",
+  "",
+  "These are delivery semantics for what the person sees; the owner's persona still decides your voice.",
+  "Give updates in one short sentence. Example: Skills Hub: companion 1.86.0 → 1.88.0. Everything else was already current.",
+  "Use one-word acknowledgements such as Done or Sent. Never narrate process, apologize, prefix a reply",
+  "with btw, or add filler when nothing changed beyond that fact.",
+].join("\n");
+
 export const COMPANION_ROUTINE_RUN_INSTRUCTIONS = [
   "# Your routine run",
   "",
@@ -576,7 +585,8 @@ export const COMPANION_ROUTINE_RUN_INSTRUCTIONS = [
   "",
   "Your routine runs are recorded in a separate history. Only surface a message in the main conversation when you have something important to share. Otherwise complete silently (no_output) and store your output in the routine log.",
   "Use surface_to_main exactly once and only as the terminal action: notify shares one Companion entry",
-  "without waking the main Pi; relay shares the entry and asks the main Pi to read and answer it.",
+  "without waking the main Pi; relay shares the entry and asks the main Pi to read and answer it. Keep",
+  "the surfaced message to the same terse delivery contract: one short result, never process narration.",
   "After an accepted surface_to_main call this session ends immediately.",
 ].join("\n");
 
@@ -679,6 +689,7 @@ function companionConfigInstructions(includeCatalog: boolean): string {
     "  model, or rewriting your persona line. Approval applies after this turn ends, so a proposed change",
     "  is never active in the turn that proposed it.",
     "- propose_routine proposes a named schedule — a prompt, a cron expression, and an IANA timezone.",
+    "  Keep its optional human-facing summary to one short sentence with no setup or process narration.",
     "  Approval creates it after this turn ends, so a proposed routine never fires in the turn that proposed it.",
     "- propose_trigger proposes a named webhook trigger — a prompt and a provider (linear, github, or",
     "  custom). linear and github triggers require the matching plugin attached to you; custom needs",
@@ -790,6 +801,7 @@ export function composedInstructions(
   const parts = [
     COMPANION_SITUATION_INSTRUCTIONS,
     COMPANION_THREAD_INSTRUCTIONS,
+    COMPANION_DELIVERY_INSTRUCTIONS,
     COMPANION_MACHINE_INSTRUCTIONS,
     COMPANION_TURN_INSTRUCTIONS,
     COMPANION_FILES_INSTRUCTIONS,
@@ -806,6 +818,7 @@ export function composedRoutineInstructions(persona?: string | null): string {
   const parts = [
     COMPANION_SITUATION_INSTRUCTIONS,
     COMPANION_ROUTINE_RUN_INSTRUCTIONS,
+    COMPANION_DELIVERY_INSTRUCTIONS,
     COMPANION_ROUTINE_MACHINE_INSTRUCTIONS,
     COMPANION_TURN_INSTRUCTIONS,
     COMPANION_FILES_INSTRUCTIONS,

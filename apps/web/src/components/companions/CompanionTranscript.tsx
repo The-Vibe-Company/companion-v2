@@ -119,6 +119,8 @@ interface TranscriptChrome {
   onStop: () => void;
   onCancelQueued: (turnId: string) => void;
   onOpenRoutineRun?: (routine: NonNullable<CompanionTranscriptEntry["routine"]>) => void;
+  expandedRoutineNotifyGroups: ReadonlySet<string>;
+  onToggleRoutineNotifyGroup: (eventId: string) => void;
   dequeueingTurnId: string | null;
 }
 
@@ -246,10 +248,60 @@ function Separators({ message }: { message: TranscriptMessage | undefined }) {
 
 function AssistantFrame({ children }: { children: ReactNode }) {
   const message = useTranscriptMessage();
+  const {
+    expandedRoutineNotifyGroups,
+    onOpenRoutineRun,
+    onToggleRoutineNotifyGroup,
+  } = useChrome();
+  const groupedEntry = message?.entries.find((entry) => entry.routine_notify_group != null);
+  const notifyGroup = groupedEntry?.routine_notify_group ?? null;
+  const expanded = groupedEntry ? expandedRoutineNotifyGroups.has(groupedEntry.event_id) : false;
   return (
     <>
       <Separators message={message} />
       <AssistantPassageLead message={message} />
+      {notifyGroup && groupedEntry ? (
+        <>
+          <button
+            type="button"
+            className="chat-routine-notify-group"
+            aria-expanded={expanded}
+            onClick={() => onToggleRoutineNotifyGroup(groupedEntry.event_id)}
+          >
+            <ChevronRightIcon
+              aria-hidden="true"
+              className={cn("size-3.5 transition-transform", expanded && "rotate-90")}
+            />
+            {notifyGroup.routine_name} · {notifyGroup.total_count} updates
+          </button>
+          {expanded ? (
+            <div className="chat-routine-notify-history">
+              {notifyGroup.hidden_entries.map((entry) => entry.routine ? (
+                entry.routine.run_id && onOpenRoutineRun ? (
+                  <button
+                    key={entry.event_id}
+                    type="button"
+                    className="chat-routine-header chat-routine-header--button"
+                    aria-label={`Open ${entry.routine.name} routine run`}
+                    onClick={() => onOpenRoutineRun(entry.routine!)}
+                  >
+                    Routine: {entry.routine.name}
+                    <ChevronRightIcon aria-hidden="true" className="size-3.5" />
+                  </button>
+                ) : (
+                  <p key={entry.event_id} className="chat-routine-header">
+                    Routine: {entry.routine.name}
+                  </p>
+                )
+              ) : entry.role === "assistant" ? (
+                <p key={entry.event_id} className="chat-routine-notify-history__reply">
+                  {entry.content}
+                </p>
+              ) : null)}
+            </div>
+          ) : null}
+        </>
+      ) : null}
       {children}
       {/* Files come after the words that introduced them, which is the order they happened in. */}
       {message && <AttachmentList attachments={attachmentsOf(message)} />}
@@ -477,6 +529,17 @@ export function CompanionTranscript({
   const [outgoing, setOutgoing] = useState<CompanionTranscriptEntry | null>(null);
   const [stopping, setStopping] = useState(false);
   const [dequeueingTurnId, setDequeueingTurnId] = useState<string | null>(null);
+  const [expandedRoutineNotifyGroups, setExpandedRoutineNotifyGroups] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const toggleRoutineNotifyGroup = useCallback((eventId: string) => {
+    setExpandedRoutineNotifyGroups((current) => {
+      const next = new Set(current);
+      if (next.has(eventId)) next.delete(eventId);
+      else next.add(eventId);
+      return next;
+    });
+  }, []);
 
   const entries = useMemo(() => {
     const saved = thread?.entries ?? [];
@@ -718,6 +781,8 @@ export function CompanionTranscript({
     onStop: stopTurn,
     onCancelQueued: cancelQueued,
     onOpenRoutineRun,
+    expandedRoutineNotifyGroups,
+    onToggleRoutineNotifyGroup: toggleRoutineNotifyGroup,
     dequeueingTurnId,
   }), [
     attachmentError,
@@ -729,6 +794,7 @@ export function CompanionTranscript({
     companion.icon,
     dequeueingTurnId,
     empty,
+    expandedRoutineNotifyGroups,
     hint,
     loading,
     onAttach,
@@ -740,6 +806,7 @@ export function CompanionTranscript({
     stopTurn,
     stopping,
     swallowClickAfterPress,
+    toggleRoutineNotifyGroup,
   ]);
 
   const decisions = useMemo(() => ({
