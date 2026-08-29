@@ -10,16 +10,39 @@ private struct FixedSessionStorage: SessionStorage {
 }
 
 private final class SuspendedThreadSyncURLProtocol: URLProtocol, @unchecked Sendable {
-    nonisolated(unsafe) static var requestStarted = DispatchSemaphore(value: 0)
     nonisolated(unsafe) static var releaseResponse = DispatchSemaphore(value: 0)
-    nonisolated(unsafe) static var requestedURL: URL?
+    private nonisolated(unsafe) static let lock = NSLock()
+    private nonisolated(unsafe) static var requestDidStart = false
+    private nonisolated(unsafe) static var requestedURL: URL?
+
+    static func reset() {
+        lock.lock()
+        requestDidStart = false
+        requestedURL = nil
+        lock.unlock()
+        releaseResponse = DispatchSemaphore(value: 0)
+    }
+
+    static var hasStarted: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return requestDidStart
+    }
+
+    static var capturedURL: URL? {
+        lock.lock()
+        defer { lock.unlock() }
+        return requestedURL
+    }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        Self.lock.lock()
         Self.requestedURL = request.url
-        Self.requestStarted.signal()
+        Self.requestDidStart = true
+        Self.lock.unlock()
         _ = Self.releaseResponse.wait(timeout: .now() + 5)
         let payload = #"""
         {
@@ -54,13 +77,28 @@ private final class SuspendedThreadSyncURLProtocol: URLProtocol, @unchecked Send
 }
 
 private final class BackgroundRefreshURLProtocol: URLProtocol, @unchecked Sendable {
-    nonisolated(unsafe) static var requestsStarted = DispatchSemaphore(value: 0)
+    private nonisolated(unsafe) static let lock = NSLock()
+    private nonisolated(unsafe) static var requestCount = 0
+
+    static func reset() {
+        lock.lock()
+        requestCount = 0
+        lock.unlock()
+    }
+
+    static var requestsStarted: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return requestCount
+    }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
-        Self.requestsStarted.signal()
+        Self.lock.lock()
+        Self.requestCount += 1
+        Self.lock.unlock()
         let path = request.url?.path ?? ""
         let payload: String
         if path == "/v1/companions/sync" {
@@ -133,10 +171,11 @@ func sqliteCachePersistsRestoresScopesAndBoundedThreadTail() throws {
     )
     #expect(snapshot.thread.entries.count == 300)
     try cache.saveThread(snapshot, scope: "org-a:user-a", companionID: snapshot.thread.companionID)
-    let restored = try #require(cache.thread(
+    let restoredSnapshot = try cache.thread(
         scope: "org-a:user-a",
         companionID: snapshot.thread.companionID
-    ))
+    )
+    let restored = try #require(restoredSnapshot)
     #expect(restored.isPartial)
     #expect(restored.thread.entries.count == 250)
     #expect(restored.thread.entries.first?.ordinal == 50)
@@ -197,9 +236,7 @@ func offlineSessionRestoresRosterWithoutWaitingForNetwork() throws {
 
 @Test @MainActor
 func cachedThreadRemainsRenderableWhileDeltaSynchronizationIsInFlight() async throws {
-    SuspendedThreadSyncURLProtocol.requestStarted = DispatchSemaphore(value: 0)
-    SuspendedThreadSyncURLProtocol.releaseResponse = DispatchSemaphore(value: 0)
-    SuspendedThreadSyncURLProtocol.requestedURL = nil
+    SuspendedThreadSyncURLProtocol.reset()
     let fixture = try cacheFixture()
     defer { try? FileManager.default.removeItem(at: fixture.directory) }
     let session = testSession()
@@ -237,16 +274,17 @@ func cachedThreadRemainsRenderableWhileDeltaSynchronizationIsInFlight() async th
     let synchronization = Task {
         try await store.synchronizeThread(companionID: cached.thread.companionID)
     }
-    await Task.detached {
-        _ = SuspendedThreadSyncURLProtocol.requestStarted.wait(timeout: .now() + 5)
-    }.value
+    for _ in 0..<500 where !SuspendedThreadSyncURLProtocol.hasStarted {
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+    #expect(SuspendedThreadSyncURLProtocol.hasStarted)
 
     // The request has reached the transport and is deliberately suspended. Cached content remains
     // the projection, so ChatView's loader predicate stays false throughout revalidation.
     #expect(!projection.needsBlockingLoader)
     #expect(store.cachedThread(companionID: cached.thread.companionID)?.thread.entries.count == 250)
     #expect(URLComponents(
-        url: try #require(SuspendedThreadSyncURLProtocol.requestedURL),
+        url: try #require(SuspendedThreadSyncURLProtocol.capturedURL),
         resolvingAgainstBaseURL: false
     )?.queryItems?.contains(URLQueryItem(name: "cursor", value: "prior-cursor")) == true)
 
@@ -299,7 +337,7 @@ func companionInvalidationReachesTheVisibleThreadConsumer() async throws {
 
 @Test @MainActor
 func aVisibleDifferentCompanionDoesNotSuppressBackgroundCacheRefresh() async throws {
-    BackgroundRefreshURLProtocol.requestsStarted = DispatchSemaphore(value: 0)
+    BackgroundRefreshURLProtocol.reset()
     let fixture = try cacheFixture()
     defer { try? FileManager.default.removeItem(at: fixture.directory) }
     let session = testSession()
@@ -321,10 +359,10 @@ func aVisibleDifferentCompanionDoesNotSuppressBackgroundCacheRefresh() async thr
 
     let companionY = "33333333-3333-4333-8333-333333333333"
     store.invalidateCompanion(companionID: companionY)
-    await Task.detached {
-        _ = BackgroundRefreshURLProtocol.requestsStarted.wait(timeout: .now() + 5)
-        _ = BackgroundRefreshURLProtocol.requestsStarted.wait(timeout: .now() + 5)
-    }.value
+    for _ in 0..<500 where BackgroundRefreshURLProtocol.requestsStarted < 2 {
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+    #expect(BackgroundRefreshURLProtocol.requestsStarted >= 2)
     for _ in 0..<100 where store.cachedThread(companionID: companionY) == nil {
         await Task.yield()
     }
