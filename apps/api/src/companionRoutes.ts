@@ -54,6 +54,9 @@ import {
   answerCompanionRoutineDecisionV2,
   answerCompanionTriggerDecisionV2,
   cancelCompanionTurnV2,
+  buildCompanionRosterSync,
+  buildCompanionThreadDelta,
+  validateCompanionSyncCursor,
   classifyCompanionTriggerFireError,
   composeTriggerPrompt,
   createCompanionV2,
@@ -150,6 +153,7 @@ import {
   setCompanionProviderInputSchema,
   setCompanionWorkspaceShareInputSchema,
   setDefaultCompanionProviderInputSchema,
+  companionSyncQuerySchema,
   startCompanionRuntimeInputSchema,
   saveCompanionPluginInputSchema,
   updateCompanionInputSchema,
@@ -876,6 +880,37 @@ export function registerCompanionRoutes(
       return c.json({ companions });
     } catch (error) {
       return jsonError(c, error, errorStatus(error));
+    }
+  });
+
+  app.get("/v1/companions/sync", async (c) => {
+    try {
+      const query = companionSyncQuerySchema.parse({ cursor: c.req.query("cursor") });
+      const sync = await tenant(c, async ({ actor, orgId, database }) => {
+        if (query.cursor) {
+          validateCompanionSyncCursor({
+            cursor: query.cursor,
+            kind: "roster",
+            orgId,
+            actorId: actor.id,
+          });
+        }
+        const [companions, sections] = await Promise.all([
+          listCompanionsV2({ actor, orgId, withLastMessage: true, database }),
+          listCompanionSections({ actor, orgId, database }),
+        ]);
+        return buildCompanionRosterSync({
+          orgId,
+          actorId: actor.id,
+          companions,
+          sections,
+          cursor: query.cursor,
+        });
+      });
+      c.header("Cache-Control", "private, no-store");
+      return c.json(sync);
+    } catch (error) {
+      return routeError(c, error);
     }
   });
 
@@ -1786,6 +1821,36 @@ export function registerCompanionRoutes(
         readCompanionThreadV2({ actor, orgId, companionId, database }));
       c.header("Cache-Control", "private, no-store");
       return c.json({ thread: projectThreadForHttp(thread, transcriptionAvailable) });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.get("/v1/companions/:id/thread-delta", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const query = companionSyncQuerySchema.parse({ cursor: c.req.query("cursor") });
+      const delta = await tenant(c, async ({ actor, orgId, database }) => {
+        if (query.cursor) {
+          validateCompanionSyncCursor({
+            cursor: query.cursor,
+            kind: "thread",
+            orgId,
+            actorId: actor.id,
+            companionId,
+          });
+        }
+        const thread = await readCompanionThreadV2({ actor, orgId, companionId, database });
+        return buildCompanionThreadDelta({
+          orgId,
+          actorId: actor.id,
+          companionId,
+          thread: projectThreadForHttp(thread, transcriptionAvailable),
+          cursor: query.cursor,
+        });
+      });
+      c.header("Cache-Control", "private, no-store");
+      return c.json(delta);
     } catch (error) {
       return routeError(c, error);
     }

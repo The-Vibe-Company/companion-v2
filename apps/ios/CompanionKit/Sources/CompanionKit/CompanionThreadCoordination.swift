@@ -8,6 +8,10 @@ public struct CompanionThreadProjection: Equatable, Sendable {
         self.thread = thread
     }
 
+    /// A refresh may be active while cached content remains visible. Only an empty projection
+    /// needs the blocking conversation loader.
+    public var needsBlockingLoader: Bool { thread == nil }
+
     public mutating func beginRefresh() -> Int {
         revision += 1
         return revision

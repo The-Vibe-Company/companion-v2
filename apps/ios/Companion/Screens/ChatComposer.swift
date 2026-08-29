@@ -236,7 +236,7 @@ struct ChatComposer: View {
             || selectingAttachments
             || transcription.isBusy
             || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || canSend == false
+            || canSend != true
     }
 
     private var showsSendButton: Bool {
@@ -312,7 +312,7 @@ struct ChatComposer: View {
             || selectingAttachments
             || transcription.isBusy
             || remainingAttachmentCapacity == 0
-            || canSend == false
+            || canSend != true
     }
 
     private var transcriptionButtonDisabled: Bool {

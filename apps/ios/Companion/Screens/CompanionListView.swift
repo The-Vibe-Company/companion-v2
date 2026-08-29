@@ -18,7 +18,9 @@ struct CompanionListView: View {
     @Environment(SessionStore.self) private var sessionStore
     @Environment(NotificationCoordinator.self) private var notifications
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
     let session: Session
+    private let initialSnapshot: CompanionRosterSnapshot?
     private let services: CompanionListServices?
     private let chatServices: ChatServices?
     @State private var path: [CompanionRoute] = []
@@ -48,12 +50,21 @@ struct CompanionListView: View {
 
     init(
         session: Session,
+        initialSnapshot: CompanionRosterSnapshot? = nil,
         services: CompanionListServices? = nil,
         chatServices: ChatServices? = nil
     ) {
         self.session = session
+        self.initialSnapshot = initialSnapshot
         self.services = services
         self.chatServices = chatServices
+        _rosterState = State(initialValue: CompanionRosterState(
+            companions: initialSnapshot?.companions ?? []
+        ))
+        _sectionStore = State(initialValue: CompanionSectionStore(
+            sections: initialSnapshot?.sections ?? []
+        ))
+        _loading = State(initialValue: initialSnapshot == nil)
     }
 
     var body: some View {
@@ -198,15 +209,47 @@ struct CompanionListView: View {
                 Text("Companions in this section will move to Unassigned.")
             }
             .task(id: session.orgID) {
-                await reload()
+                await reload(silently: initialSnapshot != nil)
                 while !Task.isCancelled {
                     let interval: UInt64 = companions.contains(where: hasActiveWork) ? 8 : 45
                     try? await Task.sleep(for: .seconds(interval))
                     if !Task.isCancelled { await reload(silently: true) }
                 }
             }
+            .task(id: mostRecentCompanionID) {
+                guard services == nil,
+                      scenePhase == .active,
+                      let companionID = mostRecentCompanionID,
+                      sessionStore.cachedThread(companionID: companionID) == nil else { return }
+                if let measurement = try? await sessionStore.synchronizeThread(companionID: companionID) {
+                    CompanionPerformanceTelemetry.syncCompleted(
+                        surface: "thread-prefetch",
+                        bytes: measurement.receivedBytes,
+                        milliseconds: measurement.networkMilliseconds
+                    )
+                }
+            }
+            .onAppear {
+                if !loading {
+                    CompanionPerformanceTelemetry.rosterWillRender(
+                        cacheRestoreMilliseconds: sessionStore.initialCacheRestoreMilliseconds,
+                        companionCount: companions.count
+                    )
+                }
+            }
+            .onChange(of: loading) { _, isLoading in
+                guard !isLoading else { return }
+                CompanionPerformanceTelemetry.rosterWillRender(
+                    cacheRestoreMilliseconds: sessionStore.initialCacheRestoreMilliseconds,
+                    companionCount: companions.count
+                )
+            }
             .onChange(of: notifications.pendingDestination) { _, _ in
                 openPendingNotificationIfPossible()
+            }
+            .onChange(of: scenePhase) { _, phase in
+                guard phase == .active else { return }
+                Task { await reload(silently: !companions.isEmpty) }
             }
             .tint(CompanionIOSTheme.textPrimary)
         }
@@ -243,14 +286,30 @@ struct CompanionListView: View {
     }
 
     private var loadingState: some View {
-        VStack(spacing: 14) {
-            ProgressView()
-                .controlSize(.large)
-            Text("Loading Companions…")
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(Color.companionMuted)
+        List {
+            ForEach(0..<5, id: \.self) { index in
+                HStack(spacing: 12) {
+                    Circle()
+                        .fill(CompanionIOSTheme.surfaceCard)
+                        .frame(width: 36, height: 36)
+                    VStack(alignment: .leading, spacing: 7) {
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(CompanionIOSTheme.surfaceCard)
+                            .frame(width: index.isMultiple(of: 2) ? 112 : 146, height: 15)
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(CompanionIOSTheme.surfaceCard)
+                            .frame(maxWidth: index.isMultiple(of: 2) ? 214 : 176)
+                            .frame(height: 12)
+                    }
+                }
+                .frame(minHeight: 52)
+                .listRowSeparator(.hidden)
+            }
         }
-        .padding(28)
+        .listStyle(.plain)
+        .scrollDisabled(true)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Loading Companions")
     }
 
     private func errorState(_ message: String) -> some View {
@@ -287,6 +346,12 @@ struct CompanionListView: View {
 
     private var matchingCompanions: [CompanionSummary] {
         companions.filter(matchesSearch)
+    }
+
+    private var mostRecentCompanionID: String? {
+        companions.compactMap { companion in
+            companion.lastMessage.map { (id: companion.id, createdAt: $0.createdAt) }
+        }.max { $0.createdAt < $1.createdAt }?.id
     }
 
     private var homeSections: [CompanionHomeSection] {
@@ -357,6 +422,9 @@ struct CompanionListView: View {
             )
         }
         .buttonStyle(.plain)
+        .simultaneousGesture(TapGesture().onEnded {
+            CompanionPerformanceTelemetry.chatTapped(companionID: companion.id)
+        })
         .disabled(busy)
         .accessibilityIdentifier("companion.row.\(companion.id)")
         .contextMenu { companionContextMenu(for: companion, busy: busy) }
@@ -444,12 +512,14 @@ struct CompanionListView: View {
                     nextSections = try CompanionSectionCompatibility.fallback(for: error)
                 }
             } else {
-                next = try await sessionStore.listCompanions()
-                do {
-                    nextSections = try await sessionStore.listCompanionSections()
-                } catch {
-                    nextSections = try CompanionSectionCompatibility.fallback(for: error)
-                }
+                let measurement = try await sessionStore.synchronizeRoster()
+                next = measurement.value.companions
+                nextSections = measurement.value.sections
+                CompanionPerformanceTelemetry.syncCompleted(
+                    surface: "roster",
+                    bytes: measurement.receivedBytes,
+                    milliseconds: measurement.networkMilliseconds
+                )
             }
             guard generation == reloadGeneration else { return }
             rosterState.reconcile(with: next)
@@ -498,6 +568,7 @@ struct CompanionListView: View {
             case .chat(let companionID):
                 ChatView(
                     companion: companion,
+                    initialSnapshot: sessionStore.cachedThread(companionID: companionID),
                     readingPosition: chatReadingPositions.position(for: companionID),
                     onOpenPlugins: { showingPlugins = true },
                     services: chatServices,

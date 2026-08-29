@@ -1605,6 +1605,49 @@ export const companionThreadSchema = z.object({
 export type CompanionThread = z.infer<typeof companionThreadSchema>;
 
 /**
+ * Stateless delta cursors are intentionally small, opaque snapshots rather than database offsets.
+ * The server can therefore detect edits and deletions even when a client was offline, while a
+ * bounded cursor keeps an untrusted query parameter from becoming an unbounded request body.
+ */
+export const COMPANION_SYNC_CURSOR_VERSION = 1 as const;
+export const COMPANION_SYNC_CURSOR_MAX_CHARACTERS = 256 * 1024;
+export const COMPANION_SYNC_CURSOR_MAX_RECORDS = 20_000;
+
+export const companionSyncQuerySchema = z.object({
+  cursor: z.string().min(1).max(COMPANION_SYNC_CURSOR_MAX_CHARACTERS).optional(),
+}).strict();
+export type CompanionSyncQuery = z.infer<typeof companionSyncQuerySchema>;
+
+export const companionSyncCursorSchema = z.string()
+  .min(1)
+  .max(COMPANION_SYNC_CURSOR_MAX_CHARACTERS);
+
+export const companionRosterSyncResponseSchema = z.object({
+  cursor: companionSyncCursorSchema,
+  changed_companions: z.array(companionSchema),
+  deleted_companion_ids: z.array(z.string().uuid()),
+  /** Full current order lets a client reposition unchanged rows after an activity/reorder event. */
+  companion_ids: z.array(z.string().uuid()),
+  changed_sections: z.array(companionSectionSchema),
+  deleted_section_ids: z.array(z.string().uuid()),
+  /** Full current section order has the same property as `companion_ids`. */
+  section_ids: z.array(z.string().uuid()),
+}).strict();
+export type CompanionRosterSyncResponse = z.infer<typeof companionRosterSyncResponseSchema>;
+
+/** Thread metadata is sent on every delta so state changes are never hidden behind entry polling. */
+export const companionThreadMetadataSchema = companionThreadSchema.omit({ entries: true });
+export type CompanionThreadMetadata = z.infer<typeof companionThreadMetadataSchema>;
+
+export const companionThreadDeltaResponseSchema = z.object({
+  cursor: companionSyncCursorSchema,
+  changed_entries: z.array(companionTranscriptEntrySchema),
+  deleted_event_ids: z.array(z.string().min(1).max(200)),
+  thread: companionThreadMetadataSchema,
+}).strict();
+export type CompanionThreadDeltaResponse = z.infer<typeof companionThreadDeltaResponseSchema>;
+
+/**
  * One send, one turn. The sender names the message it is creating, and the control plane stores that
  * name as the transcript event id, so a request that arrives twice — a retried fetch, a proxy replay,
  * a client that resent the same submission — persists the same turn instead of a second one.
