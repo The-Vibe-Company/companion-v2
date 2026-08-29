@@ -418,7 +418,10 @@ public final class SessionStore {
             throw CancellationError()
         }
         if let cache {
-            try await Task.detached(priority: .utility) {
+            // The cache is an offline acceleration layer. A full roster remains usable when the
+            // device cannot persist it (for example, a full disk or a snapshot over the byte cap).
+            // Do not turn a successful authoritative refresh into an app-visible sync failure.
+            try? await Task.detached(priority: .utility) {
                 try cache.saveRoster(snapshot, scope: scope)
             }.value
         }
@@ -1044,7 +1047,10 @@ public final class SessionStore {
             companionsMarkedRead.insert(companionID)
         }
         if let cache {
-            try await Task.detached(priority: .utility) {
+            // A bounded top-level tail can still exceed the byte cap when one projected routine
+            // group owns many hidden entries. Keep the complete fresh thread in memory even when
+            // that optional offline snapshot cannot be written.
+            try? await Task.detached(priority: .utility) {
                 try cache.saveThread(snapshot, scope: scope, companionID: companionID)
             }.value
         }
