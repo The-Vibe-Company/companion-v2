@@ -949,9 +949,12 @@ requests for one account share renewal. An upstream `401` with no MCP response b
 renewal and one retry; timeouts, disconnects, redirects, or ambiguous results are never replayed.
 The refresh token remains encrypted in the control plane. Refresh rotates only the encrypted
 envelope and increments `credential_version` with a row-locked CAS; `credential_generation` stays
-stable for the connection. Delete/reconnect creates a new account identity. A failed or revoked
-refresh is surfaced only when access is actually unusable, as `mcp_oauth_refresh_failed`; provider
-bodies and token material are never logged. There is no minimum OAuth access-token lifetime.
+stable for the connection. Delete/reconnect creates a new account identity. A failed refresh is
+surfaced only when access is actually unusable, as `mcp_oauth_refresh_failed`. When Google's Gmail
+token endpoint positively confirms `invalid_grant`, the API deletes that exact stored connection in
+the same request before surfacing the expurgated failure; network errors, timeouts, malformed
+responses, and other provider failures retain the encrypted connection. Provider bodies and token
+material are never logged. There is no minimum OAuth access-token lifetime.
 
 The Gmail account requests Google's restricted `gmail.readonly` and `gmail.compose` scopes through
 a deployment-owned OAuth client separate from login. Because `gmail.compose` can authorize sending

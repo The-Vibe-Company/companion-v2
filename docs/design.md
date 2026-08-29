@@ -408,8 +408,10 @@ Google adding a send or mailbox-mutation tool cannot silently expand Companion a
 Git uses a credential helper and `gh` uses an audited wrapper; each command asks the same loopback
 gateway, so neither `GITHUB_TOKEN` nor `GH_TOKEN` is persisted in the Box environment or on disk.
 OAuth refresh updates the encrypted envelope with a credential-version CAS while keeping the
-connection generation stable. Deleting and reconnecting the plugin creates a new account identity
-and generation.
+connection generation stable. When Google's token endpoint positively confirms a Gmail
+`invalid_grant`, API deletes that exact stored connection before returning the expurgated refresh
+failure; ambiguous or transient refresh failures retain it. Deleting and reconnecting the plugin
+creates a new account identity and generation.
 
 Staging records the earliest bounded expiry across the Skills Hub token and MCP broker capability,
 not OAuth access tokens. That expiry becomes active only after a different idle Pi invocation is

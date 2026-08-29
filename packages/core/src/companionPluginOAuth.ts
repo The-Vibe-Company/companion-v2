@@ -177,6 +177,17 @@ export class CompanionPluginOAuthError extends Error {
   }
 }
 
+/** Google has positively confirmed that the stored Gmail grant is no longer valid. */
+export class CompanionPluginOAuthRevokedError extends CompanionPluginOAuthError {
+  constructor() {
+    super(
+      "The MCP authorization has been revoked. Reconnect it in Plugins.",
+      "oauth_refresh_failed",
+    );
+    this.name = "CompanionPluginOAuthRevokedError";
+  }
+}
+
 function isRecord<T>(value: T): value is T & Record<string, CompanionPluginOAuthJsonValue> {
   return Boolean(value) && jsonObjectSchema.safeParse(value).success;
 }
@@ -214,6 +225,7 @@ async function oauthJson(
   fetchImpl: typeof fetch,
   failure: CompanionPluginOAuthError,
   signal?: AbortSignal,
+  confirmedRevocationFailure?: CompanionPluginOAuthRevokedError,
 ): Promise<Record<string, CompanionPluginOAuthJsonValue>> {
   let response: Response;
   try {
@@ -232,7 +244,22 @@ async function oauthJson(
     if (signal?.aborted) throw signal.reason ?? error;
     throw failure;
   }
-  if (!response.ok) throw failure;
+  if (!response.ok) {
+    if (confirmedRevocationFailure) {
+      // Google documents `invalid_grant` as the positive signal that a refresh grant is invalid,
+      // expired, or revoked. Inspect only that stable field and discard every provider detail.
+      // SAFETY: Response.json returns a JSON-compatible value; `isRecord` validates it before use.
+      const providerError = await response.json().catch((cause: unknown) => {
+        if (signal?.aborted) throw signal.reason ?? cause;
+        return null;
+      }) as CompanionPluginOAuthJsonValue;
+      if (signal?.aborted) throw signal.reason ?? failure;
+      if (isRecord(providerError) && providerError.error === "invalid_grant") {
+        throw confirmedRevocationFailure;
+      }
+    }
+    throw failure;
+  }
   // SAFETY: a parsed JSON body is always a JSON value; null is the transport-failure fallback.
   const value = await response.json().catch((cause: unknown) => {
     if (signal?.aborted) throw signal.reason ?? cause;
@@ -638,6 +665,9 @@ export async function refreshCompanionPluginOAuth(input: {
     input.fetchImpl ?? fetch,
     failure,
     input.signal,
+    input.credential.serverName === "com.google.workspace/gmail"
+      ? new CompanionPluginOAuthRevokedError()
+      : undefined,
   );
   const tokens = parseTokens(
     raw,

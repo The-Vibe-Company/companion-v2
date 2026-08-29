@@ -553,6 +553,69 @@
 .v10-footer__by a:hover { color: var(--v10-ink); }
 .v10-footer__by a:focus-visible { outline-color: var(--color-accent-ink); }
 
+/* --- privacy policy ------------------------------------------------------------ */
+.v10-privacy { min-height: 100vh; }
+.v10-privacy__hero {
+  padding-block: clamp(56px, 8vw, 104px) clamp(40px, 6vw, 72px);
+  border-bottom: 1px solid var(--v10-line);
+  background: var(--v10-bg);
+}
+.v10-privacy__title {
+  margin: 0;
+  max-width: 16ch;
+  font-size: clamp(2.6rem, 5.6vw, 4.25rem);
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.03em;
+  line-height: 1.05;
+  text-wrap: balance;
+}
+.v10-privacy__intro {
+  max-width: 62ch;
+  margin: var(--space-5) 0 0;
+  color: var(--v10-ink-muted);
+  font-size: var(--text-lead);
+  line-height: var(--leading-relaxed);
+  text-wrap: pretty;
+}
+.v10-privacy__updated {
+  margin: var(--space-4) 0 0;
+  color: var(--v10-ink-faint);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+}
+.v10-privacy__article {
+  max-width: 820px;
+  padding-block: clamp(48px, 7vw, 88px) clamp(64px, 9vw, 120px);
+}
+.v10-privacy__article h2 {
+  margin: 0;
+  color: var(--v10-ink);
+  font-size: clamp(1.25rem, 2.2vw, 1.625rem);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-tight);
+  line-height: 1.2;
+}
+.v10-privacy__article p {
+  max-width: 72ch;
+  margin: var(--space-3) 0 0;
+  color: var(--v10-ink-muted);
+  font-size: var(--text-md);
+  line-height: var(--leading-relaxed);
+  text-wrap: pretty;
+}
+.v10-privacy__overview {
+  padding-bottom: var(--space-7);
+  border-bottom: 1px solid var(--v10-line);
+}
+.v10-privacy__section {
+  padding-top: var(--space-7);
+}
+@media (max-width: 560px) {
+  .v10-privacy__article { padding-top: var(--space-6); }
+  .v10-privacy__hero .v10-wrap { padding-inline: var(--space-4); }
+}
+
 /* --- reveals (staggered) ------------------------------------------------------------ */
 @media (prefers-reduced-motion: no-preference) {
   .v5-reveal { opacity: 0; transform: translateY(12px); transition: opacity 420ms var(--ease-out-quint), transform 420ms var(--ease-out-quint); }

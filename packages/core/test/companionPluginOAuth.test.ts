@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  COMPANION_PLUGIN_OAUTH_SERVERS,
   CompanionPluginOAuthError,
+  CompanionPluginOAuthRevokedError,
   beginCompanionPluginOAuth,
   completeCompanionPluginOAuth,
   refreshCompanionPluginOAuth,
@@ -18,6 +20,16 @@ function formBody(init: RequestInit | undefined): URLSearchParams {
 }
 
 describe("Companion plugin OAuth broker", () => {
+  it("keeps Gmail OAuth limited to the exact read-and-draft scope pair", () => {
+    const scopes = COMPANION_PLUGIN_OAUTH_SERVERS["com.google.workspace/gmail"].scopes;
+
+    expect(scopes).toEqual([
+      "https://www.googleapis.com/auth/gmail.readonly",
+      "https://www.googleapis.com/auth/gmail.compose",
+    ]);
+    expect(scopes).toHaveLength(2);
+  });
+
   it("discovers Linear, dynamically registers the callback, and builds a PKCE authorization URL", async () => {
     const fetchImpl = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse({
@@ -165,6 +177,37 @@ describe("Companion plugin OAuth broker", () => {
       code: "oauth_refresh_failed",
       message: expect.not.stringContaining("secret provider detail"),
     }));
+
+    await expect(refreshCompanionPluginOAuth({
+      credential: {
+        ...credential,
+        serverName: "com.google.workspace/gmail",
+        tokenEndpoint: "https://oauth2.googleapis.com/token",
+        resource: "https://gmailmcp.googleapis.com/mcp/v1",
+      },
+      env: {
+        COMPANION_MCP_GMAIL_CLIENT_ID: credential.client.clientId,
+        COMPANION_MCP_GMAIL_CLIENT_SECRET: credential.client.clientSecret ?? "gmail-secret",
+      },
+      fetchImpl: failedFetch,
+    })).rejects.toBeInstanceOf(CompanionPluginOAuthRevokedError);
+
+    const transientFetch = vi.fn<typeof fetch>(async () =>
+      jsonResponse({ error: "temporarily_unavailable", error_description: "secret provider detail" }, 503)
+    );
+    await expect(refreshCompanionPluginOAuth({
+      credential: {
+        ...credential,
+        serverName: "com.google.workspace/gmail",
+        tokenEndpoint: "https://oauth2.googleapis.com/token",
+        resource: "https://gmailmcp.googleapis.com/mcp/v1",
+      },
+      env: {
+        COMPANION_MCP_GMAIL_CLIENT_ID: credential.client.clientId,
+        COMPANION_MCP_GMAIL_CLIENT_SECRET: credential.client.clientSecret ?? "gmail-secret",
+      },
+      fetchImpl: transientFetch,
+    })).rejects.not.toBeInstanceOf(CompanionPluginOAuthRevokedError);
 
     const malformedSuccess = vi.fn<typeof fetch>(async () => jsonResponse({
       refresh_token: "provider-secret-that-must-not-leak",

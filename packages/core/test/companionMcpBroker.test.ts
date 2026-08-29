@@ -9,7 +9,11 @@ import {
   decryptCompanionMcpRuntimeCredential,
   encryptCompanionMcpRuntimeCredential,
 } from "../src/companionRuntimeCredentials";
-import { CompanionPluginOAuthError, type CompanionPluginStoredOAuthCredential } from "../src/companionPluginOAuth";
+import {
+  CompanionPluginOAuthError,
+  CompanionPluginOAuthRevokedError,
+  type CompanionPluginStoredOAuthCredential,
+} from "../src/companionPluginOAuth";
 
 const orgId = "11111111-1111-4111-8111-111111111111";
 const companionId = "22222222-2222-4222-8222-222222222222";
@@ -187,6 +191,50 @@ describe("Companion MCP access-token broker", () => {
       now: () => nowMs,
     })).rejects.toBe(providerError);
   });
+
+  it("deletes a Gmail credential only after Google confirms invalid_grant", async () => {
+    const rows = [accountRow(gmailOauth("expired", nowMs - 1))];
+    const deletions: TestRecord[] = [];
+    const database = fakeDatabase({ rows, deletions });
+
+    await expect(issueCompanionMcpAccessToken({
+      authorization,
+      accountId,
+      credentialGeneration,
+      forceRefresh: false,
+      masterKey,
+      database,
+      refreshOauth: vi.fn(async () => { throw new CompanionPluginOAuthRevokedError(); }),
+      now: () => nowMs,
+    })).resolves.toBeNull();
+
+    expect(deletions).toEqual([{ id: accountId }]);
+    expect(rows).toHaveLength(0);
+  });
+
+  it("retains a Gmail credential after an unconfirmed refresh failure", async () => {
+    const rows = [accountRow(gmailOauth("expired", nowMs - 1))];
+    const deletions: TestRecord[] = [];
+    const database = fakeDatabase({ rows, deletions });
+    const providerError = new CompanionPluginOAuthError(
+      "The MCP authorization could not be refreshed. Reconnect it in Plugins.",
+      "oauth_refresh_failed",
+    );
+
+    await expect(issueCompanionMcpAccessToken({
+      authorization,
+      accountId,
+      credentialGeneration,
+      forceRefresh: false,
+      masterKey,
+      database,
+      refreshOauth: vi.fn(async () => { throw providerError; }),
+      now: () => nowMs,
+    })).rejects.toBe(providerError);
+
+    expect(deletions).toEqual([]);
+    expect(rows).toHaveLength(1);
+  });
 });
 
 function oauth(
@@ -206,6 +254,21 @@ function oauth(
     tokenEndpoint: "https://mcp.linear.app/token",
     resource: "https://mcp.linear.app/mcp",
     client: { clientId: "client", clientSecret: null, tokenEndpointAuthMethod: "none" },
+  };
+}
+
+function gmailOauth(accessToken: string, expiresAt: number): CompanionPluginStoredOAuthCredential {
+  return {
+    ...oauth(accessToken, expiresAt),
+    serverName: "com.google.workspace/gmail",
+    scope: "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose",
+    tokenEndpoint: "https://oauth2.googleapis.com/token",
+    resource: "https://gmailmcp.googleapis.com/mcp/v1",
+    client: {
+      clientId: "gmail-client",
+      clientSecret: "gmail-secret",
+      tokenEndpointAuthMethod: "client_secret_post",
+    },
   };
 }
 
@@ -238,6 +301,7 @@ interface FakeDatabaseInput {
   observedCredentialVersion?: number;
   updateResults?: Array<Array<{ credentialVersion: number }>>;
   updates?: TestRecord[];
+  deletions?: TestRecord[];
 }
 
 interface FakeSelectProjection {
@@ -279,6 +343,15 @@ function buildFakeDatabase(input: FakeDatabaseInput) {
           })),
         };
       }),
+    })),
+    delete: vi.fn(() => ({
+      where: vi.fn(() => ({
+        returning: vi.fn(async () => {
+          const [deleted] = input.rows.splice(0, 1);
+          if (deleted) input.deletions?.push({ id: deleted.id });
+          return deleted ? [{ id: deleted.id }] : [];
+        }),
+      })),
     })),
   };
   return database;

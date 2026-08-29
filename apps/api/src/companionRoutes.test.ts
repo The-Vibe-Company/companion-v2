@@ -262,6 +262,7 @@ function threadWithInterruptedTurn(access: "owner" | "editor" | "viewer") {
 function registerCompanionRoutes(
   app: Hono<{ Variables: ApiVariables }>,
   env: NodeJS.ProcessEnv = {},
+  withTenantContext: typeof dbModule.withTenantContext = testWithTenantContext,
 ): void {
   registerCompanionRoutesImpl(app, {
     COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS: "example.test",
@@ -273,7 +274,7 @@ function registerCompanionRoutes(
     ...coreMocks,
     ...desktopMocks,
     ...storageMocks,
-    withTenantContext: testWithTenantContext,
+    withTenantContext,
   });
 }
 
@@ -588,6 +589,32 @@ describe("Companions Runtime v2 API", () => {
       body: JSON.stringify({ ...body, account_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" }),
     });
     expect(unselected.status).toBe(401);
+
+    let transactionCommitted = false;
+    const commitAfterCallback: typeof dbModule.withTenantContext = async (_input, action) => {
+      const result = await action(dbModule.db);
+      transactionCommitted = true;
+      return result;
+    };
+    const revokedApp = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(
+      revokedApp,
+      { COMPANION_COMPANIONS_ENABLED: "true" },
+      commitAfterCallback,
+    );
+    coreMocks.issueCompanionMcpAccessToken.mockResolvedValueOnce(null);
+    const revoked = await revokedApp.request("/v1/runtime/mcp-access-token", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${capability}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+    expect(transactionCommitted).toBe(true);
+    expect(revoked.status).toBe(503);
+    expect(revoked.headers.get("cache-control")).toBe("private, no-store");
+    expect(await revoked.json()).toEqual({ error: "MCP authorization could not be refreshed" });
   });
 
   it("registers nothing unless both the feature flag and allowlist are configured", async () => {

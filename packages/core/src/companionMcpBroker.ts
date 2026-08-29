@@ -8,6 +8,7 @@ import {
 } from "./companionRuntimeCredentials";
 import {
   CompanionPluginOAuthError,
+  CompanionPluginOAuthRevokedError,
   refreshCompanionPluginOAuth,
   type CompanionPluginStoredOAuthCredential,
 } from "./companionPluginOAuth";
@@ -77,7 +78,7 @@ export async function issueCompanionMcpAccessToken(input: {
   refreshOauth?: (
     credential: CompanionPluginStoredOAuthCredential,
   ) => Promise<CompanionPluginStoredOAuthCredential>;
-}): Promise<CompanionMcpAccessToken> {
+}): Promise<CompanionMcpAccessToken | null> {
   const { database } = input;
   const authorized = input.authorization.accountRefs.some((ref) =>
     ref.account_id === input.accountId
@@ -156,7 +157,31 @@ export async function issueCompanionMcpAccessToken(input: {
       return tokenResponse(decrypted.credential, row.credentialVersion);
     }
 
-    const refreshed = await refreshOauth(decrypted.credential);
+    let refreshed: CompanionPluginStoredOAuthCredential;
+    try {
+      refreshed = await refreshOauth(decrypted.credential);
+    } catch (error) {
+      if (
+        decrypted.credential.serverName === "com.google.workspace/gmail"
+        && error instanceof CompanionPluginOAuthRevokedError
+      ) {
+        const [deleted] = await database
+          .delete(schema.companionMcpAccounts)
+          .where(and(
+            eq(schema.companionMcpAccounts.id, row.id),
+            eq(schema.companionMcpAccounts.orgId, row.orgId),
+            eq(schema.companionMcpAccounts.ownerId, row.ownerId),
+            eq(schema.companionMcpAccounts.credentialGeneration, row.credentialGeneration),
+            eq(schema.companionMcpAccounts.credentialVersion, row.credentialVersion),
+          ))
+          .returning({ id: schema.companionMcpAccounts.id });
+        if (!deleted) throw new CompanionMcpBrokerAuthorizationError();
+        // The caller converts this sentinel to the existing expurgated refresh failure only after
+        // its tenant transaction commits, so the credential deletion cannot be rolled back.
+        return null;
+      }
+      throw error;
+    }
     const refreshedExpiry = refreshed.accessExpiresAt === null
       ? null
       : Date.parse(refreshed.accessExpiresAt);
