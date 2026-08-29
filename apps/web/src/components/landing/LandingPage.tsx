@@ -17,6 +17,14 @@ const VIBE_COMPANY_URL = "https://thevibecompany.co";
 
 /* ---------------------------------------------------------------- copy --- */
 
+type PortalSkillId =
+  | "linkedin-posts"
+  | "meeting-summaries"
+  | "debug-my-setup"
+  | "sales-research"
+  | "brand-voice"
+  | "weekly-report";
+
 const COPY = {
   nav: { idea: "The idea", difference: "The difference", why: "Why it matters" },
   github: "GitHub",
@@ -89,7 +97,7 @@ const COPY = {
     "sales-research": "A 10-minute company brief before any sales call.",
     "brand-voice": "Rewrites anything in the company tone.",
     "weekly-report": "Your Friday report, assembled from the week's notes.",
-  } as Record<string, string>,
+  } satisfies Record<PortalSkillId, string>,
   whyNum: "Why it matters",
   whyTitlePre: "Know-how that ",
   whyTitleMark: "stays in the building.",
@@ -132,7 +140,7 @@ type Copy = typeof COPY;
 
 /* Portal rows — machine values stay literal, like a real screenshot. */
 type PortalRow = {
-  id: string;
+  id: PortalSkillId;
   library: "personal" | "org";
   group: string;
   who: string;
@@ -152,7 +160,7 @@ const PORTAL_ROWS: PortalRow[] = [
   { id: "brand-voice", library: "org", group: "marketing", who: "Léa", a: "terracotta", scopeLabel: "Organization", ver: "1.1.0", when: "2w ago" },
   { id: "weekly-report", library: "personal", group: "operations", who: "You", a: "slate", scopeLabel: "My Skills", ver: "0.9.1", when: "4w ago", draft: true },
 ];
-const SCOPE_ICON: Record<PortalRow["library"], string> = { personal: "lock", org: "users" };
+const SCOPE_ICON = { personal: "lock", org: "users" } satisfies Record<PortalRow["library"], string>;
 
 /* Ticker chips — the portal rows in motion, plus a couple of off-screen extras. */
 type TickerSkill = { id: string; who: string; a: string };
@@ -692,6 +700,7 @@ function Footer({ c }: { c: Copy }) {
           <a href={SKILL_MD_URL} target="_blank" rel="noreferrer">
             SKILL.md ↗
           </a>
+          <Link href="/privacy">Privacy</Link>
           <a href={GITHUB_URL} target="_blank" rel="noreferrer">
             {c.footerDocs} ↗
           </a>

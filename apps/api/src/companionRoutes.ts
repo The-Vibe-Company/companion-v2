@@ -679,6 +679,12 @@ export function registerCompanionRoutes(
         masterKey: loadSecretsMasterKey(env.COMPANION_SECRETS_MASTER_KEY),
         database,
       }));
+      if (result === null) {
+        throw new CompanionPluginOAuthError(
+          "The MCP authorization could not be refreshed. Reconnect it in Plugins.",
+          "oauth_refresh_failed",
+        );
+      }
       c.header("Cache-Control", "private, no-store");
       c.header("Pragma", "no-cache");
       return c.json(companionMcpAccessTokenSchema.parse(result));

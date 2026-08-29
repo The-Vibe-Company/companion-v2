@@ -1,14 +1,18 @@
 import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  CompanionPluginOAuthRevokedError,
   CompanionNotFoundError,
   CompanionPluginConflictError,
+  createCompanionV2,
   deleteCompanionPlugin,
+  issueCompanionMcpAccessToken,
   listCompanionPlugins,
+  saveCompanionProvider,
   saveCompanionOAuthPlugin,
   saveCompanionPlugin,
 } from "@companion/core";
-import { schema } from "@companion/db";
+import { schema, withTenantContext } from "@companion/db";
 import {
   createIntegrationFixture,
   integrationDb,
@@ -26,6 +30,7 @@ describe("member-private Companion MCP connections", () => {
   });
 
   afterEach(async () => {
+    await integrationDb.delete(schema.companions).where(eq(schema.companions.orgId, fixture.orgA));
     await fixture.cleanup();
   });
 
@@ -128,6 +133,83 @@ describe("member-private Companion MCP connections", () => {
     expect(JSON.stringify(stored)).not.toContain("gmail-refresh-secret");
   });
 
+  it("commits exact Gmail credential deletion after Google confirms invalid_grant", async () => {
+    await saveCompanionProvider({
+      actor: fixture.owner,
+      orgId: fixture.orgA,
+      providerId: "anthropic",
+      authMethod: "api_key",
+      credential: "integration-provider-secret",
+      masterKey,
+      database: integrationDb,
+    });
+    const target = await saveCompanionOAuthPlugin({
+      actor: fixture.owner,
+      orgId: fixture.orgA,
+      provider: "gmail",
+      label: "revoked",
+      remoteUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+      credential: gmailCredential("expired-access", "revoked-refresh"),
+      masterKey,
+      database: integrationDb,
+    });
+    const retained = await saveCompanionOAuthPlugin({
+      actor: fixture.owner,
+      orgId: fixture.orgA,
+      provider: "gmail",
+      label: "retained",
+      remoteUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+      credential: gmailCredential("retained-access", "retained-refresh"),
+      masterKey,
+      database: integrationDb,
+    });
+    const companion = await withTenantContext({
+      orgId: fixture.orgA,
+      userId: fixture.owner.id,
+    }, async (database) => await createCompanionV2({
+      actor: fixture.owner,
+      orgId: fixture.orgA,
+      name: "Revocation verifier",
+      providerId: "anthropic",
+      modelId: "claude-opus-4-8",
+      selectedMcpAccountIds: [target.id],
+      database,
+    }));
+    const targetRow = await integrationDb.query.companionMcpAccounts.findFirst({
+      where: eq(schema.companionMcpAccounts.id, target.id),
+    });
+    expect(targetRow).toBeDefined();
+
+    const outcome = await withTenantContext({
+      orgId: fixture.orgA,
+      userId: fixture.owner.id,
+    }, async (database) => await issueCompanionMcpAccessToken({
+      authorization: {
+        orgId: fixture.orgA,
+        companionId: companion.id,
+        actorId: fixture.owner.id,
+        accountRefs: [{
+          account_id: target.id,
+          credential_generation: targetRow!.credentialGeneration,
+        }],
+      },
+      accountId: target.id,
+      credentialGeneration: targetRow!.credentialGeneration,
+      forceRefresh: true,
+      masterKey,
+      database,
+      refreshOauth: async () => { throw new CompanionPluginOAuthRevokedError(); },
+    }));
+
+    expect(outcome).toBeNull();
+    expect(await integrationDb.query.companionMcpAccounts.findFirst({
+      where: eq(schema.companionMcpAccounts.id, target.id),
+    })).toBeUndefined();
+    expect(await integrationDb.query.companionMcpAccounts.findFirst({
+      where: eq(schema.companionMcpAccounts.id, retained.id),
+    })).toBeDefined();
+  });
+
   it("keeps connections private from admins and cross-tenant actors", async () => {
     const account = await saveCompanionPlugin({
       actor: fixture.developer,
@@ -217,3 +299,23 @@ describe("member-private Companion MCP connections", () => {
     })).toBeUndefined();
   });
 });
+
+function gmailCredential(accessToken: string, refreshToken: string) {
+  return {
+    kind: "oauth" as const,
+    version: 1 as const,
+    serverName: "com.google.workspace/gmail" as const,
+    accessToken,
+    refreshToken,
+    accessExpiresAt: "2020-01-01T00:00:00.000Z",
+    scope: "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose",
+    tokenType: "Bearer" as const,
+    tokenEndpoint: "https://oauth2.googleapis.com/token",
+    resource: "https://gmailmcp.googleapis.com/mcp/v1",
+    client: {
+      clientId: "gmail-client",
+      clientSecret: null,
+      tokenEndpointAuthMethod: "client_secret_post" as const,
+    },
+  };
+}

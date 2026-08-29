@@ -5,11 +5,12 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LandingPage } from "./LandingPage";
 
+// SAFETY: React's test harness reads this documented global flag; the test owns its boolean value.
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const roots: Root[] = [];
 
-class MockIntersectionObserver {
+class MockIntersectionObserver implements IntersectionObserver {
   readonly root = null;
   readonly rootMargin = "0px";
   readonly thresholds = [0];
@@ -18,8 +19,9 @@ class MockIntersectionObserver {
 
   observe(target: Element) {
     this.callback(
+      // SAFETY: This test fixture supplies the two IntersectionObserverEntry fields useReveal reads.
       [{ isIntersecting: true, target } as IntersectionObserverEntry],
-      this as unknown as IntersectionObserver,
+      this,
     );
   }
 
@@ -159,6 +161,9 @@ describe("LandingPage portal preview", () => {
     const vibeCompany = Array.from(container.querySelectorAll("a")).find(
       (candidate) => candidate.textContent?.trim() === "The Vibe Company",
     );
+    const privacy = Array.from(container.querySelectorAll("a")).find(
+      (candidate) => candidate.textContent?.trim() === "Privacy",
+    );
 
     expect(share?.getAttribute("href")).toBe("/login");
     expect(howItWorks?.getAttribute("href")).toBe("#problem");
@@ -166,6 +171,7 @@ describe("LandingPage portal preview", () => {
     expect(github?.getAttribute("target")).toBe("_blank");
     expect(vibeCompany?.getAttribute("href")).toBe("https://thevibecompany.co");
     expect(vibeCompany?.getAttribute("target")).toBe("_blank");
+    expect(privacy?.getAttribute("href")).toBe("/privacy");
     expect(container.textContent).toContain("an open source tool by The Vibe Company");
     expect(container.textContent).toContain("governance stays on infrastructure you control");
     expect(container.textContent).not.toContain("your data never leave the building");
