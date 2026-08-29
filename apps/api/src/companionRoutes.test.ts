@@ -446,6 +446,21 @@ describe("Companions Runtime v2 API", () => {
     expect(await deleted.json()).toEqual({ ok: true, unassigned_count: 2 });
   });
 
+  it("treats a nullable section_id on the dedicated assignment route as an unassign", async () => {
+    const app = appWithRoutes();
+    coreMocks.assignCompanionSection.mockResolvedValue({ ...companion, section_id: null });
+
+    const response = await app.request(jsonPut(`/v1/companions/${COMPANION_ID}/section`, {
+      section_id: null,
+    }));
+
+    expect(response.status).toBe(200);
+    expect(coreMocks.assignCompanionSection).toHaveBeenCalledWith(expect.objectContaining({
+      companionId: COMPANION_ID,
+      sectionId: null,
+    }));
+  });
+
   it("rejects malformed and duplicate section reorder ids before database access", async () => {
     const response = await appWithRoutes().request(jsonPut("/v1/companion-sections/reorder", {
       section_ids: [SECTION_ID, SECTION_ID],

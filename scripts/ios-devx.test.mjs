@@ -147,7 +147,7 @@ test("the plugin add-account chip matches connected account tokens", () => {
   assert.match(plugins, /private func disconnect[\s\S]{0,120}?guard !demoMode else \{ return \}/);
 });
 
-test("home and chat header chrome keeps bare 44-point actions", () => {
+test("home and simplified chat header keep the approved 44-point actions", () => {
   const roster = read("apps/ios/Companion/Screens/CompanionListView.swift");
   const chat = read("apps/ios/Companion/Screens/ChatView.swift");
   const design = read("docs/ios-design.md");
@@ -168,38 +168,62 @@ test("home and chat header chrome keeps bare 44-point actions", () => {
   assert.doesNotMatch(homeButton, /Circle\(\)|\.background\(|\.overlay/);
   assert.match(accountAvatar, /clipShape\(Circle\(\)\)/);
   assert.doesNotMatch(accountAvatar, /Circle\(\)\.stroke/);
+  assert.match(chatHeader, /accessibilityIdentifier\("chat\.details"\)/);
   assert.match(chatHeader, /systemImage: "desktopcomputer"/);
-  assert.match(chatHeader, /Image\(systemName: "ellipsis"\)[\s\S]{0,80}?frame\(width: 44, height: 44\)/);
+  assert.doesNotMatch(chatHeader, /Image\(systemName: "ellipsis"\)|Menu\s*\{/);
+  assert.doesNotMatch(chatHeader, /CompanionStatusBadge/);
   assert.doesNotMatch(chatHeader, /background\(CompanionIOSTheme\.card, in: Circle\(\)\)/);
   assert.match(design, /bare search and \+ icons/);
-  assert.match(design, /Chat header computer and overflow actions use the same bare-icon treatment/);
+  assert.match(design, /chat header is a centered CharacterMark-and-name pill/);
 });
 
-test("every custom sheet back header preserves the native interactive pop gesture", () => {
-  const header = read("apps/ios/Companion/DesignSystem/SheetComponents.swift");
+test("home renders three-companion sections as list rows and keeps move errors human-readable", () => {
+  const roster = read("apps/ios/Companion/Screens/CompanionListView.swift");
+  const rosterState = read("apps/ios/CompanionKit/Sources/CompanionKit/CompanionRosterState.swift");
+  const management = read("apps/ios/Companion/DesignSystem/ManagementComponents.swift");
+  const uiTests = read("apps/ios/CompanionUITests/CompanionUITests.swift");
+
+  assert.doesNotMatch(roster, /usesPinnedGrid|pinnedGrid/);
+  assert.match(roster, /ForEach\(section\.companions\)\s*\{\s*companionRow\(\$0\)\s*\}/);
+  assert.match(roster, /Text\(preview\)[\s\S]*?lineLimit\(1\)/);
+  assert.match(roster, /Text\(timeLabel\)/);
+  assert.match(roster, /COMPANION_ROSTER_DEMO_THREE/);
+  assert.doesNotMatch(rosterState, /usesPinnedGrid/);
+  assert.equal(management.includes('hasPrefix("{")'), true);
+  assert.equal(management.includes('hasPrefix("[")'), true);
+  assert.match(roster, /Move failed\. Choose a valid section and try again\./);
+  assert.match(uiTests, /testRosterRendersThreeCompanionsAsListRowsWithPreviews/);
+});
+
+test("root stacks preserve native pop and add a guarded 52-point back zone", () => {
   const navigation = read("apps/ios/Companion/Support/NavigationSwipeBackSupport.swift");
+  const roster = read("apps/ios/Companion/Screens/CompanionListView.swift");
   const memberSettings = read("apps/ios/Companion/Screens/MemberSettingsView.swift");
-  const botDetails = read("apps/ios/Companion/Screens/CompanionBotDetailSheet.swift");
+  const botDetails = read("apps/ios/Companion/Screens/CompanionDetailView.swift");
   const plugins = read("apps/ios/Companion/Screens/PluginCatalogSheet.swift");
   const uiTests = read("apps/ios/CompanionUITests/CompanionUITests.swift");
 
-  assert.match(
-    header,
-    /\.companionNavigationSwipeBackEnabled\(leadingStyle == \.back\)/,
-  );
-  assert.match(
-    navigation,
-    /func companionNavigationSwipeBackEnabled\(_ enabled: Bool = true\)/,
-  );
+  assert.match(roster, /NavigationStack\(path: \$path\)[\s\S]*?\.companionNavigationSwipeBackEnabled\(\)/);
+  assert.match(memberSettings, /NavigationStack\s*\{[\s\S]*?\.companionNavigationSwipeBackEnabled\(\)/);
+  assert.match(navigation, /supplementalLeadingEdgeBand: CGFloat = 52/);
+  assert.match(navigation, /nativeLeadingEdgeBand: CGFloat = 20/);
   assert.match(navigation, /navigationController\.viewControllers\.count > 1/);
-  assert.match(navigation, /installedNavigationController\.transitionCoordinator == nil/);
+  assert.match(navigation, /navigationController\.transitionCoordinator == nil/);
+  assert.match(navigation, /otherGestureRecognizer === installedNativeGesture/);
+  assert.match(navigation, /pan\.cancelsTouchesInView = false/);
+  assert.match(navigation, /contentSize\.width > scrollView\.bounds\.width/);
+  assert.match(navigation, /hasCompetingHorizontalDrag\(excluding: pan\)/);
+  assert.match(navigation, /otherGestureRecognizer is UIPanGestureRecognizer/);
+  assert.match(navigation, /navigationController\.popViewController\(animated: true\)/);
   assert.match(memberSettings, /case \.plugins:\s*PluginManagementView\(\)/);
   assert.match(plugins, /CompanionSheetHeader\([\s\S]{0,120}?leadingStyle: \.back/);
   assert.match(botDetails, /CompanionSheetHeader\(title: routine\.name, leadingStyle: \.back\)/);
   assert.match(botDetails, /CompanionSheetHeader\(title: "Routine run", leadingStyle: \.back\)/);
-  assert.match(header, /"navigation\.custom-back"/);
   assert.match(uiTests, /testMemberSettingsCustomHeadersSupportButtonAndLeadingEdgeBack/);
   assert.match(uiTests, /testBotDetailRoutineAndRunCustomHeadersSupportConsecutiveEdgePops/);
+  assert.match(uiTests, /testWideBackZoneDoesNotStealAHorizontalCharacterDrag/);
+  assert.match(uiTests, /CGVector\(dx: 0\.10, dy: 0\.5\)/);
+  assert.match(uiTests, /swipeFromNativeLeadingEdge/);
 });
 
 test("full-screen native backdrops stay neutral in every state", () => {
@@ -275,10 +299,11 @@ test("chat uses the approved two-sided bubbles and morphing composer", () => {
   assert.match(composer, /else if showsSendButton \|\| !transcriptionAvailable/);
   assert.match(composer, /\.background\(CompanionIOSTheme\.primaryCTA, in: Circle\(\)\)/);
   assert.match(chat, /CharacterMark\([\s\S]{0,220}?size: 20/);
-  assert.match(
-    chat,
-    /CompanionStatusBadge\([\s\S]{0,120}?runtime: currentCompanion\.runtime,[\s\S]{0,80}?compact: true/,
+  const chatHeader = chat.slice(
+    chat.indexOf("private var headerToolbar"),
+    chat.indexOf("private var loadEarlierButton"),
   );
+  assert.doesNotMatch(chatHeader, /CompanionStatusBadge|systemName: "ellipsis"/);
   assert.doesNotMatch(decisionCard, /pending \? accent\.opacity/);
   assert.doesNotMatch(glassDemoBubbles, /accent:|tint:/);
   assert.doesNotMatch(queuedDemoBubbles, /accent:|tint:/);
@@ -850,9 +875,7 @@ test("the staged reply fixture is armed only after the UI reader leaves the tail
 
 test("native routine history keeps private runs separate and reachable", () => {
   const chat = read("apps/ios/Companion/Screens/ChatView.swift");
-  const resources = read(
-    "apps/ios/Companion/Screens/CompanionConnectedResourcesView.swift",
-  );
+  const details = read("apps/ios/Companion/Screens/CompanionDetailView.swift");
   const history = read("apps/ios/Companion/Screens/CompanionRoutineHistoryView.swift");
   const models = read("apps/ios/CompanionKit/Sources/CompanionKit/Models.swift");
   const client = read("apps/ios/CompanionKit/Sources/CompanionKit/APIClient.swift");
@@ -861,8 +884,8 @@ test("native routine history keeps private runs separate and reachable", () => {
   assert.match(chat, /if let routine = input\.entry\.routine/);
   assert.match(chat, /Text\("Routine: \\\(routine\.name\)"\)/);
   assert.match(chat, /CompanionRoutineHistoryTarget\([\s\S]*?runID: runID/);
-  assert.match(resources, /CompanionRoutineHistoryView\([\s\S]*?routineID: routine\.id/);
-  assert.match(resources, /Shows this routine's persisted runs and internal transcripts/);
+  assert.match(details, /CompanionRoutineRunListStore/);
+  assert.match(details, /CompanionRoutineRunSheet\([\s\S]*?run: run/);
   assert.match(history, /Text\("Internal transcript"\)/);
   assert.match(history, /case \.noOutput: return "Completed silently"/);
   assert.match(history, /nextRunsCursor != nil/);
@@ -871,7 +894,56 @@ test("native routine history keeps private runs separate and reachable", () => {
   assert.match(models, /case runID = "run_id"/);
   assert.match(client, /\/routines\/\\\(routine\)\/runs\?\\\(query\)/);
   assert.match(client, /\/routine-runs\/\\\(run\)\?\\\(query\)/);
-  assert.match(readme, /compact clickable marker instead of a prompt bubble/);
+  assert.match(readme, /compact\s+clickable marker instead of a prompt bubble/);
+});
+
+test("iOS navigation has one Companion details route and no legacy resource page", () => {
+  const roster = read("apps/ios/Companion/Screens/CompanionListView.swift");
+  const chat = read("apps/ios/Companion/Screens/ChatView.swift");
+  const computer = read("apps/ios/Companion/Screens/CompanionComputerView.swift");
+  const details = read("apps/ios/Companion/Screens/CompanionDetailView.swift");
+  const resources = read("apps/ios/Companion/Screens/CompanionDetailResourceSections.swift");
+  const detailDemo = read("apps/ios/Companion/Screens/CompanionDetailDemo.swift");
+  const root = read("apps/ios/Companion/Navigation/RootView.swift");
+
+  assert.match(roster, /case chat\(String\)\s*\n\s*case details\(String\)/);
+  assert.doesNotMatch(roster, /case settings\(|case identity\(/);
+  assert.match(roster, /NavigationLink\(value: CompanionRoute\.details\(companion\.id\)\)/);
+  const contextMenu = roster.slice(
+    roster.indexOf("private func companionContextMenu"),
+    roster.indexOf("private func reload", roster.indexOf("private func companionContextMenu")),
+  );
+  assert.doesNotMatch(contextMenu, /Button\("(?:Details|Settings)"/);
+  assert.match(chat, /accessibilityIdentifier\("chat\.details"\)/);
+  const chatHeader = chat.slice(
+    chat.indexOf("private var headerToolbar"),
+    chat.indexOf("private var loadEarlierButton"),
+  );
+  assert.doesNotMatch(chatHeader, /accessibilityIdentifier\("chat\.actions"\)|systemName: "ellipsis"/);
+  assert.doesNotMatch(computer, /computer\.details|Button\("Companion details"/);
+  for (const identifier of [
+    "companion.details.provider",
+    "companion.details.routine.",
+    "companion.details.delete",
+  ]) {
+    assert.match(details, new RegExp(identifier.replaceAll(".", "\\.")));
+  }
+  assert.match(resources, /companion\.details\.resources/);
+  assert.match(resources, /companion\.details\.plugin-account\./);
+  assert.match(resources, /background\(CompanionIOSTheme\.chip, in: Capsule\(\)\)/);
+  assert.doesNotMatch(details, /CompanionLegacySettingsView|companion\.details\.settings/);
+  assert.doesNotMatch(resources, /struct CompanionConnectedResourcesView|navigationTitle\("Connected resources"\)/);
+  assert.match(detailDemo, /connectedResources: \{ CompanionResourceDemoFixtures\.resources \}/);
+  assert.match(resources, /enum CompanionResourceDemoFixtures/);
+  assert.doesNotMatch(resources, /enum CompanionDetailDemoFixtures/);
+  assert.match(details, /\.onChange\(of: providerID\) \{ _, _ in selectDefaultModel\(\) \}/);
+  assert.match(
+    details,
+    /private func apply[\s\S]{0,180}?let preservesProviderDraft = changedProviderOrModel[\s\S]{0,300}?if !preservesProviderDraft/,
+  );
+  assert.match(roster, /case \.details\(let companionID\):[\s\S]{0,500}?path = \[\.chat\(companionID\)\]/);
+  assert.doesNotMatch(detailDemo, /struct CompanionLegacySettingsView|navigationTitle\("Companion settings"\)/);
+  assert.doesNotMatch(root, /-companion-resources-demo|CompanionConnectedResourcesDemoView/);
 });
 
 test("GitHub Actions never installs or invokes XcodeBuildMCP", () => {

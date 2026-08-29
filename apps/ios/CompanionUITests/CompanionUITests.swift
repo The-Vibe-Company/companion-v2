@@ -43,8 +43,8 @@ final class CompanionUITests: XCTestCase {
     @MainActor
     func testChatPhotoLibraryOpensOnFirstSelectionWithKeyboardVisible() throws {
         let app = XCUIApplication()
-        app.launchArguments = ["-companion-settings-demo"]
-        app.launchEnvironment["COMPANION_SETTINGS_DEMO_ACCESS"] = "owner"
+        app.launchArguments = ["-companion-detail-demo"]
+        app.launchEnvironment["COMPANION_DETAIL_DEMO_ACCESS"] = "owner"
         app.launch()
 
         let composer = app.descendants(matching: .any)["chat.composer"]
@@ -68,9 +68,9 @@ final class CompanionUITests: XCTestCase {
     @MainActor
     func testChatComposerExposesAccessibleVoiceTranscriptionControl() throws {
         let app = XCUIApplication()
-        app.launchArguments = ["-companion-settings-demo"]
-        app.launchEnvironment["COMPANION_SETTINGS_DEMO_ACCESS"] = "owner"
-        app.launchEnvironment["COMPANION_SETTINGS_DEMO_TRANSCRIPTION_AVAILABLE"] = "true"
+        app.launchArguments = ["-companion-detail-demo"]
+        app.launchEnvironment["COMPANION_DETAIL_DEMO_ACCESS"] = "owner"
+        app.launchEnvironment["COMPANION_DETAIL_DEMO_TRANSCRIPTION_AVAILABLE"] = "true"
         app.launch()
 
         let microphone = app.buttons["chat.transcription.toggle"]
@@ -83,8 +83,8 @@ final class CompanionUITests: XCTestCase {
     @MainActor
     func testChatComposerHidesVoiceTranscriptionWithoutDeploymentKey() throws {
         let app = XCUIApplication()
-        app.launchArguments = ["-companion-settings-demo"]
-        app.launchEnvironment["COMPANION_SETTINGS_DEMO_ACCESS"] = "owner"
+        app.launchArguments = ["-companion-detail-demo"]
+        app.launchEnvironment["COMPANION_DETAIL_DEMO_ACCESS"] = "owner"
         app.launch()
 
         let composer = app.descendants(matching: .any)["chat.composer"]
@@ -1246,14 +1246,11 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
-    func testOwnerCanOpenSettingsAndConfirmDurableDeletion() throws {
-        let app = launchCompanionSettings(access: "owner")
+    func testOwnerCanOpenDetailsAndConfirmDurableDeletion() throws {
+        let app = launchCompanionDetails(access: "owner")
 
-        let delete = app.buttons["companion.settings.delete"]
-        for _ in 0..<3 {
-            if delete.exists { break }
-            app.swipeUp()
-        }
+        let delete = app.buttons["companion.details.delete"]
+        for _ in 0..<4 where !delete.isHittable { app.swipeUp() }
         XCTAssertTrue(delete.waitForExistence(timeout: 5))
         delete.tap()
         let confirmation = app.sheets.buttons["Delete Companion"]
@@ -1261,146 +1258,210 @@ final class CompanionUITests: XCTestCase {
         confirmation.tap()
 
         XCTAssertTrue(app.staticTexts["Deletion requested"].waitForExistence(timeout: 2))
-        XCTAssertTrue(app.staticTexts["The Companion will remain visible until its Box is permanently deleted."].exists)
+        XCTAssertTrue(app.staticTexts[
+            "The Companion will remain visible until its Box is permanently deleted."
+        ].exists)
     }
 
     @MainActor
-    func testEditorCanEditSettingsButCannotDelete() throws {
-        let app = launchCompanionSettings(access: "editor")
+    func testEditorDetailsKeepOwnerOnlyMCPAndRuntimeRules() throws {
+        let app = launchCompanionDetails(access: "editor")
 
-        XCTAssertTrue(app.buttons["companion.settings.save"].exists)
-        XCTAssertFalse(app.descendants(matching: .any)["companion.settings.name"].exists)
-        XCTAssertFalse(app.buttons["companion.settings.delete"].exists)
+        XCTAssertTrue(app.buttons["companion.details.provider.save"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["companion.details.provider.save"].isEnabled)
+        XCTAssertFalse(app.buttons["companion.details.delete"].exists)
 
-        let editIdentity = app.descendants(matching: .any)["companion.settings.identity.edit"]
-        XCTAssertTrue(editIdentity.waitForExistence(timeout: 2))
-        editIdentity.tap()
-
-        XCTAssertTrue(app.navigationBars["Edit identity"].waitForExistence(timeout: 2))
-        XCTAssertTrue(app.descendants(matching: .any)["companion.identity.name"].isEnabled)
-        let selectedShape = app.descendants(matching: .any)["companion.identity.icon.shape.6"]
-        for _ in 0..<4 where !selectedShape.exists { app.swipeUp() }
-        XCTAssertTrue(selectedShape.waitForExistence(timeout: 2))
-        XCTAssertEqual(selectedShape.value as? String, "Selected")
-
-        let firstShape = app.descendants(matching: .any)["companion.identity.icon.shape.0"]
-        XCTAssertTrue(firstShape.exists)
-        firstShape.tap()
-        XCTAssertEqual(firstShape.value as? String, "Selected")
-        let identitySave = app.buttons["companion.identity.save"]
-        XCTAssertTrue(identitySave.isEnabled)
-        identitySave.tap()
-
-        XCTAssertTrue(app.navigationBars["Companion settings"].waitForExistence(timeout: 2))
-        XCTAssertTrue(app.staticTexts["Identity saved."].waitForExistence(timeout: 2))
-
-        openConnectedResources(in: app)
-        XCTAssertFalse(app.buttons["companion.resources.plugins.add"].exists)
-        XCTAssertTrue(app.descendants(matching: .any)[
-            "companion.resources.plugins.owner-only"
-        ].waitForExistence(timeout: 2))
-        XCTAssertTrue(app.buttons["companion.resources.restart.companion"].exists)
+        let ownerOnly = app.descendants(matching: .any)["companion.details.plugins.owner-only"]
+        XCTAssertTrue(ownerOnly.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["companion.details.plugins.add"].exists)
+        XCTAssertTrue(app.buttons["companion.details.restart.companion"].waitForExistence(timeout: 2))
     }
 
     @MainActor
-    func testViewerSettingsAreReadOnly() throws {
-        let app = launchCompanionSettings(access: "viewer")
+    func testViewerDetailsAreReadOnly() throws {
+        let app = launchCompanionDetails(access: "viewer")
 
-        XCTAssertFalse(app.buttons["companion.settings.save"].exists)
-        XCTAssertTrue(app.descendants(matching: .any)["companion.settings.identity.summary"].exists)
-        XCTAssertFalse(app.descendants(matching: .any)["companion.settings.identity.edit"].exists)
-        XCTAssertFalse(app.buttons["companion.settings.delete"].exists)
-        XCTAssertTrue(app.staticTexts["You have read-only access to this Companion."].exists)
+        XCTAssertTrue(app.staticTexts["Bot details"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["companion.details.character"].exists)
+        XCTAssertFalse(app.buttons["companion.details.provider.save"].exists)
+        XCTAssertFalse(app.buttons["companion.details.delete"].exists)
+        XCTAssertFalse(app.buttons["companion.details.plugins.add"].exists)
+        XCTAssertFalse(app.buttons["companion.details.restart.companion"].exists)
+        let readOnly = app.descendants(matching: .any)["companion.details.runtime.read-only"]
+        for _ in 0..<4 where !readOnly.exists { app.swipeUp() }
+        XCTAssertTrue(readOnly.waitForExistence(timeout: 2))
     }
 
     @MainActor
-    func testOwnerCanDiscardAnIdentityDraft() throws {
-        let app = launchCompanionSettings(access: "owner")
-
-        let editIdentity = app.descendants(matching: .any)["companion.settings.identity.edit"]
-        editIdentity.tap()
-
-        let originalShape = app.descendants(matching: .any)["companion.identity.icon.shape.6"]
-        for _ in 0..<4 where !originalShape.exists { app.swipeUp() }
-        XCTAssertEqual(originalShape.value as? String, "Selected")
-
-        let draftShape = app.descendants(matching: .any)["companion.identity.icon.shape.0"]
-        draftShape.tap()
-        XCTAssertEqual(draftShape.value as? String, "Selected")
-
-        app.navigationBars["Edit identity"].buttons.element(boundBy: 0).tap()
-        XCTAssertTrue(app.navigationBars["Companion settings"].waitForExistence(timeout: 2))
-        XCTAssertFalse(app.staticTexts["Identity saved."].exists)
-
-        editIdentity.tap()
-        let reopenedShape = app.descendants(matching: .any)["companion.identity.icon.shape.6"]
-        for _ in 0..<4 where !reopenedShape.exists { app.swipeUp() }
-        XCTAssertEqual(reopenedShape.value as? String, "Selected")
-    }
-
-    @MainActor
-    func testSettingsOwnsConnectedResourcesWithNativeResourceDetails() throws {
-        let app = launchCompanionRoster(access: "viewer")
-        let row = app.descendants(matching: .any)["companion.row.c96ab360-00f3-4497-a51a-51442db8add1"]
-        row.tap()
-
-        XCTAssertFalse(app.buttons["chat.resources"].exists)
-        let settingsButton = app.buttons["chat.settings"]
-        XCTAssertTrue(settingsButton.waitForExistence(timeout: 5))
-        settingsButton.tap()
-        let resourcesButton = app.descendants(matching: .any)["companion.settings.resources"]
-        XCTAssertTrue(resourcesButton.waitForExistence(timeout: 2))
-        resourcesButton.tap()
-
-        XCTAssertTrue(app.navigationBars["Connected resources"].waitForExistence(timeout: 2))
-        let skill = app.descendants(matching: .any)[
-            "companion.resources.skill.11111111-1111-4111-8111-111111111111"
+    func testRosterAndChatUseOneDetailsRoute() throws {
+        let app = launchCompanionRoster(access: "owner")
+        let row = app.descendants(matching: .any)[
+            "companion.row.c96ab360-00f3-4497-a51a-51442db8add1"
         ]
-        XCTAssertTrue(skill.waitForExistence(timeout: 2))
+
+        row.tap()
+        XCTAssertTrue(app.staticTexts["Bot details"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["chat.details"].exists)
+        XCTAssertTrue(app.buttons["companion.details.open-chat"].waitForExistence(timeout: 2))
+
+        app.buttons["companion.details.open-chat"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["chat.transcript"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["chat.details"].exists)
+
+        app.buttons["chat.details"].tap()
+        XCTAssertTrue(app.staticTexts["Bot details"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["companion.details.open-chat"].exists)
+    }
+
+    @MainActor
+    func testDetailsShowsNativeResourceCardsAndOneRoutineSection() throws {
+        let app = launchCompanionDetails(access: "viewer")
+
+        XCTAssertTrue(app.staticTexts["Bot details"].waitForExistence(timeout: 5))
+        let skill = app.descendants(matching: .any)[
+            "companion.details.skill.11111111-1111-4111-8111-111111111111"
+        ]
+        XCTAssertTrue(skill.waitForExistence(timeout: 5))
         XCTAssertTrue(skill.label.contains("Incident Summary"))
         XCTAssertTrue(skill.label.contains("Enabled"))
-        XCTAssertTrue(app.descendants(matching: .any)["companion.resources.skills.hidden"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["companion.details.skills.hidden"].exists)
 
         let routine = app.descendants(matching: .any)[
-            "companion.resources.routine.33333333-3333-4333-8333-333333333333"
+            "companion.details.routine.33333333-3333-4333-8333-333333333333"
         ]
-        XCTAssertTrue(routine.exists)
-        XCTAssertTrue(routine.label.contains("Weekdays at 09:00"))
-        XCTAssertTrue(routine.label.contains("America/New_York"))
-        XCTAssertTrue(routine.label.contains("Next"))
-        XCTAssertTrue(routine.label.contains("in \(expectedDeviceTimezone)"))
-        XCTAssertTrue(routine.label.contains("Active"))
+        XCTAssertTrue(routine.waitForExistence(timeout: 2))
+        XCTAssertTrue(routine.label.contains("Weekday brief"))
+        XCTAssertTrue(routine.label.contains("Summarize the weekday release status."))
+        XCTAssertEqual(routine.count, 1)
 
         let trigger = app.descendants(matching: .any)[
-            "companion.resources.trigger.44444444-4444-4444-8444-444444444444"
+            "companion.details.trigger.44444444-4444-4444-8444-444444444444"
         ]
         if !trigger.exists { app.swipeUp() }
         XCTAssertTrue(trigger.waitForExistence(timeout: 2))
         XCTAssertTrue(trigger.label.contains("GitHub"))
         XCTAssertTrue(trigger.label.contains("Webhook registered"))
         XCTAssertTrue(trigger.label.contains("Active"))
+        XCTAssertFalse(app.navigationBars["Connected resources"].exists)
     }
 
     @MainActor
     func testOwnerCreatesResourcesInTheDeviceTimezoneByDefault() throws {
-        let app = launchCompanionRoster(access: "owner")
-        let row = app.descendants(matching: .any)["companion.row.c96ab360-00f3-4497-a51a-51442db8add1"]
-        row.tap()
-        let settingsButton = app.buttons["chat.settings"]
-        XCTAssertTrue(settingsButton.waitForExistence(timeout: 5))
-        settingsButton.tap()
-        let resourcesButton = app.descendants(matching: .any)["companion.settings.resources"]
-        XCTAssertTrue(resourcesButton.waitForExistence(timeout: 2))
-        resourcesButton.tap()
+        let app = launchCompanionDetails(access: "owner")
 
-        let addRoutine = app.buttons["companion.resources.routines.add"]
-        XCTAssertTrue(addRoutine.waitForExistence(timeout: 2))
-        XCTAssertTrue(app.buttons["companion.resources.triggers.add"].exists)
+        let addRoutine = scrollToButton("companion.details.add-routine", in: app)
+        XCTAssertTrue(app.buttons["companion.details.triggers.add"].exists)
         addRoutine.tap()
 
         XCTAssertTrue(app.navigationBars["New routine"].waitForExistence(timeout: 2))
         XCTAssertTrue(app.staticTexts[expectedDeviceTimezone].exists)
-        XCTAssertTrue(app.staticTexts["Cron is evaluated as local wall-clock time in this timezone. Change your member timezone from Account › Member settings."].exists)
+        XCTAssertTrue(app.staticTexts[
+            "Cron is evaluated as local wall-clock time in this timezone. Change your member timezone from Account › Member settings."
+        ].exists)
+    }
+
+    @MainActor
+    func testDetailsEmptyStatesUseTheSamePage() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-detail-demo"]
+        app.launchEnvironment["COMPANION_DETAIL_DEMO_EMPTY"] = "triggers"
+        app.launchEnvironment["COMPANION_DETAIL_DEMO_ACCESS"] = "viewer"
+        app.launch()
+
+        let settings = app.buttons["chat.details"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        settings.tap()
+        XCTAssertTrue(app.staticTexts["Bot details"].waitForExistence(timeout: 2))
+        let empty = app.descendants(matching: .any)["companion.details.triggers.empty"]
+        for _ in 0..<5 where !empty.exists { app.swipeUp() }
+        XCTAssertTrue(empty.waitForExistence(timeout: 2))
+        XCTAssertTrue(empty.label.contains("No triggers connected"))
+        XCTAssertTrue(empty.label.contains("Webhook prompts will appear here"))
+    }
+
+    @MainActor
+    func testRosterContextMenuHasNoHiddenDetailsShortcut() throws {
+        let app = launchCompanionRoster(access: "editor")
+        let row = app.descendants(matching: .any)[
+            "companion.row.c96ab360-00f3-4497-a51a-51442db8add1"
+        ]
+        openRosterContextMenu(for: row, in: app)
+
+        XCTAssertFalse(app.buttons["Settings"].exists)
+        XCTAssertFalse(app.buttons["Details"].exists)
+    }
+
+    @MainActor
+    func testOwnerCanAttachDetachPluginsAndConfirmCompanionRestart() throws {
+        let app = launchCompanionDetails(access: "owner")
+
+        let linear = app.descendants(matching: .any)[
+            "companion.details.plugin.55555555-5555-4555-8555-555555555555"
+        ]
+        XCTAssertTrue(linear.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["work"].exists)
+        XCTAssertTrue(app.staticTexts["Linear"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)[
+            "companion.details.plugin-account.55555555-5555-4555-8555-555555555555"
+        ].exists)
+
+        let detach = app.buttons[
+            "companion.details.plugin.detach.55555555-5555-4555-8555-555555555555"
+        ]
+        XCTAssertTrue(detach.exists)
+        detach.tap()
+        XCTAssertTrue(app.staticTexts["Linear · work detached."].waitForExistence(timeout: 2))
+
+        let add = app.buttons["companion.details.plugins.add"]
+        XCTAssertTrue(add.exists)
+        add.tap()
+        let github = app.sheets.buttons["GitHub · personal"]
+        XCTAssertTrue(github.waitForExistence(timeout: 2))
+        github.tap()
+        XCTAssertTrue(app.staticTexts["GitHub · personal attached."].waitForExistence(timeout: 2))
+
+        let restart = scrollToButton("companion.details.restart.companion", in: app)
+        restart.tap()
+        let confirm = app.sheets.buttons["Restart Companion"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 2))
+        confirm.tap()
+        XCTAssertTrue(app.staticTexts[
+            "Companion restart accepted. It will run after earlier runtime work."
+        ].waitForExistence(timeout: 2))
+    }
+
+    @MainActor
+    func testOwnerConfirmsFullServerRestartWithInterruptionCopy() throws {
+        let app = launchCompanionDetails(access: "owner")
+
+        let restart = scrollToButton("companion.details.restart.server", in: app)
+        restart.tap()
+        XCTAssertTrue(app.staticTexts[
+            "This queues a full server restart. Active work is interrupted, but the Companion and its saved files remain."
+        ].waitForExistence(timeout: 2))
+        let confirm = app.sheets.buttons["Restart server"]
+        XCTAssertTrue(confirm.exists)
+    }
+
+    @MainActor
+    func testViewerDetailsAreReadOnlyInDarkMode() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-detail-demo", "-AppleInterfaceStyle", "Dark"]
+        app.launchEnvironment["COMPANION_DETAIL_DEMO_ACCESS"] = "viewer"
+        app.launchEnvironment["COMPANION_API_URL"] = "http://127.0.0.1:9"
+        app.launch()
+
+        let settings = app.buttons["chat.details"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        settings.tap()
+        XCTAssertTrue(app.staticTexts["Bot details"].waitForExistence(timeout: 2))
+
+        XCTAssertFalse(app.buttons["companion.details.plugins.add"].exists)
+        XCTAssertFalse(app.buttons["companion.details.restart.companion"].exists)
+        XCTAssertFalse(app.buttons["companion.details.restart.server"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)[
+            "companion.details.runtime.read-only"
+        ].waitForExistence(timeout: 5))
     }
 
     @MainActor
@@ -1419,105 +1480,6 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
-    func testConnectedResourcesShowsSectionEmptyStates() throws {
-        let app = XCUIApplication()
-        app.launchArguments = ["-companion-resources-demo"]
-        app.launchEnvironment["COMPANION_RESOURCES_DEMO_EMPTY"] = "triggers"
-        app.launch()
-
-        XCTAssertTrue(app.navigationBars["Connected resources"].waitForExistence(timeout: 5))
-        let empty = app.descendants(matching: .any)["companion.resources.triggers.empty"]
-        for _ in 0..<3 where !empty.exists { app.swipeUp() }
-        XCTAssertTrue(empty.waitForExistence(timeout: 2))
-        XCTAssertTrue(empty.label.contains("No triggers connected"))
-        XCTAssertTrue(empty.label.contains("Webhook prompts will appear here"))
-    }
-
-    @MainActor
-    func testRosterContextMenuRoutesConnectedResourcesThroughSettings() throws {
-        let app = launchCompanionRoster(access: "editor")
-        let row = app.descendants(matching: .any)["companion.row.c96ab360-00f3-4497-a51a-51442db8add1"]
-        openRosterContextMenu(for: row, in: app)
-
-        XCTAssertFalse(app.buttons["Connected resources"].exists)
-        app.buttons["Settings"].tap()
-        let resources = app.descendants(matching: .any)["companion.settings.resources"]
-        XCTAssertTrue(resources.waitForExistence(timeout: 2))
-        resources.tap()
-        XCTAssertTrue(app.navigationBars["Connected resources"].waitForExistence(timeout: 2))
-    }
-
-    @MainActor
-    func testOwnerCanAttachDetachPluginsAndConfirmCompanionRestart() throws {
-        let app = launchCompanionSettings(access: "owner")
-        openConnectedResources(in: app)
-
-        let linear = app.descendants(matching: .any)[
-            "companion.resources.plugin.55555555-5555-4555-8555-555555555555"
-        ]
-        XCTAssertTrue(linear.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["work"].exists)
-        XCTAssertTrue(app.staticTexts["Linear"].exists)
-
-        let detach = app.buttons["companion.resources.plugin.detach.55555555-5555-4555-8555-555555555555"]
-        XCTAssertTrue(detach.exists)
-        detach.tap()
-        XCTAssertTrue(app.staticTexts["Linear · work detached."].waitForExistence(timeout: 2))
-
-        let add = app.buttons["companion.resources.plugins.add"]
-        XCTAssertTrue(add.exists)
-        add.tap()
-        let github = app.sheets.buttons["GitHub · personal"]
-        XCTAssertTrue(github.waitForExistence(timeout: 2))
-        github.tap()
-        XCTAssertTrue(app.staticTexts["GitHub · personal attached."].waitForExistence(timeout: 2))
-
-        let restart = scrollToButton("companion.resources.restart.companion", in: app)
-        restart.tap()
-        let confirm = app.sheets.buttons["Restart Companion"]
-        XCTAssertTrue(confirm.waitForExistence(timeout: 2))
-        confirm.tap()
-        XCTAssertTrue(app.staticTexts[
-            "Companion restart accepted. It will run after earlier runtime work."
-        ].waitForExistence(timeout: 2))
-    }
-
-    @MainActor
-    func testOwnerConfirmsFullServerRestartWithInterruptionCopy() throws {
-        let app = launchCompanionSettings(access: "owner")
-        openConnectedResources(in: app)
-
-        let restart = scrollToButton("companion.resources.restart.server", in: app)
-        restart.tap()
-        XCTAssertTrue(app.staticTexts[
-            "This queues a full server restart. Active work is interrupted, but the Companion and its saved files remain."
-        ].waitForExistence(timeout: 2))
-        let confirm = app.sheets.buttons["Restart server"]
-        XCTAssertTrue(confirm.exists)
-    }
-
-    @MainActor
-    func testViewerResourcesAreReadOnlyInDarkMode() throws {
-        let app = XCUIApplication()
-        app.launchArguments = ["-companion-settings-demo", "-AppleInterfaceStyle", "Dark"]
-        app.launchEnvironment["COMPANION_SETTINGS_DEMO_ACCESS"] = "viewer"
-        app.launchEnvironment["COMPANION_API_URL"] = "http://127.0.0.1:9"
-        app.launch()
-
-        let settings = app.buttons["chat.settings"]
-        XCTAssertTrue(settings.waitForExistence(timeout: 5))
-        settings.tap()
-        openConnectedResources(in: app)
-
-        XCTAssertFalse(app.buttons["companion.resources.plugins.add"].exists)
-        XCTAssertFalse(app.buttons["companion.resources.restart.companion"].exists)
-        XCTAssertFalse(app.buttons["companion.resources.restart.server"].exists)
-        XCTAssertTrue(app.descendants(matching: .any)[
-            "companion.resources.runtime.read-only"
-        ].waitForExistence(timeout: 2))
-    }
-
-    @MainActor
     func testNotificationDemoOpensTheTargetConversationAfterRosterRestore() throws {
         let app = XCUIApplication()
         app.launchArguments = ["-companion-roster-demo", "-companion-notification-demo"]
@@ -1529,20 +1491,40 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    func testRosterRendersThreeCompanionsAsListRowsWithPreviews() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-roster-demo"]
+        app.launchEnvironment["COMPANION_ROSTER_DEMO_THREE"] = "1"
+        app.launchEnvironment["COMPANION_API_URL"] = "http://127.0.0.1:9"
+        app.launch()
+
+        for (id, name) in [
+            ("c96ab360-00f3-4497-a51a-51442db8add1", "Luna"),
+            ("d96ab360-00f3-4497-a51a-51442db8add2", "Nova"),
+            ("e96ab360-00f3-4497-a51a-51442db8add3", "Orbit"),
+        ] {
+            let row = app.descendants(matching: .any)["companion.row.\(id)"]
+            XCTAssertTrue(row.waitForExistence(timeout: 5), "Missing list row for \(name)")
+            XCTAssertTrue(row.label.contains(name))
+            XCTAssertTrue(row.label.contains("Release notes are ready."))
+        }
+    }
+
+    @MainActor
     func testChatSupportsCustomBackAndLeadingEdgeSwipeWithKeyboardOpen() throws {
         let app = launchCompanionRoster(access: "owner")
         let row = app.descendants(matching: .any)["companion.row.c96ab360-00f3-4497-a51a-51442db8add1"]
 
-        row.tap()
+        openChatFromRoster(row, in: app)
         XCTAssertTrue(app.descendants(matching: .any)["chat.transcript"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Luna thinking"].waitForExistence(timeout: 2))
         let customBack = app.buttons["chat.back"]
         XCTAssertTrue(customBack.exists)
         XCTAssertEqual(customBack.label, "Back")
-        customBack.tap()
+        swipeFromNativeLeadingEdge(in: app)
         XCTAssertTrue(row.waitForExistence(timeout: 3))
 
-        row.tap()
+        openChatFromRoster(row, in: app)
         let composer = app.descendants(matching: .any)["chat.composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         composer.tap()
@@ -1567,7 +1549,7 @@ final class CompanionUITests: XCTestCase {
         let row = app.descendants(matching: .any)["companion.row.c96ab360-00f3-4497-a51a-51442db8add1"]
 
         for _ in 0..<2 {
-            row.tap()
+            openChatFromRoster(row, in: app)
 
             let transcript = app.scrollViews.matching(
                 NSPredicate(format: "identifier == %@", "chat.transcript")
@@ -1597,7 +1579,7 @@ final class CompanionUITests: XCTestCase {
     func testComputerSupportsLeadingEdgeSwipeAcrossConsecutivePops() throws {
         let app = launchCompanionRoster(access: "owner")
         let row = app.descendants(matching: .any)["companion.row.c96ab360-00f3-4497-a51a-51442db8add1"]
-        row.tap()
+        openChatFromRoster(row, in: app)
 
         let computer = app.buttons["Open Luna's computer"]
         XCTAssertTrue(computer.waitForExistence(timeout: 5))
@@ -1655,7 +1637,7 @@ final class CompanionUITests: XCTestCase {
 
     @MainActor
     func testBotDetailRoutineAndRunCustomHeadersSupportConsecutiveEdgePops() throws {
-        let app = launchCompanionSettings(access: "owner")
+        let app = launchCompanionDetails(access: "owner")
         let routineID = "33333333-3333-4333-8333-333333333333"
         let runID = "88888888-8888-4888-8888-888888888888"
         let routine = scrollToButton("companion.details.routine.\(routineID)", in: app)
@@ -1676,6 +1658,21 @@ final class CompanionUITests: XCTestCase {
         XCTAssertTrue(run.waitForExistence(timeout: 3))
         swipeFromLeadingEdge(in: app)
         XCTAssertTrue(app.staticTexts["Bot details"].waitForExistence(timeout: 3))
+    }
+
+    @MainActor
+    func testWideBackZoneDoesNotStealAHorizontalCharacterDrag() throws {
+        let app = launchCompanionDetails(access: "owner")
+        let colors = app.scrollViews["companion.details.character.colors"]
+        XCTAssertTrue(colors.waitForExistence(timeout: 5))
+
+        colors.swipeLeft()
+        let start = colors.coordinate(withNormalizedOffset: CGVector(dx: 0.08, dy: 0.5))
+        let end = colors.coordinate(withNormalizedOffset: CGVector(dx: 0.82, dy: 0.5))
+        start.press(forDuration: 0.05, thenDragTo: end)
+
+        XCTAssertTrue(app.staticTexts["Bot details"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.buttons["companion.details.open-chat"].exists)
     }
 
     @MainActor
@@ -1703,22 +1700,13 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
-    func testEditorRosterOffersSettingsWithoutDelete() throws {
+    func testEditorRosterOffersDetailsWithoutDelete() throws {
         assertRosterContextMenu(access: "editor", canDelete: false)
     }
 
     @MainActor
-    func testViewerRosterOffersSettingsWithoutDelete() throws {
+    func testViewerRosterOffersDetailsWithoutDelete() throws {
         assertRosterContextMenu(access: "viewer", canDelete: false)
-    }
-
-    @MainActor
-    private func openConnectedResources(in app: XCUIApplication) {
-        let resources = app.descendants(matching: .any)["companion.settings.resources"]
-        for _ in 0..<3 where !resources.exists { app.swipeUp() }
-        XCTAssertTrue(resources.waitForExistence(timeout: 5))
-        resources.tap()
-        XCTAssertTrue(app.navigationBars["Connected resources"].waitForExistence(timeout: 2))
     }
 
     @MainActor
@@ -1731,17 +1719,17 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
-    private func launchCompanionSettings(access: String) -> XCUIApplication {
+    private func launchCompanionDetails(access: String) -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchArguments = ["-companion-settings-demo"]
-        app.launchEnvironment["COMPANION_SETTINGS_DEMO_ACCESS"] = access
+        app.launchArguments = ["-companion-detail-demo"]
+        app.launchEnvironment["COMPANION_DETAIL_DEMO_ACCESS"] = access
         app.launchEnvironment["COMPANION_API_URL"] = "http://127.0.0.1:9"
         app.launch()
 
-        let settings = app.buttons["chat.settings"]
-        XCTAssertTrue(settings.waitForExistence(timeout: 5))
-        settings.tap()
-        XCTAssertTrue(app.navigationBars["Companion settings"].waitForExistence(timeout: 2))
+        let details = app.buttons["chat.details"]
+        XCTAssertTrue(details.waitForExistence(timeout: 5))
+        details.tap()
+        XCTAssertTrue(app.staticTexts["Bot details"].waitForExistence(timeout: 2))
         return app
     }
 
@@ -1789,7 +1777,7 @@ final class CompanionUITests: XCTestCase {
         }
         XCTAssertTrue(row.isHittable)
         row.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 1.5)
-        XCTAssertTrue(app.buttons["Settings"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Move to"].waitForExistence(timeout: 5))
     }
 
     @MainActor
@@ -1800,7 +1788,25 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    private func openChatFromRoster(_ row: XCUIElement, in app: XCUIApplication) {
+        row.tap()
+        let openChat = app.buttons["companion.details.open-chat"]
+        XCTAssertTrue(openChat.waitForExistence(timeout: 5))
+        openChat.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["chat.transcript"].waitForExistence(timeout: 5))
+    }
+
+    @MainActor
     private func swipeFromLeadingEdge(in app: XCUIApplication) {
+        // About 39pt on the standard test phone: outside UIKit's narrow native band but inside
+        // Companion's 52pt supplemental capture zone.
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.10, dy: 0.5))
+        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.82, dy: 0.5))
+        start.press(forDuration: 0.05, thenDragTo: end)
+    }
+
+    @MainActor
+    private func swipeFromNativeLeadingEdge(in app: XCUIApplication) {
         let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.5))
         let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.82, dy: 0.5))
         start.press(forDuration: 0.05, thenDragTo: end)

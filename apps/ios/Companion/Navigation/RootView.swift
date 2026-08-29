@@ -42,12 +42,10 @@ struct RootView: View {
                 )
             } else if ProcessInfo.processInfo.arguments.contains("-companion-create-demo") {
                 CreateCompanionDemoView()
-            } else if ProcessInfo.processInfo.arguments.contains("-companion-resources-demo") {
-                CompanionConnectedResourcesDemoView()
             } else if ProcessInfo.processInfo.arguments.contains("-glass-chat-demo") {
                 GlassChatDemoView()
-            } else if ProcessInfo.processInfo.arguments.contains("-companion-settings-demo") {
-                CompanionSettingsDemoView()
+            } else if ProcessInfo.processInfo.arguments.contains("-companion-detail-demo") {
+                CompanionDetailDemoView()
             } else if ProcessInfo.processInfo.arguments.contains("-companion-roster-demo") {
                 CompanionRosterDemoView()
             } else if ProcessInfo.processInfo.arguments.contains("-glass-management-demo-plugins") {
@@ -82,9 +80,8 @@ struct RootView: View {
                   !arguments.contains("-companion-decision-demo"),
                   !arguments.contains("-companion-icon-demo"),
                   !arguments.contains("-companion-create-demo"),
-                  !arguments.contains("-companion-resources-demo"),
                   !arguments.contains("-glass-chat-demo"),
-                  !arguments.contains("-companion-settings-demo"),
+                  !arguments.contains("-companion-detail-demo"),
                   !arguments.contains("-companion-roster-demo"),
                   !arguments.contains("-glass-management-demo-plugins"),
                   !arguments.contains("-glass-management-demo") else { return }

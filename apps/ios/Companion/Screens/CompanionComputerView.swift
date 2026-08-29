@@ -9,7 +9,6 @@ struct CompanionComputerView: View {
     @Environment(\.dismiss) private var dismiss
 
     let companion: CompanionSummary
-    let onSettings: () -> Void
     private let openDesktop: ((String) async throws -> CompanionDesktop)?
 
     @State private var desktop: CompanionDesktop?
@@ -21,11 +20,9 @@ struct CompanionComputerView: View {
 
     init(
         companion: CompanionSummary,
-        onSettings: @escaping () -> Void,
         openDesktop: ((String) async throws -> CompanionDesktop)? = nil
     ) {
         self.companion = companion
-        self.onSettings = onSettings
         self.openDesktop = openDesktop
     }
 
@@ -43,7 +40,6 @@ struct CompanionComputerView: View {
             .padding(.vertical, 12)
         }
         .navigationBarBackButtonHidden(true)
-        .companionNavigationSwipeBackEnabled()
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(Color.black, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
@@ -138,26 +134,22 @@ struct CompanionComputerView: View {
         }
 
         ToolbarItem(placement: .principal) {
-            Button(action: onSettings) {
-                HStack(spacing: 8) {
-                    CharacterMark(
-                        name: companion.name,
-                        icon: companion.icon,
-                        size: 20
-                    )
-                    Text(companion.name)
-                        .font(.subheadline.weight(.semibold))
-                        .lineLimit(1)
-                }
-                .foregroundStyle(Color.white)
-                .padding(.leading, 10)
-                .padding(.trailing, 14)
-                .frame(minHeight: 36)
-                .background(Color.white.opacity(0.12), in: Capsule())
+            HStack(spacing: 8) {
+                CharacterMark(
+                    name: companion.name,
+                    icon: companion.icon,
+                    size: 20
+                )
+                Text(companion.name)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Details for \(companion.name)")
-            .accessibilityIdentifier("computer.details")
+            .foregroundStyle(Color.white)
+            .padding(.leading, 10)
+            .padding(.trailing, 14)
+            .frame(minHeight: 36)
+            .background(Color.white.opacity(0.12), in: Capsule())
+            .accessibilityElement(children: .combine)
         }
 
         ToolbarItemGroup(placement: .topBarTrailing) {
@@ -171,7 +163,6 @@ struct CompanionComputerView: View {
                 Button("Reconnect", systemImage: "arrow.triangle.2.circlepath") {
                     requestGeneration += 1
                 }
-                Button("Companion details", systemImage: "info.circle", action: onSettings)
             } label: {
                 Image(systemName: "ellipsis")
                     .frame(width: 44, height: 44)

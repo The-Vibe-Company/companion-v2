@@ -128,8 +128,6 @@ public struct CompanionHomeSection: Identifiable, Equatable, Sendable {
     public let companions: [CompanionSummary]
     public let isUnassigned: Bool
     public let isCollapsed: Bool
-
-    public var usesPinnedGrid: Bool { !companions.isEmpty && companions.count <= 3 }
 }
 
 public enum CompanionSectionCompatibility {

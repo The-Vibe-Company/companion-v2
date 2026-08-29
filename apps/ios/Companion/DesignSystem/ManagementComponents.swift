@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 import CompanionKit
 
@@ -152,6 +153,14 @@ struct CompanionEmptyCard: View {
 }
 
 func companionDisplayMessage(_ error: Error, fallback: String) -> String {
-    if let apiError = error as? APIError, !apiError.message.isEmpty { return apiError.message }
+    if let apiError = error as? APIError {
+        let message = apiError.message.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Zod's serialized issue list is useful to logs but not to a person reading an iOS
+        // banner. Keep server messages that are already human-readable and fall back for a raw
+        // object/array payload.
+        if !message.isEmpty, !message.hasPrefix("{") && !message.hasPrefix("[") {
+            return message
+        }
+    }
     return fallback
 }

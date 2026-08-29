@@ -73,6 +73,9 @@ struct CompanionListView: View {
                     }
                 }
                 }
+            // Install the widened leading-edge capture once for the whole stack so direct and
+            // value-based pushes share the same guarded UIKit pop path.
+            .companionNavigationSwipeBackEnabled()
             .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(for: CompanionRoute.self) { route in
                 destination(for: route)
@@ -226,12 +229,7 @@ struct CompanionListView: View {
             ForEach(homeSections) { section in
                 Section {
                     if !section.isCollapsed || !query.isEmpty {
-                        if section.usesPinnedGrid && query.isEmpty {
-                            pinnedGrid(section.companions)
-                                .rosterListRow(verticalInset: 8)
-                        } else {
-                            ForEach(section.companions) { companionRow($0) }
-                        }
+                        ForEach(section.companions) { companionRow($0) }
                     }
                 } header: {
                     sectionHeader(section)
@@ -348,33 +346,11 @@ struct CompanionListView: View {
         }
     }
 
-    private func pinnedGrid(_ companions: [CompanionSummary]) -> some View {
-        ScrollView(.horizontal) {
-            LazyHStack(spacing: 24) {
-                ForEach(companions) { companion in
-                    NavigationLink(value: CompanionRoute.chat(companion.id)) {
-                        VStack(spacing: 7) {
-                            CharacterMark(name: companion.name, icon: companion.icon, size: 80)
-                            Text(companion.name)
-                                .font(.system(size: 15, weight: .semibold))
-                                .foregroundStyle(CompanionIOSTheme.textPrimary)
-                                .lineLimit(1)
-                        }
-                        .frame(width: 86)
-                    }
-                    .buttonStyle(.plain)
-                    .contextMenu { companionContextMenu(for: companion, busy: false) }
-                }
-            }
-        }
-        .scrollIndicators(.hidden)
-    }
-
     @ViewBuilder
     private func companionRow(_ companion: CompanionSummary) -> some View {
         let busy = rosterActionCompanionIDs.contains(companion.id)
             || deletingCompanionIDs.contains(companion.id)
-        NavigationLink(value: CompanionRoute.chat(companion.id)) {
+        NavigationLink(value: CompanionRoute.details(companion.id)) {
             CompanionRow(
                 companion: companion,
                 deletionOperation: effectiveDeletion(for: companion)
@@ -401,7 +377,6 @@ struct CompanionListView: View {
             }
         }
         .accessibilityActions {
-            Button("Settings") { path.append(.settings(companion.id)) }
             Button(companion.pinned ? "Unpin" : "Pin") {
                 Task { await updateMemberState(companion, patch: .init(pinned: !companion.pinned)) }
             }
@@ -428,11 +403,6 @@ struct CompanionListView: View {
             }
             .disabled(busy)
         }
-
-        Button("Edit character", systemImage: "paintpalette") {
-            path.append(.identity(companion.id))
-        }
-        .disabled(companion.access == .viewer || busy)
 
         Button("Move to", systemImage: "folder") { companionToMove = companion }
             .disabled(!companion.access.canDeleteCompanion || busy)
@@ -524,12 +494,12 @@ struct CompanionListView: View {
                 ChatView(
                     companion: companion,
                     readingPosition: chatReadingPositions.position(for: companionID),
-                    onPlugins: { showingPlugins = true },
+                    onOpenPlugins: { showingPlugins = true },
                     services: chatServices,
                     onReadingPositionChange: { position in
                         chatReadingPositions.record(position, for: companionID)
                     },
-                    onSettings: { path.append(.settings(companionID)) }
+                    onDetails: { path.append(.details(companionID)) }
                 )
                 .onAppear { notifications.activeCompanionID = companionID }
                 .onDisappear {
@@ -537,16 +507,15 @@ struct CompanionListView: View {
                         notifications.activeCompanionID = nil
                     }
                 }
-            case .settings:
-                CompanionSettingsView(
+            case .details(let companionID):
+                CompanionDetailView(
                     companion: companion,
                     onSaved: replace,
+                    onOpenChat: { path = [.chat(companionID)] },
                     onDeletionStarted: beginOptimisticDeletion,
                     onDeletionAccepted: deletionAccepted,
                     onDeletionFailed: deletionFailed
                 )
-            case .identity:
-                CompanionIdentityEditorView(companion: companion, onSaved: replace)
             }
         } else {
             ContentUnavailableView(
@@ -611,7 +580,7 @@ struct CompanionListView: View {
             withRosterAnimation { rosterState.prepend(duplicate) }
             rosterNotice = "\(duplicate.name) created."
             AccessibilityNotification.Announcement("\(duplicate.name) created.").post()
-            path = [.identity(duplicate.id)]
+            path = [.details(duplicate.id)]
             await reload(silently: true)
         } catch {
             rosterActionError = companionDisplayMessage(
@@ -657,7 +626,10 @@ struct CompanionListView: View {
             rosterNotice = sectionName.map { "\(companion.name) moved to \($0)." }
                 ?? "\(companion.name) moved to Unassigned."
         } catch {
-            rosterActionError = companionDisplayMessage(error, fallback: "This Companion could not be moved.")
+            rosterActionError = companionDisplayMessage(
+                error,
+                fallback: "Move failed. Choose a valid section and try again."
+            )
         }
     }
 
@@ -913,7 +885,7 @@ struct CompanionRosterDemoView: View {
             session: CompanionRosterDemoFixtures.session,
             services: CompanionListServices(
                 listCompanions: {
-                    [CompanionRosterDemoFixtures.companion(access: access)]
+                    CompanionRosterDemoFixtures.companions(access: access)
                 },
                 listSections: { [CompanionRosterDemoFixtures.section] },
                 createSection: { _ in CompanionRosterDemoFixtures.section },
@@ -965,6 +937,11 @@ private final class CompanionRosterDemoState {
 @MainActor
 private enum CompanionRosterDemoFixtures {
     static let companionID = "c96ab360-00f3-4497-a51a-51442db8add1"
+    static let secondCompanionID = "d96ab360-00f3-4497-a51a-51442db8add2"
+    static let thirdCompanionID = "e96ab360-00f3-4497-a51a-51442db8add3"
+    static let showsThreeCompanions = ProcessInfo.processInfo.environment[
+        "COMPANION_ROSTER_DEMO_THREE"
+    ] == "1"
     static let usesLongThread = ProcessInfo.processInfo.environment[
         "COMPANION_ROSTER_DEMO_LONG_THREAD"
     ] == "1"
@@ -987,6 +964,15 @@ private enum CompanionRosterDemoFixtures {
         needsOnboarding: false,
         user: .init(id: "demo-user", email: "demo@example.com", name: "Demo")
     )
+
+    static func companions(access: CompanionAccess) -> [CompanionSummary] {
+        guard showsThreeCompanions else { return [companion(access: access)] }
+        return [
+            companion(access: access),
+            companion(id: secondCompanionID, name: "Nova", access: access),
+            companion(id: thirdCompanionID, name: "Orbit", access: access),
+        ]
+    }
 
     static func companion(
         id: String = companionID,
@@ -1147,12 +1133,11 @@ private extension View {
 
 private enum CompanionRoute: Hashable {
     case chat(String)
-    case settings(String)
-    case identity(String)
+    case details(String)
 
     var companionID: String {
         switch self {
-        case .chat(let id), .settings(let id), .identity(let id): return id
+        case .chat(let id), .details(let id): return id
         }
     }
 }
