@@ -273,10 +273,33 @@ export class BoxLabService {
     resourceName: string,
     windowStartAttemptCount: number,
     pendingPersist: Promise<void> = Promise.resolve(),
-  ): void {
-    if (this.#activeDeletionOperations.has(operation.id)) return;
+  ): Promise<void> {
+    if (this.#activeDeletionOperations.has(operation.id)) return pendingPersist;
     this.#activeDeletionOperations.add(operation.id);
-    this.#scheduleDeletion(state, operation, resourceName, windowStartAttemptCount, pendingPersist);
+    const retryablePersist = this.#recoverInitialDeletionPersistence(operation, pendingPersist);
+    this.#scheduleDeletion(state, operation, resourceName, windowStartAttemptCount, retryablePersist);
+    return retryablePersist;
+  }
+
+  async #recoverInitialDeletionPersistence(
+    operation: BoxLabDeletionRecord,
+    pendingPersist: Promise<void>,
+  ): Promise<void> {
+    try {
+      await pendingPersist;
+    } catch (error) {
+      operation.status = "blocked";
+      operation.completedAt = null;
+      try {
+        await this.#persist();
+      } catch {
+        // The original persistence failure is the actionable error for this request. A later DELETE
+        // can retry from the in-memory blocked operation even if recording that recovery also fails.
+      } finally {
+        this.#activeDeletionOperations.delete(operation.id);
+      }
+      throw error;
+    }
   }
 
   #scheduleDeletion(
@@ -586,14 +609,14 @@ export class BoxLabService {
         existing.status = "pending";
         existing.completedAt = null;
         const pendingPersist = this.#persist();
-        this.#startDeletionWindow(
+        const retryablePersist = this.#startDeletionWindow(
           state,
           existing,
           box.resourceName,
           windowStartAttemptCount,
           pendingPersist,
         );
-        await pendingPersist;
+        await retryablePersist;
       }
       return structuredClone(existing);
     }
@@ -607,8 +630,14 @@ export class BoxLabService {
     };
     state.deletions.push(operation);
     const pendingPersist = this.#persist();
-    this.#startDeletionWindow(state, operation, box.resourceName, operation.attemptCount, pendingPersist);
-    await pendingPersist;
+    const retryablePersist = this.#startDeletionWindow(
+      state,
+      operation,
+      box.resourceName,
+      operation.attemptCount,
+      pendingPersist,
+    );
+    await retryablePersist;
     return structuredClone(operation);
   }
 

@@ -342,11 +342,12 @@ export class OciSystemdDriver implements BoxLabDriver {
         input.resourceName,
         "timeout", "--signal=TERM", "--kill-after=5s", `${input.timeoutSeconds}s`,
         "bash", "--noprofile", "--norc", "-c", guestCommand.wrapper,
-        "box-lab-command", guestCommand.command, guestCommand.completionMarker,
+        "box-lab-command", guestCommand.command,
       ],
+      captureGuestCommandControl: true,
       timeoutMs: (input.timeoutSeconds + 10) * 1_000,
     });
-    return guestCommandResult(result, guestCommand.completionMarker);
+    return guestCommandResult(result);
   }
 
   async stop(resourceName: string): Promise<void> {

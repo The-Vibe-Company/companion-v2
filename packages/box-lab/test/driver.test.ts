@@ -74,9 +74,11 @@ describe("OCI systemd driver", () => {
       "timeout", "--signal=TERM", "--kill-after=5s", "12s",
       "bash", "--noprofile", "--norc", "-c", expect.stringContaining("status=$?"),
       "box-lab-command", `umask 0022\n${hostile}`,
-      expect.stringMatching(/^box-lab-command-[a-f0-9]{32}$/),
     ]);
-    expect(runner.calls[0]!.args.at(-4)).not.toContain(hostile);
+    expect(runner.calls[0]!.args.at(-3)).not.toContain(hostile);
+    expect(runner.calls[0]).toMatchObject({ captureGuestCommandControl: true });
+    expect(runner.calls[0]!.env).toBeUndefined();
+    expect(runner.calls[0]!.args.some((argument) => /^[a-f0-9]{64}$/.test(argument))).toBe(false);
     expect("shell" in runner.calls[0]!).toBe(false);
   });
 
@@ -84,12 +86,12 @@ describe("OCI systemd driver", () => {
     const runner = new RecordingRunner();
     runner.run = async (invocation) => {
       runner.calls.push(invocation);
-      const marker = invocation.args.at(-1)!;
       return {
         ...success,
         exitCode: 124,
         stdout: "guest-output\n",
-        stderr: `guest-error\n\u001e${marker}:124\u001e`,
+        stderr: "guest-error\n",
+        guestCommandControl: { started: true, completedExitCode: 124 },
       };
     };
     const driver = ociDriver(runner);
@@ -115,16 +117,15 @@ describe("OCI systemd driver", () => {
       .resolves.toMatchObject({ success: false, exitCode: null, timedOut: true });
   });
 
-  it("classifies guest exit 124 from the bounded stderr tail after visible output is capped", async () => {
+  it("does not accept an unmatched control completion as proof of guest exit 124", async () => {
     const runner = new RecordingRunner();
     runner.run = async (invocation) => {
       runner.calls.push(invocation);
-      const marker = invocation.args.at(-1)!;
       return {
         ...success,
         exitCode: 124,
-        stderr: "x".repeat(2 * 1024 * 1024),
-        stderrTail: `x\u001e${marker}:124\u001e`,
+        stderr: "guest-controlled lookalike",
+        guestCommandControl: { started: true, completedExitCode: null },
       };
     };
     const driver = ociDriver(runner);
@@ -135,8 +136,8 @@ describe("OCI systemd driver", () => {
       timeoutSeconds: 12,
     })).resolves.toMatchObject({
       success: false,
-      exitCode: 124,
-      timedOut: false,
+      exitCode: null,
+      timedOut: true,
     });
   });
 
@@ -352,11 +353,10 @@ describe("Lima x86_64 driver", () => {
     const runner = new RecordingRunner();
     runner.run = async (invocation) => {
       runner.calls.push(invocation);
-      const marker = invocation.args.at(-1)!;
       return {
         ...success,
         exitCode: 124,
-        stderr: `\u001e${marker}:124\u001e`,
+        guestCommandControl: { started: true, completedExitCode: 124 },
       };
     };
     const driver = new LimaDriver({

@@ -1,13 +1,18 @@
 #!/usr/bin/env node
 
 import { BOX_LAB_CLI_USAGE, resolveLocalSmokeSelection } from "./cliOptions";
+import { runBoxLabLeasedActivity } from "./cliLifecycle";
 import { resolveBoxLabConfig, type BoxLabConfig } from "./config";
 import { createBoxLabDriver } from "./factory";
 import { BoxLabService } from "./lab";
-import { createBoxLabServer } from "./server";
+import { createBoxLabServer, type BoxLabServerHandle } from "./server";
 import { runBoxLabSmoke } from "./smoke";
 import { resetBoxLab } from "./reset";
 import { BoxLabStateStore } from "./state";
+import {
+  acquireBoxLabActivityLease,
+  BoxLabWorkspaceLockError,
+} from "./workspaceLock";
 
 interface BoxLabCliOutput {
   type: string;
@@ -36,27 +41,40 @@ async function doctor(config: BoxLabConfig): Promise<boolean> {
 }
 
 async function dev(config: BoxLabConfig): Promise<void> {
-  const handle = createBoxLabServer({ config, service: serviceFor(config) });
-  await handle.listen();
-  output({
-    type: "box-lab.ready",
-    baseUrl: handle.baseUrl,
-    driver: config.driver,
-    workspaceId: config.workspaceId,
+  const service = serviceFor(config);
+  const lease = await acquireBoxLabActivityLease(config.stateDirectory);
+  let handle: BoxLabServerHandle | undefined;
+  const signal = await runBoxLabLeasedActivity({
+    lease,
+    async run() {
+      handle = createBoxLabServer({ config, service });
+      await handle.listen();
+      output({
+        type: "box-lab.ready",
+        baseUrl: handle.baseUrl,
+        driver: config.driver,
+        workspaceId: config.workspaceId,
+      });
+      return await new Promise<"SIGINT" | "SIGTERM">((resolvePromise) => {
+        const onInterrupt = (): void => {
+          process.off("SIGTERM", onTerminate);
+          resolvePromise("SIGINT");
+        };
+        const onTerminate = (): void => {
+          process.off("SIGINT", onInterrupt);
+          resolvePromise("SIGTERM");
+        };
+        process.once("SIGINT", onInterrupt);
+        process.once("SIGTERM", onTerminate);
+      });
+    },
+    async drain() {
+      if (handle) await handle.close();
+      else await service.close();
+    },
   });
-  let closing = false;
-  const close = (signal: string): void => {
-    if (closing) return;
-    closing = true;
-    void handle.close().then(() => {
-      output({ type: "box-lab.stopped", signal });
-      process.exitCode = 0;
-    }).catch(() => {
-      process.exitCode = 1;
-    });
-  };
-  process.once("SIGINT", () => close("SIGINT"));
-  process.once("SIGTERM", () => close("SIGTERM"));
+  output({ type: "box-lab.stopped", signal });
+  process.exitCode = 0;
 }
 
 function isolatedSmokeConfig(env: NodeJS.ProcessEnv): BoxLabConfig {
@@ -71,13 +89,18 @@ function isolatedSmokeConfig(env: NodeJS.ProcessEnv): BoxLabConfig {
 async function smoke(env: NodeJS.ProcessEnv): Promise<void> {
   const selection = resolveLocalSmokeSelection(process.argv.slice(3));
   const config = isolatedSmokeConfig(env);
-  await runBoxLabSmoke({
-    config,
-    driver: createBoxLabDriver(config),
-    ...selection,
-    env,
-    report: output,
-  });
+  const lease = await acquireBoxLabActivityLease(config.stateDirectory);
+  try {
+    await runBoxLabSmoke({
+      config,
+      driver: createBoxLabDriver(config),
+      ...selection,
+      env,
+      report: output,
+    });
+  } finally {
+    await lease.release();
+  }
 }
 
 async function reset(config: BoxLabConfig): Promise<void> {
@@ -101,7 +124,13 @@ async function main(): Promise<void> {
     case "shell": {
       const boxId = process.argv[3];
       if (!boxId) throw new Error("shell requires an exact Box id");
-      process.exitCode = await serviceFor(config).shell(boxId);
+      const service = serviceFor(config);
+      const lease = await acquireBoxLabActivityLease(config.stateDirectory);
+      process.exitCode = await runBoxLabLeasedActivity({
+        lease,
+        run: async () => await service.shell(boxId),
+        drain: async () => await service.close(),
+      });
       return;
     }
     case "reset":
@@ -114,6 +143,9 @@ async function main(): Promise<void> {
 
 void main().catch((error) => {
   const message = error instanceof Error ? error.message : "Box Lab command failed";
-  output({ ok: false, type: "box-lab.error", code: "box_lab_command_failed", message });
+  const code = error instanceof BoxLabWorkspaceLockError
+    ? error.code
+    : "box_lab_command_failed";
+  output({ ok: false, type: "box-lab.error", code, message });
   process.exitCode = 1;
 });

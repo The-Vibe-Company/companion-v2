@@ -130,6 +130,17 @@ class BlockingStateStore extends BoxLabStateStore {
   }
 }
 
+class OneShotFailingStateStore extends BoxLabStateStore {
+  nextFailure: Error | undefined;
+
+  override async save(state: BoxLabPersistedState): Promise<void> {
+    const failure = this.nextFailure;
+    this.nextFailure = undefined;
+    if (failure) throw failure;
+    await super.save(state);
+  }
+}
+
 interface TestContext {
   directory: string;
   driver: BlockingLifecycleDriver;
@@ -443,6 +454,40 @@ describe("Box Lab lifecycle serialization", () => {
 });
 
 describe("Box Lab deletion recovery", () => {
+  it("releases a failed initial persistence so the same deletion can be requested again", async () => {
+    const directory = await mkdtemp(resolve(tmpdir(), "companion-box-lab-lifecycle-"));
+    const driver = new BlockingLifecycleDriver();
+    const store = new OneShotFailingStateStore(directory, WORKSPACE_SCOPE);
+    const service = new BoxLabService({
+      driver,
+      store,
+      resourcePrefix: RESOURCE_PREFIX,
+      diagnosticsDirectory: resolve(directory, "diagnostics"),
+    });
+    const persistenceFailure = new Error("Initial deletion persistence failed");
+    try {
+      await service.initialize();
+      const boxId = await runningBox(service);
+      store.nextFailure = persistenceFailure;
+
+      await expect(service.requestDeletion(boxId)).rejects.toBe(persistenceFailure);
+      const [blocked] = (await store.load()).deletions;
+      expect(blocked).toMatchObject({ targetId: boxId, status: "blocked", attemptCount: 0 });
+      expect(driver.deleteCalls).toBe(0);
+
+      const retried = await service.requestDeletion(boxId);
+      const completed = await completedDeletion(service, retried);
+
+      expect(retried.id).toBe(blocked?.id);
+      expect(completed).toMatchObject({ status: "completed", attemptCount: 1 });
+      expect(driver.deleteCalls).toBe(1);
+      expect(driver.resources.size).toBe(0);
+    } finally {
+      await service.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("retries a transient blocked deletion without another DELETE request", async () => {
     const test = await context(new TransientDeleteDriver(1));
     try {

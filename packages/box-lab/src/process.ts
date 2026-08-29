@@ -1,7 +1,8 @@
 import { spawn, type SpawnOptions } from "node:child_process";
 
+import { GuestCommandControlCapture } from "./guestCommand";
+
 const DEFAULT_OUTPUT_LIMIT_BYTES = 2 * 1024 * 1024;
-const PROCESS_RESULT_TAIL_BYTES = 1_024;
 
 export interface ProcessInvocation {
   executable: string;
@@ -9,6 +10,7 @@ export interface ProcessInvocation {
   input?: Uint8Array | string;
   timeoutMs?: number;
   outputLimitBytes?: number;
+  captureGuestCommandControl?: boolean;
   stdio?: "pipe" | "inherit";
   env?: NodeJS.ProcessEnv;
   cwd?: string;
@@ -19,9 +21,14 @@ export interface ProcessResult {
   signal: NodeJS.Signals | null;
   stdout: string;
   stderr: string;
-  /** Bounded internal tail for protocol markers; never surface it as command output or diagnostics. */
-  stderrTail?: string;
+  /** Authentication result only; raw control frames and their challenge never leave the runner. */
+  guestCommandControl?: GuestCommandControlResult;
   timedOut: boolean;
+}
+
+export interface GuestCommandControlResult {
+  started: boolean;
+  completedExitCode: number | null;
 }
 
 export interface ProcessRunner {
@@ -45,16 +52,6 @@ function appendBounded(chunks: Buffer[], chunk: Buffer, state: { bytes: number }
   state.bytes += accepted.byteLength;
 }
 
-function appendTail(previous: Buffer, chunk: Buffer): Buffer {
-  if (chunk.byteLength >= PROCESS_RESULT_TAIL_BYTES) {
-    return chunk.subarray(chunk.byteLength - PROCESS_RESULT_TAIL_BYTES);
-  }
-  const combined = Buffer.concat([previous, chunk]);
-  return combined.byteLength <= PROCESS_RESULT_TAIL_BYTES
-    ? combined
-    : combined.subarray(combined.byteLength - PROCESS_RESULT_TAIL_BYTES);
-}
-
 function isBrokenPipe(error: Error): boolean {
   return "code" in error && error.code === "EPIPE";
 }
@@ -72,6 +69,12 @@ export class SpawnProcessRunner implements ProcessRunner {
       throw new ProcessExecutionError("invalid_argument", "Process argument contains NUL");
     }
     const stdio = invocation.stdio ?? "pipe";
+    if (invocation.captureGuestCommandControl === true && stdio !== "pipe") {
+      throw new ProcessExecutionError(
+        "invalid_control_capture",
+        "Guest command control capture requires piped stderr",
+      );
+    }
     const spawnOptions: SpawnOptions = {
       shell: false,
       stdio: stdio === "inherit" ? "inherit" : ["pipe", "pipe", "pipe"],
@@ -88,7 +91,9 @@ export class SpawnProcessRunner implements ProcessRunner {
       }
       const stdout: Buffer[] = [];
       const stderr: Buffer[] = [];
-      let stderrTail: Buffer = Buffer.alloc(0);
+      const controlCapture = invocation.captureGuestCommandControl === true
+        ? new GuestCommandControlCapture()
+        : undefined;
       const stdoutState = { bytes: 0 };
       const stderrState = { bytes: 0 };
       const limit = invocation.outputLimitBytes ?? DEFAULT_OUTPUT_LIMIT_BYTES;
@@ -107,8 +112,8 @@ export class SpawnProcessRunner implements ProcessRunner {
       if (stdio === "pipe") {
         child.stdout?.on("data", (chunk: Buffer) => appendBounded(stdout, chunk, stdoutState, limit));
         child.stderr?.on("data", (chunk: Buffer) => {
-          appendBounded(stderr, chunk, stderrState, limit);
-          stderrTail = appendTail(stderrTail, chunk);
+          const visibleChunks = controlCapture?.consume(chunk) ?? [chunk];
+          for (const visible of visibleChunks) appendBounded(stderr, visible, stderrState, limit);
         });
         child.stdin?.once("error", (error: Error) => {
           // The child exit remains authoritative when it deliberately closes stdin before consuming
@@ -133,14 +138,18 @@ export class SpawnProcessRunner implements ProcessRunner {
           ));
           return;
         }
-        resolvePromise({
+        for (const visible of controlCapture?.finish() ?? []) {
+          appendBounded(stderr, visible, stderrState, limit);
+        }
+        const result: ProcessResult = {
           exitCode,
           signal,
           stdout: Buffer.concat(stdout).toString("utf8"),
           stderr: Buffer.concat(stderr).toString("utf8"),
-          stderrTail: stderrTail.toString("utf8"),
           timedOut,
-        });
+        };
+        if (controlCapture !== undefined) result.guestCommandControl = controlCapture.result();
+        resolvePromise(result);
       });
       if (stdio === "pipe") {
         if (invocation.input !== undefined) child.stdin?.end(invocation.input);
