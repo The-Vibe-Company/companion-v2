@@ -1002,6 +1002,13 @@
       "when": 1792084000000,
       "tag": "0142_companion_thread_sync_projection",
       "breakpoints": true
+    },
+    {
+      "idx": 143,
+      "version": "7",
+      "when": 1792170400000,
+      "tag": "0143_companion_delete_routine_preemption",
+      "breakpoints": true
     }
   ]
 }
