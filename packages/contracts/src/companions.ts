@@ -1612,6 +1612,8 @@ export type CompanionThread = z.infer<typeof companionThreadSchema>;
 export const COMPANION_SYNC_CURSOR_VERSION = 1 as const;
 export const COMPANION_SYNC_CURSOR_MAX_CHARACTERS = 256 * 1024;
 export const COMPANION_SYNC_CURSOR_MAX_RECORDS = 20_000;
+/** Exact thread records retained after the historical prefix digest. */
+export const COMPANION_THREAD_SYNC_CURSOR_TAIL_RECORDS = 6;
 
 export const companionSyncQuerySchema = z.object({
   cursor: z.string().min(1).max(COMPANION_SYNC_CURSOR_MAX_CHARACTERS).optional(),

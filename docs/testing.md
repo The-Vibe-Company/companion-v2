@@ -271,7 +271,10 @@ offline roster bootstrap, foreground revalidation wiring, push invalidation deli
 thread remaining renderable with no blocking loader while its delta request is suspended. Server
 tests independently prove cursor scope/version bounds, replay determinism, deletion correctness,
 bounded long-thread cursors, historical reset correctness, side-effect-free unread-preserving
-background reads, and APNs `content-available` coexistence with ordinary alerts.
+background reads, and APNs `content-available` coexistence with ordinary alerts. A transport
+regression test also proves that iOS omits oversized legacy cursors, recovers once without a cursor
+after proxy `414`/`431` rejection, and that newly issued long-thread cursors remain below the safe
+query budget.
 
 Run targeted affected-package tests first, followed by:
 

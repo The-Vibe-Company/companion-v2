@@ -5,6 +5,7 @@ import {
   COMPANION_SYNC_CURSOR_MAX_CHARACTERS,
   COMPANION_SYNC_CURSOR_MAX_RECORDS,
   COMPANION_SYNC_CURSOR_VERSION,
+  COMPANION_THREAD_SYNC_CURSOR_TAIL_RECORDS,
   companionRosterSyncResponseSchema,
   companionThreadDeltaResponseSchema,
   type Companion,
@@ -67,6 +68,7 @@ const threadCursorSchema = z.object({
   actor_id: actorIdSchema,
   companion_id: z.string().uuid(),
   /** Exact digests for the mutable transcript tail; the immutable prefix is one bounded digest. */
+  // Accept previously issued 250-record cursors while emitting the smaller transport-safe tail.
   entries: z.array(threadDigestRecordSchema).max(250),
   entry_count: z.number().int().nonnegative().max(COMPANION_SYNC_CURSOR_MAX_RECORDS),
   prefix_count: z.number().int().nonnegative().max(COMPANION_SYNC_CURSOR_MAX_RECORDS),
@@ -314,10 +316,14 @@ function threadCursor(input: {
     throw new CompanionSyncCursorError("Companion thread is too large for a sync cursor");
   }
   // Validate the complete projection before reducing it to a bounded cursor. Transcript ordinals
-  // are unique and monotonic; keeping the newest 250 exact digests covers every mutable/live entry,
-  // while a prefix digest detects any exceptional historical edit or deletion and forces a reset.
+  // are unique and monotonic; keeping a small exact tail keeps the opaque query parameter below
+  // intermediary request-line limits, while a prefix digest detects any exceptional historical
+  // edit or deletion and forces a reset.
   assertThreadRecords(entryDigestRecords(orderedEntries));
-  const prefixCount = Math.max(0, orderedEntries.length - 250);
+  const prefixCount = Math.max(
+    0,
+    orderedEntries.length - COMPANION_THREAD_SYNC_CURSOR_TAIL_RECORDS,
+  );
   const prefixDigest = companionSyncDigest(entryDigestRecords(orderedEntries.slice(0, prefixCount)));
   const entryRecords = entryDigestRecords(orderedEntries.slice(prefixCount));
   const metadataDigest = companionSyncDigest(input.metadata);
@@ -464,7 +470,10 @@ export function buildCompanionThreadDelta(input: {
   const previousPrefix = previousThread
     ? orderedEntries.slice(0, previousThread.prefix_count)
     : [];
-  const currentPrefixCount = Math.max(0, orderedEntries.length - 250);
+  const currentPrefixCount = Math.max(
+    0,
+    orderedEntries.length - COMPANION_THREAD_SYNC_CURSOR_TAIL_RECORDS,
+  );
   const prefixStillMatches = previousThread !== undefined
     && currentPrefixCount >= previousThread.prefix_count
     && previousPrefix.length === previousThread.prefix_count

@@ -1091,11 +1091,13 @@ authority arrives. Its recurring and foreground reads use opaque stateless curso
 `GET /v1/companions/sync` and `GET /v1/companions/:id/thread-delta`: unchanged rows are omitted,
 deletions are tombstoned, roster order is explicit, changed entries retain ordinal order, and current
 thread metadata is always returned. The cursor contains projection digests rather than message text,
-is bound to organization/member/Companion scope, and keeps only an exact mutable tail plus a digest
-of older history. A rare historical-prefix edit produces an explicit replacement projection instead
-of a gap. The app keeps the full synchronized thread in memory while bounding only its persisted
-tail. These endpoints may compute the current authorized PostgreSQL projection but send only its
-delta in the ordinary case; they never advance unread state, wake, or observe Box or Pi. The visible
+is bound to organization/member/Companion scope, and keeps six exact tail records plus a digest of
+older history so its query remains below intermediary request-line limits. A rare historical-prefix
+edit produces an explicit replacement projection instead of a gap. Native iOS omits oversized
+legacy cursors and retries a proxy `414`/`431` response once without a cursor. The app keeps the full
+synchronized thread in memory while bounding only its persisted tail. These endpoints may compute
+the current authorized PostgreSQL projection but send only its delta in the ordinary case; they
+never advance unread state, wake, or observe Box or Pi. The visible
 thread clears unread explicitly. APNs invalidation and app foregrounding reuse the same
 synchronization path.
 
