@@ -280,7 +280,8 @@ describe("Companion stateless sync projections", () => {
       companionId: COMPANION_ID,
       thread: thread(entries),
     });
-    expect(initial.cursor.length).toBeLessThan(256 * 1024);
+    // Query parameters must stay comfortably below production proxy request-line limits.
+    expect(initial.cursor.length).toBeLessThan(8_000);
 
     const appended = entry("event:5000", 5_000, "message 5000");
     const next = buildCompanionThreadDelta({

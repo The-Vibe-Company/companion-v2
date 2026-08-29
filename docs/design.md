@@ -365,9 +365,12 @@ scope-bound cursors. The API still performs the ordinary authorized PostgreSQL r
 only changed projections, deletion tombstones, current roster ordering, and current thread metadata;
 it never contacts Box or Pi and background/prefetch reads do not advance the member's unread
 watermark. Opening the visible thread clears unread through the ordinary member-state capability.
-Thread cursors retain exact digests for a bounded mutable tail plus one historical-prefix digest;
-an exceptional edit outside that tail returns an explicit replacement projection. Missing cursors
-produce the initial complete projection, while malformed or cross-scope cursors fail closed.
+Thread cursors retain six exact tail digests plus one historical-prefix digest, keeping the encoded
+query comfortably below intermediary request-line limits. An exceptional edit outside that tail
+returns an explicit replacement projection. Missing cursors produce the initial complete
+projection, while malformed or cross-scope cursors fail closed. Native iOS omits oversized legacy
+thread cursors and retries proxy `414`/`431` rejection once without a cursor, yielding that complete
+replacement projection instead of a permanent refresh failure.
 Foreground activation and APNs `content-available` invalidation reuse these same endpoints rather
 than introducing a mobile-only capability contract.
 

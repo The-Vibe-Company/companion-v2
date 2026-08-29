@@ -59,6 +59,9 @@ public struct KeychainSessionStorage: SessionStorage {
 @MainActor
 @Observable
 public final class SessionStore {
+    /// Leaves ample room for the path, cookies, and proxy request-line limits around the cursor.
+    private static let maximumThreadCursorRequestBytes = 8_000
+
     public enum Phase: Equatable, Sendable {
         case restoring
         case signedOut
@@ -997,8 +1000,9 @@ public final class SessionStore {
         let capturedSessionScopeGeneration = sessionScopeGeneration
         let baseline = liveThreadSnapshots[companionID]
             ?? (try? cache?.thread(scope: scope, companionID: companionID))
-        let requestCursor = baseline?.cursor
+        let requestCursor = Self.transportSafeThreadCursor(baseline?.cursor)
         let response: CompanionSyncMeasurement<CompanionThreadDelta>
+        let responseBaseline: CompanionThreadSnapshot?
         do {
             response = try await authenticated(
                 expectedScope: scope,
@@ -1009,7 +1013,11 @@ public final class SessionStore {
                     cursor: requestCursor
                 )
             }
-        } catch let error as APIError where error.status == 400 && requestCursor != nil {
+            responseBaseline = requestCursor == nil ? nil : baseline
+        } catch let error as APIError where Self.shouldRetryThreadSyncWithoutCursor(
+            error,
+            requestCursor: requestCursor
+        ) {
             response = try await authenticated(
                 expectedScope: scope,
                 expectedSessionScopeGeneration: capturedSessionScopeGeneration
@@ -1019,18 +1027,19 @@ public final class SessionStore {
                     cursor: nil
                 )
             }
+            responseBaseline = nil
         }
         guard threadSyncGenerations[companionID] == generation,
               capturedSessionScopeGeneration == sessionScopeGeneration,
               currentSession.flatMap(Self.cacheScope(for:)) == scope else {
             throw CancellationError()
         }
-        let snapshot = response.value.applying(to: requestCursor == nil ? nil : baseline)
+        let snapshot = response.value.applying(to: responseBaseline)
         let rosterMarksUnread = initialRosterSnapshot?.companions.first {
             $0.id == companionID
         }?.unread == true
         let shouldMarkRead = markRead && (
-            requestCursor == nil
+            responseBaseline == nil
                 || !response.value.changedEntries.isEmpty
                 || (rosterMarksUnread && !companionsMarkedRead.contains(companionID))
         )
@@ -1065,6 +1074,18 @@ public final class SessionStore {
             receivedBytes: response.receivedBytes,
             networkMilliseconds: response.networkMilliseconds
         )
+    }
+
+    private static func transportSafeThreadCursor(_ cursor: String?) -> String? {
+        guard let cursor, cursor.utf8.count <= maximumThreadCursorRequestBytes else { return nil }
+        return cursor
+    }
+
+    private static func shouldRetryThreadSyncWithoutCursor(
+        _ error: APIError,
+        requestCursor: String?
+    ) -> Bool {
+        requestCursor != nil && [400, 414, 431].contains(error.status)
     }
 
     public func decideCompanionDecision(

@@ -165,6 +165,89 @@ private final class BackgroundRefreshURLProtocol: URLProtocol, @unchecked Sendab
     override func stopLoading() {}
 }
 
+private final class OversizedThreadCursorURLProtocol: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    private nonisolated(unsafe) static var requestedURL: URL?
+
+    static func reset() {
+        lock.lock()
+        requestedURL = nil
+        lock.unlock()
+    }
+
+    static var capturedURL: URL? {
+        lock.lock()
+        defer { lock.unlock() }
+        return requestedURL
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.lock.lock()
+        Self.requestedURL = request.url
+        Self.lock.unlock()
+        let payload = #"{"cursor":"transport-safe","reset_entries":true,"changed_entries":[{"event_id":"event:900","ordinal":900,"role":"assistant","content":"Recovered","reasoning":null,"author_id":null,"author_name":null,"decision":null,"tool":null,"routine":null,"turn_id":null,"queued":false,"attachments":[],"created_at":"2026-08-29T00:00:00Z"}],"deleted_event_ids":[],"thread":{"companion_id":"22222222-2222-4222-8222-222222222222","viewer_id":"user-1","read_only":false,"can_send":true,"transcription_available":true,"active_turn":null,"queued_count":0,"interrupted_turn":null}}"#
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(payload.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+private final class RejectedThreadCursorURLProtocol: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    private nonisolated(unsafe) static var requestedCursors: [String?] = []
+
+    static func reset() {
+        lock.lock()
+        requestedCursors = []
+        lock.unlock()
+    }
+
+    static var capturedCursors: [String?] {
+        lock.lock()
+        defer { lock.unlock() }
+        return requestedCursors
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let cursor = URLComponents(
+            url: request.url!,
+            resolvingAgainstBaseURL: false
+        )?.queryItems?.first(where: { $0.name == "cursor" })?.value
+        Self.lock.lock()
+        Self.requestedCursors.append(cursor)
+        Self.lock.unlock()
+        let statusCode = cursor == nil ? 200 : 431
+        let payload = cursor == nil
+            ? #"{"cursor":"transport-safe","reset_entries":true,"changed_entries":[],"deleted_event_ids":[],"thread":{"companion_id":"22222222-2222-4222-8222-222222222222","viewer_id":"user-1","read_only":false,"can_send":true,"transcription_available":true,"active_turn":null,"queued_count":0,"interrupted_turn":null}}"#
+            : ""
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: statusCode,
+            httpVersion: nil,
+            headerFields: cursor == nil ? ["Content-Type": "application/json"] : nil
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(payload.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
 private final class SuspendedRosterSyncURLProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var releaseResponse = DispatchSemaphore(value: 0)
     private static let lock = NSLock()
@@ -705,6 +788,81 @@ func cachedThreadRemainsRenderableWhileDeltaSynchronizationIsInFlight() async th
     #expect(refreshed.value.thread.canSend)
     #expect(refreshed.value.cursor == "next-cursor")
     #expect(refreshed.value.isPartial)
+}
+
+@Test @MainActor
+func oversizedLegacyThreadCursorRecoversWithAFullSynchronization() async throws {
+    OversizedThreadCursorURLProtocol.reset()
+    let fixture = try cacheFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let session = testSession()
+    let companionID = "22222222-2222-4222-8222-222222222222"
+    try fixture.cache.saveThread(
+        CompanionThreadSnapshot(
+            cursor: String(repeating: "A", count: 8_001),
+            thread: try companionThread(entries: [try transcriptEntry(ordinal: 1)])
+        ),
+        scope: "org-1:user-1",
+        companionID: companionID
+    )
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [OversizedThreadCursorURLProtocol.self]
+    let client = APIClient(
+        baseURL: URL(string: "https://example.test")!,
+        session: URLSession(configuration: configuration),
+        initialAuthority: session
+    )
+    let store = SessionStore(
+        apiURL: URL(string: "https://example.test")!,
+        storage: FixedSessionStorage(data: try JSONEncoder().encode(session)),
+        cache: fixture.cache,
+        apiClient: client
+    )
+
+    let synchronization = try await store.synchronizeThread(companionID: companionID)
+    let requestURL = try #require(OversizedThreadCursorURLProtocol.capturedURL)
+    let cursor = URLComponents(
+        url: requestURL,
+        resolvingAgainstBaseURL: false
+    )?.queryItems?.first(where: { $0.name == "cursor" })?.value
+    #expect(cursor == nil)
+    #expect(synchronization.value.cursor == "transport-safe")
+    #expect(synchronization.value.thread.entries.map(\.content) == ["Recovered"])
+}
+
+@Test @MainActor
+func rejectedThreadCursorRetriesOnceWithoutCursor() async throws {
+    RejectedThreadCursorURLProtocol.reset()
+    let fixture = try cacheFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let session = testSession()
+    let companionID = "22222222-2222-4222-8222-222222222222"
+    try fixture.cache.saveThread(
+        CompanionThreadSnapshot(
+            cursor: "short-cursor",
+            thread: try companionThread(entries: [try transcriptEntry(ordinal: 1)])
+        ),
+        scope: "org-1:user-1",
+        companionID: companionID
+    )
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [RejectedThreadCursorURLProtocol.self]
+    let client = APIClient(
+        baseURL: URL(string: "https://example.test")!,
+        session: URLSession(configuration: configuration),
+        initialAuthority: session
+    )
+    let store = SessionStore(
+        apiURL: URL(string: "https://example.test")!,
+        storage: FixedSessionStorage(data: try JSONEncoder().encode(session)),
+        cache: fixture.cache,
+        apiClient: client
+    )
+
+    let synchronization = try await store.synchronizeThread(companionID: companionID)
+    #expect(RejectedThreadCursorURLProtocol.capturedCursors == ["short-cursor", nil])
+    #expect(synchronization.value.cursor == "transport-safe")
+    #expect(synchronization.value.thread.entries.isEmpty)
 }
 
 @Test

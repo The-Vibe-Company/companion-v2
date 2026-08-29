@@ -42,6 +42,9 @@ Prefetch/background reads preserve unread state. Chat installs that read-only ca
 immediately, then calls
 `GET /v1/companions/:id/thread-delta`; fresh metadata is required before send, attachment,
 transcription, or decision controls become active, and the visible chat explicitly clears unread.
+Legacy cached thread cursors that exceed the transport-safe request budget are omitted so the app
+can recover with one complete synchronization instead of sending an oversized URL. A proxy
+`414`/`431` response receives the same single no-cursor recovery attempt.
 SQLite never stores attachment bytes and is purged for that member/workspace scope on logout or
 invalid session.
 
