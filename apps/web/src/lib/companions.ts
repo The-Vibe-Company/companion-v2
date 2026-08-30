@@ -15,9 +15,11 @@ import type {
   CompanionShares,
   CompanionThread,
   CompanionTrigger,
+  CompanionTriggerProviderAccount,
   CancelCompanionTurnAcceptedResponse,
   CreateCompanionRoutineInput,
   CreateCompanionTriggerInput,
+  CreateCompanionTriggerProviderAccountInput,
   SendCompanionMessageAcceptedResponse,
   SaveCompanionProviderInput,
   SaveCompanionPluginInput,
@@ -188,6 +190,44 @@ export async function deleteCompanionPlugin(orgId: string, accountId: string): P
     method: "DELETE",
     headers: orgHeaders(orgId),
   });
+}
+
+/** Member-wide provider authority used for trigger registration by every Companion. */
+export async function listCompanionTriggerProviderAccounts(
+  orgId: string,
+): Promise<CompanionTriggerProviderAccount[]> {
+  const result = await apiFetch<{ accounts: CompanionTriggerProviderAccount[] }>(
+    "/v1/companion-trigger-provider-accounts",
+    { headers: orgHeaders(orgId) },
+  );
+  return result.accounts;
+}
+
+/** API-key fallback; OAuth remains the primary GitHub and Sentry connection path. */
+export async function saveCompanionTriggerProviderAccount(
+  orgId: string,
+  input: CreateCompanionTriggerProviderAccountInput,
+): Promise<CompanionTriggerProviderAccount> {
+  const result = await apiFetch<{ account: CompanionTriggerProviderAccount }>(
+    "/v1/companion-trigger-provider-accounts",
+    {
+      method: "POST",
+      headers: orgHeaders(orgId),
+      body: JSON.stringify(input),
+    },
+  );
+  return result.account;
+}
+
+export async function disconnectCompanionTriggerProviderAccount(
+  orgId: string,
+  accountId: string,
+): Promise<CompanionTriggerProviderAccount> {
+  const result = await apiFetch<{ account: CompanionTriggerProviderAccount }>(
+    `/v1/companion-trigger-provider-accounts/${encodeURIComponent(accountId)}`,
+    { method: "DELETE", headers: orgHeaders(orgId) },
+  );
+  return result.account;
 }
 
 export async function saveCompanionProvider(

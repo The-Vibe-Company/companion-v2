@@ -70,9 +70,11 @@ clickable marker instead of a prompt bubble; it opens that exact run, while surf
 remain available to Viewers, and never wake Box or Pi. The details page queues the existing Pi-only
 restart. Trigger rows are a distinct result surface beside plugins: they show provider, notify/relay
 mode, remote registration state, retry failures, and newest-first fire history with bounded received
-payloads. Creation and chat approval reuse the matching attached MCP credential and let Companion
-register the remote webhook end to end. iOS never asks for a callback URL or a second provider key;
-the platform URL and secret rotation remain collapsed technical controls for editors only. The
+payloads. Trigger provider accounts connect once at member level and are immediately usable by every
+Companion without an attachment step. GitHub and Sentry normally share their encrypted MCP OAuth
+credential; Linear and supported fallbacks use one encrypted member-level API key. Creation and chat
+approval let Companion register the remote webhook end to end, without a callback-URL prompt or
+manual provider-console setup. The platform URL and secret rotation remain collapsed technical controls for editors only. The
 details page queues the existing Pi-only restart as **Restart Companion** and the existing full-Box
 restart as **Restart server**; both are
 confirmed, idempotent lifecycle intents whose PostgreSQL-projected queued/stopping/starting/completed

@@ -7,6 +7,7 @@ import UIKit
 struct CompanionResourceSectionsServices {
     let load: () async throws -> CompanionConnectedResources
     let listPlugins: () async throws -> [CompanionPluginAccount]
+    let listTriggerProviderAccounts: (() async throws -> [CompanionTriggerProviderAccount])?
     let updatePluginSelection: ([String]) async throws -> CompanionSummary
     let loadCompanion: () async throws -> CompanionSummary
     let restart: (CompanionRuntimeRestartTarget, UUID) async throws -> CompanionOperationSummary
@@ -19,6 +20,7 @@ struct CompanionResourceSectionsServices {
     init(
         load: @escaping () async throws -> CompanionConnectedResources,
         listPlugins: @escaping () async throws -> [CompanionPluginAccount],
+        listTriggerProviderAccounts: (() async throws -> [CompanionTriggerProviderAccount])? = nil,
         updatePluginSelection: @escaping ([String]) async throws -> CompanionSummary,
         loadCompanion: @escaping () async throws -> CompanionSummary,
         restart: @escaping (CompanionRuntimeRestartTarget, UUID) async throws -> CompanionOperationSummary,
@@ -30,6 +32,7 @@ struct CompanionResourceSectionsServices {
     ) {
         self.load = load
         self.listPlugins = listPlugins
+        self.listTriggerProviderAccounts = listTriggerProviderAccounts
         self.updatePluginSelection = updatePluginSelection
         self.loadCompanion = loadCompanion
         self.restart = restart
@@ -50,6 +53,7 @@ struct CompanionResourceSections: View {
     @State private var currentCompanion: CompanionSummary
     @State private var resources: CompanionConnectedResources?
     @State private var plugins: [CompanionPluginAccount] = []
+    @State private var triggerProviderAccounts: [CompanionTriggerProviderAccount] = []
     @State private var loading = true
     @State private var error: String?
     @State private var success: String?
@@ -57,6 +61,7 @@ struct CompanionResourceSections: View {
     @State private var mutatingPluginID: String?
     @State private var showingPluginChoices = false
     @State private var showingPluginManagement = false
+    @State private var showingTriggerProviderManagement = false
     @State private var restartTarget: CompanionRuntimeRestartTarget?
     @State private var restartingTarget: CompanionRuntimeRestartTarget?
     @State private var restartRequestIDs: [CompanionRuntimeRestartTarget: UUID] = [:]
@@ -140,6 +145,13 @@ struct CompanionResourceSections: View {
         }
         .sheet(isPresented: $showingPluginManagement, onDismiss: { Task { await loadPlugins() } }) {
             PluginManagementView()
+                .tint(visualTheme.accent)
+        }
+        .sheet(
+            isPresented: $showingTriggerProviderManagement,
+            onDismiss: { Task { await load() } }
+        ) {
+            TriggerProviderManagementView()
                 .tint(visualTheme.accent)
         }
         .confirmationDialog(
@@ -484,7 +496,10 @@ struct CompanionResourceSections: View {
             .buttonStyle(.borderless)
             .accessibilityLabel("Fire history for \(trigger.name)")
             .accessibilityIdentifier("companion.details.trigger-history.\(trigger.id)")
-            if canEditResources, providerConnected, trigger.registrationStatus == .failed, busyResourceID != trigger.id {
+            if canEditResources,
+               providerConnected,
+               (trigger.registrationStatus == .failed || trigger.registrationStatus == .unregistered),
+               busyResourceID != trigger.id {
                 Button {
                     Task { await retryTriggerRegistration(trigger) }
                 } label: {
@@ -509,7 +524,8 @@ struct CompanionResourceSections: View {
                         Button("Edit", systemImage: "pencil") {
                             editingTrigger = trigger
                         }
-                        if providerConnected, trigger.registrationStatus == .failed {
+                        if providerConnected,
+                           (trigger.registrationStatus == .failed || trigger.registrationStatus == .unregistered) {
                             Button("Retry registration", systemImage: "arrow.clockwise") {
                                 Task { await retryTriggerRegistration(trigger) }
                             }
@@ -847,16 +863,15 @@ struct CompanionResourceSections: View {
         currentCompanion.access.canEditCompanionSettings
     }
 
-    private var triggerAccountOptions: [CompanionPluginAccount] {
-        plugins.filter(\.connected)
+    private var triggerAccountOptions: [CompanionTriggerProviderAccount] {
+        triggerProviderAccounts
     }
 
-    private var triggerProviderAccounts: [CompanionPluginAccount] {
-        triggerAccountOptions
-            .filter { $0.provider.lowercased() == "github" || $0.provider.lowercased() == "linear" }
+    private var sortedTriggerProviderAccounts: [CompanionTriggerProviderAccount] {
+        triggerProviderAccounts
             .sorted {
-                let left = pluginProviderName($0.provider)
-                let right = pluginProviderName($1.provider)
+                let left = pluginProviderName($0.provider.rawValue)
+                let right = pluginProviderName($1.provider.rawValue)
                 if left != right { return left.localizedCaseInsensitiveCompare(right) == .orderedAscending }
                 return $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending
             }
@@ -876,32 +891,43 @@ struct CompanionResourceSections: View {
                 }
                 Spacer()
                 Button(triggerProviderAccounts.isEmpty ? "Connect" : "Manage") {
-                    showingPluginManagement = true
+                    showingTriggerProviderManagement = true
                 }
                 .font(.caption.weight(.semibold))
                 .accessibilityIdentifier("companion.details.triggers.manage-providers")
             }
 
             if triggerProviderAccounts.isEmpty {
-                Text("No trigger provider connected. Connect GitHub or Linear once to make it live for every Companion.")
+                Text("No trigger provider connected. Connect GitHub, Sentry, or Linear once to make it live for every Companion.")
                     .font(.caption)
                     .foregroundStyle(Color.companionMuted)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
-                ForEach(triggerProviderAccounts) { account in
+                ForEach(sortedTriggerProviderAccounts) { account in
                     HStack(spacing: 9) {
-                        PluginMark(provider: account.provider, size: 28)
-                        Text("\(pluginProviderName(account.provider)) · \(account.label)")
+                        PluginMark(provider: account.provider.rawValue, size: 28)
+                        Text("\(pluginProviderName(account.provider.rawValue)) · \(account.label)")
                             .font(.caption.weight(.medium))
                             .foregroundStyle(Color.companionInk)
                             .lineLimit(1)
                         Spacer()
-                        Label("Connected", systemImage: "checkmark.circle.fill")
+                        Label(
+                            account.status == .connected ? "Connected" : "Disconnected",
+                            systemImage: account.status == .connected
+                                ? "checkmark.circle.fill"
+                                : "exclamationmark.circle.fill"
+                        )
                             .font(.caption2.weight(.semibold))
-                            .foregroundStyle(Color.companionSuccess)
+                            .foregroundStyle(
+                                account.status == .connected
+                                    ? Color.companionSuccess
+                                    : Color.companionDanger
+                            )
                     }
                     .accessibilityElement(children: .combine)
-                    .accessibilityLabel("\(pluginProviderName(account.provider)) \(account.label), shared provider connected")
+                    .accessibilityLabel(
+                        "\(pluginProviderName(account.provider.rawValue)) \(account.label), shared provider \(account.status.rawValue)"
+                    )
                 }
             }
 
@@ -916,11 +942,11 @@ struct CompanionResourceSections: View {
 
     private func triggerProviderConnected(_ trigger: CompanionTrigger) -> Bool {
         let provider = trigger.provider.lowercased()
-        guard provider == "github" || provider == "linear" else { return true }
+        guard provider == "github" || provider == "linear" || provider == "sentry" else { return true }
         if let accountID = trigger.providerAccountID {
-            return triggerProviderAccounts.contains { $0.id == accountID }
+            return triggerProviderAccounts.contains { $0.id == accountID && $0.status == .connected }
         }
-        return triggerProviderAccounts.contains { $0.provider.lowercased() == provider }
+        return triggerProviderAccounts.contains { $0.provider.rawValue == provider && $0.status == .connected }
     }
 
     private var effectiveMemberTimezone: String {
@@ -1045,6 +1071,7 @@ struct CompanionResourceSections: View {
             resources = next
             error = nil
             await loadPlugins(expectedGeneration: generation)
+            await loadTriggerProviderAccounts(expectedGeneration: generation)
             await refreshRuntime()
         } catch {
             guard !Task.isCancelled, generation == loadGeneration else { return }
@@ -1071,6 +1098,29 @@ struct CompanionResourceSections: View {
             guard !Task.isCancelled,
                   expectedGeneration == nil || expectedGeneration == loadGeneration else { return }
             self.error = companionDisplayMessage(error, fallback: "Plugin accounts could not be refreshed.")
+        }
+    }
+
+    private func loadTriggerProviderAccounts(expectedGeneration: Int? = nil) async {
+        do {
+            let next: [CompanionTriggerProviderAccount]
+            if let list = services?.listTriggerProviderAccounts {
+                next = try await list()
+            } else if services == nil {
+                next = try await sessionStore.listCompanionTriggerProviderAccounts()
+            } else {
+                next = []
+            }
+            guard !Task.isCancelled,
+                  expectedGeneration == nil || expectedGeneration == loadGeneration else { return }
+            triggerProviderAccounts = next
+        } catch {
+            guard !Task.isCancelled,
+                  expectedGeneration == nil || expectedGeneration == loadGeneration else { return }
+            self.error = companionDisplayMessage(
+                error,
+                fallback: "Trigger provider accounts could not be refreshed."
+            )
         }
     }
 

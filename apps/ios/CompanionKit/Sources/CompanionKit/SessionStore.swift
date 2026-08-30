@@ -970,6 +970,43 @@ public final class SessionStore {
         }
     }
 
+    public func listCompanionTriggerProviderAccounts() async throws -> [CompanionTriggerProviderAccount] {
+        do {
+            let accounts = try await client.listCompanionTriggerProviderAccounts()
+            await persistRollingAuthority()
+            return accounts
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func saveCompanionTriggerProviderAccount(
+        _ input: CreateCompanionTriggerProviderAccountInput
+    ) async throws -> CompanionTriggerProviderAccount {
+        do {
+            let account = try await client.saveCompanionTriggerProviderAccount(input)
+            await persistRollingAuthority()
+            return account
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func disconnectCompanionTriggerProviderAccount(
+        accountID: String
+    ) async throws -> CompanionTriggerProviderAccount {
+        do {
+            let account = try await client.disconnectCompanionTriggerProviderAccount(accountID: accountID)
+            await persistRollingAuthority()
+            return account
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
     public func listAccessibleCompanionSkills() async throws -> [CompanionSkillReference] {
         do {
             let skills = try await client.listAccessibleCompanionSkills()

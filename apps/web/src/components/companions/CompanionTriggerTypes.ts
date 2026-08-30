@@ -1,6 +1,7 @@
 import type {
   CompanionTrigger,
   CompanionTriggerMode,
+  CompanionTriggerProviderAccount,
   CompanionTriggerProvider,
   CompanionTriggerRegistrationStatus,
   CreateCompanionTriggerInput,
@@ -20,13 +21,8 @@ export type CompanionTriggerV2Mode = CompanionTriggerMode;
 export type CompanionTriggerV2RegistrationStatus = CompanionTriggerRegistrationStatus;
 export type CompanionTriggerV2 = CompanionTrigger;
 
-/** A credential-free member account projection shared by every Companion in the workspace. */
-export interface CompanionTriggerAccountOption {
-  id: string;
-  provider: string;
-  label: string;
-  connected?: boolean;
-}
+/** Credential-free member authority shared by every Companion without an attachment step. */
+export type CompanionTriggerAccountOption = CompanionTriggerProviderAccount;
 
 /** Additive request shape sent by the Trigger v2 editor. */
 export type CreateCompanionTriggerV2Input = CreateCompanionTriggerInput;

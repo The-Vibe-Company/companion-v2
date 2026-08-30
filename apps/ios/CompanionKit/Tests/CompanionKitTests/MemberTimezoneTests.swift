@@ -116,6 +116,21 @@ func profileAndResourceInputsEncodeSharedRoutePayloads() throws {
     #expect(trigger?["provider_account_id"] as? String == "55555555-5555-4555-8555-555555555555")
     #expect((trigger?["target"] as? [String: Any])?["repo"] as? String == "acme/project")
 
+    let sentryTrigger = try JSONSerialization.jsonObject(
+        with: encoder.encode(CreateCompanionTriggerInput(
+            name: "New Sentry issue",
+            prompt: "Fix the issue.",
+            provider: .sentry,
+            target: CompanionTriggerTarget(
+                organization: "acme",
+                project: "ios",
+                events: ["error"]
+            )
+        ))
+    ) as? [String: Any]
+    #expect(sentryTrigger?["provider"] as? String == "sentry")
+    #expect((sentryTrigger?["target"] as? [String: Any])?["organization"] as? String == "acme")
+
     let providerChange = try JSONSerialization.jsonObject(
         with: encoder.encode(UpdateCompanionTriggerInput(provider: .custom))
     ) as? [String: Any]
@@ -132,6 +147,14 @@ func triggerRegistrationRetryAndHistoryUseSharedRoutes() async throws {
         let requestURL = try #require(request.url)
         let data: Data
         switch (requestURL.path, request.httpMethod) {
+        case ("/v1/companion-trigger-provider-accounts", "GET"):
+            data = Data(#"{"accounts":[{"id":"account-1","provider":"sentry","label":"work","credential_source":"mcp_oauth","mcp_account_id":"mcp-1","status":"connected","dependent_trigger_count":2,"created_at":"2026-08-30T09:00:00.000Z","updated_at":"2026-08-30T09:00:00.000Z"}]}"#.utf8)
+        case ("/v1/companion-trigger-provider-accounts", "POST"):
+            let body = try JSONSerialization.jsonObject(with: memberTimezoneRequestBody(request)) as? [String: String]
+            #expect(body == ["provider": "linear", "label": "work", "credential": "secret-key"])
+            data = Data(#"{"account":{"id":"account-2","provider":"linear","label":"work","credential_source":"api_key","mcp_account_id":null,"status":"connected","dependent_trigger_count":0,"created_at":"2026-08-30T09:00:00.000Z","updated_at":"2026-08-30T09:00:00.000Z"}}"#.utf8)
+        case ("/v1/companion-trigger-provider-accounts/account-1", "DELETE"):
+            data = Data(#"{"account":{"id":"account-1","provider":"sentry","label":"work","credential_source":"mcp_oauth","mcp_account_id":null,"status":"disconnected","dependent_trigger_count":2,"created_at":"2026-08-30T09:00:00.000Z","updated_at":"2026-08-30T09:01:00.000Z"}}"#.utf8)
         case ("/v1/companions/companion-1/triggers/trigger-1/registration", "POST"):
             data = Data(#"{"trigger":{"id":"trigger-1","name":"CI failed","prompt":"Summarize failure","mode":"notify","provider":"github","provider_account_id":"account-1","registration_status":"registered","remote_hook_account_id":"account-1","remote_hook_id":"hook-42","enabled":true,"webhook_url":null,"last_fired_at":null,"last_error_message":null}}"#.utf8)
         case ("/v1/companions/companion-1/triggers/trigger-1/runs", "GET"):
@@ -163,6 +186,23 @@ func triggerRegistrationRetryAndHistoryUseSharedRoutes() async throws {
         needsOnboarding: false,
         user: .init(id: "user-1", email: "member@example.com", name: "Member")
     ))
+
+    let providerAccounts = try await client.listCompanionTriggerProviderAccounts()
+    #expect(providerAccounts.first?.provider == .sentry)
+    #expect(providerAccounts.first?.dependentTriggerCount == 2)
+
+    let apiKeyAccount = try await client.saveCompanionTriggerProviderAccount(
+        CreateCompanionTriggerProviderAccountInput(
+            provider: .linear,
+            label: "work",
+            credential: "secret-key"
+        )
+    )
+    #expect(apiKeyAccount.credentialSource == .apiKey)
+
+    let disconnected = try await client.disconnectCompanionTriggerProviderAccount(accountID: "account-1")
+    #expect(disconnected.status == .disconnected)
+    #expect(disconnected.mcpAccountID == nil)
 
     let retried = try await client.retryCompanionTriggerRegistration(
         companionID: "companion-1",

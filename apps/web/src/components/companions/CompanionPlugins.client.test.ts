@@ -228,13 +228,13 @@ describe("CompanionPlugins", () => {
     expect(window.location.search).toBe("?view=plugins");
   });
 
-  it("names GitHub as MCP plus git after OAuth returns", async () => {
+  it("confirms GitHub trigger authority separately from per-Companion MCP attachment", async () => {
     window.location.href = "http://localhost/companions?view=plugins&oauth=connected&provider=github";
 
     const container = await mount();
 
     expect(container.querySelector('[role="status"]')?.textContent)
-      .toBe("GitHub connected for MCP and git.");
+      .toBe("GitHub connected. Trigger registration is live for every Companion; MCP tools can now be attached separately.");
     expect(window.location.search).toBe("?view=plugins");
   });
 

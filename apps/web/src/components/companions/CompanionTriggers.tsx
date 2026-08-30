@@ -63,7 +63,7 @@ const MODE_DESCRIPTIONS = {
 } satisfies Record<CompanionTriggerV2Mode, string>;
 
 const TRIGGER_MODES = ["notify", "relay"] satisfies CompanionTriggerV2Mode[];
-const REMOTE_TRIGGER_PROVIDERS = ["github", "linear"] satisfies CompanionTriggerV2Provider[];
+const REMOTE_TRIGGER_PROVIDERS = ["github", "linear", "sentry"] satisfies CompanionTriggerV2Provider[];
 type RemoteTriggerProvider = (typeof REMOTE_TRIGGER_PROVIDERS)[number];
 
 type TriggerEditorValue = CompanionTriggerV2;
@@ -80,11 +80,12 @@ function providerMark(provider: CompanionTriggerV2Provider) {
 }
 
 function isProvider(provider: string): provider is CompanionTriggerV2Provider {
-  return provider === "webhook" || provider === "linear" || provider === "github" || provider === "custom";
+  return provider === "webhook" || provider === "linear" || provider === "github"
+    || provider === "sentry" || provider === "custom";
 }
 
 function isRemoteTriggerProvider(provider: string): provider is RemoteTriggerProvider {
-  return provider === "github" || provider === "linear";
+  return provider === "github" || provider === "linear" || provider === "sentry";
 }
 
 function eligibleAccountsFor(
@@ -94,8 +95,7 @@ function eligibleAccountsFor(
   // Generic/custom webhooks are not backed by a connected member account. Provider-backed triggers
   // silently reuse the sole shared account and only expose a chooser when there is a real choice.
   if (provider === "webhook" || provider === "custom") return [];
-  return accounts.filter((account) => account.connected !== false
-    && account.provider.toLocaleLowerCase("en-US") === provider);
+  return accounts.filter((account) => account.status === "connected" && account.provider === provider);
 }
 
 function triggerProviderConnected(
@@ -103,7 +103,7 @@ function triggerProviderConnected(
   accounts: readonly CompanionTriggerAccountOption[],
 ): boolean {
   if (!isRemoteTriggerProvider(trigger.provider)) return true;
-  return accounts.some((account) => account.connected !== false
+  return accounts.some((account) => account.status === "connected"
     && (trigger.provider_account_id
       ? account.id === trigger.provider_account_id
       : account.provider.toLocaleLowerCase("en-US") === trigger.provider));
@@ -114,7 +114,7 @@ function selectableProvidersFor(
   accounts: readonly CompanionTriggerAccountOption[],
 ): CompanionTriggerV2Provider[] {
   const providers: CompanionTriggerV2Provider[] = REMOTE_TRIGGER_PROVIDERS.filter((provider) => (
-    accounts.some((account) => account.provider.toLocaleLowerCase("en-US") === provider)
+    accounts.some((account) => account.status === "connected" && account.provider === provider)
   ));
   // Existing legacy/manual triggers remain inspectable and editable, but those providers are not
   // offered for new triggers because they cannot complete remote registration end to end.
@@ -122,17 +122,29 @@ function selectableProvidersFor(
   return providers;
 }
 
-function triggerTarget(provider: CompanionTriggerV2Provider, repo: string, events: string): CompanionTriggerTarget | null {
-  if (provider !== "github") return null;
-  return {
-    repo: repo.trim() || undefined,
-    events: events.split(",").map((event) => event.trim()).filter(Boolean),
-  };
+function triggerTarget(
+  provider: CompanionTriggerV2Provider,
+  repo: string,
+  organization: string,
+  project: string,
+  events: string,
+): CompanionTriggerTarget | null {
+  const parsedEvents = events.split(",").map((event) => event.trim()).filter(Boolean);
+  if (provider === "github") return { repo: repo.trim() || undefined, events: parsedEvents };
+  if (provider === "sentry") {
+    return {
+      organization: organization.trim() || undefined,
+      project: project.trim() || undefined,
+      events: parsedEvents,
+    };
+  }
+  return null;
 }
 
 function registrationLabel(trigger: CompanionTriggerV2): string {
   if (trigger.registration_status === "registered") return "Registered";
   if (trigger.registration_status === "failed") return "Registration failed";
+  if (trigger.registration_status === "unregistered") return "Unregistered";
   return "Manual fallback";
 }
 
@@ -172,6 +184,8 @@ function TriggerEditor({
   const [mode, setMode] = useState<CompanionTriggerV2Mode>(initial?.mode ?? "relay");
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
   const [repo, setRepo] = useState(initial?.target?.repo ?? "");
+  const [organization, setOrganization] = useState(initial?.target?.organization ?? "");
+  const [project, setProject] = useState(initial?.target?.project ?? "");
   const [events, setEvents] = useState(initial?.target?.events?.join(", ") ?? "push");
   const [providerAccountId, setProviderAccountId] = useState(initial?.provider_account_id ?? "");
   const [busy, setBusy] = useState(false);
@@ -204,22 +218,24 @@ function TriggerEditor({
   }, [eligibleAccounts, initial?.provider, initial?.provider_account_id, provider]);
 
   const accountChoiceRequired = eligibleAccounts.length > 1 && !providerAccountId;
-  const providerAccountMissing = (provider === "github" || provider === "linear")
-    && eligibleAccounts.length === 0;
+  const providerAccountMissing = isRemoteTriggerProvider(provider) && eligibleAccounts.length === 0;
   const githubTargetIncomplete = provider === "github" && (!repo.trim() || !events.trim());
+  const sentryTargetIncomplete = provider === "sentry"
+    && (!organization.trim() || !project.trim() || !events.trim());
   const canSave = !busy
     && Boolean(name.trim())
     && Boolean(prompt.trim())
     && selectableProviders.length > 0
     && !accountChoiceRequired
     && !providerAccountMissing
-    && !githubTargetIncomplete;
+    && !githubTargetIncomplete
+    && !sentryTargetIncomplete;
 
   async function save() {
     if (!canSave) return;
     setBusy(true);
     setError(null);
-    const target = triggerTarget(provider, repo, events);
+    const target = triggerTarget(provider, repo, organization, project, events);
     const request: Omit<CreateCompanionTriggerInput, "id"> = {
       name: name.trim(),
       prompt: prompt.trim(),
@@ -308,7 +324,7 @@ function TriggerEditor({
       ) : (
         <div className="companions-trigger-provider-required" role="status">
           <strong>Connect a provider first</strong>
-          <span>Connect GitHub or Linear once in Plugins. Every Companion can then use it immediately.</span>
+          <span>Connect GitHub, Sentry, or Linear once. Every Companion can then use it immediately.</span>
         </div>
       )}
 
@@ -337,9 +353,9 @@ function TriggerEditor({
       )}
       {selectableProviders.length > 0
         && eligibleAccounts.length === 0
-        && (provider === "linear" || provider === "github") && (
+        && isRemoteTriggerProvider(provider) && (
         <p className="companions-trigger-field-hint" role="status">
-          Connect {providerLabel(provider)} once in Plugins. It will become available to every Companion.
+          Connect {providerLabel(provider)} once in Trigger providers. It will become available to every Companion.
         </p>
       )}
 
@@ -367,6 +383,27 @@ function TriggerEditor({
             <span id="companion-trigger-events-hint" className="companions-trigger-field-hint">
               Separate event names with commas. Use * for every event.
             </span>
+          </label>
+        </div>
+      )}
+
+      {provider === "sentry" && (
+        <div className="companions-trigger-target">
+          <p className="companions-trigger-field-label">Sentry event</p>
+          <div className="companions-plugin-form__pair">
+            <label className="og-field">
+              <span>Organization slug</span>
+              <input value={organization} onChange={(event) => setOrganization(event.target.value)} autoComplete="off" />
+            </label>
+            <label className="og-field">
+              <span>Project slug</span>
+              <input value={project} onChange={(event) => setProject(event.target.value)} autoComplete="off" />
+            </label>
+          </div>
+          <label className="og-field">
+            <span>Events</span>
+            <input value={events} onChange={(event) => setEvents(event.target.value)} placeholder="error" autoComplete="off" />
+            <span className="companions-trigger-field-hint">Separate event names with commas.</span>
           </label>
         </div>
       )}
@@ -440,12 +477,10 @@ export function CompanionTriggers({
   const [confirmingRotateId, setConfirmingRotateId] = useState<string | null>(null);
   const copyResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const emitChange = (next: CompanionTrigger[]) => onChange(next);
-  const connectedProviderAccounts = useMemo(() => accountOptions.flatMap((account) => {
-    const provider = account.provider.toLocaleLowerCase("en-US");
-    return account.connected !== false && isRemoteTriggerProvider(provider)
-      ? [{ ...account, provider }]
-      : [];
-  }), [accountOptions]);
+  const connectedProviderAccounts = useMemo(
+    () => accountOptions.filter((account) => account.status === "connected"),
+    [accountOptions],
+  );
 
   useEffect(() => () => {
     if (copyResetRef.current) clearTimeout(copyResetRef.current);
@@ -562,15 +597,17 @@ export function CompanionTriggers({
             </button>
           )}
         </div>
-        {connectedProviderAccounts.length === 0 ? (
+        {accountOptions.length === 0 ? (
           <p>No trigger provider connected. Connect once for every Companion.</p>
         ) : (
           <ul>
-            {connectedProviderAccounts.map((account) => (
+            {accountOptions.map((account) => (
               <li key={account.id}>
                 {providerMark(account.provider)}
                 <span>{providerLabel(account.provider)} · {account.label}</span>
-                <Badge tone="ok" dot>Connected</Badge>
+                <Badge tone={account.status === "connected" ? "ok" : "danger"} dot>
+                  {account.status === "connected" ? "Connected" : "Disconnected"}
+                </Badge>
               </li>
             ))}
           </ul>
@@ -616,6 +653,11 @@ export function CompanionTriggers({
                       {trigger.target.repo} · {trigger.target.events?.join(", ")}
                     </span>
                   )}
+                  {trigger.provider === "sentry" && trigger.target?.organization && trigger.target.project && (
+                    <span className="chat-context__caption mono">
+                      {trigger.target.organization}/{trigger.target.project} · {trigger.target.events?.join(", ")}
+                    </span>
+                  )}
                   {trigger.last_fired_at && (
                     <span className="chat-context__caption">
                       Last fired {formatMemberDateTime(trigger.last_fired_at, displayTimezone)} · {displayTimezone}
@@ -650,7 +692,8 @@ export function CompanionTriggers({
                   )}
                   {canEdit && (
                     <>
-                      {trigger.registration_status === "failed" && providerConnected && (
+                      {(trigger.registration_status === "failed" || trigger.registration_status === "unregistered")
+                        && providerConnected && (
                         <button
                           type="button"
                           className="chat-context__link"

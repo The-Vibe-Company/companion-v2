@@ -20,6 +20,7 @@ import type {
   CompanionTurn,
   CompanionRoutine,
   CompanionTrigger,
+  CompanionTriggerProviderAccount,
 } from "@companion/contracts";
 import {
   COMPANION_PROVIDER_CATALOG,
@@ -55,6 +56,7 @@ import { Icon } from "../Icon";
 import { Dialog } from "../org/primitives";
 import { CompanionProvidersDialog } from "./CompanionProvidersDialog";
 import { CompanionPlugins } from "./CompanionPlugins";
+import { CompanionTriggerProvidersDialog } from "./CompanionTriggerProvidersDialog";
 import { CompanionSettings } from "./CompanionSettings";
 import type { CompanionContextSkill } from "./CompanionContext";
 import { CompanionThread } from "./CompanionThread";
@@ -254,6 +256,7 @@ export function CompanionsApp({
   initialCompanions,
   initialProviders,
   initialPlugins,
+  initialTriggerProviderAccounts = [],
   initialCompanionId,
   initialSettingsCompanionId,
   initialPluginsOpen = false,
@@ -269,6 +272,7 @@ export function CompanionsApp({
   initialCompanions: Companion[];
   initialProviders: CompanionProvidersResponse | null;
   initialPlugins: CompanionPluginAccount[];
+  initialTriggerProviderAccounts?: CompanionTriggerProviderAccount[];
   initialCompanionId?: string | null;
   initialSettingsCompanionId?: string | null;
   initialPluginsOpen?: boolean;
@@ -296,6 +300,10 @@ export function CompanionsApp({
   const [managingProviders, setManagingProviders] = useState(false);
   const [pluginsOpen, setPluginsOpen] = useState(initialPluginsOpen && !initialCompanionId);
   const [pluginAccounts, setPluginAccounts] = useState(initialPlugins);
+  const [triggerProviderAccounts, setTriggerProviderAccounts] = useState(
+    initialTriggerProviderAccounts,
+  );
+  const [triggerProvidersOpen, setTriggerProvidersOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sharing, setSharing] = useState<Companion | null>(null);
@@ -1116,7 +1124,11 @@ export function CompanionsApp({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [mobileSidebarOpen]);
 
-  const dialogOpen = sharing !== null || creating || managingProviders || deletingCompanion !== null;
+  const dialogOpen = sharing !== null
+    || creating
+    || managingProviders
+    || deletingCompanion !== null
+    || triggerProvidersOpen;
 
   useEffect(() => {
     if (!dialogOpen) return;
@@ -1285,14 +1297,8 @@ export function CompanionsApp({
               onRoutinesChange={setRoutines}
               contextTriggers={triggers}
               onTriggersChange={setTriggers}
-              contextTriggerAccounts={pluginAccounts
-                .map((plugin) => ({
-                  id: plugin.id,
-                  provider: plugin.provider,
-                  label: plugin.label,
-                  connected: plugin.connected,
-                }))}
-              onManageTriggerProviders={openPlugins}
+              contextTriggerAccounts={triggerProviderAccounts}
+              onManageTriggerProviders={() => setTriggerProvidersOpen(true)}
               contextTriggerHistoryApi={companionTriggerHistoryApi}
               contextPlugins={pluginAccounts.map((plugin) => ({
                 id: plugin.id,
@@ -1362,7 +1368,17 @@ export function CompanionsApp({
           <CompanionPlugins
             orgId={currentOrg.id}
             initialAccounts={pluginAccounts}
-            onAccountsChange={setPluginAccounts}
+            onAccountsChange={(accounts) => {
+              setPluginAccounts(accounts);
+              // Disconnecting an OAuth MCP account also disconnects its shared trigger authority.
+              // Mirror that immediately; a full refresh will load the server projection.
+              const remainingIds = new Set(accounts.map((account) => account.id));
+              setTriggerProviderAccounts((current) => current.map((account) => (
+                account.mcp_account_id && !remainingIds.has(account.mcp_account_id)
+                  ? { ...account, status: "disconnected", mcp_account_id: null }
+                  : account
+              )));
+            }}
             onBack={closePlugins}
           />
         ) : (
@@ -1418,7 +1434,20 @@ export function CompanionsApp({
             </div>
           </div>
         )}
+
       </main>
+
+      {triggerProvidersOpen && (
+        <CompanionTriggerProvidersDialog
+          orgId={currentOrg.id}
+          accounts={triggerProviderAccounts}
+          onAccountsChange={setTriggerProviderAccounts}
+          onMcpAccountRemoved={(accountId) => {
+            setPluginAccounts((current) => current.filter((account) => account.id !== accountId));
+          }}
+          onClose={() => setTriggerProvidersOpen(false)}
+        />
+      )}
 
       {creating && providers && (
         <NewCompanionDialog

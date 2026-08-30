@@ -2,7 +2,7 @@
 
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import type { CompanionTrigger } from "@companion/contracts";
+import type { CompanionTrigger, CompanionTriggerProviderAccount } from "@companion/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CompanionTriggers, type CompanionTriggersApi } from "./CompanionTriggers";
 
@@ -50,11 +50,28 @@ function trigger(overrides: Partial<CompanionTrigger> = {}): CompanionTrigger {
   };
 }
 
+function providerAccount(
+  overrides: Partial<CompanionTriggerProviderAccount> = {},
+): CompanionTriggerProviderAccount {
+  return {
+    id: "account-1",
+    provider: "github",
+    label: "Acme GitHub",
+    credential_source: "mcp_oauth",
+    mcp_account_id: "44444444-4444-4444-8444-444444444444",
+    status: "connected",
+    dependent_trigger_count: 0,
+    created_at: "2026-08-30T00:00:00.000Z",
+    updated_at: "2026-08-30T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
 async function mount(input: {
   triggers?: CompanionTrigger[];
   canEdit?: boolean;
   memberTimezone?: string | null;
-  accountOptions?: Array<{ id: string; provider: string; label: string; connected?: boolean }>;
+  accountOptions?: CompanionTriggerProviderAccount[];
   onChange?: (triggers: CompanionTrigger[]) => void;
   onManageProviders?: () => void;
 } = {}) {
@@ -174,7 +191,7 @@ describe("Companion triggers panel", () => {
     const container = await mount({
       triggers: [failed],
       onChange,
-      accountOptions: [{ id: "account-1", provider: "github", label: "Acme GitHub" }],
+      accountOptions: [providerAccount()],
     });
 
     expect(container.textContent).toContain("GitHub token is missing hook write scope.");
@@ -195,7 +212,7 @@ describe("Companion triggers panel", () => {
     const created = trigger({ registration_status: "registered", provider_account_id: "account-1" });
     companionsApi.createCompanionTrigger.mockResolvedValue(created);
     const container = await mount({
-      accountOptions: [{ id: "account-1", provider: "github", label: "Acme GitHub" }],
+      accountOptions: [providerAccount()],
     });
 
     await act(async () => {
@@ -217,7 +234,7 @@ describe("Companion triggers panel", () => {
   it("shows member-wide providers separately from per-Companion triggers", async () => {
     const onManageProviders = vi.fn();
     const container = await mount({
-      accountOptions: [{ id: "account-1", provider: "github", label: "Acme GitHub" }],
+      accountOptions: [providerAccount()],
       onManageProviders,
     });
 
@@ -237,12 +254,7 @@ describe("Companion triggers panel", () => {
         registration_status: "failed",
         last_registration_error: "Provider credential was revoked.",
       })],
-      accountOptions: [{
-        id: "account-1",
-        provider: "github",
-        label: "Acme GitHub",
-        connected: false,
-      }],
+      accountOptions: [providerAccount({ status: "disconnected", mcp_account_id: null })],
     });
 
     expect(container.textContent).toContain("Provider disconnected");
@@ -325,7 +337,7 @@ describe("Companion triggers panel", () => {
     const onChange = vi.fn();
     const container = await mount({
       onChange,
-      accountOptions: [{ id: "account-1", provider: "github", label: "Acme GitHub" }],
+      accountOptions: [providerAccount()],
     });
 
     const add = requireButton(container, "[aria-label='Add a trigger']");
@@ -362,6 +374,46 @@ describe("Companion triggers panel", () => {
       }),
     );
     expect(onChange).toHaveBeenCalledWith([created]);
+  });
+
+  it("registers a Sentry project trigger with the shared member OAuth account", async () => {
+    const created = trigger({
+      name: "New Sentry issue",
+      provider: "sentry",
+      provider_account_id: "account-1",
+      target: { organization: "acme", project: "ios", events: ["error"] },
+      registration_status: "registered",
+    });
+    companionsApi.createCompanionTrigger.mockResolvedValue(created);
+    const container = await mount({
+      accountOptions: [providerAccount({ provider: "sentry", label: "Acme Sentry" })],
+    });
+
+    await act(async () => requireButton(container, "[aria-label='Add a trigger']").click());
+    const targetInputs = [...container.querySelectorAll<HTMLInputElement>(
+      ".companions-trigger-target input",
+    )];
+    if (!targetInputs[0] || !targetInputs[1] || !targetInputs[2]) {
+      throw new Error("Missing Sentry target fields");
+    }
+    await act(async () => {
+      setControlled(requireInput(container), "New Sentry issue");
+      setControlled(requireTextArea(container), "Fix the issue.");
+      setControlled(targetInputs[0]!, "acme");
+      setControlled(targetInputs[1]!, "ios");
+      setControlled(targetInputs[2]!, "error");
+    });
+    await act(async () => requireNamedButton(container, "Create trigger").click());
+
+    expect(companionsApi.createCompanionTrigger).toHaveBeenCalledWith(
+      "org-1",
+      companionId,
+      expect.objectContaining({
+        provider: "sentry",
+        provider_account_id: "account-1",
+        target: { organization: "acme", project: "ios", events: ["error"] },
+      }),
+    );
   });
 
   it("copies the webhook URL and confirms briefly", async () => {

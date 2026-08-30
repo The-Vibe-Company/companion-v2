@@ -120,6 +120,14 @@ public actor APIClient {
         let account: CompanionPluginAccount
     }
 
+    private struct TriggerProviderAccountListEnvelope: Decodable {
+        let accounts: [CompanionTriggerProviderAccount]
+    }
+
+    private struct TriggerProviderAccountEnvelope: Decodable {
+        let account: CompanionTriggerProviderAccount
+    }
+
     private struct RoutineListEnvelope: Decodable {
         let routines: [CompanionRoutine]
     }
@@ -946,6 +954,36 @@ public actor APIClient {
 
     public func listCompanionPlugins() async throws -> [CompanionPluginAccount] {
         try await decode(PluginListEnvelope.self, path: "/v1/companion-plugins").accounts
+    }
+
+    public func listCompanionTriggerProviderAccounts() async throws -> [CompanionTriggerProviderAccount] {
+        try await decode(
+            TriggerProviderAccountListEnvelope.self,
+            path: "/v1/companion-trigger-provider-accounts"
+        ).accounts
+    }
+
+    public func saveCompanionTriggerProviderAccount(
+        _ input: CreateCompanionTriggerProviderAccountInput
+    ) async throws -> CompanionTriggerProviderAccount {
+        let body = try encoder.encode(input)
+        return try await decode(
+            TriggerProviderAccountEnvelope.self,
+            path: "/v1/companion-trigger-provider-accounts",
+            method: "POST",
+            body: body
+        ).account
+    }
+
+    public func disconnectCompanionTriggerProviderAccount(
+        accountID: String
+    ) async throws -> CompanionTriggerProviderAccount {
+        let account = Self.encodedPathComponent(accountID)
+        return try await decode(
+            TriggerProviderAccountEnvelope.self,
+            path: "/v1/companion-trigger-provider-accounts/\(account)",
+            method: "DELETE"
+        ).account
     }
 
     public func listAccessibleCompanionSkills() async throws -> [CompanionSkillReference] {

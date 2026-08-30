@@ -1024,6 +1024,7 @@ public enum CompanionTriggerProvider: String, Codable, CaseIterable, Equatable, 
     case webhook
     case linear
     case github
+    case sentry
     case custom
     case unknown
 
@@ -1040,10 +1041,19 @@ public enum CompanionTriggerMode: String, Codable, CaseIterable, Equatable, Hash
 
 public struct CompanionTriggerTarget: Codable, Equatable, Sendable {
     public let repo: String?
+    public let organization: String?
+    public let project: String?
     public let events: [String]?
 
-    public init(repo: String? = nil, events: [String]? = nil) {
+    public init(
+        repo: String? = nil,
+        organization: String? = nil,
+        project: String? = nil,
+        events: [String]? = nil
+    ) {
         self.repo = repo
+        self.organization = organization
+        self.project = project
         self.events = events
     }
 }
@@ -1051,6 +1061,7 @@ public struct CompanionTriggerTarget: Codable, Equatable, Sendable {
 public struct CompanionTrigger: Codable, Identifiable, Equatable, Sendable {
     public enum RegistrationStatus: String, Codable, Equatable, Sendable {
         case manual
+        case unregistered
         case registered
         case failed
         case unknown
@@ -1160,7 +1171,8 @@ public struct CompanionTrigger: Codable, Identifiable, Equatable, Sendable {
 
     public var status: CompanionConnectedResourceStatus {
         if !enabled { return .disabled }
-        return registrationStatus == .failed || lastRegistrationError != nil || lastErrorMessage != nil
+        return registrationStatus == .failed || registrationStatus == .unregistered
+            || lastRegistrationError != nil || lastErrorMessage != nil
             ? .error
             : .active
     }
@@ -1170,6 +1182,7 @@ public struct CompanionTrigger: Codable, Identifiable, Equatable, Sendable {
         case "webhook": "Webhook"
         case "github": "GitHub"
         case "linear": "Linear"
+        case "sentry": "Sentry"
         case "custom": "Custom"
         default: provider
         }
@@ -1178,10 +1191,68 @@ public struct CompanionTrigger: Codable, Identifiable, Equatable, Sendable {
     public var registrationDescription: String {
         switch registrationStatus {
         case .manual: "Platform endpoint ready"
+        case .unregistered: "Webhook unregistered"
         case .registered: "Webhook registered"
         case .failed: "Registration failed"
         case .unknown: "Registration unknown"
         }
+    }
+}
+
+public enum CompanionTriggerProviderAccountProvider: String, Codable, CaseIterable, Hashable, Sendable {
+    case github
+    case linear
+    case sentry
+}
+
+public enum CompanionTriggerProviderAccountStatus: String, Codable, Hashable, Sendable {
+    case connected
+    case disconnected
+}
+
+public enum CompanionTriggerProviderCredentialSource: String, Codable, Hashable, Sendable {
+    case mcpOAuth = "mcp_oauth"
+    case apiKey = "api_key"
+}
+
+/// Write-only-safe member authority shared by every Companion without an attachment step.
+public struct CompanionTriggerProviderAccount: Codable, Identifiable, Hashable, Sendable {
+    public let id: String
+    public let provider: CompanionTriggerProviderAccountProvider
+    public let label: String
+    public let credentialSource: CompanionTriggerProviderCredentialSource
+    public let mcpAccountID: String?
+    public let status: CompanionTriggerProviderAccountStatus
+    public let dependentTriggerCount: Int
+    public let createdAt: String
+    public let updatedAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case provider
+        case label
+        case credentialSource = "credential_source"
+        case mcpAccountID = "mcp_account_id"
+        case status
+        case dependentTriggerCount = "dependent_trigger_count"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+}
+
+public struct CreateCompanionTriggerProviderAccountInput: Encodable, Equatable, Sendable {
+    public let provider: CompanionTriggerProviderAccountProvider
+    public let label: String
+    public let credential: String
+
+    public init(
+        provider: CompanionTriggerProviderAccountProvider,
+        label: String,
+        credential: String
+    ) {
+        self.provider = provider
+        self.label = label
+        self.credential = credential
     }
 }
 
