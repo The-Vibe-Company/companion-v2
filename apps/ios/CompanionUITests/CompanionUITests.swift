@@ -273,6 +273,66 @@ final class CompanionUITests: XCTestCase {
     }
 
     @MainActor
+    func testRoutineQueuedMessageUsesCompactChipAndCollapsedRemoval() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-queued-demo"]
+        app.launchEnvironment["COMPANION_QUEUED_DEMO_ROUTINE"] = "1"
+        app.launch()
+
+        let queue = app.buttons["chat.queue.toggle"]
+        let prompt = "ROUTINE_PROMPT_SHOULD_STAY_HIDDEN_UNTIL_EXPANDED"
+        XCTAssertTrue(queue.waitForExistence(timeout: 5))
+        XCTAssertEqual(queue.label, "1 queued message")
+        XCTAssertFalse(app.staticTexts[prompt].exists)
+        XCTAssertTrue((queue.value as? String)?.contains("Routine: Morning brief") == true)
+        XCTAssertGreaterThanOrEqual(queue.frame.height, 44)
+        XCTAssertLessThanOrEqual(queue.frame.height, 64)
+
+        let collapsedRemove = app.buttons[
+            "chat.queue.remove.dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+        ]
+        XCTAssertTrue(collapsedRemove.exists)
+        XCTAssertGreaterThanOrEqual(collapsedRemove.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(collapsedRemove.frame.height, 44)
+        XCTAssertFalse(collapsedRemove.label.contains(prompt))
+        collapsedRemove.tap()
+        XCTAssertTrue(app.buttons["Keep queued"].waitForExistence(timeout: 2))
+        app.buttons["Keep queued"].tap()
+
+        queue.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["chat.queue.list"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts[prompt].waitForExistence(timeout: 2))
+        let expandedRoutineRemovals = app.buttons.matching(
+            NSPredicate(
+                format: "identifier == %@",
+                "chat.queue.remove.dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+            )
+        )
+        XCTAssertEqual(expandedRoutineRemovals.count, 1)
+    }
+
+    @MainActor
+    func testRoutineArrivalCollapsesAnExpandedQueueWithoutChangingOrdinarySemantics() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-companion-queued-demo"]
+        app.launchEnvironment["COMPANION_QUEUED_DEMO_ROUTINE_TRANSITION"] = "1"
+        app.launch()
+
+        let queue = app.buttons["chat.queue.toggle"]
+        XCTAssertTrue(queue.waitForExistence(timeout: 5))
+        queue.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["chat.queue.list"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["Then tighten the empty-state copy."].exists)
+
+        app.buttons["queue.demo.load-routine"].tap()
+        let collapsedQueue = app.buttons["chat.queue.toggle"]
+        XCTAssertTrue(collapsedQueue.waitForExistence(timeout: 2))
+        XCTAssertTrue((collapsedQueue.value as? String)?.contains("Routine: Morning brief") == true)
+        XCTAssertFalse(app.descendants(matching: .any)["chat.queue.list"].exists)
+        XCTAssertFalse(app.staticTexts["ROUTINE_PROMPT_SHOULD_STAY_HIDDEN_UNTIL_EXPANDED"].exists)
+    }
+
+    @MainActor
     func testQueuedMessagesSupportAccessibilityDynamicType() throws {
         let app = XCUIApplication()
         app.launchArguments = [
