@@ -7,7 +7,7 @@ import type {
   CreateCompanionTriggerInput,
   UpdateCompanionTriggerInput,
 } from "@companion/contracts";
-import { COMPANION_TRIGGER_NAME_MAX_CHARACTERS, COMPANION_TRIGGER_PROVIDERS } from "@companion/contracts";
+import { COMPANION_TRIGGER_NAME_MAX_CHARACTERS } from "@companion/contracts";
 import {
   createCompanionTrigger,
   deleteCompanionTrigger,
@@ -63,6 +63,7 @@ const MODE_DESCRIPTIONS = {
 } satisfies Record<CompanionTriggerV2Mode, string>;
 
 const TRIGGER_MODES = ["notify", "relay"] satisfies CompanionTriggerV2Mode[];
+const REMOTE_TRIGGER_PROVIDERS = ["github", "linear"] satisfies CompanionTriggerV2Provider[];
 
 type TriggerEditorValue = CompanionTriggerV2;
 type TriggerChangeHandler = (triggers: CompanionTrigger[]) => void;
@@ -89,6 +90,19 @@ function eligibleAccountsFor(
   // silently reuse the sole attached account and only expose a chooser when there is a real choice.
   if (provider === "webhook" || provider === "custom") return [];
   return accounts.filter((account) => account.provider.toLocaleLowerCase("en-US") === provider);
+}
+
+function selectableProvidersFor(
+  initial: TriggerEditorValue | null,
+  accounts: readonly CompanionTriggerAccountOption[],
+): CompanionTriggerV2Provider[] {
+  const providers: CompanionTriggerV2Provider[] = REMOTE_TRIGGER_PROVIDERS.filter((provider) => (
+    accounts.some((account) => account.provider.toLocaleLowerCase("en-US") === provider)
+  ));
+  // Existing legacy/manual triggers remain inspectable and editable, but those providers are not
+  // offered for new triggers because they cannot complete remote registration end to end.
+  if (initial && !providers.includes(initial.provider)) providers.push(initial.provider);
+  return providers;
 }
 
 function triggerTarget(provider: CompanionTriggerV2Provider, repo: string, events: string): CompanionTriggerTarget | null {
@@ -128,14 +142,15 @@ function TriggerEditor({
   onSaved: (trigger: CompanionTriggerV2) => void;
   onClose: () => void;
 }) {
-  const defaultProvider = accountOptions.find((account) => (
-    account.provider.toLocaleLowerCase("en-US") === "github"
-      || account.provider.toLocaleLowerCase("en-US") === "linear"
-  ))?.provider.toLocaleLowerCase("en-US");
+  const selectableProviders = useMemo(
+    () => selectableProvidersFor(initial, accountOptions),
+    [accountOptions, initial],
+  );
+  const defaultProvider = selectableProviders[0] ?? "github";
   const [name, setName] = useState(initial?.name ?? "");
   const [prompt, setPrompt] = useState(initial?.prompt ?? "");
   const [provider, setProvider] = useState<CompanionTriggerV2Provider>(
-    initial?.provider ?? (defaultProvider === "github" || defaultProvider === "linear" ? defaultProvider : "webhook"),
+    initial?.provider ?? defaultProvider,
   );
   const [mode, setMode] = useState<CompanionTriggerV2Mode>(initial?.mode ?? "relay");
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
@@ -172,11 +187,15 @@ function TriggerEditor({
   }, [eligibleAccounts, initial?.provider, initial?.provider_account_id, provider]);
 
   const accountChoiceRequired = eligibleAccounts.length > 1 && !providerAccountId;
+  const providerAccountMissing = (provider === "github" || provider === "linear")
+    && eligibleAccounts.length === 0;
   const githubTargetIncomplete = provider === "github" && (!repo.trim() || !events.trim());
   const canSave = !busy
     && Boolean(name.trim())
     && Boolean(prompt.trim())
+    && selectableProviders.length > 0
     && !accountChoiceRequired
+    && !providerAccountMissing
     && !githubTargetIncomplete;
 
   async function save() {
@@ -253,19 +272,28 @@ function TriggerEditor({
         />
       </label>
 
-      <label className="og-field">
-        <span>Provider</span>
-        <select
-          value={provider}
-          onChange={(event) => {
-            if (isProvider(event.target.value)) setProvider(event.target.value);
-          }}
-        >
-          {COMPANION_TRIGGER_PROVIDERS.map((option) => (
-            <option key={option} value={option}>{PROVIDER_LABELS[option]}</option>
-          ))}
-        </select>
-      </label>
+      {selectableProviders.length > 0 ? (
+        <label className="og-field">
+          <span>Provider</span>
+          <select
+            value={provider}
+            onChange={(event) => {
+              if (isProvider(event.target.value)) setProvider(event.target.value);
+            }}
+          >
+            {selectableProviders.map((option) => (
+              <option key={option} value={option}>
+                {PROVIDER_LABELS[option]}{option === "webhook" || option === "custom" ? " (legacy)" : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : (
+        <div className="companions-trigger-provider-required" role="status">
+          <strong>Connect a provider first</strong>
+          <span>Attach a GitHub or Linear account in Plugins. Companion will reuse it automatically.</span>
+        </div>
+      )}
 
       {eligibleAccounts.length === 1 && (
         <p className="companions-trigger-field-hint" role="status">
@@ -290,7 +318,9 @@ function TriggerEditor({
           </span>
         </label>
       )}
-      {eligibleAccounts.length === 0 && (provider === "linear" || provider === "github") && (
+      {selectableProviders.length > 0
+        && eligibleAccounts.length === 0
+        && (provider === "linear" || provider === "github") && (
         <p className="companions-trigger-field-hint" role="status">
           Attach a {providerLabel(provider)} account in Plugins to register this provider webhook.
         </p>

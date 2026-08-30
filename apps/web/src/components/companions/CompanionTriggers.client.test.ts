@@ -105,12 +105,6 @@ function requireTextArea(container: ParentNode): HTMLTextAreaElement {
   return textarea;
 }
 
-function requireSelect(container: ParentNode): HTMLSelectElement {
-  const select = container.querySelector("select");
-  if (!(select instanceof HTMLSelectElement)) throw new Error("Missing select");
-  return select;
-}
-
 function setControlled(
   element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement,
   value: string,
@@ -262,11 +256,33 @@ describe("Companion triggers panel", () => {
     expect(onChange).toHaveBeenCalledWith([]);
   });
 
-  it("creates a trigger with a client-generated id, mirroring routine creation", async () => {
-    const created = trigger({ name: "Deploy finished", provider: "custom" });
+  it("requires a connected provider instead of falling back to a manual webhook", async () => {
+    const container = await mount();
+
+    await act(async () => {
+      requireButton(container, "[aria-label='Add a trigger']")
+        .dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+
+    expect(container.textContent).toContain("Connect a provider first");
+    expect(container.textContent).not.toContain("Webhook (legacy)");
+    expect(container.textContent).not.toContain("Custom (legacy)");
+    expect(requireNamedButton(container, "Create trigger").disabled).toBe(true);
+  });
+
+  it("creates a provider-backed trigger with a client-generated id", async () => {
+    const created = trigger({
+      name: "Deploy finished",
+      provider: "github",
+      provider_account_id: "account-1",
+      registration_status: "registered",
+    });
     companionsApi.createCompanionTrigger.mockResolvedValue(created);
     const onChange = vi.fn();
-    const container = await mount({ onChange });
+    const container = await mount({
+      onChange,
+      accountOptions: [{ id: "account-1", provider: "github", label: "Acme GitHub" }],
+    });
 
     const add = requireButton(container, "[aria-label='Add a trigger']");
     await act(async () => {
@@ -276,7 +292,9 @@ describe("Companion triggers panel", () => {
     await act(async () => {
       setControlled(requireInput(container), "Deploy finished");
       setControlled(requireTextArea(container), "Report the deploy.");
-      setControlled(requireSelect(container), "custom");
+      const repository = container.querySelector<HTMLInputElement>("input[placeholder='owner/repository']");
+      if (!repository) throw new Error("Missing repository input");
+      setControlled(repository, "acme/app");
     });
 
     const create = requireNamedButton(container, "Create trigger");
@@ -292,7 +310,9 @@ describe("Companion triggers panel", () => {
         id: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/),
         name: "Deploy finished",
         prompt: "Report the deploy.",
-        provider: "custom",
+        provider: "github",
+        provider_account_id: "account-1",
+        target: { repo: "acme/app", events: ["push"] },
         mode: "relay",
         enabled: true,
       }),

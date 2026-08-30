@@ -227,9 +227,10 @@ struct CompanionTriggerEditorView: View {
         self.accountOptions = accountOptions
         _name = State(initialValue: initial?.name ?? "")
         _prompt = State(initialValue: initial?.prompt ?? "")
-        let defaultProvider = accountOptions.compactMap { CompanionTriggerProvider(rawValue: $0.provider) }
-            .first(where: { $0 == .github || $0 == .linear }) ?? .webhook
-        let selectedProvider = CompanionTriggerProvider(rawValue: initial?.provider ?? defaultProvider.rawValue) ?? .webhook
+        let defaultProvider = accountOptions.filter(\.connected)
+            .compactMap { CompanionTriggerProvider(rawValue: $0.provider) }
+            .first(where: { $0 == .github || $0 == .linear }) ?? .github
+        let selectedProvider = CompanionTriggerProvider(rawValue: initial?.provider ?? defaultProvider.rawValue) ?? .github
         let matchingAccounts = accountOptions.filter {
             $0.connected && $0.provider.lowercased() == selectedProvider.rawValue
         }
@@ -258,14 +259,24 @@ struct CompanionTriggerEditorView: View {
                     TextField("Name", text: $name)
                         .textInputAutocapitalization(.sentences)
                         .accessibilityIdentifier("companion.trigger-editor.name")
-                    Picker("Provider", selection: $provider) {
-                        Text("Webhook").tag(CompanionTriggerProvider.webhook)
-                        Text("Custom").tag(CompanionTriggerProvider.custom)
-                        Text("GitHub").tag(CompanionTriggerProvider.github)
-                        Text("Linear").tag(CompanionTriggerProvider.linear)
+                    if availableProviders.isEmpty {
+                        Label {
+                            Text("Attach a GitHub or Linear account in Plugins. Companion will reuse it automatically.")
+                        } icon: {
+                            Image(systemName: "link.badge.plus")
+                        }
+                        .font(.footnote)
+                        .foregroundStyle(Color.companionMuted)
+                        .accessibilityIdentifier("companion.trigger-editor.provider-required")
+                    } else {
+                        Picker("Provider", selection: $provider) {
+                            ForEach(availableProviders, id: \.self) { option in
+                                Text(providerLabel(option)).tag(option)
+                            }
+                        }
+                        .accessibilityIdentifier("companion.trigger-editor.provider")
+                        .onChange(of: provider) { _, _ in chooseSoleAccount() }
                     }
-                    .accessibilityIdentifier("companion.trigger-editor.provider")
-                    .onChange(of: provider) { _, _ in chooseSoleAccount() }
 
                     if eligibleAccounts.count == 1, let account = eligibleAccounts.first {
                         LabeledContent("Connected account", value: account.label)
@@ -278,7 +289,7 @@ struct CompanionTriggerEditorView: View {
                             }
                         }
                         .accessibilityIdentifier("companion.trigger-editor.account")
-                    } else if provider == .github || provider == .linear {
+                    } else if !availableProviders.isEmpty && (provider == .github || provider == .linear) {
                         Text("Connect this provider in Plugins. Companion will reuse that account automatically.")
                             .font(.footnote)
                             .foregroundStyle(Color.companionMuted)
@@ -373,6 +384,9 @@ struct CompanionTriggerEditorView: View {
     private var formIsValid: Bool {
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        if provider == .github || provider == .linear {
+            guard !eligibleAccounts.isEmpty else { return false }
+        }
         guard provider == .github else { return true }
         return repository.trimmingCharacters(in: .whitespacesAndNewlines).contains("/")
             && !normalizedEvents.isEmpty
@@ -385,6 +399,9 @@ struct CompanionTriggerEditorView: View {
         if prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return "Enter a prompt."
         }
+        if (provider == .github || provider == .linear), eligibleAccounts.isEmpty {
+            return "Attach this provider in Plugins so Companion can register the webhook."
+        }
         return "GitHub triggers need a repository and at least one event."
     }
 
@@ -395,6 +412,31 @@ struct CompanionTriggerEditorView: View {
     private var eligibleAccounts: [CompanionPluginAccount] {
         guard provider == .github || provider == .linear else { return [] }
         return accountOptions.filter { $0.connected && $0.provider.lowercased() == provider.rawValue }
+    }
+
+    private var availableProviders: [CompanionTriggerProvider] {
+        var providers = [CompanionTriggerProvider]()
+        for account in accountOptions where account.connected {
+            guard let option = CompanionTriggerProvider(rawValue: account.provider.lowercased()),
+                  option == .github || option == .linear,
+                  !providers.contains(option) else { continue }
+            providers.append(option)
+        }
+        if let initialProvider = initial.flatMap({ CompanionTriggerProvider(rawValue: $0.provider) }),
+           !providers.contains(initialProvider) {
+            providers.append(initialProvider)
+        }
+        return providers
+    }
+
+    private func providerLabel(_ option: CompanionTriggerProvider) -> String {
+        switch option {
+        case .github: "GitHub"
+        case .linear: "Linear"
+        case .webhook: "Webhook (legacy)"
+        case .custom: "Custom (legacy)"
+        case .unknown: "Unknown"
+        }
     }
 
     private func chooseSoleAccount() {
