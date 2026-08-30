@@ -176,8 +176,11 @@ and starts the three-minute cold-start window from that decision.
 ## Dedicated runtime execution
 
 `apps/runtime` sweeps every two seconds, claims with a 30-second lease, renews every ten seconds,
-and defaults to eight concurrent Companions. A completed execution interrupts only the scheduler's
-recovery sleep so a start can hand its newly idle Pi directly to the queued turn. `/healthz` fails when PostgreSQL, the claim loop, or the
+and defaults to eight concurrent executions. PostgreSQL serializes each lane; the process scheduler
+tracks exact claims, so one Companion may occupy a main and a routine slot at the same time. Routine
+startup observes only its run-scoped broker and never idles or recycles the main Pi. A completed
+execution interrupts only the scheduler's recovery sleep so a start can hand its newly idle Pi
+directly to the queued turn. `/healthz` fails when PostgreSQL, the claim loop, or the
 latest sweep is unhealthy.
 
 Main-lane precedence is permanent delete, explicit stop/restart, main decision response, active main

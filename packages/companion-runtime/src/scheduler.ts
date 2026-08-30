@@ -32,6 +32,20 @@ export interface RuntimeEngineControl {
   drain(): Promise<void>;
 }
 
+function activeExecutionKey(claim: RuntimeClaim, executorId: string): string {
+  const fence = claimFence(claim, executorId);
+  return [
+    fence.orgId,
+    fence.companionId,
+    fence.claimToken,
+    fence.claimEpoch.toString(),
+    fence.gateEpoch.toString(),
+    fence.executorId,
+    fence.workKind,
+    fence.workId,
+  ].join("\u001f");
+}
+
 export class RuntimeScheduler {
   readonly #store: RuntimeStore;
   readonly #engine: RuntimeEngineControl;
@@ -176,15 +190,17 @@ export class RuntimeScheduler {
             await this.#store.release(claimFence(claim, this.#executorId));
             continue;
           }
-          if (this.#active.has(claim.companionId)) {
-            await this.#store.release(claimFence(claim, this.#executorId));
+          const activeKey = activeExecutionKey(claim, this.#executorId);
+          if (this.#active.has(activeKey)) {
+            // A repeated row with the exact active fence is already owned by this execution.
+            // Releasing it here would revoke the lease underneath the in-flight promise.
             continue;
           }
           const execution = this.#engine.execute(claim);
-          this.#active.set(claim.companionId, execution);
+          this.#active.set(activeKey, execution);
           void execution.then(
-            () => this.#removeActive(claim.companionId, execution),
-            () => this.#removeActive(claim.companionId, execution),
+            () => this.#removeActive(activeKey, execution),
+            () => this.#removeActive(activeKey, execution),
           );
         }
       }
@@ -250,9 +266,9 @@ export class RuntimeScheduler {
     }
   }
 
-  #removeActive(companionId: string, execution: Promise<RuntimeExecutionResult>): void {
-    if (this.#active.get(companionId) !== execution) return;
-    this.#active.delete(companionId);
+  #removeActive(activeKey: string, execution: Promise<RuntimeExecutionResult>): void {
+    if (this.#active.get(activeKey) !== execution) return;
+    this.#active.delete(activeKey);
     // A completed start operation can have made the queued turn claimable. Interrupt only the
     // scheduler's recovery sleep; the main shutdown signal and periodic sweep remain unchanged.
     if (this.#sleepAbort && !this.#sleepAbort.signal.aborted) {

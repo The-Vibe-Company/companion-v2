@@ -537,6 +537,155 @@ describe("Companion routines over the real database", () => {
     });
   });
 
+  it("ignores scheduler cancellations and disables only after five genuine run failures", async () => {
+    const created = await asActor(fixture.owner, (database) => createCompanionRoutineV2({
+      orgId: fixture.orgA,
+      companionId,
+      ...draft("Failure accounting"),
+      database,
+    }));
+    let fireIndex = 0;
+    const settleNextRun = async (errorCode: string, errorMessage: string) => {
+      await integrationDb
+        .update(schema.companionRoutines)
+        .set({ nextFireAt: new Date() })
+        .where(eq(schema.companionRoutines.id, created.id));
+      const workerId = `integration-routine-outcome-${fireIndex++}`;
+      const claimed = await claimDueCompanionRoutines({ workerId, database: integrationDb });
+      const claim = claimed.find((entry) => entry.routineId === created.id);
+      if (!claim) throw new Error("expected the routine outcome fixture to be due");
+      await fireCompanionRoutine({
+        workerId,
+        orgId: fixture.orgA,
+        routineId: created.id,
+        clientMessageId: routineFireMessageId({
+          routineId: created.id,
+          scheduledFor: claim.scheduledFor,
+        }),
+        scheduledFor: claim.scheduledFor,
+        nextFireAt: new Date(Date.now() + 60 * 60 * 1000),
+        database: integrationDb,
+      });
+      const run = await integrationDb.query.companionTurns.findFirst({
+        where: eq(schema.companionTurns.routineSnapshotId, created.id),
+        orderBy: (turn, { desc }) => [desc(turn.createdAt), desc(turn.id)],
+      });
+      if (!run) throw new Error("expected a fired routine run");
+      await integrationDb
+        .update(schema.companionTurns)
+        .set({
+          status: "failed",
+          settledAt: new Date(),
+          absoluteDeadlineAt: new Date(Date.now() + 60 * 1000),
+          lastErrorCode: errorCode,
+          lastErrorMessage: errorMessage,
+          lastErrorAction: "retry",
+        })
+        .where(eq(schema.companionTurns.id, run.id));
+    };
+
+    for (let index = 0; index < 5; index += 1) {
+      await settleNextRun(
+        "routine_session_cancelled",
+        "Routine Pi session was cancelled before launch.",
+      );
+    }
+    let [after] = await asActor(fixture.owner, (database) => listCompanionRoutinesV2({
+      orgId: fixture.orgA,
+      companionId,
+      database,
+    }));
+    expect(after).toMatchObject({ consecutive_failures: 0, enabled: true });
+
+    for (let index = 0; index < 5; index += 1) {
+      await settleNextRun("provider_unavailable", "The routine provider is unavailable.");
+    }
+    [after] = await asActor(fixture.owner, (database) => listCompanionRoutinesV2({
+      orgId: fixture.orgA,
+      companionId,
+      database,
+    }));
+    expect(after).toMatchObject({
+      consecutive_failures: 5,
+      enabled: false,
+      next_fire_at: null,
+      last_error_code: "provider_unavailable",
+    });
+  });
+
+  it("does not apply an old run outcome to a recreated routine generation", async () => {
+    const routineId = randomUUID();
+    await asActor(fixture.owner, (database) => createCompanionRoutineV2({
+      orgId: fixture.orgA,
+      companionId,
+      id: routineId,
+      ...draft("Original generation"),
+      database,
+    }));
+    await integrationDb
+      .update(schema.companionRoutines)
+      .set({ nextFireAt: new Date() })
+      .where(eq(schema.companionRoutines.id, routineId));
+    const [claim] = await claimDueCompanionRoutines({
+      workerId: "integration-routine-generation",
+      database: integrationDb,
+    });
+    if (!claim) throw new Error("expected the original routine generation to be due");
+    await fireCompanionRoutine({
+      workerId: "integration-routine-generation",
+      orgId: fixture.orgA,
+      routineId,
+      clientMessageId: routineFireMessageId({ routineId, scheduledFor: claim.scheduledFor }),
+      scheduledFor: claim.scheduledFor,
+      nextFireAt: new Date(Date.now() + 60 * 60 * 1000),
+      database: integrationDb,
+    });
+    const oldRun = await integrationDb.query.companionTurns.findFirst({
+      where: eq(schema.companionTurns.routineSnapshotId, routineId),
+      orderBy: (turn, { desc }) => [desc(turn.createdAt), desc(turn.id)],
+    });
+    if (!oldRun) throw new Error("expected the original routine run");
+
+    await asActor(fixture.owner, (database) => deleteCompanionRoutineV2({
+      orgId: fixture.orgA,
+      companionId,
+      routineId,
+      database,
+    }));
+    await asActor(fixture.owner, (database) => createCompanionRoutineV2({
+      orgId: fixture.orgA,
+      companionId,
+      id: routineId,
+      ...draft("Replacement generation"),
+      database,
+    }));
+
+    await integrationDb
+      .update(schema.companionTurns)
+      .set({
+        status: "failed",
+        settledAt: new Date(),
+        absoluteDeadlineAt: new Date(Date.now() + 60 * 1000),
+        lastErrorCode: "provider_unavailable",
+        lastErrorMessage: "The old routine provider was unavailable.",
+        lastErrorAction: "retry",
+      })
+      .where(eq(schema.companionTurns.id, oldRun.id));
+
+    const [replacement] = await asActor(fixture.owner, (database) => listCompanionRoutinesV2({
+      orgId: fixture.orgA,
+      companionId,
+      database,
+    }));
+    expect(replacement).toMatchObject({
+      id: routineId,
+      name: "Replacement generation",
+      consecutive_failures: 0,
+      enabled: true,
+      last_error_code: null,
+    });
+  });
+
   it("keeps private run history tenant-scoped and references one notify payload in the main thread", async () => {
     const created = await asActor(fixture.owner, (database) => createCompanionRoutineV2({
       orgId: fixture.orgA,
