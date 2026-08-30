@@ -18,15 +18,19 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { sql as drizzleSql } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
+import { listCompanionTriggerProviderAccounts } from "@companion/core";
 import {
   companionOperationSchema,
   companionTranscriptEntrySchema,
   companionTurnSchema,
   type CompanionConfigProposal,
 } from "@companion/contracts";
+import { schema, type Db } from "@companion/db";
 import {
   RuntimeDatabaseRoleError,
   verifyRuntimeDatabaseRole,
@@ -561,7 +565,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
             'companion_runtime_event_projections', 'companion_runtime_desktop_requests',
             'companion_main_pi_compactions', 'companion_routine_context_substrates',
             'companion_message_attachments', 'companion_routines', 'companion_mcp_broker_tokens',
-            'companion_images'
+            'companion_triggers', 'companion_images'
           ]) protected(table_name)
           where has_table_privilege(${runtimeRole}, 'public.' || protected.table_name, 'SELECT')
         ) as "privateTableReads",
@@ -681,6 +685,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       "public.companion_api_list_triggers(uuid,uuid)",
       "public.companion_api_create_trigger(uuid,uuid,uuid,text,text,text,text,boolean)",
       "public.companion_api_update_trigger(uuid,uuid,uuid,text,text,text,boolean)",
+      "public.companion_api_list_trigger_provider_accounts(uuid)",
       "public.companion_api_rotate_trigger_secret(uuid,uuid,uuid,text)",
       "public.companion_api_delete_trigger(uuid,uuid,uuid)",
       "public.companion_webhook_get_trigger(uuid)",
@@ -742,6 +747,94 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     `;
     expect(workerRoutineAcl).toHaveLength(workerRoutineSignatures.length);
     expect(workerRoutineAcl.every((entry) => entry.worker && !entry.api && !entry.runtime)).toBe(true);
+  });
+
+  it("lists member-wide trigger provider accounts without exposing private trigger rows", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const providerAccountId = randomUUID();
+    const triggerId = randomUUID();
+    const companion = await createCompanion();
+    try {
+      await sql`
+        insert into companion_trigger_provider_accounts(
+          id, org_id, owner_id, provider, label, credential_source, mcp_account_id
+        ) values (
+          ${providerAccountId}::uuid, ${ids.orgA}::uuid, ${ids.ownerA},
+          'github', 'Runtime GitHub', 'mcp_oauth', ${ids.mcpAccount}::uuid
+        )
+      `;
+      await sql`
+        insert into companion_triggers(
+          id, org_id, companion_id, name, prompt, mode, provider,
+          provider_account_id, secret, created_by
+        ) values (
+          ${triggerId}::uuid, ${ids.orgA}::uuid, ${companion.companionId}::uuid,
+          'Runtime account count', 'Notify the owner.', 'notify', 'github',
+          ${providerAccountId}::uuid, ${"a".repeat(64)}, ${ids.ownerA}
+        )
+      `;
+
+      const [acl] = await sql<Array<{ canReadTriggers: boolean; canListAccounts: boolean }>>`
+        select
+          has_table_privilege(${apiRole}, 'public.companion_triggers', 'SELECT')
+            as "canReadTriggers",
+          has_function_privilege(
+            ${apiRole}, 'public.companion_api_list_trigger_provider_accounts(uuid)', 'EXECUTE'
+          ) as "canListAccounts"
+      `;
+      expect(acl).toEqual({ canReadTriggers: false, canListAccounts: true });
+
+      const serviceSql = postgres(runtimeUrl.toString(), { max: 1 });
+      let accounts;
+      try {
+        const apiDatabase = drizzle(serviceSql, { schema }) as Db;
+        accounts = await apiDatabase.transaction(async (transaction) => {
+          await transaction.execute(drizzleSql.raw(`set local role ${apiRole}`));
+          await transaction.execute(drizzleSql`select
+            set_config('app.org_id', ${ids.orgA}, true),
+            set_config('app.user_id', ${ids.ownerA}, true)
+          `);
+          return listCompanionTriggerProviderAccounts({
+            actor: {
+              id: ids.ownerA,
+              email: `${ids.ownerA}@example.test`,
+              name: "Runtime executor actor 0",
+            },
+            orgId: ids.orgA,
+            database: transaction as unknown as Db,
+          });
+        });
+      } finally {
+        await serviceSql.end({ timeout: 1 });
+      }
+      expect(accounts).toHaveLength(1);
+      expect(accounts[0]).toMatchObject({
+        id: providerAccountId,
+        provider: "github",
+        label: "Runtime GitHub",
+        credential_source: "mcp_oauth",
+        mcp_account_id: ids.mcpAccount,
+        status: "connected",
+        dependent_trigger_count: 1,
+      });
+      await expect(asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`select id from public.companion_triggers`,
+      })).rejects.toThrow(/permission denied/i);
+      await expect(asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerB,
+        action: (tx) => tx`
+          select account from public.companion_api_list_trigger_provider_accounts(${ids.orgA}::uuid)
+        `,
+      })).rejects.toThrow(/not a workspace member/i);
+    } finally {
+      await removeCompanion(companion.companionId);
+      await sql`
+        delete from companion_trigger_provider_accounts where id = ${providerAccountId}::uuid
+      `;
+    }
   });
 
   it("persists the restart Box skill-update checkpoint before provider restart", async () => {

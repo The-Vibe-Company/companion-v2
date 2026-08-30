@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 import {
   companionTriggerProviderAccountSchema,
@@ -38,30 +38,14 @@ export async function listCompanionTriggerProviderAccounts(input: {
   database?: Db;
 }): Promise<CompanionTriggerProviderAccount[]> {
   const database = input.database ?? db;
-  await assertMember(database, input.actor, input.orgId);
-  const rows = await database
-    .select({
-      account: schema.companionTriggerProviderAccounts,
-      dependentTriggerCount: sql<number>`count(${schema.companionTriggers.id})::integer`,
-    })
-    .from(schema.companionTriggerProviderAccounts)
-    .leftJoin(
-      schema.companionTriggers,
-      and(
-        eq(schema.companionTriggers.orgId, schema.companionTriggerProviderAccounts.orgId),
-        eq(schema.companionTriggers.providerAccountId, schema.companionTriggerProviderAccounts.id),
-      ),
-    )
-    .where(and(
-      eq(schema.companionTriggerProviderAccounts.orgId, input.orgId),
-      eq(schema.companionTriggerProviderAccounts.ownerId, input.actor.id),
-    ))
-    .groupBy(schema.companionTriggerProviderAccounts.id)
-    .orderBy(
-      asc(schema.companionTriggerProviderAccounts.provider),
-      asc(schema.companionTriggerProviderAccounts.label),
-    );
-  return rows.map((row) => projectAccount(row.account, row.dependentTriggerCount));
+  const result = await database.execute(sql`
+    select account
+    from public.companion_api_list_trigger_provider_accounts(${input.orgId}::uuid)
+  `);
+  // SAFETY: the capability returns exactly one public JSON projection per member-owned account;
+  // the shared contract rejects missing, secret-bearing, or otherwise unexpected fields.
+  return Array.from(result as Iterable<{ account: unknown }>)
+    .map((row) => companionTriggerProviderAccountSchema.parse(row.account));
 }
 
 /** Materialize trigger authority from an OAuth MCP account without copying its credential. */

@@ -53,6 +53,7 @@ const registrationTriggerSchema = z.object({
     .default(null),
   webhook_url: z.string().url(),
   secret: z.string().regex(/^[0-9a-f]{32,128}$/),
+  registration_status: z.enum(["manual", "unregistered", "registered", "failed"]),
   remote_hook_id: z.string().nullable(),
   remote_hook_account_id: z.string().uuid().nullable().default(null),
 });
@@ -254,6 +255,91 @@ const LINEAR_DELETE_MUTATION = `
   }
 `;
 
+const LINEAR_LIST_QUERY = `
+  query CompanionWebhooks {
+    webhooks {
+      nodes { id url }
+    }
+  }
+`;
+
+function githubHeaders(token: string) {
+  return {
+    accept: "application/vnd.github+json",
+    authorization: `Bearer ${token}`,
+    "user-agent": "companion-github-sync",
+    "x-github-api-version": "2022-11-28",
+  };
+}
+
+async function findGitHubWebhook(input: {
+  fetch: typeof globalThis.fetch;
+  repoPath: string;
+  token: string;
+  webhookUrl: string;
+}): Promise<string | null> {
+  const response = await input.fetch(`${GITHUB_API}/repos/${input.repoPath}/hooks?per_page=100`, {
+    headers: githubHeaders(input.token),
+  });
+  const hooks = z.array(z.object({
+    id: z.number().int(),
+    config: z.object({ url: z.string() }).passthrough(),
+  })).safeParse(await response.json().catch(() => null));
+  if (!response.ok || !hooks.success) {
+    throw new CompanionTriggerRegistrationError(
+      "provider_rejected",
+      `github webhook reconciliation failed (${response.status})`,
+    );
+  }
+  const hook = hooks.data.find((candidate) => candidate.config.url === input.webhookUrl);
+  return hook ? String(hook.id) : null;
+}
+
+async function findLinearWebhook(input: {
+  fetch: typeof globalThis.fetch;
+  token: string;
+  webhookUrl: string;
+}): Promise<string | null> {
+  const response = await input.fetch(LINEAR_API, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: input.token.trim() },
+    body: JSON.stringify({ query: LINEAR_LIST_QUERY }),
+  });
+  const payload = z.object({
+    data: z.object({
+      webhooks: z.object({ nodes: z.array(z.object({ id: z.string(), url: z.string() })) }),
+    }).optional(),
+    errors: z.array(z.object({ message: z.string() })).optional(),
+  }).safeParse(await response.json().catch(() => null));
+  if (!response.ok || !payload.success || payload.data.errors?.length || !payload.data.data) {
+    throw new CompanionTriggerRegistrationError(
+      "provider_rejected",
+      `linear webhook reconciliation failed (${response.status})`,
+    );
+  }
+  return payload.data.data.webhooks.nodes.find((candidate) => candidate.url === input.webhookUrl)?.id ?? null;
+}
+
+async function findSentryWebhook(input: {
+  fetch: typeof globalThis.fetch;
+  projectPath: string;
+  token: string;
+  webhookUrl: string;
+}): Promise<string | null> {
+  const response = await input.fetch(`${SENTRY_API}/projects/${input.projectPath}/hooks/`, {
+    headers: { authorization: `Bearer ${input.token}` },
+  });
+  const hooks = z.array(z.object({ id: z.string().min(1).max(200), url: z.string() }))
+    .safeParse(await response.json().catch(() => null));
+  if (!response.ok || !hooks.success) {
+    throw new CompanionTriggerRegistrationError(
+      "provider_rejected",
+      `Sentry webhook reconciliation failed (${response.status})`,
+    );
+  }
+  return hooks.data.find((candidate) => candidate.url === input.webhookUrl)?.id ?? null;
+}
+
 async function linearTriggerKeyToken(input: {
   orgId: string;
   providerAccountId?: string | null;
@@ -278,6 +364,36 @@ async function registerLinearTriggerWebhook(
     providerAccountId: trigger.provider_account_id,
   });
   const doFetch = input.fetch ?? globalThis.fetch;
+  let existingHookId: string | null;
+  try {
+    existingHookId = await findLinearWebhook({
+      fetch: doFetch,
+      token: key.token,
+      webhookUrl: trigger.webhook_url,
+    });
+  } catch (error) {
+    const message = error instanceof CompanionTriggerRegistrationError
+      ? error.message
+      : "linear webhook reconciliation could not reach the provider";
+    await persistRegistration({
+      ...input,
+      accountId: trigger.remote_hook_account_id ?? key.accountId,
+      remoteHookId: trigger.remote_hook_id,
+      status: "failed",
+      error: sanitizeCompanionRuntimeError(message).slice(0, 500),
+    });
+    return { status: "failed", error: message };
+  }
+  if (existingHookId) {
+    await persistRegistration({
+      ...input,
+      accountId: key.accountId,
+      remoteHookId: existingHookId,
+      status: "registered",
+      error: null,
+    });
+    return { status: "registered", remote_hook_id: existingHookId };
+  }
   let response: Response;
   try {
     response = await doFetch(LINEAR_API, {
@@ -294,7 +410,8 @@ async function registerLinearTriggerWebhook(
       }),
     });
   } catch {
-    return persistLinearFailure(input, "linear webhook registration could not reach the provider");
+    return recoverLinearRegistration(input, trigger, key, doFetch,
+      "linear webhook registration could not reach the provider");
   }
   const payload = z.object({
     data: z.object({
@@ -309,19 +426,8 @@ async function registerLinearTriggerWebhook(
     ? payload.data.data?.webhookSubscriptionCreate
     : undefined;
   if (!response.ok || !created?.success || !created.webhookSubscription) {
-    await persistRegistration({
-      orgId: input.orgId,
-      companionId: input.companionId,
-      triggerId: input.triggerId,
-      accountId: null,
-      remoteHookId: null,
-      status: "failed",
-      error: sanitizeCompanionRuntimeError(
-        `linear rejected the webhook (${response.status})`,
-      ).slice(0, 500),
-      database: input.database,
-    });
-    return { status: "failed", error: `linear rejected the webhook (${response.status})` };
+    return recoverLinearRegistration(input, trigger, key, doFetch,
+      `linear rejected the webhook (${response.status})`);
   }
   const remoteHookId = created.webhookSubscription.id;
   await persistRegistration({
@@ -335,6 +441,44 @@ async function registerLinearTriggerWebhook(
     database: input.database,
   });
   return { status: "registered", remote_hook_id: remoteHookId };
+}
+
+async function recoverLinearRegistration(
+  input: { orgId: string; companionId: string; triggerId: string; database: Db },
+  trigger: RegistrationTrigger,
+  key: { accountId: string; token: string },
+  doFetch: typeof globalThis.fetch,
+  message: string,
+): Promise<CompanionTriggerRegistrationOutcome> {
+  let recoveredHookId: string | null = null;
+  try {
+    recoveredHookId = await findLinearWebhook({
+      fetch: doFetch,
+      token: key.token,
+      webhookUrl: trigger.webhook_url,
+    });
+  } catch {
+    // The create outcome may be ambiguous. Keep any prior remote id and fail closed; the next
+    // serialized retry reconciles by callback URL before it attempts another create.
+  }
+  if (recoveredHookId) {
+    await persistRegistration({
+      ...input,
+      accountId: key.accountId,
+      remoteHookId: recoveredHookId,
+      status: "registered",
+      error: null,
+    });
+    return { status: "registered", remote_hook_id: recoveredHookId };
+  }
+  await persistRegistration({
+    ...input,
+    accountId: trigger.remote_hook_account_id ?? key.accountId,
+    remoteHookId: trigger.remote_hook_id,
+    status: "failed",
+    error: sanitizeCompanionRuntimeError(message).slice(0, 500),
+  });
+  return { status: "failed", error: message };
 }
 
 async function persistLinearFailure(
@@ -389,9 +533,41 @@ async function registerSentryTriggerWebhook(
   const projectPath = [trigger.target.organization, trigger.target.project]
     .map(encodeURIComponent)
     .join("/");
+  const doFetch = input.fetch ?? globalThis.fetch;
+  let existingHookId: string | null;
+  try {
+    existingHookId = await findSentryWebhook({
+      fetch: doFetch,
+      projectPath,
+      token,
+      webhookUrl: trigger.webhook_url,
+    });
+  } catch (error) {
+    const message = error instanceof CompanionTriggerRegistrationError
+      ? error.message
+      : "Sentry webhook reconciliation could not reach the provider";
+    await persistRegistration({
+      ...input,
+      accountId: trigger.remote_hook_account_id ?? account.id,
+      remoteHookId: trigger.remote_hook_id,
+      status: "failed",
+      error: sanitizeCompanionRuntimeError(message).slice(0, 500),
+    });
+    return { status: "failed", error: message };
+  }
+  if (existingHookId) {
+    await persistRegistration({
+      ...input,
+      accountId: account.id,
+      remoteHookId: existingHookId,
+      status: "registered",
+      error: null,
+    });
+    return { status: "registered", remote_hook_id: existingHookId };
+  }
   let response: Response;
   try {
-    response = await (input.fetch ?? globalThis.fetch)(`${SENTRY_API}/projects/${projectPath}/hooks/`, {
+    response = await doFetch(`${SENTRY_API}/projects/${projectPath}/hooks/`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${token}`,
@@ -400,16 +576,14 @@ async function registerSentryTriggerWebhook(
       body: JSON.stringify({ url: trigger.webhook_url, events: trigger.target.events }),
     });
   } catch {
-    const error = "Sentry webhook registration could not reach the provider";
-    await persistRegistration({ ...input, accountId: account.id, remoteHookId: null, status: "failed", error });
-    return { status: "failed", error };
+    return recoverSentryRegistration(input, trigger, account.id, token, projectPath, doFetch,
+      "Sentry webhook registration could not reach the provider");
   }
   const created = z.object({ id: z.string().min(1).max(200) })
     .safeParse(await response.json().catch(() => null));
   if (!response.ok || !created.success) {
     const error = sanitizeCompanionRuntimeError(`Sentry rejected the webhook (${response.status})`).slice(0, 500);
-    await persistRegistration({ ...input, accountId: account.id, remoteHookId: null, status: "failed", error });
-    return { status: "failed", error };
+    return recoverSentryRegistration(input, trigger, account.id, token, projectPath, doFetch, error);
   }
   await persistRegistration({
     ...input,
@@ -419,6 +593,46 @@ async function registerSentryTriggerWebhook(
     error: null,
   });
   return { status: "registered", remote_hook_id: created.data.id };
+}
+
+async function recoverSentryRegistration(
+  input: { orgId: string; companionId: string; triggerId: string; database: Db },
+  trigger: RegistrationTrigger,
+  accountId: string,
+  token: string,
+  projectPath: string,
+  doFetch: typeof globalThis.fetch,
+  message: string,
+): Promise<CompanionTriggerRegistrationOutcome> {
+  let recoveredHookId: string | null = null;
+  try {
+    recoveredHookId = await findSentryWebhook({
+      fetch: doFetch,
+      projectPath,
+      token,
+      webhookUrl: trigger.webhook_url,
+    });
+  } catch {
+    // A later retry performs this same lookup before creating another remote hook.
+  }
+  if (recoveredHookId) {
+    await persistRegistration({
+      ...input,
+      accountId,
+      remoteHookId: recoveredHookId,
+      status: "registered",
+      error: null,
+    });
+    return { status: "registered", remote_hook_id: recoveredHookId };
+  }
+  await persistRegistration({
+    ...input,
+    accountId: trigger.remote_hook_account_id ?? accountId,
+    remoteHookId: trigger.remote_hook_id,
+    status: "failed",
+    error: sanitizeCompanionRuntimeError(message).slice(0, 500),
+  });
+  return { status: "failed", error: message };
 }
 
 /**
@@ -436,6 +650,11 @@ export async function registerCompanionTriggerWebhookV2(input: {
   fetch?: typeof globalThis.fetch;
 }): Promise<CompanionTriggerRegistrationOutcome> {
   const trigger = await loadRegistrationTrigger(input);
+  // The registration read holds the trigger row lock for the tenant transaction. A concurrent
+  // retry observes this committed state instead of issuing a second provider mutation.
+  if (trigger.registration_status === "registered" && trigger.remote_hook_id) {
+    return { status: "registered", remote_hook_id: trigger.remote_hook_id };
+  }
   if (trigger.provider === "sentry") return registerSentryTriggerWebhook(input, trigger);
   if (trigger.provider === "linear") {
     try {
@@ -491,6 +710,37 @@ export async function registerCompanionTriggerWebhookV2(input: {
   const doFetch = input.fetch ?? globalThis.fetch;
   // Encode each path segment separately so the owner/repo slash survives.
   const repoPath = trigger.target.repo.split("/").map(encodeURIComponent).join("/");
+  let existingHookId: string | null;
+  try {
+    existingHookId = await findGitHubWebhook({
+      fetch: doFetch,
+      repoPath,
+      token,
+      webhookUrl: trigger.webhook_url,
+    });
+  } catch (error) {
+    const message = error instanceof CompanionTriggerRegistrationError
+      ? error.message
+      : "github webhook reconciliation could not reach the provider";
+    await persistRegistration({
+      ...input,
+      accountId: trigger.remote_hook_account_id ?? account.id,
+      remoteHookId: trigger.remote_hook_id,
+      status: "failed",
+      error: sanitizeCompanionRuntimeError(message).slice(0, 500),
+    });
+    return { status: "failed", error: message };
+  }
+  if (existingHookId) {
+    await persistRegistration({
+      ...input,
+      accountId: account.id,
+      remoteHookId: existingHookId,
+      status: "registered",
+      error: null,
+    });
+    return { status: "registered", remote_hook_id: existingHookId };
+  }
   let response: Response;
   try {
     response = await doFetch(
@@ -498,11 +748,8 @@ export async function registerCompanionTriggerWebhookV2(input: {
       {
         method: "POST",
         headers: {
-          accept: "application/vnd.github+json",
-          authorization: `Bearer ${token}`,
+          ...githubHeaders(token),
           "content-type": "application/json",
-          "user-agent": "companion-github-sync",
-          "x-github-api-version": "2022-11-28",
         },
         body: JSON.stringify({
           name: "web",
@@ -517,41 +764,22 @@ export async function registerCompanionTriggerWebhookV2(input: {
       },
     );
   } catch (error) {
-    await persistRegistration({
-      ...input,
-      accountId: account.id,
-      remoteHookId: null,
-      status: "failed",
-      error: sanitizeCompanionRuntimeError(
-        error instanceof Error ? error.message : "github webhook registration failed",
-      ).slice(0, 500),
-    });
-    return { status: "failed", error: "github webhook registration could not reach the provider" };
+    return recoverGitHubRegistration(input, trigger, account.id, token, repoPath, doFetch,
+      error instanceof Error
+        ? error.message
+        : "github webhook registration could not reach the provider");
   }
   if (!response.ok) {
     // The provider has the final word on unknown event names and missing permissions.
     const message = sanitizeCompanionRuntimeError(
       `github rejected the webhook (${response.status})`,
     ).slice(0, 500);
-    await persistRegistration({
-      ...input,
-      accountId: account.id,
-      remoteHookId: null,
-      status: "failed",
-      error: message,
-    });
-    return { status: "failed", error: message };
+    return recoverGitHubRegistration(input, trigger, account.id, token, repoPath, doFetch, message);
   }
   const created = z.object({ id: z.number().int() }).safeParse(await response.json().catch(() => null));
   if (!created.success) {
-    await persistRegistration({
-      ...input,
-      accountId: account.id,
-      remoteHookId: null,
-      status: "failed",
-      error: "github returned an unreadable webhook payload",
-    });
-    return { status: "failed", error: "github returned an unreadable webhook payload" };
+    return recoverGitHubRegistration(input, trigger, account.id, token, repoPath, doFetch,
+      "github returned an unreadable webhook payload");
   }
   const remoteHookId = String(created.data.id);
   await persistRegistration({
@@ -562,6 +790,47 @@ export async function registerCompanionTriggerWebhookV2(input: {
     error: null,
   });
   return { status: "registered", remote_hook_id: remoteHookId };
+}
+
+async function recoverGitHubRegistration(
+  input: { orgId: string; companionId: string; triggerId: string; database: Db },
+  trigger: RegistrationTrigger,
+  accountId: string,
+  token: string,
+  repoPath: string,
+  doFetch: typeof globalThis.fetch,
+  message: string,
+): Promise<CompanionTriggerRegistrationOutcome> {
+  let recoveredHookId: string | null = null;
+  try {
+    recoveredHookId = await findGitHubWebhook({
+      fetch: doFetch,
+      repoPath,
+      token,
+      webhookUrl: trigger.webhook_url,
+    });
+  } catch {
+    // A provider-committed request can lose its response. Preserve local evidence and let the
+    // next serialized retry reconcile by callback URL before attempting another create.
+  }
+  if (recoveredHookId) {
+    await persistRegistration({
+      ...input,
+      accountId,
+      remoteHookId: recoveredHookId,
+      status: "registered",
+      error: null,
+    });
+    return { status: "registered", remote_hook_id: recoveredHookId };
+  }
+  await persistRegistration({
+    ...input,
+    accountId: trigger.remote_hook_account_id ?? accountId,
+    remoteHookId: trigger.remote_hook_id,
+    status: "failed",
+    error: sanitizeCompanionRuntimeError(message).slice(0, 500),
+  });
+  return { status: "failed", error: message };
 }
 
 export async function unregisterCompanionTriggerWebhookV2(input: {

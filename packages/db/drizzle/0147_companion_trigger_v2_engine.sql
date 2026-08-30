@@ -278,6 +278,89 @@ BEGIN
 END $$;
 --> statement-breakpoint
 
+-- Provider authority is member-wide, but dependent triggers remain private runtime rows. Project
+-- the count through one narrow capability instead of granting the API role access to that table.
+CREATE FUNCTION public.companion_api_list_trigger_provider_accounts(p_org_id uuid)
+RETURNS TABLE(account jsonb)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+SET row_security = on
+AS $$
+DECLARE
+  v_actor_id text := public.companion_api_actor(p_org_id);
+BEGIN
+  RETURN QUERY
+  SELECT jsonb_build_object(
+    'id', provider_account.id,
+    'provider', provider_account.provider,
+    'label', provider_account.label,
+    'credential_source', provider_account.credential_source,
+    'mcp_account_id', provider_account.mcp_account_id,
+    'status', provider_account.status,
+    'dependent_trigger_count', count(trigger_row.id)::integer,
+    'created_at', to_char(
+      provider_account.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+    ),
+    'updated_at', to_char(
+      provider_account.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+    )
+  )
+  FROM public.companion_trigger_provider_accounts provider_account
+  LEFT JOIN public.companion_triggers trigger_row
+    ON trigger_row.org_id = provider_account.org_id
+   AND trigger_row.provider_account_id = provider_account.id
+  WHERE provider_account.org_id = p_org_id
+    AND provider_account.owner_id = v_actor_id
+  GROUP BY provider_account.id
+  ORDER BY provider_account.provider, provider_account.label, provider_account.id;
+END
+$$;
+--> statement-breakpoint
+
+-- Registration performs a provider mutation while the API tenant transaction is open. Lock the
+-- trigger row here so concurrent retries serialize, then return the state committed by any earlier
+-- waiter before the next caller decides whether a provider mutation is still necessary.
+CREATE OR REPLACE FUNCTION public.companion_api_get_trigger_for_registration(
+  p_org_id uuid,
+  p_companion_id uuid,
+  p_trigger_id uuid,
+  p_webhook_base_url text
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+SET row_security = on
+AS $$
+DECLARE
+  v_access text := public.companion_api_require_access(p_org_id, p_companion_id, 'editor');
+  v_trigger public.companion_triggers%ROWTYPE;
+BEGIN
+  IF v_access NOT IN ('owner', 'editor') THEN
+    RAISE EXCEPTION 'editor access is required' USING ERRCODE = '42501';
+  END IF;
+  SELECT trigger_row.* INTO v_trigger
+  FROM public.companion_triggers trigger_row
+  WHERE trigger_row.org_id = p_org_id
+    AND trigger_row.companion_id = p_companion_id
+    AND trigger_row.id = p_trigger_id
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Companion trigger not found' USING ERRCODE = 'P0002';
+  END IF;
+  RETURN public.companion_api_trigger_json(p_org_id, p_companion_id, p_trigger_id, true)
+    || jsonb_build_object(
+      'webhook_url', p_webhook_base_url
+        || '/v1/hooks/triggers/' || v_trigger.id::text || '/' || v_trigger.secret,
+      'remote_hook_id', v_trigger.remote_hook_id
+    );
+END
+$$;
+--> statement-breakpoint
+
 CREATE FUNCTION public.companion_api_create_trigger(
   p_org_id uuid, p_companion_id uuid, p_id uuid, p_name text, p_prompt text,
   p_mode text, p_provider text, p_provider_account_id uuid, p_target jsonb,
@@ -494,6 +577,16 @@ BEGIN
       AND client_message_id=p_client_message_id) INTO v_replay;
   IF NOT v_replay THEN
     IF NOT v_trigger.enabled THEN RETURN QUERY SELECT 'skipped_disabled',NULL::jsonb,false; RETURN; END IF;
+    IF v_trigger.provider IN ('github','linear','sentry')
+       AND (v_trigger.registration_status <> 'registered' OR NOT EXISTS (
+         SELECT 1 FROM public.companion_trigger_provider_accounts provider_account
+         WHERE provider_account.org_id=p_org_id
+           AND provider_account.id=v_trigger.provider_account_id
+           AND provider_account.provider=v_trigger.provider
+           AND provider_account.status='connected'
+       )) THEN
+      RETURN QUERY SELECT 'skipped_disabled',NULL::jsonb,false; RETURN;
+    END IF;
     IF v_trigger.last_fired_at IS NOT NULL
        AND v_trigger.last_fired_at > statement_timestamp()-interval '60 seconds' THEN
       RETURN QUERY SELECT 'skipped_throttled',NULL::jsonb,false; RETURN;
@@ -841,6 +934,7 @@ END $$;
 
 REVOKE ALL ON FUNCTION public.companion_api_create_trigger(uuid,uuid,uuid,text,text,text,text,uuid,jsonb,text,boolean) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.companion_api_update_trigger(uuid,uuid,uuid,text,text,text,text,uuid,jsonb,boolean) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.companion_api_list_trigger_provider_accounts(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.companion_api_trigger_run_json(uuid,uuid,uuid,boolean,integer,integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.companion_api_trigger_run_summary_json(uuid,uuid,uuid,boolean) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.companion_api_list_trigger_runs(uuid,uuid,uuid,uuid,integer) FROM PUBLIC;
@@ -858,6 +952,7 @@ BEGIN
     SELECT rolname INTO v_role FROM pg_roles WHERE oid=v_grantee;
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.companion_api_create_trigger(uuid,uuid,uuid,text,text,text,text,uuid,jsonb,text,boolean) TO %I',v_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.companion_api_update_trigger(uuid,uuid,uuid,text,text,text,text,uuid,jsonb,boolean) TO %I',v_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.companion_api_list_trigger_provider_accounts(uuid) TO %I',v_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.companion_api_list_trigger_runs(uuid,uuid,uuid,uuid,integer) TO %I',v_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION public.companion_api_get_trigger_run(uuid,uuid,uuid,integer,integer) TO %I',v_role);
   END LOOP;

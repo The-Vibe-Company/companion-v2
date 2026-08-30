@@ -845,6 +845,7 @@ BEGIN
       companion_api_functions := companion_api_functions || ARRAY[
         'public.companion_api_create_trigger(uuid,uuid,uuid,text,text,text,text,uuid,jsonb,text,boolean)'::regprocedure,
         'public.companion_api_update_trigger(uuid,uuid,uuid,text,text,text,text,uuid,jsonb,boolean)'::regprocedure,
+        'public.companion_api_list_trigger_provider_accounts(uuid)'::regprocedure,
         'public.companion_api_list_trigger_runs(uuid,uuid,uuid,uuid,integer)'::regprocedure,
         'public.companion_api_get_trigger_run(uuid,uuid,uuid,integer,integer)'::regprocedure
       ];
