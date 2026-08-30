@@ -58,6 +58,67 @@ For ordinary compatible Runtime v2 releases, use rolling deployment. One runtime
 SIGTERM stops new claims, reaches bounded safe checkpoints, and releases or loses its leases; another
 replica must take over within 45 seconds. Do not clear lease rows or edit epochs manually.
 
+### Verify queued routine cleanup (migration 0145)
+
+Migration 0145 preserves routine turn/message history while settling stale executable work. After
+the release job commits, record the migration output and run these read-only checks as the migration
+owner:
+
+```sql
+select count(*) as stale_queued_routine_turns
+from public.companion_turns
+where status = 'queued'
+  and (routine_snapshot_id is not null or routine_name is not null)
+  and created_at < now() - interval '10 minutes';
+
+select status::text, last_error_code, last_error_action::text, count(*)
+from public.companion_turns
+where last_error_code in ('routine_disabled', 'routine_deleted', 'routine_queue_expired')
+group by status, last_error_code, last_error_action
+order by last_error_code, status;
+
+select tgname
+from pg_catalog.pg_trigger
+where tgrelid = 'public.companion_routines'::regclass
+  and tgname in (
+    'companion_routines_cancel_queued_turns_on_disable',
+    'companion_routines_cancel_queued_turns_on_delete'
+  )
+  and not tgisinternal;
+```
+
+The first query must return zero: the migration backfill covers queued routine-origin rows older
+than the ten-minute missed-fire grace, including rows whose definition was already deleted. The
+second query should show only terminal `cancelled` rows with action `none`; these are skipped runs,
+not genuine routine failures, and must not produce failure-streak increments or notifications.
+The trigger query must return both rows. A runtime claim sweep repeats bounded cleanup under the
+current enabled gate epoch, so a stale/disabled executor cannot mutate queue state. Do not manually
+delete or requeue these turns; if the count rises, inspect runtime sweep freshness and gate state:
+
+```sql
+select enabled, gate_epoch, updated_at
+from public.companion_runtime_gate_status();
+```
+
+Also verify that no skipped source retains an executable cold-start derivative:
+
+```sql
+select count(*) as executable_starts_with_settled_sources
+from public.companion_operations operation
+join public.companion_turns source_turn
+  on source_turn.org_id = operation.org_id
+ and source_turn.companion_id = operation.companion_id
+ and source_turn.id = operation.source_turn_id
+where operation.kind = 'start'
+  and operation.trigger = 'turn'
+  and operation.status in ('pending', 'running')
+  and source_turn.status <> 'queued';
+```
+
+This must return zero after at least one current runtime claim sweep. An active executor is denied
+further Box contact immediately; an already-dead executor is reconciled after its lease expires.
+Do not clear the lease or operation manually.
+
 Migration 0110 is deliberately migration-first during that rolling deploy. As soon as it commits,
 the pre-0110 four-argument runtime claimer receives no new work; already-held leases remain valid.
 Deploy the matching runtime immediately after the release job. If an old replica loses a lease after

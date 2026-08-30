@@ -193,6 +193,7 @@ export const COMPANION_SQL_BUDGET_CONTRACT: Readonly<Record<string, readonly str
   companion_runtime_defer_delete: ["5 seconds", "15 seconds", "30 seconds", "60 seconds"],
   // COMPANION_ROUTINE_MISSED_GRACE_MS twin.
   companion_fire_routine: ["10 minutes"],
+  companion_runtime_expire_queued_routine_turns: ["10 minutes"],
   // COMPANION_TRIGGER_MIN_INTERVAL_MS twin.
   companion_api_fire_trigger: ["60 seconds"],
 };

@@ -5811,6 +5811,440 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     }
   });
 
+  it("claims a later ordinary message on main before an older queued routine, then claims the routine lane", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const fixture = await createCompanion({
+      boxReady: true,
+      selectedSkillIds: [],
+      selectedMcpAccountIds: [],
+    });
+    const routineId = randomUUID();
+    const mainExecutor = `${executorId}-queue-main`;
+    const routineExecutor = `${executorId}-queue-routine`;
+    let mainClaim: Claim | undefined;
+    let routineClaim: Claim | undefined;
+    try {
+      // The fixture starts with a running main attempt. Finish that seed work so both newly queued
+      // turns are eligible, while retaining the material snapshot required by the claim guard.
+      await sql`
+        update companion_turn_attempts
+        set status = 'cancelled', settled_at = now(), updated_at = now()
+        where id = ${fixture.attemptId}::uuid
+      `;
+      await sql`
+        update companion_turns
+        set status = 'cancelled', settled_at = now(), state_changed_at = now(), updated_at = now()
+        where id = ${fixture.turnId}::uuid
+      `;
+      await sql`
+        update companion_runtime_instances
+        set material_pi_invocation_id = pi_invocation_id, material_client_surface = 'web',
+          material_expires_at = now() + interval '6 hours', last_observed_at = now()
+        where companion_id = ${fixture.companionId}::uuid
+      `;
+      await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          select public.companion_api_create_routine(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid, ${routineId}::uuid,
+            'Queued routine', 'Write the queued routine result.', '0 9 * * *', 'UTC', true,
+            now() + interval '1 hour'
+          )
+        `,
+      });
+      await sql`
+        update companion_routines
+        set next_fire_at = now() - interval '1 second'
+        where id = ${routineId}::uuid
+      `;
+      const [due] = await asWorker((tx) => tx<Array<{ scheduledFor: Date }>>`
+        select scheduled_for as "scheduledFor"
+        from public.companion_claim_due_routines('queue-routine-worker', 1, 60)
+        where routine_id = ${routineId}::uuid
+      `);
+      if (!due) throw new Error("expected the queued routine to become due");
+      const [fired] = await asWorker((tx) => tx<Array<{ outcome: string }>>`
+        select outcome from public.companion_fire_routine(
+          'queue-routine-worker', ${ids.orgA}::uuid, ${routineId}::uuid, ${randomUUID()}::uuid,
+          ${due.scheduledFor.toISOString()}::timestamptz, now() + interval '1 hour'
+        )
+      `);
+      expect(fired).toEqual({ outcome: "fired" });
+      const [routineTurn] = await sql<Array<{ turnId: string; status: string }>>`
+        select id::text as "turnId", status::text as status
+        from companion_turns
+        where companion_id = ${fixture.companionId}::uuid
+          and routine_snapshot_id = ${routineId}::uuid
+      `;
+      expect(routineTurn?.status).toBe("queued");
+
+      const clientMessageId = randomUUID();
+      const [ordinary] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ turn: { id: string } }>>`
+          select turn from public.companion_api_enqueue_turn(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid, ${clientMessageId}::uuid,
+            'Answer the ordinary user message.', 'web', '[]'::jsonb
+          )
+        `,
+      });
+      const ordinaryTurnId = stringValue(ordinary?.turn.id);
+      if (ordinaryTurnId === null) throw new Error("expected an ordinary queued turn");
+
+      // The routine has the older global queue sequence, but the first claim must honor the main
+      // lane for this priority tie. The routine row remains durable and executable independently.
+      [mainClaim] = await claimWorkRows(1, mainExecutor);
+      expect(mainClaim).toMatchObject({ workKind: "attempt", companionId: fixture.companionId });
+      const [claimedMain] = await sql<Array<{ turnId: string; lane: string; status: string }>>`
+        select attempt.turn_id::text as "turnId", attempt.execution_lane as lane,
+          turn_row.status::text as status
+        from companion_turn_attempts attempt
+        join companion_turns turn_row
+          on turn_row.org_id = attempt.org_id
+         and turn_row.companion_id = attempt.companion_id
+         and turn_row.id = attempt.turn_id
+        where attempt.id = ${mainClaim!.workId}::uuid
+      `;
+      expect(claimedMain).toEqual({ turnId: ordinaryTurnId, lane: "main", status: "starting" });
+      const [routineStillQueued] = await sql<Array<{ status: string }>>`
+        select status::text as status from companion_turns where id = ${routineTurn!.turnId}::uuid
+      `;
+      expect(routineStillQueued).toEqual({ status: "queued" });
+
+      await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          select * from public.companion_api_cancel_turn(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid, ${ordinaryTurnId}::uuid
+          )
+        `,
+      });
+      await release(mainClaim!, mainExecutor);
+      mainClaim = undefined;
+
+      [routineClaim] = await claimWorkRows(1, routineExecutor);
+      expect(routineClaim).toMatchObject({ workKind: "attempt", companionId: fixture.companionId });
+      const [claimedRoutine] = await sql<Array<{ turnId: string; lane: string; status: string }>>`
+        select attempt.turn_id::text as "turnId", attempt.execution_lane as lane,
+          turn_row.status::text as status
+        from companion_turn_attempts attempt
+        join companion_turns turn_row
+          on turn_row.org_id = attempt.org_id
+         and turn_row.companion_id = attempt.companion_id
+         and turn_row.id = attempt.turn_id
+        where attempt.id = ${routineClaim!.workId}::uuid
+      `;
+      expect(claimedRoutine).toEqual({
+        turnId: routineTurn!.turnId,
+        lane: "routine",
+        status: "starting",
+      });
+    } finally {
+      if (routineClaim) {
+        await sql`
+          update companion_turn_attempts
+          set status = 'cancelled', settled_at = now(), updated_at = now()
+          where id = ${routineClaim.workId}::uuid
+        `;
+        await sql`
+          update companion_turns
+          set status = 'cancelled', settled_at = now(), state_changed_at = now(), updated_at = now()
+          where id = (select turn_id from companion_turn_attempts where id = ${routineClaim.workId}::uuid)
+        `;
+        await release(routineClaim, routineExecutor);
+      }
+      if (mainClaim) {
+        await release(mainClaim, mainExecutor);
+      }
+      await sql`delete from companion_routines where companion_id = ${fixture.companionId}::uuid`;
+      await removeCompanion(fixture.companionId);
+    }
+  });
+
+  it("settles an expired routine queue row in the claim sweep without delaying a main claim", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const fixture = await createCompanion({
+      boxReady: true,
+      selectedSkillIds: [],
+      selectedMcpAccountIds: [],
+    });
+    const routineId = randomUUID();
+    const mainExecutor = `${executorId}-ttl-main`;
+    let mainClaim: Claim | undefined;
+    try {
+      await sql`
+        update companion_turn_attempts
+        set status = 'cancelled', settled_at = now(), updated_at = now()
+        where id = ${fixture.attemptId}::uuid
+      `;
+      await sql`
+        update companion_turns
+        set status = 'cancelled', settled_at = now(), state_changed_at = now(), updated_at = now()
+        where id = ${fixture.turnId}::uuid
+      `;
+      await sql`
+        update companion_runtime_instances
+        set material_pi_invocation_id = pi_invocation_id, material_client_surface = 'web',
+          material_expires_at = now() + interval '6 hours', last_observed_at = now()
+        where companion_id = ${fixture.companionId}::uuid
+      `;
+      await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          select public.companion_api_create_routine(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid, ${routineId}::uuid,
+            'Expired routine', 'This queued run must expire.', '0 9 * * *', 'UTC', true,
+            now() + interval '1 hour'
+          )
+        `,
+      });
+      await sql`
+        update companion_routines
+        set next_fire_at = now() - interval '1 second'
+        where id = ${routineId}::uuid
+      `;
+      const [due] = await asWorker((tx) => tx<Array<{ scheduledFor: Date }>>`
+        select scheduled_for as "scheduledFor"
+        from public.companion_claim_due_routines('ttl-routine-worker', 1, 60)
+        where routine_id = ${routineId}::uuid
+      `);
+      if (!due) throw new Error("expected the TTL routine to become due");
+      await asWorker((tx) => tx`
+        select outcome from public.companion_fire_routine(
+          'ttl-routine-worker', ${ids.orgA}::uuid, ${routineId}::uuid, ${randomUUID()}::uuid,
+          ${due.scheduledFor.toISOString()}::timestamptz, now() + interval '1 hour'
+        )
+      `);
+      const [routineTurn] = await sql<Array<{ turnId: string }>>`
+        select id::text as "turnId"
+        from companion_turns
+        where companion_id = ${fixture.companionId}::uuid
+          and routine_snapshot_id = ${routineId}::uuid
+      `;
+      if (!routineTurn) throw new Error("expected an expired routine turn");
+      const staleStartId = randomUUID();
+      await sql`
+        insert into companion_operations (
+          id, org_id, companion_id, request_id, kind, trigger, actor_id,
+          source_turn_id, runtime_generation
+        ) values (
+          ${staleStartId}::uuid, ${ids.orgA}::uuid, ${fixture.companionId}::uuid,
+          ${randomUUID()}::uuid, 'start', 'turn', ${ids.ownerA},
+          ${routineTurn.turnId}::uuid, 1
+        )
+      `;
+      await sql`
+        update companion_turns
+        set created_at = now() - interval '11 minutes'
+        where id = ${routineTurn.turnId}::uuid
+      `;
+
+      const clientMessageId = randomUUID();
+      const [ordinary] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ turn: { id: string } }>>`
+          select turn from public.companion_api_enqueue_turn(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid, ${clientMessageId}::uuid,
+            'The user message must remain responsive.', 'web', '[]'::jsonb
+          )
+        `,
+      });
+      const ordinaryTurnId = stringValue(ordinary?.turn.id);
+      if (ordinaryTurnId === null) throw new Error("expected an ordinary queued turn");
+
+      // The wrapper settles the stale routine row first, then the unchanged lane-aware claimer
+      // selects the ordinary user turn. Cleanup is bounded and does not hold the main lease.
+      [mainClaim] = await claimWorkRows(1, mainExecutor);
+      expect(mainClaim).toMatchObject({ workKind: "attempt", companionId: fixture.companionId });
+      const [claimed] = await sql<Array<{ turnId: string; lane: string }>>`
+        select turn_id::text as "turnId", execution_lane as lane
+        from companion_turn_attempts where id = ${mainClaim!.workId}::uuid
+      `;
+      expect(claimed).toEqual({ turnId: ordinaryTurnId, lane: "main" });
+      const [expired] = await sql<Array<{
+        status: string;
+        errorCode: string | null;
+        errorMessage: string | null;
+        errorAction: string | null;
+      }>>`
+        select status::text as status, last_error_code as "errorCode",
+          last_error_message as "errorMessage", last_error_action::text as "errorAction"
+        from companion_turns where id = ${routineTurn.turnId}::uuid
+      `;
+      expect(expired).toEqual({
+        status: "cancelled",
+        errorCode: "routine_queue_expired",
+        errorMessage: "This scheduled run expired while waiting in the queue.",
+        errorAction: "none",
+      });
+      const [staleStart] = await sql<Array<{ status: string }>>`
+        select status::text as status from companion_operations where id = ${staleStartId}::uuid
+      `;
+      expect(staleStart).toEqual({ status: "cancelled" });
+
+      await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          select * from public.companion_api_cancel_turn(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid, ${ordinaryTurnId}::uuid
+          )
+        `,
+      });
+      await release(mainClaim!, mainExecutor);
+      mainClaim = undefined;
+    } finally {
+      if (mainClaim) await release(mainClaim, mainExecutor);
+      await sql`delete from companion_routines where companion_id = ${fixture.companionId}::uuid`;
+      await removeCompanion(fixture.companionId);
+    }
+  });
+
+  it("reconciles an orphaned routine Start after lease loss before claiming a later user Start", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const fixture = await createCompanion({
+      boxReady: false,
+      selectedSkillIds: [],
+      selectedMcpAccountIds: [],
+    });
+    const routineId = randomUUID();
+    const routineExecutor = `${executorId}-orphaned-routine-start`;
+    const userExecutor = `${executorId}-orphaned-user-start`;
+    let routineStartClaim: Claim | undefined;
+    let userStartClaim: Claim | undefined;
+    try {
+      await sql`
+        update companion_turn_attempts
+        set status = 'cancelled', settled_at = now(), updated_at = now()
+        where id = ${fixture.attemptId}::uuid
+      `;
+      await sql`
+        update companion_turns
+        set status = 'cancelled', settled_at = now(), state_changed_at = now(), updated_at = now()
+        where id = ${fixture.turnId}::uuid
+      `;
+      await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          select public.companion_api_create_routine(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid, ${routineId}::uuid,
+            'Orphaned cold start', 'Say exactly: Hello World.', '*/5 * * * *', 'UTC', true,
+            now() + interval '1 hour'
+          )
+        `,
+      });
+      await sql`
+        update companion_routines set next_fire_at = now() - interval '1 second'
+        where id = ${routineId}::uuid
+      `;
+      const [due] = await asWorker((tx) => tx<Array<{ scheduledFor: Date }>>`
+        select scheduled_for as "scheduledFor"
+        from public.companion_claim_due_routines('orphaned-start-worker', 1, 60)
+        where routine_id = ${routineId}::uuid
+      `);
+      if (!due) throw new Error("expected the orphaned-start routine to become due");
+      expect(await asWorker((tx) => tx<Array<{ outcome: string }>>`
+        select outcome from public.companion_fire_routine(
+          'orphaned-start-worker', ${ids.orgA}::uuid, ${routineId}::uuid,
+          ${randomUUID()}::uuid, ${due.scheduledFor.toISOString()}::timestamptz,
+          now() + interval '1 hour'
+        )
+      `)).toEqual([{ outcome: "fired" }]);
+
+      const [routineTurn] = await sql<Array<{ turnId: string }>>`
+        select id::text as "turnId" from companion_turns
+        where companion_id = ${fixture.companionId}::uuid
+          and routine_snapshot_id = ${routineId}::uuid
+      `;
+      if (!routineTurn) throw new Error("expected the routine-origin cold turn");
+      [routineStartClaim] = await claimWorkRows(1, routineExecutor);
+      expect(routineStartClaim).toMatchObject({
+        workKind: "operation",
+        companionId: fixture.companionId,
+      });
+      const [claimedRoutineStart] = await sql<Array<{ sourceTurnId: string | null }>>`
+        select source_turn_id::text as "sourceTurnId"
+        from companion_operations where id = ${routineStartClaim!.workId}::uuid
+      `;
+      expect(claimedRoutineStart).toEqual({ sourceTurnId: routineTurn.turnId });
+      expect(await authorizeClaim(routineStartClaim!, routineExecutor)).toEqual({
+        authorized: true,
+        denialCode: null,
+      });
+
+      // Disable settles the source in its own transaction. The claimed derivative cannot contact
+      // Box again, and a dead executor's expired fence must not leave its running row behind.
+      await sql`
+        update companion_routines set enabled = false, next_fire_at = null, updated_at = now()
+        where id = ${routineId}::uuid
+      `;
+      expect(await authorizeClaim(routineStartClaim!, routineExecutor)).toEqual({
+        authorized: false,
+        denialCode: "source_turn_settled",
+      });
+      await sql`
+        update companion_runtime_leases
+        set renewed_at = now() - interval '2 seconds', expires_at = now() - interval '1 second'
+        where companion_id = ${fixture.companionId}::uuid and lane = 'main'
+      `;
+
+      const [ordinary] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ turn: { id: string }; operation: { id: string } }>>`
+          select turn, operation from public.companion_api_enqueue_turn(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid, ${randomUUID()}::uuid,
+            'This user message must not wait behind the routine.', 'web', '[]'::jsonb
+          )
+        `,
+      });
+      const ordinaryTurnId = stringValue(ordinary?.turn.id);
+      const ordinaryStartId = stringValue(ordinary?.operation.id);
+      if (ordinaryTurnId === null || ordinaryStartId === null) {
+        throw new Error("expected the ordinary cold turn and Start operation");
+      }
+
+      [userStartClaim] = await claimWorkRows(1, userExecutor);
+      expect(userStartClaim).toMatchObject({
+        workKind: "operation",
+        workId: ordinaryStartId,
+        companionId: fixture.companionId,
+      });
+      const [reconciled] = await sql<Array<{
+        operationStatus: string;
+        turnStatus: string;
+        turnErrorCode: string | null;
+      }>>`
+        select operation.status::text as "operationStatus",
+          turn_row.status::text as "turnStatus",
+          turn_row.last_error_code as "turnErrorCode"
+        from companion_operations operation
+        join companion_turns turn_row on turn_row.id = operation.source_turn_id
+        where operation.id = ${routineStartClaim!.workId}::uuid
+      `;
+      expect(reconciled).toEqual({
+        operationStatus: "cancelled",
+        turnStatus: "cancelled",
+        turnErrorCode: "routine_disabled",
+      });
+      const [claimedUserSource] = await sql<Array<{ sourceTurnId: string | null }>>`
+        select source_turn_id::text as "sourceTurnId"
+        from companion_operations where id = ${userStartClaim!.workId}::uuid
+      `;
+      expect(claimedUserSource).toEqual({ sourceTurnId: ordinaryTurnId });
+    } finally {
+      if (userStartClaim) await release(userStartClaim, userExecutor);
+      await sql`delete from companion_routines where companion_id = ${fixture.companionId}::uuid`;
+      await removeCompanion(fixture.companionId);
+    }
+  });
+
   it("lets permanent delete preempt and recover past an interrupted isolated routine", async () => {
     if (!sql) throw new Error("runtime executor database is not initialized");
     const fixture = await createCompanion({
