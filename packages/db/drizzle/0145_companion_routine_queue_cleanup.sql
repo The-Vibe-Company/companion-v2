@@ -450,7 +450,7 @@ DECLARE
   v_definition text;
   v_old text := $r$      i.health_due_at,
       i.companion_id$r$;
-  v_new text := $r$      CASE WHEN v_lane = 'main' THEN 0 ELSE 1 END,
+  v_new text := $r$      CASE WHEN l.lane = 'main' THEN 0 ELSE 1 END,
       i.health_due_at,
       i.companion_id$r$;
   v_count integer;
@@ -466,6 +466,42 @@ BEGIN
   EXECUTE replace(v_definition, v_old, v_new);
 END
 $companion_main_queue_tie_break$;
+--> statement-breakpoint
+
+-- Queued-turn cancellation already settles user-triggered Retry operations. A cold send owns a
+-- turn-triggered Start instead; cancel that still-pending derivative in the same transaction so a
+-- settled source can never leave higher-priority lifecycle work behind.
+DO $companion_cancel_pending_turn_start$
+DECLARE
+  v_signature text := 'public.companion_api_cancel_turn(uuid,uuid,uuid)';
+  v_definition text;
+  v_old text := $r$    AND retry_operation.kind IN ('start', 'restart_pi')
+    AND retry_operation.trigger = 'user'
+    AND retry_operation.status = 'pending';$r$;
+  v_new text := $r$    AND (
+      (
+        retry_operation.kind IN ('start', 'restart_pi')
+        AND retry_operation.trigger = 'user'
+      )
+      OR (
+        retry_operation.kind = 'start'
+        AND retry_operation.trigger = 'turn'
+      )
+    )
+    AND retry_operation.status = 'pending';$r$;
+  v_count integer;
+BEGIN
+  v_definition := pg_catalog.pg_get_functiondef(pg_catalog.to_regprocedure(v_signature));
+  v_count := (
+    char_length(v_definition) - char_length(replace(v_definition, v_old, ''))
+  ) / char_length(v_old);
+  IF v_definition IS NULL OR v_count <> 1 THEN
+    RAISE EXCEPTION 'pending turn Start cancellation rewrite matched %, expected 1',
+      COALESCE(v_count, 0) USING ERRCODE = '55000';
+  END IF;
+  EXECUTE replace(v_definition, v_old, v_new);
+END
+$companion_cancel_pending_turn_start$;
 --> statement-breakpoint
 
 -- Defense in depth for turn-derived lifecycle work: a Start whose source has already settled is
@@ -507,9 +543,9 @@ $companion_live_start_source_guard$;
 --> statement-breakpoint
 
 -- A Start claim remains fenced while its lease is live, but its source turn can be atomically
--- skipped by a routine disable/delete trigger in another transaction. Refuse any later Box contact
--- for that claim. Runtime treats this denial as a handoff: it releases the lease, after which the
--- bounded reconciliation above terminalizes the orphan before another claim is selected.
+-- settled by user cancellation or routine disable/delete in another transaction. Refuse any later
+-- Box contact for that claim. Runtime treats this denial as a handoff: it releases the lease, after
+-- which the bounded reconciliation above terminalizes the orphan before another claim is selected.
 DO $companion_live_start_authorization_guard$
 DECLARE
   v_signature text :=
@@ -597,8 +633,9 @@ WHERE turn_row.id = stranded.id
   AND turn_row.status = 'queued';
 --> statement-breakpoint
 
--- The backfill above may have settled sources written by an older API. Remove their unclaimed
--- cold-start derivatives so they cannot retain lifecycle priority or clutter the operation queue.
+-- The backfill above and older API releases may have left an unclaimed cold-start derivative behind
+-- any already-settled source. Remove every such pending turn Start before the source guard becomes
+-- authoritative so neither routine nor ordinary cancellation can retain lifecycle priority.
 UPDATE public.companion_operations operation_row
 SET status = 'cancelled',
     settled_at = statement_timestamp(),
@@ -612,10 +649,7 @@ WHERE operation_row.kind = 'start'
     WHERE source_turn.org_id = operation_row.org_id
       AND source_turn.companion_id = operation_row.companion_id
       AND source_turn.id = operation_row.source_turn_id
-      AND source_turn.status = 'cancelled'
-      AND source_turn.last_error_code IN (
-        'routine_disabled', 'routine_deleted', 'routine_queue_expired'
-      )
+      AND source_turn.status <> 'queued'
   );
 --> statement-breakpoint
 

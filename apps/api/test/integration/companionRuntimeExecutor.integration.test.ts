@@ -3689,6 +3689,61 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     }
   });
 
+  it("atomically cancels a queued turn and its pending cold-start derivative", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const fixture = await createCompanion({
+      boxReady: false,
+      selectedSkillIds: [],
+      selectedMcpAccountIds: [],
+    });
+    try {
+      await sql`
+        update companion_turn_attempts
+        set status = 'cancelled', settled_at = now(), updated_at = now()
+        where id = ${fixture.attemptId}::uuid
+      `;
+      await sql`
+        update companion_turns
+        set status = 'cancelled', settled_at = now(), state_changed_at = now(), updated_at = now()
+        where id = ${fixture.turnId}::uuid
+      `;
+
+      const [enqueued] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ turn: { id: string }; operation: { id: string } }>>`
+          select turn, operation from public.companion_api_enqueue_turn(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid, ${randomUUID()}::uuid,
+            'Cancel this cold queued message.', 'web', '[]'::jsonb
+          )
+        `,
+      });
+      const turnId = stringValue(enqueued?.turn.id);
+      const startId = stringValue(enqueued?.operation.id);
+      if (turnId === null || startId === null) {
+        throw new Error("expected a queued turn and its cold-start operation");
+      }
+
+      const [cancelled] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ turn: { status: string } }>>`
+          select turn from public.companion_api_cancel_turn(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid, ${turnId}::uuid
+          )
+        `,
+      });
+      expect(cancelled?.turn.status).toBe("cancelled");
+      const [derivative] = await sql<Array<{ status: string; settledAt: Date | null }>>`
+        select status::text as status, settled_at as "settledAt"
+        from companion_operations where id = ${startId}::uuid
+      `;
+      expect(derivative).toEqual({ status: "cancelled", settledAt: expect.any(Date) });
+    } finally {
+      await removeCompanion(fixture.companionId);
+    }
+  });
+
   it("dequeues a follow-up immediately and asks the executor to stop an accepted turn", async () => {
     if (!sql) throw new Error("runtime executor database is not initialized");
     const fixture = await createCompanion({ boxReady: true });
@@ -5895,6 +5950,16 @@ describe("Companion runtime executor PostgreSQL surface", () => {
 
       // The routine has the older global queue sequence, but the first claim must honor the main
       // lane for this priority tie. The routine row remains durable and executable independently.
+      const [claimDefinition] = await sql<Array<{ definition: string }>>`
+        select pg_get_functiondef(
+          'public.companion_runtime_claim_work_without_material_guard(text,integer,integer,bigint)'
+            ::regprocedure
+        ) as definition
+      `;
+      expect(claimDefinition?.definition).toContain("CASE WHEN l.lane = 'main' THEN 0 ELSE 1 END");
+      expect(claimDefinition?.definition).not.toContain(
+        "CASE WHEN v_lane = 'main' THEN 0 ELSE 1 END",
+      );
       [mainClaim] = await claimWorkRows(1, mainExecutor);
       expect(mainClaim).toMatchObject({ workKind: "attempt", companionId: fixture.companionId });
       const [claimedMain] = await sql<Array<{ turnId: string; lane: string; status: string }>>`
