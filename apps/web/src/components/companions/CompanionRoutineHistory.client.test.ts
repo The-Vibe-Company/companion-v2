@@ -4,6 +4,8 @@
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type {
+  CompanionLatestOperation,
+  CompanionOperation,
   CompanionRoutineRunDetail,
   CompanionRoutineRunSummary,
 } from "@companion/contracts";
@@ -29,6 +31,41 @@ const routineId = "22222222-2222-4222-8222-222222222222";
 const runId = "33333333-3333-4333-8333-333333333333";
 const secondRunId = "44444444-4444-4444-8444-444444444444";
 const roots: Root[] = [];
+
+function retryOperation(
+  status: CompanionOperation["status"] = "pending",
+  error: CompanionOperation["error"] = null,
+): CompanionOperation {
+  return {
+    id: "55555555-5555-4555-8555-555555555555",
+    companion_id: companionId,
+    request_id: null,
+    source_turn_id: runId,
+    kind: "restart_pi",
+    trigger: "user",
+    status,
+    queue_sequence: 1,
+    checkpoint: status === "succeeded" ? "pi_ready" : "pending",
+    attempt_count: status === "pending" ? 0 : 1,
+    error,
+    created_at: "2026-08-27T09:10:01.000Z",
+    started_at: status === "pending" ? null : "2026-08-27T09:10:02.000Z",
+    settled_at: ["pending", "running"].includes(status) ? null : "2026-08-27T09:10:03.000Z",
+  };
+}
+
+function latestRetryOperation(
+  status: CompanionLatestOperation["status"],
+  error: CompanionLatestOperation["error"] = null,
+): CompanionLatestOperation {
+  return {
+    id: "55555555-5555-4555-8555-555555555555",
+    source_turn_id: runId,
+    kind: "restart_pi",
+    status,
+    error,
+  };
+}
 
 const summary: CompanionRoutineRunSummary = {
   run_id: runId,
@@ -59,6 +96,23 @@ const firstPage: CompanionRoutineRunDetail = {
   }],
   next_entry_cursor: 1,
 };
+
+function interruptedDetail(): CompanionRoutineRunDetail {
+  return {
+    ...firstPage,
+    status: "interrupted",
+    outcome: "error",
+    surface_mode: null,
+    main_entry_event_id: null,
+    settled_at: "2026-08-27T09:10:00.000Z",
+    error: {
+      code: "turn_stalled",
+      message: "The Companion stopped making progress.",
+      action: "retry",
+    },
+    next_entry_cursor: null,
+  };
+}
 
 const secondPage: CompanionRoutineRunDetail = {
   ...summary,
@@ -108,22 +162,42 @@ async function flush() {
   });
 }
 
-async function mount(run: string | null = null) {
+interface RecoveryOptions {
+  canAct?: boolean;
+  latestOperation?: CompanionLatestOperation | null;
+  onRetry?: (runId: string, retryId: string) => Promise<CompanionOperation>;
+  onCancel?: (runId: string) => Promise<void>;
+}
+
+async function mount(run: string | null = null, recovery: RecoveryOptions = {}) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
   roots.push(root);
-  await act(async () => {
-    root.render(React.createElement(CompanionRoutineHistory, {
+  let currentRecovery = recovery;
+  const render = async () => {
+    await act(async () => root.render(React.createElement(CompanionRoutineHistory, {
       orgId: "org-1",
       companionId,
       target: { routineId, runId: run, name: "Morning brief" },
       memberTimezone: "UTC",
+      canAct: currentRecovery.canAct ?? true,
+      latestOperation: currentRecovery.latestOperation ?? null,
+      onRetry: currentRecovery.onRetry ?? (async () => retryOperation()),
+      onCancel: currentRecovery.onCancel ?? (async () => undefined),
       onClose: () => undefined,
-    }));
-  });
+    })));
+  };
+  await render();
   await flush();
-  return container;
+  return {
+    container,
+    rerender: async (next: Partial<RecoveryOptions>) => {
+      currentRecovery = { ...currentRecovery, ...next };
+      await render();
+      await flush();
+    },
+  };
 }
 
 function buttonNamed(container: HTMLElement, name: string): HTMLButtonElement {
@@ -151,7 +225,7 @@ describe("Companion routine history", () => {
   });
 
   it("moves from newest-first run history into the private paginated transcript", async () => {
-    const container = await mount();
+    const { container } = await mount();
 
     expect(container.textContent).toContain("Notified in main chat");
     expect(container.textContent).toContain("Completed");
@@ -185,7 +259,7 @@ describe("Companion routine history", () => {
   });
 
   it("opens a marker-linked run directly and keeps a path back to the routine list", async () => {
-    const container = await mount(runId);
+    const { container } = await mount(runId);
 
     expect(container.textContent).toContain("Routine run");
     expect(container.textContent).toContain("Checked the overnight deployment.");
@@ -212,7 +286,7 @@ describe("Companion routine history", () => {
       ),
     );
 
-    const container = await mount();
+    const { container } = await mount();
     const runButtons = () => [
       ...container.querySelectorAll<HTMLButtonElement>(".routine-history__run-button"),
     ];
@@ -233,5 +307,74 @@ describe("Companion routine history", () => {
     await flush();
     expect(container.textContent).not.toContain("stale first-run failure");
     expect(container.textContent).toContain("The later run completed cleanly.");
+  });
+
+  it("lets a runner resolve an interrupted routine without touching the main Pi", async () => {
+    const interrupted = interruptedDetail();
+    const onRetry = vi.fn(async (): Promise<CompanionOperation> => retryOperation());
+    historyApi.readCompanionRoutineRun.mockReset().mockResolvedValue(interrupted);
+
+    const { container } = await mount(runId, { onRetry });
+    expect(container.textContent).toContain("Cancel releases blocked runtime work.");
+
+    await act(async () => buttonNamed(container, "Retry run").click());
+
+    expect(onRetry).toHaveBeenCalledWith(runId, expect.stringMatching(/^[0-9a-f-]{36}$/));
+    expect(container.textContent).toContain("Retry accepted. The isolated routine session");
+    expect(container.textContent).not.toContain("Retry run");
+    expect(buttonNamed(container, "Cancel run").disabled).toBe(false);
+  });
+
+  it("restores retry and shows the durable failure when the isolated Pi recycle fails", async () => {
+    historyApi.readCompanionRoutineRun.mockReset().mockResolvedValue(interruptedDetail());
+    const { container, rerender } = await mount(runId);
+
+    await act(async () => buttonNamed(container, "Retry run").click());
+    expect(container.textContent).toContain("Retry accepted.");
+
+    await rerender({
+      latestOperation: latestRetryOperation("failed", {
+        code: "runtime_execution_failed",
+        message: "The isolated routine session could not restart.",
+        action: "retry",
+      }),
+    });
+
+    expect(container.textContent).toContain("The isolated routine session could not restart.");
+    expect(buttonNamed(container, "Retry run").disabled).toBe(false);
+    expect(buttonNamed(container, "Cancel run").disabled).toBe(false);
+  });
+
+  it("refreshes a recovered run and removes stale cancellation controls", async () => {
+    const interrupted = interruptedDetail();
+    historyApi.readCompanionRoutineRun.mockReset().mockResolvedValue(interrupted);
+    const { container, rerender } = await mount(runId);
+
+    await act(async () => buttonNamed(container, "Retry run").click());
+    historyApi.readCompanionRoutineRun.mockResolvedValueOnce({
+      ...interrupted,
+      status: "queued",
+      outcome: "pending",
+      started_at: null,
+      settled_at: null,
+      error: null,
+    });
+    await rerender({ latestOperation: latestRetryOperation("succeeded") });
+    await flush();
+
+    expect(container.textContent).toContain("Queued");
+    expect(container.textContent).not.toContain("Retry run");
+    expect(container.textContent).not.toContain("Cancel run");
+  });
+
+  it("explains the recovery boundary without exposing mutations to a Viewer", async () => {
+    const interrupted = interruptedDetail();
+    historyApi.readCompanionRoutineRun.mockReset().mockResolvedValue(interrupted);
+
+    const { container } = await mount(runId, { canAct: false });
+
+    expect(container.textContent).toContain("An Owner or Editor must retry or cancel this run.");
+    expect(container.textContent).not.toContain("Retry run");
+    expect(container.textContent).not.toContain("Cancel run");
   });
 });

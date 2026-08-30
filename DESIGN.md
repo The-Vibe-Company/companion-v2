@@ -278,9 +278,12 @@ The sidebar presents the Skills libraries directly: My Skills, Organization, Ins
 Routine history extends the compatibility marker without adding chat chrome. The routine row exposes
 a History action, while a marker carrying `run_id` is a compact clickable control. Both open the same
 right-side drawer: newest runs first, explicit terminal outcome, then the private transcript paged by
-durable ordinal. The drawer takes the full chat stage on a phone, traps focus, closes with Esc or its
-scrim, and never contacts Box. During the compatibility phase the ordinary assistant reply stays in
-the thread and is referenced as the run's virtual notify result rather than duplicated in history.
+durable ordinal. An interrupted run exposes the same explicit Retry and Cancel boundary as an
+interrupted main turn: Retry recycles only that run's isolated Pi session, while Cancel releases the
+routine lane and any shared lifecycle work waiting behind it. Viewer sees the reason but no mutation
+controls. The drawer takes the full chat stage on a phone, traps focus, closes with Esc or its scrim,
+and never contacts Box on reads. During the compatibility phase the ordinary assistant reply stays
+in the thread and is referenced as the run's virtual notify result rather than duplicated in history.
 
 Routine creation uses the member's saved timezone as the default schedule zone on both responsive
 web and the native Apple clients. Routine next-fire and trigger last-fire instants are displayed in that member

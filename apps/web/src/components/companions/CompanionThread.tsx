@@ -556,6 +556,10 @@ export function CompanionThread({
           companionId={companion.id}
           target={routineHistory}
           memberTimezone={memberTimezone}
+          canAct={canSend}
+          latestOperation={companion.runtime.latest_operation ?? null}
+          onRetry={onRetryInterrupted}
+          onCancel={onCancelInterrupted}
           onClose={closeRoutineHistory}
         />
       ) : null}
