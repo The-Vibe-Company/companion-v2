@@ -125,7 +125,7 @@ struct PluginManagementView: View {
             }
             Button("Cancel", role: .cancel) { pluginToDisconnect = nil }
         } message: {
-            Text("Its encrypted credential and all Companion attachments will be removed.")
+            Text("This member-wide account becomes unavailable to every Companion. MCP tool attachments stop working, and dependent triggers cannot register or receive events until the provider is reconnected.")
         }
         .task {
             guard !demoMode else { return }

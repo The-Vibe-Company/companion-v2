@@ -220,6 +220,7 @@ export function CompanionThread({
   onTriggersChange,
   contextTriggerAccounts = [],
   contextTriggerHistoryApi,
+  onManageTriggerProviders,
   contextPlugins = [],
   contextModels = [],
   lastReadOrdinal,
@@ -248,10 +249,11 @@ export function CompanionThread({
   onRoutinesChange?: (routines: CompanionRoutine[]) => void;
   contextTriggers?: CompanionTrigger[];
   onTriggersChange?: (triggers: CompanionTrigger[]) => void;
-  /** Credential-free MCP account projections already attached to this Companion. */
+  /** Credential-free member accounts available to every Companion for provider registration. */
   contextTriggerAccounts?: readonly CompanionTriggerAccountOption[];
   /** Optional read adapter for the trigger history drawer. */
   contextTriggerHistoryApi?: CompanionTriggerHistoryApi;
+  onManageTriggerProviders?: () => void;
   /** Connected plugins this reader can already name on a config card. */
   contextPlugins?: Array<{ id: string; label: string }>;
   /** Provider catalog models this surface already loaded. */
@@ -568,6 +570,7 @@ export function CompanionThread({
             triggerAccounts={contextTriggerAccounts}
             onTriggersChange={onTriggersChange ?? (() => undefined)}
             onOpenTriggerHistory={contextTriggerHistoryApi ? openTriggerHistory : undefined}
+            onManageTriggerProviders={onManageTriggerProviders}
             onJoin={context.onJoin}
             onDesktop={onDesktop}
             onSettings={onSettings}

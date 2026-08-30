@@ -2078,6 +2078,59 @@ button.chat-box:focus-visible {
   line-height: var(--leading-normal);
 }
 
+.chat-context__trigger-providers {
+  padding: 9px 10px;
+  display: grid;
+  gap: 7px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-sunken);
+}
+
+.chat-context__trigger-providers-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.chat-context__trigger-providers-head strong {
+  color: var(--color-fg);
+  font-size: var(--text-xs);
+}
+
+.chat-context__trigger-providers p,
+.chat-context__trigger-providers small {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 11px;
+  line-height: var(--leading-normal);
+}
+
+.chat-context__trigger-providers ul {
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+  list-style: none;
+}
+
+.chat-context__trigger-providers li {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-fg);
+  font-size: var(--text-xs);
+}
+
+.chat-context__trigger-providers li > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .chat-context__trigger-resource {
   gap: 8px;
 }

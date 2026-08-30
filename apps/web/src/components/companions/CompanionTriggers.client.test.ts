@@ -54,8 +54,9 @@ async function mount(input: {
   triggers?: CompanionTrigger[];
   canEdit?: boolean;
   memberTimezone?: string | null;
-  accountOptions?: Array<{ id: string; provider: string; label: string }>;
+  accountOptions?: Array<{ id: string; provider: string; label: string; connected?: boolean }>;
   onChange?: (triggers: CompanionTrigger[]) => void;
+  onManageProviders?: () => void;
 } = {}) {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -70,6 +71,7 @@ async function mount(input: {
       canEdit: input.canEdit ?? true,
       accountOptions: input.accountOptions,
       onChange: input.onChange ?? (() => undefined),
+      onManageProviders: input.onManageProviders,
       api: companionsApi,
     }));
   });
@@ -169,7 +171,11 @@ describe("Companion triggers panel", () => {
     });
     companionsApi.retryCompanionTriggerRegistration.mockResolvedValue(registered);
     const onChange = vi.fn();
-    const container = await mount({ triggers: [failed], onChange });
+    const container = await mount({
+      triggers: [failed],
+      onChange,
+      accountOptions: [{ id: "account-1", provider: "github", label: "Acme GitHub" }],
+    });
 
     expect(container.textContent).toContain("GitHub token is missing hook write scope.");
     await act(async () => {
@@ -185,7 +191,7 @@ describe("Companion triggers panel", () => {
     expect(onChange).toHaveBeenCalledWith([registered]);
   });
 
-  it("reuses the sole attached provider account without asking for a key or URL", async () => {
+  it("reuses the sole member-wide provider account without asking for attachment, a key, or a URL", async () => {
     const created = trigger({ registration_status: "registered", provider_account_id: "account-1" });
     companionsApi.createCompanionTrigger.mockResolvedValue(created);
     const container = await mount({
@@ -201,10 +207,48 @@ describe("Companion triggers panel", () => {
     if (!provider) throw new Error("Missing provider picker");
     await act(async () => { setControlled(provider, "github"); });
 
-    expect(container.textContent).toContain("Using the attached GitHub account “Acme GitHub”.");
+    expect(container.textContent).toContain("Using the shared GitHub account “Acme GitHub”.");
+    expect(container.textContent).toContain("No Companion attachment is required.");
     expect(container.textContent?.toLowerCase()).not.toContain("paste");
     expect(container.querySelector("input[placeholder*='URL']")).toBeNull();
     expect(container.querySelector("input[placeholder*='key']")).toBeNull();
+  });
+
+  it("shows member-wide providers separately from per-Companion triggers", async () => {
+    const onManageProviders = vi.fn();
+    const container = await mount({
+      accountOptions: [{ id: "account-1", provider: "github", label: "Acme GitHub" }],
+      onManageProviders,
+    });
+
+    expect(container.textContent).toContain("Shared providers");
+    expect(container.textContent).toContain("GitHub · Acme GitHub");
+    expect(container.textContent).toContain("Member-wide and immediately available here.");
+    expect(container.textContent).toContain("MCP tool attachments are managed separately.");
+
+    await act(async () => requireNamedButton(container, "Manage").click());
+    expect(onManageProviders).toHaveBeenCalledOnce();
+  });
+
+  it("blocks retry and explains cross-Companion degradation when a shared account disconnects", async () => {
+    const container = await mount({
+      triggers: [trigger({
+        provider_account_id: "account-1",
+        registration_status: "failed",
+        last_registration_error: "Provider credential was revoked.",
+      })],
+      accountOptions: [{
+        id: "account-1",
+        provider: "github",
+        label: "Acme GitHub",
+        connected: false,
+      }],
+    });
+
+    expect(container.textContent).toContain("Provider disconnected");
+    expect(container.textContent).toContain("Registration blocked");
+    expect(container.textContent).toContain("every dependent Companion");
+    expect(buttonNamed(container, "Retry registration")).toBeUndefined();
   });
 
   it("shows trigger activity in the stored member timezone", async () => {

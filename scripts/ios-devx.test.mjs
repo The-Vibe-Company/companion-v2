@@ -1106,6 +1106,26 @@ test("iOS navigation has one Companion details route and no legacy resource page
   assert.doesNotMatch(root, /-companion-resources-demo|CompanionConnectedResourcesDemoView/);
 });
 
+test("iOS trigger providers are member-wide while MCP tool attachments remain Companion-specific", () => {
+  const resources = read("apps/ios/Companion/Screens/CompanionDetailResourceSections.swift");
+  const editor = read("apps/ios/Companion/Screens/CompanionResourceEditorViews.swift");
+  const plugins = read("apps/ios/Companion/Screens/PluginCatalogSheet.swift");
+
+  const triggerAccounts = resources.slice(
+    resources.indexOf("private var triggerAccountOptions"),
+    resources.indexOf("private var effectiveMemberTimezone"),
+  );
+  assert.match(triggerAccounts, /plugins\.filter\(\\\.connected\)/);
+  assert.doesNotMatch(triggerAccounts, /selectedMCPAccountIDs|attached/);
+  assert.match(resources, /Text\("Shared providers"\)/);
+  assert.match(resources, /No Companion attachment is required\. MCP tool attachments are managed separately above\./);
+  assert.match(resources, /Registration blocked · provider disconnected/);
+  assert.match(editor, /LabeledContent\("Shared account"/);
+  assert.doesNotMatch(editor, /Attach a GitHub or Linear account/);
+  assert.match(plugins, /unavailable to every Companion/);
+  assert.match(plugins, /dependent triggers cannot register or receive events/);
+});
+
 test("GitHub Actions never installs or invokes XcodeBuildMCP", () => {
   const workflows = readdirSync(resolve(ROOT, ".github/workflows"))
     .filter((file) => file.endsWith(".yml") || file.endsWith(".yaml"));

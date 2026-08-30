@@ -295,6 +295,7 @@ export function CompanionsApp({
   const [creating, setCreating] = useState(false);
   const [managingProviders, setManagingProviders] = useState(false);
   const [pluginsOpen, setPluginsOpen] = useState(initialPluginsOpen && !initialCompanionId);
+  const [pluginAccounts, setPluginAccounts] = useState(initialPlugins);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sharing, setSharing] = useState<Companion | null>(null);
@@ -1284,15 +1285,16 @@ export function CompanionsApp({
               onRoutinesChange={setRoutines}
               contextTriggers={triggers}
               onTriggersChange={setTriggers}
-              contextTriggerAccounts={initialPlugins
-                .filter((plugin) => opened.selected_mcp_account_ids.includes(plugin.id))
+              contextTriggerAccounts={pluginAccounts
                 .map((plugin) => ({
                   id: plugin.id,
                   provider: plugin.provider,
                   label: plugin.label,
+                  connected: plugin.connected,
                 }))}
+              onManageTriggerProviders={openPlugins}
               contextTriggerHistoryApi={companionTriggerHistoryApi}
-              contextPlugins={initialPlugins.map((plugin) => ({
+              contextPlugins={pluginAccounts.map((plugin) => ({
                 id: plugin.id,
                 label: `${plugin.provider} · ${plugin.label}`,
               }))}
@@ -1359,7 +1361,8 @@ export function CompanionsApp({
         ) : pluginsOpen ? (
           <CompanionPlugins
             orgId={currentOrg.id}
-            initialAccounts={initialPlugins}
+            initialAccounts={pluginAccounts}
+            onAccountsChange={setPluginAccounts}
             onBack={closePlugins}
           />
         ) : (

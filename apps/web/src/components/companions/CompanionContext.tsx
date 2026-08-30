@@ -49,6 +49,7 @@ export function CompanionContext({
   triggerAccounts = [],
   onTriggersChange,
   onOpenTriggerHistory,
+  onManageTriggerProviders,
   onJoin,
   onDesktop,
   onSettings,
@@ -70,6 +71,7 @@ export function CompanionContext({
   triggerAccounts?: readonly CompanionTriggerAccountOption[];
   onTriggersChange: (triggers: CompanionTrigger[]) => void;
   onOpenTriggerHistory?: (trigger: CompanionTriggerV2) => void;
+  onManageTriggerProviders?: () => void;
   onJoin: () => void;
   onDesktop: () => void;
   /** Null for a Viewer, who does not receive the runner-only context panel. */
@@ -248,6 +250,7 @@ export function CompanionContext({
           canEdit={onSettings !== null}
           onChange={onTriggersChange}
           onOpenHistory={onOpenTriggerHistory}
+          onManageProviders={onManageTriggerProviders}
         />
       </div>
     </aside>

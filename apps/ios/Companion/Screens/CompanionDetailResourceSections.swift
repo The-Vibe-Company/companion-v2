@@ -276,6 +276,8 @@ struct CompanionResourceSections: View {
                     symbol: "bolt",
                     count: resources.triggers.count
                 ) {
+                    triggerProviderAvailability
+                    resourceDivider
                     if resources.triggers.isEmpty {
                         emptyRow(
                             title: "No triggers connected",
@@ -430,7 +432,8 @@ struct CompanionResourceSections: View {
     }
 
     private func triggerRow(_ trigger: CompanionTrigger) -> some View {
-        HStack(alignment: .top, spacing: 12) {
+        let providerConnected = triggerProviderConnected(trigger)
+        return HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 6) {
                 Text(trigger.name)
                     .font(.subheadline.weight(.semibold))
@@ -441,10 +444,10 @@ struct CompanionResourceSections: View {
                 Text(trigger.mode == .notify ? "Notify me" : "Ask the Companion")
                     .font(.caption.weight(.medium))
                     .foregroundStyle(Color.companionMuted)
-                Text(trigger.registrationDescription)
+                Text(providerConnected ? trigger.registrationDescription : "Registration blocked · provider disconnected")
                     .font(.caption)
                     .foregroundStyle(
-                        trigger.registrationStatus == .failed
+                        !providerConnected || trigger.registrationStatus == .failed
                             ? Color.companionDanger
                             : Color.companionMuted
                     )
@@ -462,9 +465,15 @@ struct CompanionResourceSections: View {
                         .foregroundStyle(Color.companionDanger)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                if !providerConnected {
+                    Text("Reconnect this member provider to resume registration and incoming events for every dependent Companion.")
+                        .font(.caption)
+                        .foregroundStyle(Color.companionDanger)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             Spacer(minLength: 8)
-            statusBadge(trigger.status)
+            statusBadge(providerConnected ? trigger.status : .error)
             Button {
                 historyTrigger = trigger
             } label: {
@@ -475,7 +484,7 @@ struct CompanionResourceSections: View {
             .buttonStyle(.borderless)
             .accessibilityLabel("Fire history for \(trigger.name)")
             .accessibilityIdentifier("companion.details.trigger-history.\(trigger.id)")
-            if canEditResources, trigger.registrationStatus == .failed, busyResourceID != trigger.id {
+            if canEditResources, providerConnected, trigger.registrationStatus == .failed, busyResourceID != trigger.id {
                 Button {
                     Task { await retryTriggerRegistration(trigger) }
                 } label: {
@@ -500,7 +509,7 @@ struct CompanionResourceSections: View {
                         Button("Edit", systemImage: "pencil") {
                             editingTrigger = trigger
                         }
-                        if trigger.registrationStatus == .failed {
+                        if providerConnected, trigger.registrationStatus == .failed {
                             Button("Retry registration", systemImage: "arrow.clockwise") {
                                 Task { await retryTriggerRegistration(trigger) }
                             }
@@ -839,8 +848,79 @@ struct CompanionResourceSections: View {
     }
 
     private var triggerAccountOptions: [CompanionPluginAccount] {
-        let attached = Set(currentCompanion.selectedMCPAccountIDs)
-        return plugins.filter { attached.contains($0.id) && $0.connected }
+        plugins.filter(\.connected)
+    }
+
+    private var triggerProviderAccounts: [CompanionPluginAccount] {
+        triggerAccountOptions
+            .filter { $0.provider.lowercased() == "github" || $0.provider.lowercased() == "linear" }
+            .sorted {
+                let left = pluginProviderName($0.provider)
+                let right = pluginProviderName($1.provider)
+                if left != right { return left.localizedCaseInsensitiveCompare(right) == .orderedAscending }
+                return $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending
+            }
+    }
+
+    @ViewBuilder
+    private var triggerProviderAvailability: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Shared providers")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color.companionInk)
+                    Text("Connected once for every Companion")
+                        .font(.caption)
+                        .foregroundStyle(Color.companionMuted)
+                }
+                Spacer()
+                Button(triggerProviderAccounts.isEmpty ? "Connect" : "Manage") {
+                    showingPluginManagement = true
+                }
+                .font(.caption.weight(.semibold))
+                .accessibilityIdentifier("companion.details.triggers.manage-providers")
+            }
+
+            if triggerProviderAccounts.isEmpty {
+                Text("No trigger provider connected. Connect GitHub or Linear once to make it live for every Companion.")
+                    .font(.caption)
+                    .foregroundStyle(Color.companionMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                ForEach(triggerProviderAccounts) { account in
+                    HStack(spacing: 9) {
+                        PluginMark(provider: account.provider, size: 28)
+                        Text("\(pluginProviderName(account.provider)) · \(account.label)")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(Color.companionInk)
+                            .lineLimit(1)
+                        Spacer()
+                        Label("Connected", systemImage: "checkmark.circle.fill")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(Color.companionSuccess)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("\(pluginProviderName(account.provider)) \(account.label), shared provider connected")
+                }
+            }
+
+            Text("No Companion attachment is required. MCP tool attachments are managed separately above.")
+                .font(.caption2)
+                .foregroundStyle(Color.companionMuted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16)
+        .accessibilityIdentifier("companion.details.triggers.providers")
+    }
+
+    private func triggerProviderConnected(_ trigger: CompanionTrigger) -> Bool {
+        let provider = trigger.provider.lowercased()
+        guard provider == "github" || provider == "linear" else { return true }
+        if let accountID = trigger.providerAccountID {
+            return triggerProviderAccounts.contains { $0.id == accountID }
+        }
+        return triggerProviderAccounts.contains { $0.provider.lowercased() == provider }
     }
 
     private var effectiveMemberTimezone: String {

@@ -261,7 +261,7 @@ struct CompanionTriggerEditorView: View {
                         .accessibilityIdentifier("companion.trigger-editor.name")
                     if availableProviders.isEmpty {
                         Label {
-                            Text("Attach a GitHub or Linear account in Plugins. Companion will reuse it automatically.")
+                            Text("Connect GitHub or Linear once in Plugins. Every Companion can use it immediately.")
                         } icon: {
                             Image(systemName: "link.badge.plus")
                         }
@@ -279,10 +279,10 @@ struct CompanionTriggerEditorView: View {
                     }
 
                     if eligibleAccounts.count == 1, let account = eligibleAccounts.first {
-                        LabeledContent("Connected account", value: account.label)
+                        LabeledContent("Shared account", value: account.label)
                             .accessibilityIdentifier("companion.trigger-editor.account-reused")
                     } else if eligibleAccounts.count > 1 {
-                        Picker("Connected account", selection: $providerAccountID) {
+                        Picker("Shared account", selection: $providerAccountID) {
                             Text("Choose account").tag("")
                             ForEach(eligibleAccounts) { account in
                                 Text(account.label).tag(account.id)
@@ -290,7 +290,7 @@ struct CompanionTriggerEditorView: View {
                         }
                         .accessibilityIdentifier("companion.trigger-editor.account")
                     } else if !availableProviders.isEmpty && (provider == .github || provider == .linear) {
-                        Text("Connect this provider in Plugins. Companion will reuse that account automatically.")
+                        Text("Connect this provider once in Plugins. It will become available to every Companion.")
                             .font(.footnote)
                             .foregroundStyle(Color.companionMuted)
                     }
@@ -400,7 +400,7 @@ struct CompanionTriggerEditorView: View {
             return "Enter a prompt."
         }
         if (provider == .github || provider == .linear), eligibleAccounts.isEmpty {
-            return "Attach this provider in Plugins so Companion can register the webhook."
+            return "Connect this provider once in Plugins so Companion can register the webhook."
         }
         return "GitHub triggers need a repository and at least one event."
     }

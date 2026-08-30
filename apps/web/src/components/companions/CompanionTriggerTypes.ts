@@ -20,11 +20,12 @@ export type CompanionTriggerV2Mode = CompanionTriggerMode;
 export type CompanionTriggerV2RegistrationStatus = CompanionTriggerRegistrationStatus;
 export type CompanionTriggerV2 = CompanionTrigger;
 
-/** A credential-free account projection used only to choose an attached provider account. */
+/** A credential-free member account projection shared by every Companion in the workspace. */
 export interface CompanionTriggerAccountOption {
   id: string;
   provider: string;
   label: string;
+  connected?: boolean;
 }
 
 /** Additive request shape sent by the Trigger v2 editor. */

@@ -64,6 +64,7 @@ const MODE_DESCRIPTIONS = {
 
 const TRIGGER_MODES = ["notify", "relay"] satisfies CompanionTriggerV2Mode[];
 const REMOTE_TRIGGER_PROVIDERS = ["github", "linear"] satisfies CompanionTriggerV2Provider[];
+type RemoteTriggerProvider = (typeof REMOTE_TRIGGER_PROVIDERS)[number];
 
 type TriggerEditorValue = CompanionTriggerV2;
 type TriggerChangeHandler = (triggers: CompanionTrigger[]) => void;
@@ -82,14 +83,30 @@ function isProvider(provider: string): provider is CompanionTriggerV2Provider {
   return provider === "webhook" || provider === "linear" || provider === "github" || provider === "custom";
 }
 
+function isRemoteTriggerProvider(provider: string): provider is RemoteTriggerProvider {
+  return provider === "github" || provider === "linear";
+}
+
 function eligibleAccountsFor(
   provider: CompanionTriggerV2Provider,
   accounts: readonly CompanionTriggerAccountOption[],
 ): CompanionTriggerAccountOption[] {
-  // Generic/custom webhooks are not backed by a connected MCP account. Provider-backed triggers
-  // silently reuse the sole attached account and only expose a chooser when there is a real choice.
+  // Generic/custom webhooks are not backed by a connected member account. Provider-backed triggers
+  // silently reuse the sole shared account and only expose a chooser when there is a real choice.
   if (provider === "webhook" || provider === "custom") return [];
-  return accounts.filter((account) => account.provider.toLocaleLowerCase("en-US") === provider);
+  return accounts.filter((account) => account.connected !== false
+    && account.provider.toLocaleLowerCase("en-US") === provider);
+}
+
+function triggerProviderConnected(
+  trigger: CompanionTriggerV2,
+  accounts: readonly CompanionTriggerAccountOption[],
+): boolean {
+  if (!isRemoteTriggerProvider(trigger.provider)) return true;
+  return accounts.some((account) => account.connected !== false
+    && (trigger.provider_account_id
+      ? account.id === trigger.provider_account_id
+      : account.provider.toLocaleLowerCase("en-US") === trigger.provider));
 }
 
 function selectableProvidersFor(
@@ -165,7 +182,7 @@ function TriggerEditor({
     [accountOptions, provider],
   );
 
-  // A single attached account is an implementation detail, not an extra setup step. Preserve an
+  // A single member account is an implementation detail, not an extra setup step. Preserve an
   // explicit choice when editing, otherwise select the only eligible account automatically.
   useEffect(() => {
     if (provider === initial?.provider && initial?.provider_account_id && eligibleAccounts.some(
@@ -291,13 +308,13 @@ function TriggerEditor({
       ) : (
         <div className="companions-trigger-provider-required" role="status">
           <strong>Connect a provider first</strong>
-          <span>Attach a GitHub or Linear account in Plugins. Companion will reuse it automatically.</span>
+          <span>Connect GitHub or Linear once in Plugins. Every Companion can then use it immediately.</span>
         </div>
       )}
 
       {eligibleAccounts.length === 1 && (
         <p className="companions-trigger-field-hint" role="status">
-          Using the attached {providerLabel(provider)} account “{eligibleAccounts[0]!.label}”.
+          Using the shared {providerLabel(provider)} account “{eligibleAccounts[0]!.label}”. No Companion attachment is required.
         </p>
       )}
       {eligibleAccounts.length > 1 && (
@@ -308,13 +325,13 @@ function TriggerEditor({
             onChange={(event) => setProviderAccountId(event.target.value)}
             aria-describedby="companion-trigger-account-hint"
           >
-            <option value="">Choose an attached account</option>
+            <option value="">Choose a shared account</option>
             {eligibleAccounts.map((account) => (
               <option key={account.id} value={account.id}>{account.label}</option>
             ))}
           </select>
           <span id="companion-trigger-account-hint" className="companions-trigger-field-hint">
-            Choose which attached account should register this provider webhook.
+            Choose which member account should register this webhook. This does not attach it to the Companion&apos;s MCP tools.
           </span>
         </label>
       )}
@@ -322,7 +339,7 @@ function TriggerEditor({
         && eligibleAccounts.length === 0
         && (provider === "linear" || provider === "github") && (
         <p className="companions-trigger-field-hint" role="status">
-          Attach a {providerLabel(provider)} account in Plugins to register this provider webhook.
+          Connect {providerLabel(provider)} once in Plugins. It will become available to every Companion.
         </p>
       )}
 
@@ -400,6 +417,7 @@ export function CompanionTriggers({
   accountOptions = [],
   onChange,
   onOpenHistory,
+  onManageProviders,
   api = defaultCompanionTriggersApi,
 }: {
   orgId: string;
@@ -407,10 +425,11 @@ export function CompanionTriggers({
   triggers: readonly CompanionTrigger[];
   memberTimezone?: string | null;
   canEdit: boolean;
-  /** Only attached, credential-free account projections should be passed here. */
+  /** All credential-free member account projections; never filter by Companion MCP attachments. */
   accountOptions?: readonly CompanionTriggerAccountOption[];
   onChange: TriggerChangeHandler;
   onOpenHistory?: (trigger: CompanionTriggerV2) => void;
+  onManageProviders?: () => void;
   api?: CompanionTriggersApi;
 }) {
   const displayTimezone = memberTimezone ?? detectedBrowserTimeZone();
@@ -421,6 +440,12 @@ export function CompanionTriggers({
   const [confirmingRotateId, setConfirmingRotateId] = useState<string | null>(null);
   const copyResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const emitChange = (next: CompanionTrigger[]) => onChange(next);
+  const connectedProviderAccounts = useMemo(() => accountOptions.flatMap((account) => {
+    const provider = account.provider.toLocaleLowerCase("en-US");
+    return account.connected !== false && isRemoteTriggerProvider(provider)
+      ? [{ ...account, provider }]
+      : [];
+  }), [accountOptions]);
 
   useEffect(() => () => {
     if (copyResetRef.current) clearTimeout(copyResetRef.current);
@@ -528,6 +553,30 @@ export function CompanionTriggers({
           </button>
         )}
       </div>
+      <div className="chat-context__trigger-providers" aria-label="Member trigger providers">
+        <div className="chat-context__trigger-providers-head">
+          <strong>Shared providers</strong>
+          {onManageProviders && (
+            <button type="button" className="chat-context__link" onClick={onManageProviders}>
+              {connectedProviderAccounts.length === 0 ? "Connect" : "Manage"}
+            </button>
+          )}
+        </div>
+        {connectedProviderAccounts.length === 0 ? (
+          <p>No trigger provider connected. Connect once for every Companion.</p>
+        ) : (
+          <ul>
+            {connectedProviderAccounts.map((account) => (
+              <li key={account.id}>
+                {providerMark(account.provider)}
+                <span>{providerLabel(account.provider)} · {account.label}</span>
+                <Badge tone="ok" dot>Connected</Badge>
+              </li>
+            ))}
+          </ul>
+        )}
+        <small>Member-wide and immediately available here. No Companion attachment is required; MCP tool attachments are managed separately.</small>
+      </div>
       {triggers.length === 0 ? (
         <p className="chat-context__empty">
           No triggers connected. Add a provider event to notify or wake this Companion.
@@ -539,6 +588,7 @@ export function CompanionTriggers({
             const registrationError = trigger.last_registration_error
               ?? (trigger.registration_status === "failed" ? trigger.last_error_message : null);
             const mode = trigger.mode;
+            const providerConnected = triggerProviderConnected(trigger, accountOptions);
             return (
               <li key={trigger.id} className="chat-context__resource chat-context__trigger-resource">
                 <div className="chat-context__routine-main">
@@ -548,16 +598,18 @@ export function CompanionTriggers({
                       <span className="chat-context__trigger-name-text">{trigger.name}</span>
                     </span>
                     <Badge
-                      tone={!trigger.enabled ? "neutral" : trigger.last_error_message ? "danger" : "ok"}
+                      tone={!trigger.enabled ? "neutral" : !providerConnected || trigger.last_error_message ? "danger" : "ok"}
                       dot
                     >
-                      {!trigger.enabled ? "Disabled" : trigger.last_error_message ? "Error" : "Enabled"}
+                      {!trigger.enabled ? "Disabled" : !providerConnected ? "Provider disconnected" : trigger.last_error_message ? "Error" : "Enabled"}
                     </Badge>
                   </span>
                   <span className="chat-context__resource-meta">
                     <span>{providerLabel(trigger.provider)}</span>
                     <span>{MODE_LABELS[mode]}</span>
-                    <Badge tone={registrationTone(trigger)}>{registrationLabel(trigger)}</Badge>
+                    <Badge tone={providerConnected ? registrationTone(trigger) : "danger"}>
+                      {providerConnected ? registrationLabel(trigger) : "Registration blocked"}
+                    </Badge>
                   </span>
                   {trigger.provider === "github" && trigger.target?.repo && (
                     <span className="chat-context__caption mono">
@@ -572,6 +624,11 @@ export function CompanionTriggers({
                   {registrationError && (
                     <span className="chat-context__routine-error" role="status">
                       {registrationError}
+                    </span>
+                  )}
+                  {!providerConnected && (
+                    <span className="chat-context__routine-error" role="status">
+                      Reconnect this member provider to resume registration and incoming events for every dependent Companion.
                     </span>
                   )}
                   {trigger.last_error_message && trigger.last_error_message !== registrationError && (
@@ -593,7 +650,7 @@ export function CompanionTriggers({
                   )}
                   {canEdit && (
                     <>
-                      {trigger.registration_status === "failed" && (
+                      {trigger.registration_status === "failed" && providerConnected && (
                         <button
                           type="button"
                           className="chat-context__link"

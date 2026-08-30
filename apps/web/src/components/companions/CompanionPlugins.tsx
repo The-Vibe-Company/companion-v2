@@ -406,11 +406,13 @@ export function CompanionPlugins({
   orgId,
   initialAccounts,
   onBack,
+  onAccountsChange,
   api = defaultCompanionPluginsApi,
 }: {
   orgId: string;
   initialAccounts: CompanionPluginAccount[];
   onBack: () => void;
+  onAccountsChange?: (accounts: CompanionPluginAccount[]) => void;
   api?: CompanionPluginsApi;
 }) {
   const [accounts, setAccounts] = useState(initialAccounts);
@@ -470,11 +472,19 @@ export function CompanionPlugins({
   }, [accounts]);
 
   const remove = async (account: CompanionPluginAccount) => {
+    const confirmed = window.confirm(
+      `Disconnect ${providerName(account.provider)} “${account.label}”? `
+      + "This member-wide account will be unavailable to every Companion. Its MCP tool attachments "
+      + "will stop working, and triggers that use it cannot register or receive events until the provider is reconnected.",
+    );
+    if (!confirmed) return;
     setRemoving(account.id);
     setError(null);
     try {
       await api.deleteCompanionPlugin(orgId, account.id);
-      setAccounts((current) => current.filter((item) => item.id !== account.id));
+      const next = accounts.filter((item) => item.id !== account.id);
+      setAccounts(next);
+      onAccountsChange?.(next);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "This MCP account could not be disconnected.");
     } finally {
@@ -574,7 +584,9 @@ export function CompanionPlugins({
           orgId={orgId}
           api={api}
           onAdded={(account) => {
-            setAccounts((current) => [...current, account]);
+            const next = [...accounts, account];
+            setAccounts(next);
+            onAccountsChange?.(next);
             setAdding(false);
           }}
           onClose={() => setAdding(false)}

@@ -107,6 +107,7 @@ describe("CompanionPlugins", () => {
     act(() => roots.splice(0).forEach((root) => root.unmount()));
     document.body.innerHTML = "";
     vi.clearAllMocks();
+    vi.restoreAllMocks();
   });
 
   it("submits live custom-MCP form values and adds the labeled account", async () => {
@@ -282,6 +283,7 @@ describe("CompanionPlugins", () => {
   });
 
   it("disconnects an existing labeled account without changing the catalog", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     deleteCompanionPlugin.mockResolvedValue(undefined);
     const container = await mount([account]);
     const disconnect = container.querySelector<HTMLButtonElement>(
@@ -290,6 +292,8 @@ describe("CompanionPlugins", () => {
 
     await act(async () => disconnect?.click());
 
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("unavailable to every Companion"));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("cannot register or receive events"));
     expect(deleteCompanionPlugin).toHaveBeenCalledWith("org-1", account.id);
     expect(container.querySelector('.companions-plugin-label')).toBeNull();
     expect(container.querySelector(
@@ -301,6 +305,18 @@ describe("CompanionPlugins", () => {
       container.querySelectorAll(".companions-catalog-card button"),
       (button) => button.textContent,
     )).toEqual(["Connect", "Connect", "Connect", "Connect", "Connect", "Connect", "Connect"]);
+  });
+
+  it("keeps the member-wide provider connected when disconnect is cancelled", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+    const container = await mount([account]);
+
+    await act(async () => container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Disconnect Linear work"]',
+    )?.click());
+
+    expect(deleteCompanionPlugin).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("1 account");
   });
 
   it("explains a duplicate-label callback and removes the error parameter", async () => {
