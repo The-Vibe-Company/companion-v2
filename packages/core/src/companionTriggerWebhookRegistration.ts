@@ -763,11 +763,9 @@ export async function registerCompanionTriggerWebhookV2(input: {
         }),
       },
     );
-  } catch (error) {
+  } catch {
     return recoverGitHubRegistration(input, trigger, account.id, token, repoPath, doFetch,
-      error instanceof Error
-        ? error.message
-        : "github webhook registration could not reach the provider");
+      "github webhook registration could not reach the provider");
   }
   if (!response.ok) {
     // The provider has the final word on unknown event names and missing permissions.
