@@ -1023,6 +1023,13 @@
       "when": 1792343200000,
       "tag": "0145_companion_routine_queue_cleanup",
       "breakpoints": true
+    },
+    {
+      "idx": 146,
+      "version": "7",
+      "when": 1792429600000,
+      "tag": "0146_companion_restart_box_checkpoint",
+      "breakpoints": true
     }
   ]
 }

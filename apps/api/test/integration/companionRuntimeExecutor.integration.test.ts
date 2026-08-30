@@ -744,6 +744,81 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     expect(workerRoutineAcl.every((entry) => entry.worker && !entry.api && !entry.runtime)).toBe(true);
   });
 
+  it("persists the restart Box skill-update checkpoint before provider restart", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const fixture = await createCompanion({
+      boxReady: true,
+      selectedSkillIds: [],
+      selectedMcpAccountIds: [],
+    });
+    const restartExecutor = `${executorId}-restart-box`;
+    let claim: Claim | undefined;
+    try {
+      await sql`
+        update companion_turn_attempts set status = 'cancelled', settled_at = now()
+        where id = ${fixture.attemptId}::uuid
+      `;
+      await sql`
+        update companion_turns set status = 'cancelled', settled_at = now(),
+          inactivity_deadline_at = null
+        where id = ${fixture.turnId}::uuid
+      `;
+
+      const [enqueued] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ operation: { id: string } }>>`
+          select * from public.companion_api_enqueue_operation(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid, ${randomUUID()}::uuid,
+            'restart_box', 'web'
+          )
+        `,
+      });
+      if (!enqueued) throw new Error("expected restart Box operation");
+
+      [claim] = await claimWorkRows(1, restartExecutor);
+      expect(claim).toMatchObject({
+        workKind: "operation",
+        workId: enqueued.operation.id,
+        checkpoint: "pending",
+        checkpointSequence: "0",
+      });
+      if (!claim) throw new Error("expected restart Box claim");
+      const restartClaim = claim;
+
+      const [skillUpdate] = await asRuntime((tx) => tx<Array<{ sequence: string | null }>>`
+        select public.companion_runtime_checkpoint(
+          ${restartClaim.orgId}::uuid, ${restartClaim.companionId}::uuid,
+          ${restartClaim.claimToken}::uuid, ${restartClaim.claimEpoch}::bigint,
+          ${restartClaim.gateEpoch}::bigint, ${restartExecutor}, 'operation',
+          ${restartClaim.workId}::uuid, ${restartClaim.checkpointSequence}::bigint,
+          'skills_updated', null, null, null, null, null, null, null, null
+        )::text as sequence
+      `);
+      expect(skillUpdate?.sequence).toBe("1");
+
+      const [providerRestart] = await asRuntime((tx) => tx<Array<{ sequence: string | null }>>`
+        select public.companion_runtime_checkpoint(
+          ${restartClaim.orgId}::uuid, ${restartClaim.companionId}::uuid,
+          ${restartClaim.claimToken}::uuid, ${restartClaim.claimEpoch}::bigint,
+          ${restartClaim.gateEpoch}::bigint, ${restartExecutor}, 'operation',
+          ${restartClaim.workId}::uuid, 1, 'restarting_box',
+          null, null, null, null, null, null, null, null
+        )::text as sequence
+      `);
+      expect(providerRestart?.sequence).toBe("2");
+
+      const [operation] = await sql<Array<{ checkpoint: string; sequence: string }>>`
+        select checkpoint, checkpoint_sequence::text as sequence
+        from companion_operations where id = ${restartClaim.workId}::uuid
+      `;
+      expect(operation).toEqual({ checkpoint: "restarting_box", sequence: "2" });
+    } finally {
+      if (claim) await release(claim, restartExecutor);
+      await removeCompanion(fixture.companionId);
+    }
+  });
+
   it("serializes image builds, fences outcomes, applies backoff, and re-arms exhausted failures", async () => {
     if (!sql) throw new Error("runtime executor database is not initialized");
     const database = sql;
