@@ -44,6 +44,7 @@ export interface RuntimeExecutionResult {
 
 const RELEASE_DENIALS = new Set([
   "higher_priority_work_pending",
+  "source_turn_settled",
   "settings_changed_since_claim",
   "settings_changed",
 ]);

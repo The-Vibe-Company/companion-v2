@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   answerCompanionRoutineDecisionV2,
@@ -537,6 +537,143 @@ describe("Companion routines over the real database", () => {
     });
   });
 
+  it("atomically cancels queued routine turns on disable and delete, and rolls back the purge", async () => {
+    const created = await asActor(fixture.owner, (database) => createCompanionRoutineV2({
+      orgId: fixture.orgA,
+      companionId,
+      ...draft("Queue cleanup"),
+      database,
+    }));
+
+    const fireQueued = async (workerId: string): Promise<string> => {
+      await integrationDb
+        .update(schema.companionRoutines)
+        .set({ nextFireAt: new Date() })
+        .where(eq(schema.companionRoutines.id, created.id));
+      const [claim] = await claimDueCompanionRoutines({ workerId, database: integrationDb });
+      if (!claim) throw new Error("expected the queue cleanup routine to become due");
+      await fireCompanionRoutine({
+        workerId,
+        orgId: fixture.orgA,
+        routineId: created.id,
+        clientMessageId: routineFireMessageId({ routineId: created.id, scheduledFor: claim.scheduledFor }),
+        scheduledFor: claim.scheduledFor,
+        nextFireAt: new Date(Date.now() + 60 * 60 * 1000),
+        database: integrationDb,
+      });
+      const [turn] = await integrationDb
+        .select({ id: schema.companionTurns.id })
+        .from(schema.companionTurns)
+        .where(and(
+          eq(schema.companionTurns.routineSnapshotId, created.id),
+          eq(schema.companionTurns.status, "queued"),
+        ))
+        .orderBy(desc(schema.companionTurns.createdAt), desc(schema.companionTurns.id));
+      if (!turn) throw new Error("expected a queued routine turn");
+      return turn.id;
+    };
+
+    const disabledTurnId = await fireQueued("integration-routine-disable-cleanup");
+    await expect(integrationSql.begin(async (tx) => {
+      await tx`
+        update companion_routines
+        set enabled = false, next_fire_at = null
+        where id = ${created.id}::uuid
+      `;
+      throw new Error("rollback routine disable");
+    })).rejects.toThrow("rollback routine disable");
+
+    const [afterRollback] = await integrationSql<Array<{ enabled: boolean }>>`
+      select enabled from companion_routines where id = ${created.id}::uuid
+    `;
+    expect(afterRollback).toEqual({ enabled: true });
+    const [queuedAfterRollback] = await integrationSql<Array<{ status: string }>>`
+      select status::text as status from companion_turns where id = ${disabledTurnId}::uuid
+    `;
+    expect(queuedAfterRollback).toEqual({ status: "queued" });
+    const [startAfterRollback] = await integrationSql<Array<{ status: string }>>`
+      select status::text as status from companion_operations
+      where source_turn_id = ${disabledTurnId}::uuid and kind = 'start'
+    `;
+    expect(startAfterRollback).toEqual({ status: "pending" });
+
+    await asActor(fixture.owner, (database) => updateCompanionRoutineV2({
+      orgId: fixture.orgA,
+      companionId,
+      routineId: created.id,
+      enabled: false,
+      database,
+    }));
+    const [disabledTurn] = await integrationSql<Array<{
+      status: string;
+      errorCode: string | null;
+      errorMessage: string | null;
+      errorAction: string | null;
+    }>>`
+      select status::text as status, last_error_code as "errorCode",
+        last_error_message as "errorMessage", last_error_action::text as "errorAction"
+      from companion_turns where id = ${disabledTurnId}::uuid
+    `;
+    expect(disabledTurn).toEqual({
+      status: "cancelled",
+      errorCode: "routine_disabled",
+      errorMessage: "This scheduled run was skipped because the routine was disabled.",
+      errorAction: "none",
+    });
+    const [disabledStart] = await integrationSql<Array<{ status: string }>>`
+      select status::text as status from companion_operations
+      where source_turn_id = ${disabledTurnId}::uuid and kind = 'start'
+    `;
+    expect(disabledStart).toEqual({ status: "cancelled" });
+    const [disabledRoutine] = await integrationDb
+      .select({ failures: schema.companionRoutines.consecutiveFailures })
+      .from(schema.companionRoutines)
+      .where(eq(schema.companionRoutines.id, created.id));
+    expect(disabledRoutine?.failures).toBe(0);
+
+    await asActor(fixture.owner, (database) => updateCompanionRoutineV2({
+      orgId: fixture.orgA,
+      companionId,
+      routineId: created.id,
+      enabled: true,
+      database,
+    }));
+    const deletedTurnId = await fireQueued("integration-routine-delete-cleanup");
+    await asActor(fixture.owner, (database) => deleteCompanionRoutineV2({
+      orgId: fixture.orgA,
+      companionId,
+      routineId: created.id,
+      database,
+    }));
+
+    const [deletedTurn] = await integrationSql<Array<{
+      status: string;
+      routineId: string | null;
+      routineName: string | null;
+      errorCode: string | null;
+      errorMessage: string | null;
+      errorAction: string | null;
+    }>>`
+      select status::text as status, routine_id::text as "routineId", routine_name as "routineName",
+        last_error_code as "errorCode", last_error_message as "errorMessage",
+        last_error_action::text as "errorAction"
+      from companion_turns where id = ${deletedTurnId}::uuid
+    `;
+    expect(deletedTurn).toEqual({
+      status: "cancelled",
+      routineId: null,
+      routineName: "Queue cleanup",
+      errorCode: "routine_deleted",
+      errorMessage: "This scheduled run was skipped because the routine was deleted.",
+      errorAction: "none",
+    });
+    const [deletedStart] = await integrationSql<Array<{ status: string }>>`
+      select status::text as status from companion_operations
+      where source_turn_id = ${deletedTurnId}::uuid and kind = 'start'
+    `;
+    expect(deletedStart).toEqual({ status: "cancelled" });
+  });
+
   it("ignores scheduler cancellations and disables only after five genuine run failures", async () => {
     const created = await asActor(fixture.owner, (database) => createCompanionRoutineV2({
       orgId: fixture.orgA,
@@ -545,7 +682,7 @@ describe("Companion routines over the real database", () => {
       database,
     }));
     let fireIndex = 0;
-    const settleNextRun = async (errorCode: string, errorMessage: string) => {
+    const fireNextRun = async (): Promise<string> => {
       await integrationDb
         .update(schema.companionRoutines)
         .set({ nextFireAt: new Date() })
@@ -554,23 +691,26 @@ describe("Companion routines over the real database", () => {
       const claimed = await claimDueCompanionRoutines({ workerId, database: integrationDb });
       const claim = claimed.find((entry) => entry.routineId === created.id);
       if (!claim) throw new Error("expected the routine outcome fixture to be due");
+      const clientMessageId = routineFireMessageId({
+        routineId: created.id,
+        scheduledFor: claim.scheduledFor,
+      });
       await fireCompanionRoutine({
         workerId,
         orgId: fixture.orgA,
         routineId: created.id,
-        clientMessageId: routineFireMessageId({
-          routineId: created.id,
-          scheduledFor: claim.scheduledFor,
-        }),
+        clientMessageId,
         scheduledFor: claim.scheduledFor,
         nextFireAt: new Date(Date.now() + 60 * 60 * 1000),
         database: integrationDb,
       });
       const run = await integrationDb.query.companionTurns.findFirst({
-        where: eq(schema.companionTurns.routineSnapshotId, created.id),
-        orderBy: (turn, { desc }) => [desc(turn.createdAt), desc(turn.id)],
+        where: eq(schema.companionTurns.clientMessageId, clientMessageId),
       });
       if (!run) throw new Error("expected a fired routine run");
+      return run.id;
+    };
+    const settleRun = async (runId: string, errorCode: string, errorMessage: string) => {
       await integrationDb
         .update(schema.companionTurns)
         .set({
@@ -581,7 +721,10 @@ describe("Companion routines over the real database", () => {
           lastErrorMessage: errorMessage,
           lastErrorAction: "retry",
         })
-        .where(eq(schema.companionTurns.id, run.id));
+        .where(eq(schema.companionTurns.id, runId));
+    };
+    const settleNextRun = async (errorCode: string, errorMessage: string) => {
+      await settleRun(await fireNextRun(), errorCode, errorMessage);
     };
 
     for (let index = 0; index < 5; index += 1) {
@@ -597,9 +740,45 @@ describe("Companion routines over the real database", () => {
     }));
     expect(after).toMatchObject({ consecutive_failures: 0, enabled: true });
 
-    for (let index = 0; index < 5; index += 1) {
+    for (let index = 0; index < 4; index += 1) {
       await settleNextRun("provider_unavailable", "The routine provider is unavailable.");
     }
+    const fifthFailureRunId = await fireNextRun();
+    const queuedBeforeAutoDisable = randomUUID();
+    const queuedClientMessageId = randomUUID();
+    await integrationSql`
+      insert into companion_turns (
+        id, org_id, companion_id, client_message_id, message_event_id, queue_sequence,
+        actor_id, client_surface, status, routine_id, routine_name,
+        routine_snapshot_id, routine_snapshot_created_at
+      )
+      select
+        ${queuedBeforeAutoDisable}::uuid, routine.org_id, routine.companion_id,
+        ${queuedClientMessageId}::uuid, ${`msg:${queuedClientMessageId}`},
+        coalesce((
+          select max(existing.queue_sequence) + 1
+          from companion_turns existing
+          where existing.companion_id = routine.companion_id
+        ), 1),
+        ${fixture.owner.id}, 'web'::companion_client_surface, 'queued'::companion_turn_status,
+        routine.id, routine.name, routine.id, routine.created_at
+      from companion_routines routine
+      where routine.id = ${created.id}::uuid
+    `;
+    await integrationSql`
+      insert into companion_operations (
+        org_id, companion_id, request_id, kind, trigger, actor_id,
+        source_turn_id, runtime_generation
+      ) values (
+        ${fixture.orgA}::uuid, ${companionId}::uuid, ${randomUUID()}::uuid,
+        'start', 'turn', ${fixture.owner.id}, ${queuedBeforeAutoDisable}::uuid, 1
+      )
+    `;
+    await settleRun(
+      fifthFailureRunId,
+      "provider_unavailable",
+      "The routine provider is unavailable.",
+    );
     [after] = await asActor(fixture.owner, (database) => listCompanionRoutinesV2({
       orgId: fixture.orgA,
       companionId,
@@ -611,6 +790,25 @@ describe("Companion routines over the real database", () => {
       next_fire_at: null,
       last_error_code: "provider_unavailable",
     });
+    const [purgedAfterAutoDisable] = await integrationSql<Array<{
+      status: string;
+      errorCode: string | null;
+      errorMessage: string | null;
+    }>>`
+      select status::text as status, last_error_code as "errorCode",
+        last_error_message as "errorMessage"
+      from companion_turns where id = ${queuedBeforeAutoDisable}::uuid
+    `;
+    expect(purgedAfterAutoDisable).toEqual({
+      status: "cancelled",
+      errorCode: "routine_disabled",
+      errorMessage: "This scheduled run was skipped because the routine was disabled.",
+    });
+    const [autoDisabledStart] = await integrationSql<Array<{ status: string }>>`
+      select status::text as status from companion_operations
+      where source_turn_id = ${queuedBeforeAutoDisable}::uuid and kind = 'start'
+    `;
+    expect(autoDisabledStart).toEqual({ status: "cancelled" });
   });
 
   it("does not apply an old run outcome to a recreated routine generation", async () => {

@@ -832,7 +832,7 @@ BEGIN
         'public.companion_api_answer_trigger_decision(uuid,uuid,text,text,uuid,text)'::regprocedure
       ];
     END IF;
-    -- 0145 adds autonomous Trigger v2 definitions, read-only history, and one runtime-only
+    -- 0147 adds autonomous Trigger v2 definitions, read-only history, and one runtime-only
     -- identity/mode reader for the isolated validation lane.
     IF pg_catalog.to_regprocedure(
       'public.companion_api_create_trigger(uuid,uuid,uuid,text,text,text,text,uuid,jsonb,text,boolean)'

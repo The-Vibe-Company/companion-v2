@@ -1021,7 +1021,21 @@
       "idx": 145,
       "version": "7",
       "when": 1792343200000,
-      "tag": "0145_companion_trigger_v2_engine",
+      "tag": "0145_companion_routine_queue_cleanup",
+      "breakpoints": true
+    },
+    {
+      "idx": 146,
+      "version": "7",
+      "when": 1792429600000,
+      "tag": "0146_companion_restart_box_checkpoint",
+      "breakpoints": true
+    },
+    {
+      "idx": 147,
+      "version": "7",
+      "when": 1792516000000,
+      "tag": "0147_companion_trigger_v2_engine",
       "breakpoints": true
     }
   ]

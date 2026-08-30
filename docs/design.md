@@ -166,6 +166,18 @@ apply after the routine lane is quiescent and before the next main turn. On a wa
 applied only after runtime stages the exact snapshot, restarts Pi, and observes a different idle Pi
 invocation; takeover repeats those idempotent steps if their final observation was lost.
 
+Queued routine-origin turns are settled as skipped when their exact routine generation is disabled
+or deleted, including the automatic disable after five genuine failures. The database trigger does
+this in the same transaction as the routine mutation, preserving the turn/message/history rows and
+recording only a bounded expurgated reason with action `none`; these cancellations are neither
+retryable failures nor notification events. A ten-minute `SKIP LOCKED` runtime sweep settles stale
+queued routine turns before claiming work, and migration 0145 backfills all already-stale routine
+rows—including turns whose definition no longer exists. It checks the live Runtime gate epoch so
+stale or disabled executors cannot perform cleanup. A claimed cold-start derivative loses live
+authorization as soon as its source is skipped; after that main lease is free or expired, bounded
+claim-time reconciliation terminalizes the orphan before choosing later work. Ordinary main turns
+remain independent of routine attempts.
+
 A blocking `ask_user` or `propose_*` decision moves the turn to `needs_input` and clears the
 inactivity deadline. An answer resumes Pi; after ten minutes, absence returns a cancelled response
 so Pi chooses a safe fallback without inferring approval. A newer member message cancels the wait
@@ -273,6 +285,12 @@ owner. A routine-origin turn is serialized by the Companion's `routine` PostgreS
 same staged tools, skills, plugins, model, and provider material under a run-scoped session directory
 and broker socket. The Box runs at most the main daemon plus one routine Pi. PostgreSQL, rather than
 the ephemeral Box session directory, is the durable routine-history authority.
+
+The routine table is also the cleanup boundary: disabling or deleting a definition atomically
+cancels its queued turns for that generation, and the claim wrapper expires queued routine turns
+after ten minutes. Cleanup is bounded and gate-fenced; it retains durable history for skipped runs
+and reconciles any already-claimed cold-start derivative only after its main lease is free or
+expired, so an orphan cannot retain lifecycle priority or the one-running-operation slot.
 
 Shared Box mutation remains single-owner: settings and lifecycle work other than permanent delete
 wait for the routine lane to be quiescent, and an interrupted routine must be retried or cancelled

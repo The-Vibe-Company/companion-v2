@@ -23,6 +23,8 @@ import {
   engineDependencies,
   fakePorts,
   MemoryRuntimeStore,
+  operationAuthorization,
+  operationClaim,
   TestClock,
 } from "./test/fixtures";
 
@@ -2224,6 +2226,26 @@ describe("RuntimeEngine attempts", () => {
     expect(result.outcome).toBe("released");
     expect(store.releases).toBe(1);
     expect(ports.promptCalls).toHaveLength(0);
+  });
+
+  it("releases a Start whose source turn settled without contacting Box", async () => {
+    const claim = operationClaim();
+    const denied = operationAuthorization(claim, {
+      authorized: false,
+      denialCode: "source_turn_settled",
+      runtimeGeneration: null,
+      boxId: null,
+      modelId: null,
+    });
+    const store = new MemoryRuntimeStore({ authorization: denied });
+    const ports = fakePorts(store);
+    const engine = new RuntimeEngine(engineDependencies({ store, ports }));
+
+    const result = await engine.execute(claim);
+
+    expect(result.outcome).toBe("released");
+    expect(store.releases).toBe(1);
+    expect(ports.log).toHaveLength(0);
   });
 
   it("settles a deadline denial as interrupted", async () => {
