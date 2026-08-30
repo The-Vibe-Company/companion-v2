@@ -1,5 +1,7 @@
 export const RUNTIME_RETRY_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 30_000] as const;
 
+export type IdempotentObservationCall = "get_broker_state" | "read_events";
+
 export type IdempotentLifecycleCall =
   | "list_boxes"
   | "get_status"
@@ -44,15 +46,22 @@ function jittered(base: number, sample: number): number {
 /**
  * Run once immediately, then at most five retries on a known-idempotent provider operation.
  * Create and broker writes cannot be represented by `IdempotentLifecycleCall`.
+ *
+ * Provider-state conflicts stay non-retryable by default. Observation-only calls may opt in because
+ * a Box transition can briefly reject a read even though replaying that read has no external effect.
  */
-export async function retryIdempotentLifecycle<T>(input: {
-  call: IdempotentLifecycleCall;
+interface IdempotentRetryInput<T, Call extends string> {
+  call: Call;
   operation(signal: AbortSignal | undefined): Promise<T>;
   clock: RetryClock;
   jitter: () => number;
   deadlineAt?: Date;
   signal?: AbortSignal;
   beforeAttempt?: () => Promise<void>;
+}
+
+async function retryKnownIdempotentCall<T, Call extends string>(input: IdempotentRetryInput<T, Call> & {
+  retryProviderStateConflict: boolean;
 }): Promise<T> {
   let lastError: unknown;
   const assertBudget = (): void => {
@@ -80,11 +89,28 @@ export async function retryIdempotentLifecycle<T>(input: {
       return await input.operation(input.signal);
     } catch (error) {
       lastError = error;
-      if (!isRetryableProviderError(Object(error))
+      // SAFETY: Object() always produces an object; the optional fields are read defensively.
+      const providerError = Object(error) as RetryableProviderError;
+      const retryable = isRetryableProviderError(providerError)
+        || (input.retryProviderStateConflict === true && providerError.status === 409);
+      if (!retryable
         || attempt === RUNTIME_RETRY_DELAYS_MS.length) {
         throw error;
       }
     }
   }
   throw lastError;
+}
+
+export async function retryIdempotentLifecycle<T>(
+  input: IdempotentRetryInput<T, IdempotentLifecycleCall>,
+): Promise<T> {
+  return await retryKnownIdempotentCall({ ...input, retryProviderStateConflict: false });
+}
+
+/** Retry only observation calls, including provider-state 409 while a Box is transitioning. */
+export async function retryIdempotentObservation<T>(
+  input: IdempotentRetryInput<T, IdempotentObservationCall>,
+): Promise<T> {
+  return await retryKnownIdempotentCall({ ...input, retryProviderStateConflict: true });
 }

@@ -268,8 +268,11 @@ the provider offers a create idempotency key or client-supplied name.
 An exact-name Box discovered after any acknowledged create is always adopted and permanently
 deleted before retirement.
 
-Known-idempotent lifecycle calls retry network failures, `429`, and `5xx` responses up to five times
-with jittered backoff of 1, 2, 5, 10, and 30 seconds. A provider operation id is retained whenever
+Known-idempotent lifecycle and broker-observation calls retry network failures, `429`, and `5xx`
+responses up to five times with jittered backoff of 1, 2, 5, 10, and 30 seconds. Observation-only
+broker state and journal reads also retry `409` while the provider is temporarily transitioning the
+Box, reauthorizing before every contact. Prompt and decision writes remain single-attempt and keep
+their explicit ambiguity handling. A provider operation id is retained whenever
 the API returns one. Accepted permanent deletion is not bounded by the ordinary ten-minute lifecycle
 deadline and never replays `DELETE`. At `waiting_deleted`, a claim reauthorizes and performs exactly
 one GET for the retained operation id. `completed` or `404` confirms absence; `pending`, `processing`,

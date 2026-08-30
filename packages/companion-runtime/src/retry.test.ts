@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { isRetryableProviderError, retryIdempotentLifecycle } from "./retry";
+import {
+  isRetryableProviderError,
+  retryIdempotentLifecycle,
+  retryIdempotentObservation,
+} from "./retry";
 import { TestClock } from "./test/fixtures";
 
 describe("retryIdempotentLifecycle", () => {
@@ -70,6 +74,40 @@ describe("retryIdempotentLifecycle", () => {
 
     expect(calls).toBe(1);
     expect(clock.sleeps).toEqual([]);
+  });
+
+  it("retries a provider-state conflict only for an opted-in observation call", async () => {
+    const defaultClock = new TestClock();
+    let defaultCalls = 0;
+    await expect(retryIdempotentLifecycle({
+      call: "get_status",
+      clock: defaultClock,
+      jitter: () => 0.5,
+      operation: async () => {
+        defaultCalls += 1;
+        throw Object.assign(new Error("conflict"), { status: 409 });
+      },
+    })).rejects.toThrow("conflict");
+    expect(defaultCalls).toBe(1);
+    expect(defaultClock.sleeps).toEqual([]);
+
+    const observationClock = new TestClock();
+    let observationCalls = 0;
+    const state = await retryIdempotentObservation({
+      call: "get_broker_state",
+      clock: observationClock,
+      jitter: () => 0.5,
+      operation: async () => {
+        observationCalls += 1;
+        if (observationCalls === 1) {
+          throw Object.assign(new Error("Box is updating"), { status: 409 });
+        }
+        return "idle";
+      },
+    });
+    expect(state).toBe("idle");
+    expect(observationCalls).toBe(2);
+    expect(observationClock.sleeps).toEqual([1_000]);
   });
 
   it("does not call the provider when backoff reaches the durable deadline", async () => {

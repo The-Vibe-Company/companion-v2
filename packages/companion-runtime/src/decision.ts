@@ -7,6 +7,7 @@ import { mustAbandonRuntimeExecution } from "./executionControl";
 import { runtimeSucceeded, type RuntimeWorkDisposition } from "./handler";
 import type { LeaseSession } from "./leaseSession";
 import type { RuntimeEngineDependencies } from "./ports";
+import { retryIdempotentObservation } from "./retry";
 import { RuntimeStoreIndeterminateError } from "./store";
 import type { DecisionRuntimeClaim, RuntimeAuthorization } from "./types";
 
@@ -14,6 +15,11 @@ interface DecisionContext {
   claim: DecisionRuntimeClaim;
   session: LeaseSession;
   deps: RuntimeEngineDependencies;
+}
+
+interface DecisionRuntimeBinding {
+  boxId: string;
+  invocationId: string;
 }
 
 function authorization(context: DecisionContext): RuntimeAuthorization {
@@ -28,7 +34,7 @@ function authorization(context: DecisionContext): RuntimeAuthorization {
   return value;
 }
 
-function runtimeBinding(context: DecisionContext): { boxId: string; invocationId: string } {
+function runtimeBinding(context: DecisionContext): DecisionRuntimeBinding {
   const value = authorization(context);
   if (!value.boxId || !value.piInvocationId || value.diskLayoutVersion !== 14) {
     throw new RuntimeInvariantError({
@@ -67,8 +73,23 @@ export async function handleDecision(
           });
         }
         const binding = runtimeBinding(context);
-        const broker = await context.session.external(async (signal) =>
-          await context.deps.pi.brokerState({ boxId: binding.boxId, signal }));
+        const broker = await retryIdempotentObservation({
+          call: "get_broker_state",
+          clock: context.deps.clock,
+          jitter: context.deps.jitter,
+          signal: context.session.signal,
+          deadlineAt: auth.absoluteDeadlineAt ?? undefined,
+          operation: async () => await context.session.external(async (signal) => {
+            const currentBinding = runtimeBinding(context);
+            if (
+              currentBinding.boxId !== binding.boxId
+              || currentBinding.invocationId !== binding.invocationId
+            ) {
+              throw new RuntimeStoreIndeterminateError();
+            }
+            return await context.deps.pi.brokerState({ boxId: binding.boxId, signal });
+          }),
+        });
         if (
           broker.invocationId !== binding.invocationId
           || broker.activeAttemptId !== workMaterial.attemptId

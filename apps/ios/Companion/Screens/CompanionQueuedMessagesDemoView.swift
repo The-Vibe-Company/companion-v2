@@ -6,15 +6,25 @@ struct CompanionQueuedMessagesDemoView: View {
     private let canManage: Bool
     private let viewerID: String
     private let failRemovalOnce: Bool
-    @State private var entries = CompanionQueuedMessagesDemoFixtures.entries
+    private let routineTransitionDemo: Bool
+    @State private var entries: [TranscriptEntry]
     @State private var draft = ""
     @State private var removalAttempts = 0
 
     init() {
         let access = ProcessInfo.processInfo.environment["COMPANION_QUEUED_DEMO_ACCESS"] ?? "owner"
+        let routineDemo = ProcessInfo.processInfo.environment["COMPANION_QUEUED_DEMO_ROUTINE"] == "1"
+        let routineTransitionDemo = ProcessInfo.processInfo.environment[
+            "COMPANION_QUEUED_DEMO_ROUTINE_TRANSITION"
+        ] == "1"
         canManage = access != "viewer"
         viewerID = access == "owner" ? "owner-1" : "\(access)-1"
         failRemovalOnce = ProcessInfo.processInfo.environment["COMPANION_QUEUED_DEMO_FAIL_ONCE"] == "1"
+        self.routineTransitionDemo = routineTransitionDemo
+        let initialEntries = routineDemo && !routineTransitionDemo
+            ? CompanionQueuedMessagesDemoFixtures.routineEntries
+            : CompanionQueuedMessagesDemoFixtures.entries
+        _entries = State(initialValue: initialEntries)
     }
 
     var body: some View {
@@ -38,6 +48,15 @@ struct CompanionQueuedMessagesDemoView: View {
                 }
                 .safeAreaInset(edge: .bottom) {
                     VStack(spacing: 8) {
+                        if routineTransitionDemo {
+                            Button("Load routine queue") {
+                                entries = CompanionQueuedMessagesDemoFixtures.routineEntries
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .accessibilityIdentifier("queue.demo.load-routine")
+                        }
+
                         if !entries.isEmpty {
                             CompanionQueuedMessagesView(
                                 entries: entries,
@@ -134,6 +153,28 @@ private enum CompanionQueuedMessagesDemoFixtures {
           {"id":"checklist-1","kind":"user_upload","content_type":"application/pdf","byte_size":4096,"filename":"checklist.pdf","position":0}
         ],
         "created_at":"2026-08-26T11:06:00.000Z"
+      }
+    ]
+    """#)
+
+    static let routineEntries: [TranscriptEntry] = decode(#"""
+    [
+      {
+        "event_id":"msg:44444444-4444-4444-8444-444444444444",
+        "ordinal":14,
+        "role":"user",
+        "content":"ROUTINE_PROMPT_SHOULD_STAY_HIDDEN_UNTIL_EXPANDED",
+        "author_id":"owner-1",
+        "author_name":"Stan",
+        "turn_id":"dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "routine":{
+          "id":"routine-1",
+          "name":"Morning brief",
+          "run_id":"routine-run-1"
+        },
+        "queued":true,
+        "attachments":[],
+        "created_at":"2026-08-26T11:07:00.000Z"
       }
     ]
     """#)

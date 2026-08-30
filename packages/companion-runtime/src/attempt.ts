@@ -22,7 +22,11 @@ import type {
 } from "./ports";
 import type { RuntimeVisibleTextRedactor } from "./projectionRedaction";
 import { isCompanionAttachmentImage } from "@companion/contracts";
-import { retryIdempotentLifecycle } from "./retry";
+import {
+  retryIdempotentLifecycle,
+  retryIdempotentObservation,
+  type IdempotentObservationCall,
+} from "./retry";
 import { RuntimeStoreIndeterminateError } from "./store";
 import { refreshWarmCompanionLayout } from "./layoutRefresh";
 import type {
@@ -204,6 +208,25 @@ async function material(context: AttemptContext): Promise<RuntimeWorkMaterial> {
   return value;
 }
 
+/**
+ * Retry only observation calls whose replay cannot duplicate a Pi or Box side effect. Each attempt
+ * re-enters LeaseSession.external so authority and fencing are checked immediately before contact.
+ */
+async function retryIdempotentAttemptRead<T>(
+  context: AttemptContext,
+  call: IdempotentObservationCall,
+  operation: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  return await retryIdempotentObservation({
+    call,
+    clock: context.deps.clock,
+    jitter: context.deps.jitter,
+    signal: context.session.signal,
+    deadlineAt: authorization(context).absoluteDeadlineAt ?? undefined,
+    operation: async () => await context.session.external(operation),
+  });
+}
+
 async function brokerState(context: AttemptContext): Promise<{
   invocationId: string;
   layoutMarker: string | null;
@@ -214,7 +237,7 @@ async function brokerState(context: AttemptContext): Promise<{
   counters: PiBrokerCounters;
   modelInput: ModelInputCapability[];
 }> {
-  const state = await context.session.external(async (signal) => {
+  const state = await retryIdempotentAttemptRead(context, "get_broker_state", async (signal) => {
     const runtime = requiredRuntime(context);
     return await context.deps.pi.brokerState({ boxId: runtime.boxId, signal });
   });
@@ -515,7 +538,7 @@ async function consumeIsolatedRoutine(
       return await finishIsolatedDurableTerminal(context, runId, auth);
     }
 
-    const state = await context.session.external(async (signal) =>
+    const state = await retryIdempotentAttemptRead(context, "get_broker_state", async (signal) =>
       await routine.state({ boxId: requiredRuntime(context).boxId, runId, signal }));
     validateBrokerCounters(state.counters);
     if (state.invocationId !== routineInvocationId) {
@@ -532,7 +555,7 @@ async function consumeIsolatedRoutine(
         action: "retry",
       });
     }
-    const raw = await context.session.external(async (signal) =>
+    const raw = await retryIdempotentAttemptRead(context, "read_events", async (signal) =>
       await routine.read({
         boxId: requiredRuntime(context).boxId,
         runId,
@@ -840,7 +863,7 @@ async function handleIsolatedRoutineAttempt(
 
     let state: Awaited<ReturnType<typeof routine.state>>;
     try {
-      state = await context.session.external(async (signal) =>
+      state = await retryIdempotentAttemptRead(context, "get_broker_state", async (signal) =>
         await routine.state({ boxId: runtime.boxId, runId, signal }));
     } catch (error) {
       if (mustAbandonRuntimeExecution(error)) throw error;
@@ -1100,7 +1123,7 @@ async function consumeEvents(
       });
     }
 
-    const raw = await context.session.external(async (signal) =>
+    const raw = await retryIdempotentAttemptRead(context, "read_events", async (signal) =>
       await context.deps.pi.readBrokerEvents({
         boxId: requiredRuntime(context).boxId,
         after: auth.eventCursor!,
