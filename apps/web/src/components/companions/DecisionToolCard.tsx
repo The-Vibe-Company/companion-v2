@@ -294,7 +294,7 @@ export const DecisionToolCard: ToolCallMessagePartComponent<CompanionDecisionArg
       )}
       {trigger && decision.status === "allowed" && canAct && (
         <p className="text-muted-foreground mt-1.5 text-xs">
-          Done — the Companion registered this provider event. Its status is available in Triggers.
+          Approved — Companion handled the provider setup. Check Triggers for its registration status.
         </p>
       )}
       {!pending && decision.decided_by_name && (

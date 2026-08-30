@@ -706,9 +706,7 @@ public struct CompanionRoutine: Codable, Identifiable, Equatable, Sendable {
 
     public var status: CompanionConnectedResourceStatus {
         if !enabled { return .disabled }
-        return registrationStatus == .failed || lastRegistrationError != nil || lastErrorMessage != nil
-            ? .error
-            : .active
+        return lastErrorMessage == nil ? .active : .error
     }
 
     /// A concise, truthful label for common five-field schedules. The literal cron remains visible
@@ -1162,7 +1160,9 @@ public struct CompanionTrigger: Codable, Identifiable, Equatable, Sendable {
 
     public var status: CompanionConnectedResourceStatus {
         if !enabled { return .disabled }
-        return lastErrorMessage == nil ? .active : .error
+        return registrationStatus == .failed || lastRegistrationError != nil || lastErrorMessage != nil
+            ? .error
+            : .active
     }
 
     public var providerName: String {

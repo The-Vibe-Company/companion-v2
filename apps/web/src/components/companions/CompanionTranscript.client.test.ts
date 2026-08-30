@@ -1019,7 +1019,7 @@ describe("a permission card in the thread", () => {
       }),
     })]));
 
-    expect(container.textContent).toContain("Done — the Companion registered this provider event.");
+    expect(container.textContent).toContain("Approved — Companion handled the provider setup.");
     expect(container.textContent).not.toContain("Copy the webhook URL");
   });
 

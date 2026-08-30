@@ -80,19 +80,19 @@ function TriggerRunRow({
   onOpen: () => void;
 }) {
   return (
-    <li className="trigger-history__run">
-      <button type="button" className="trigger-history__run-button" onClick={onOpen}>
-        <span className="trigger-history__run-main">
-          <span className="trigger-history__run-time">
+    <li className="routine-history__run">
+      <button type="button" className="routine-history__run-button" onClick={onOpen}>
+        <span className="routine-history__run-main">
+          <span className="routine-history__run-time">
             <time dateTime={run.created_at}>{formatMemberDateTime(run.created_at, timezone)}</time>
           </span>
-          <span className="trigger-history__run-outcome">
+          <span className="routine-history__run-outcome">
             {outcomeIcon(run.outcome, run.surface_mode)}
             {outcomeLabel(run)}
           </span>
         </span>
         <Badge tone={statusTone(run.status)} dot>{statusLabel(run.status)}</Badge>
-        <ChevronRightIcon aria-hidden="true" className="trigger-history__chevron" />
+        <ChevronRightIcon aria-hidden="true" className="routine-history__chevron" />
       </button>
     </li>
   );
@@ -111,34 +111,34 @@ function Entry({ entry, timezone }: { entry: CompanionTriggerHistoryEntry; timez
   const payload = entry.role === "user" ? entry.content : null;
 
   return (
-    <li className={`trigger-history__entry trigger-history__entry--${entry.role ?? "event"}`}>
-      <div className="trigger-history__entry-head">
+    <li className={`routine-history__entry routine-history__entry--${entry.role ?? "event"}`}>
+      <div className="routine-history__entry-head">
         {entry.role === "tool" ? <WrenchIcon aria-hidden="true" className="size-3.5" /> : null}
         <strong>{label}</strong>
         <time dateTime={entry.created_at}>{formatMemberDateTime(entry.created_at, timezone)}</time>
       </div>
       {payload ? (
-        <details className="trigger-history__payload" open>
+        <details className="routine-history__details" open>
           <summary>Event payload</summary>
           <pre>{payload}</pre>
         </details>
       ) : null}
       {entry.tool ? (
-        <div className="trigger-history__event-card">
-          <div className="trigger-history__event-head">
+        <div className="routine-history__event-card">
+          <div className="routine-history__event-head">
             <span>{entry.tool.title || entry.tool.name || entry.tool.kind || "Tool"}</span>
             {entry.tool.status ? <Badge tone={entry.tool.status === "ok" ? "ok" : entry.tool.status === "running" ? "neutral" : "danger"}>{entry.tool.status}</Badge> : null}
           </div>
           {entry.tool.detail ? (
-            <details className="trigger-history__details">
+            <details className="routine-history__details">
               <summary>Tool details</summary>
               <pre>{entry.tool.detail}</pre>
             </details>
           ) : null}
         </div>
       ) : entry.decision ? (
-        <div className="trigger-history__event-card">
-          <div className="trigger-history__event-head">
+        <div className="routine-history__event-card">
+          <div className="routine-history__event-head">
             <span>{entry.decision.title || entry.decision.name || "Decision"}</span>
             {entry.decision.status ? <Badge tone={entry.decision.status === "pending" ? "warn" : "neutral"}>{entry.decision.status}</Badge> : null}
           </div>
@@ -146,12 +146,12 @@ function Entry({ entry, timezone }: { entry: CompanionTriggerHistoryEntry; timez
           {entry.decision.answer ? <p>Answer: {entry.decision.answer}</p> : null}
         </div>
       ) : entry.content ? (
-        <div className="trigger-history__content">{entry.content}</div>
+        <div className="routine-history__content">{entry.content}</div>
       ) : null}
       {entry.reasoning ? (
-        <details className="trigger-history__details">
+        <details className="routine-history__details">
           <summary>Reasoning</summary>
-          <div className="trigger-history__content">{entry.reasoning}</div>
+          <div className="routine-history__content">{entry.reasoning}</div>
         </details>
       ) : null}
     </li>
@@ -162,7 +162,7 @@ function HistorySkeleton({ label }: { label: string }) {
   return (
     <>
       <span className="sr-only" role="status">{label}</span>
-      <div className="trigger-history__skeleton" aria-hidden="true">
+      <div className="routine-history__skeleton" aria-hidden="true">
         <span />
         <span />
         <span />
@@ -306,23 +306,23 @@ export function CompanionTriggerHistory({
   const canReturnToList = selectedRunId !== null && target.triggerId !== null;
 
   return (
-    <div className="trigger-history-layer">
-      <button type="button" className="trigger-history__scrim" aria-label="Close trigger history" onClick={onClose} />
+    <div className="trigger-history-layer routine-history-layer">
+      <button type="button" className="routine-history__scrim" aria-label="Close trigger history" onClick={onClose} />
       <aside
         ref={drawerRef}
-        className="trigger-history"
+        className="routine-history trigger-history"
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
       >
-        <header className="trigger-history__head">
+        <header className="routine-history__head">
           {canReturnToList ? (
             <button type="button" className="iconbtn" aria-label={`Back to ${target.name} fires`} onClick={() => selectRun(null)}>
               <ArrowLeftIcon aria-hidden="true" className="size-4" />
             </button>
           ) : null}
-          <div className="trigger-history__identity">
+          <div className="routine-history__identity">
             <h2 id={titleId}>{target.name}</h2>
             <p>{selectedRunId ? "Trigger fire" : "Fire history"}</p>
           </div>
@@ -331,11 +331,11 @@ export function CompanionTriggerHistory({
           </button>
         </header>
 
-        <div className="trigger-history__body">
+        <div className="routine-history__body">
           {selectedRunId ? (
             <>
               {selectedSummary ? (
-                <section className="trigger-history__summary" aria-label="Trigger fire summary">
+                <section className="routine-history__summary" aria-label="Trigger fire summary">
                   <div>
                     <span>Received</span>
                     <strong><time dateTime={selectedSummary.created_at}>{formatMemberDateTime(selectedSummary.created_at, displayTimezone)}</time></strong>
@@ -346,65 +346,65 @@ export function CompanionTriggerHistory({
                   </div>
                   <div>
                     <span>Result</span>
-                    <strong className="trigger-history__result">
+                    <strong className="routine-history__result">
                       {outcomeIcon(selectedSummary.outcome, selectedSummary.surface_mode)}
                       {outcomeLabel(selectedSummary)}
                     </strong>
                   </div>
                   {selectedSummary.error?.message ? (
-                    <p className="trigger-history__error" role="alert">{selectedSummary.error.message}</p>
+                    <p className="routine-history__error" role="alert">{selectedSummary.error.message}</p>
                   ) : null}
                 </section>
               ) : null}
-              <section className="trigger-history__transcript" aria-labelledby={`${titleId}-transcript`}>
+              <section className="routine-history__transcript" aria-labelledby={`${titleId}-transcript`}>
                 <h3 id={`${titleId}-transcript`}>Internal transcript</h3>
                 {detailLoading && !detail ? <HistorySkeleton label="Loading trigger transcript…" /> : null}
                 {detailError ? (
-                  <div className="trigger-history__error" role="alert">
+                  <div className="routine-history__error" role="alert">
                     <p>{detailError}</p>
                     <button type="button" className="cds-btn cds-btn--secondary cds-btn--sm" onClick={() => void loadDetail(selectedRunId)}>Retry</button>
                   </div>
                 ) : null}
                 {detail && detail.internal_entries.length === 0 ? (
-                  <div className="trigger-history__empty">
+                  <div className="routine-history__empty">
                     <strong>No internal transcript</strong>
                     <p>This fire finished without recorded private activity.</p>
                   </div>
                 ) : null}
                 {detail && detail.internal_entries.length > 0 ? (
-                  <ol className="trigger-history__entries">
+                  <ol className="routine-history__entries">
                     {detail.internal_entries.map((entry) => <Entry key={entry.event_id} entry={entry} timezone={displayTimezone} />)}
                   </ol>
                 ) : null}
                 {detail?.next_entry_cursor !== null && detail?.next_entry_cursor !== undefined ? (
-                  <button type="button" className="cds-btn cds-btn--secondary cds-btn--sm trigger-history__more" disabled={detailLoading} onClick={() => void loadDetail(selectedRunId, detail.next_entry_cursor ?? undefined)}>
+                  <button type="button" className="cds-btn cds-btn--secondary cds-btn--sm routine-history__more" disabled={detailLoading} onClick={() => void loadDetail(selectedRunId, detail.next_entry_cursor ?? undefined)}>
                     {detailLoading ? "Loading…" : "Load more transcript"}
                   </button>
                 ) : null}
               </section>
             </>
           ) : (
-            <section className="trigger-history__list" aria-label={`${target.name} fires`}>
+            <section className="routine-history__list" aria-label={`${target.name} fires`}>
               {runsLoading && runs.length === 0 ? <HistorySkeleton label="Loading trigger history…" /> : null}
               {runsError ? (
-                <div className="trigger-history__error" role="alert">
+                <div className="routine-history__error" role="alert">
                   <p>{runsError}</p>
                   <button type="button" className="cds-btn cds-btn--secondary cds-btn--sm" onClick={() => void loadRuns()}>Retry</button>
                 </div>
               ) : null}
               {!runsLoading && !runsError && runs.length === 0 ? (
-                <div className="trigger-history__empty">
+                <div className="routine-history__empty">
                   <strong>No fires yet</strong>
                   <p>The first provider event will appear here with its status and payload.</p>
                 </div>
               ) : null}
               {runs.length > 0 ? (
-                <ul className="trigger-history__runs">
+                <ul className="routine-history__runs">
                   {runs.map((run) => <TriggerRunRow key={run.run_id} run={run} timezone={displayTimezone} onOpen={() => selectRun(run.run_id)} />)}
                 </ul>
               ) : null}
               {runsCursor ? (
-                <button type="button" className="cds-btn cds-btn--secondary cds-btn--sm trigger-history__more" disabled={runsLoading} onClick={() => void loadRuns(runsCursor)}>
+                <button type="button" className="cds-btn cds-btn--secondary cds-btn--sm routine-history__more" disabled={runsLoading} onClick={() => void loadRuns(runsCursor)}>
                   {runsLoading ? "Loading…" : "Load earlier fires"}
                 </button>
               ) : null}

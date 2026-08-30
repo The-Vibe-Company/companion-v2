@@ -103,7 +103,7 @@ struct CompanionTriggerHistoryView: View {
     private func runRow(_ run: CompanionTriggerRunSummary) -> some View {
         HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 5) {
-                Text(MemberTimezone.formatInstant(run.createdAt, in: MemberTimezone.deviceIdentifier) ?? run.createdAt)
+                Text(MemberTimezone.formatInstant(run.createdAt, in: displayTimezone) ?? run.createdAt)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(Color.companionInk)
                 Text(resultLabel(run))
@@ -145,6 +145,10 @@ struct CompanionTriggerHistoryView: View {
         }
         loading = false
     }
+
+    private var displayTimezone: String {
+        sessionStore.memberTimezone ?? MemberTimezone.deviceIdentifier
+    }
 }
 
 private struct CompanionTriggerRunDetailView: View {
@@ -179,7 +183,7 @@ private struct CompanionTriggerRunDetailView: View {
                                 Text(resultLabel(run))
                                     .font(.headline)
                                     .foregroundStyle(Color.companionInk)
-                                Text(MemberTimezone.formatInstant(detail.createdAt, in: MemberTimezone.deviceIdentifier) ?? detail.createdAt)
+                                Text(MemberTimezone.formatInstant(detail.createdAt, in: displayTimezone) ?? detail.createdAt)
                                     .font(.footnote)
                                     .foregroundStyle(Color.companionMuted)
                             }
@@ -286,6 +290,10 @@ private struct CompanionTriggerRunDetailView: View {
             self.error = companionDisplayMessage(error, fallback: "This trigger fire could not be loaded.")
         }
         loading = false
+    }
+
+    private var displayTimezone: String {
+        sessionStore.memberTimezone ?? MemberTimezone.deviceIdentifier
     }
 }
 
