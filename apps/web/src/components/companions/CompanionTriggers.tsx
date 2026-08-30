@@ -4,8 +4,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   CompanionTrigger,
   CompanionTriggerTarget,
+  CreateCompanionTriggerInput,
+  UpdateCompanionTriggerInput,
 } from "@companion/contracts";
-import { COMPANION_TRIGGER_NAME_MAX_CHARACTERS } from "@companion/contracts";
+import { COMPANION_TRIGGER_NAME_MAX_CHARACTERS, COMPANION_TRIGGER_PROVIDERS } from "@companion/contracts";
 import {
   createCompanionTrigger,
   deleteCompanionTrigger,
@@ -19,18 +21,12 @@ import { Icon } from "../Icon";
 import { PluginMark } from "./PluginMark";
 import { detectedBrowserTimeZone, formatMemberDateTime } from "@/lib/timezones";
 import {
-  COMPANION_TRIGGER_V2_PROVIDERS,
   type CompanionTriggerAccountOption,
   type CompanionTriggerV2,
   type CompanionTriggerV2Mode,
   type CompanionTriggerV2Provider,
 } from "./CompanionTriggerTypes";
 
-/**
- * The old shared contract is still accepted here while the Trigger v2 contract lands. API methods
- * keep their legacy signatures so existing callers can inject the same test doubles; the editor
- * passes the additive v2 fields at runtime through the narrow compatibility cast below.
- */
 export interface CompanionTriggersApi {
   createCompanionTrigger: typeof createCompanionTrigger;
   deleteCompanionTrigger: typeof deleteCompanionTrigger;
@@ -48,39 +44,31 @@ const defaultCompanionTriggersApi: CompanionTriggersApi = {
 };
 
 /** UI names only: the provider picks the row's mark, never an authentication scheme. */
-const PROVIDER_LABELS: Record<CompanionTriggerV2Provider, string> = {
+const PROVIDER_LABELS = {
   webhook: "Webhook",
   linear: "Linear",
   github: "GitHub",
   sentry: "Sentry",
   custom: "Custom",
-};
+} satisfies Record<CompanionTriggerV2Provider, string>;
 
-const MODE_LABELS: Record<CompanionTriggerV2Mode, string> = {
+const MODE_LABELS = {
   notify: "Notify me",
   relay: "Ask the Companion",
-};
+} satisfies Record<CompanionTriggerV2Mode, string>;
 
-const MODE_DESCRIPTIONS: Record<CompanionTriggerV2Mode, string> = {
+const MODE_DESCRIPTIONS = {
   notify: "Show the event in the thread without starting a main Companion turn.",
   relay: "Show the event and ask the main Companion to do the requested work.",
-};
+} satisfies Record<CompanionTriggerV2Mode, string>;
+
+const TRIGGER_MODES = ["notify", "relay"] satisfies CompanionTriggerV2Mode[];
 
 type TriggerEditorValue = CompanionTriggerV2;
-type TriggerChangeHandler =
-  | ((triggers: CompanionTriggerV2[]) => void)
-  | ((triggers: CompanionTrigger[]) => void);
+type TriggerChangeHandler = (triggers: CompanionTrigger[]) => void;
 
-/** The API accepts the old type in this checkout; v2 fields are additive and validated server-side. */
-type TriggerCreateRequest = Record<string, unknown>;
-type TriggerUpdateRequest = Record<string, unknown>;
-
-function providerLabel(provider: string): string {
-  return PROVIDER_LABELS[provider as CompanionTriggerV2Provider]
-    ?? provider
-      .split("-")
-      .map((part) => part ? part[0]!.toLocaleUpperCase("en-US") + part.slice(1) : part)
-      .join(" ");
+function providerLabel(provider: CompanionTriggerV2Provider): string {
+  return PROVIDER_LABELS[provider];
 }
 
 function providerMark(provider: CompanionTriggerV2Provider) {
@@ -90,11 +78,7 @@ function providerMark(provider: CompanionTriggerV2Provider) {
 }
 
 function isProvider(provider: string): provider is CompanionTriggerV2Provider {
-  return (COMPANION_TRIGGER_V2_PROVIDERS as readonly string[]).includes(provider);
-}
-
-function asV2Trigger(trigger: CompanionTrigger | CompanionTriggerV2): CompanionTriggerV2 {
-  return trigger as CompanionTriggerV2;
+  return provider === "webhook" || provider === "linear" || provider === "github" || provider === "custom";
 }
 
 function eligibleAccountsFor(
@@ -144,9 +128,15 @@ function TriggerEditor({
   onSaved: (trigger: CompanionTriggerV2) => void;
   onClose: () => void;
 }) {
+  const defaultProvider = accountOptions.find((account) => (
+    account.provider.toLocaleLowerCase("en-US") === "github"
+      || account.provider.toLocaleLowerCase("en-US") === "linear"
+  ))?.provider.toLocaleLowerCase("en-US");
   const [name, setName] = useState(initial?.name ?? "");
   const [prompt, setPrompt] = useState(initial?.prompt ?? "");
-  const [provider, setProvider] = useState<CompanionTriggerV2Provider>(initial?.provider ?? "webhook");
+  const [provider, setProvider] = useState<CompanionTriggerV2Provider>(
+    initial?.provider ?? (defaultProvider === "github" || defaultProvider === "linear" ? defaultProvider : "webhook"),
+  );
   const [mode, setMode] = useState<CompanionTriggerV2Mode>(initial?.mode ?? "relay");
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
   const [repo, setRepo] = useState(initial?.target?.repo ?? "");
@@ -194,22 +184,22 @@ function TriggerEditor({
     setBusy(true);
     setError(null);
     const target = triggerTarget(provider, repo, events);
-    const request: TriggerCreateRequest | TriggerUpdateRequest = {
+    const request: Omit<CreateCompanionTriggerInput, "id"> = {
       name: name.trim(),
       prompt: prompt.trim(),
       provider,
       target,
       mode,
       enabled,
-      ...(providerAccountId ? { provider_account_id: providerAccountId } : {}),
     };
+    if (providerAccountId) request.provider_account_id = providerAccountId;
     try {
       const trigger = initial
         ? await api.updateCompanionTrigger(
           orgId,
           companionId,
           initial.id,
-          request as Parameters<typeof updateCompanionTrigger>[3],
+          request satisfies UpdateCompanionTriggerInput,
         )
         : await api.createCompanionTrigger(
           orgId,
@@ -217,9 +207,9 @@ function TriggerEditor({
           {
             id: crypto.randomUUID(),
             ...request,
-          } as Parameters<typeof createCompanionTrigger>[2],
+          } satisfies CreateCompanionTriggerInput,
         );
-      onSaved(asV2Trigger(trigger));
+      onSaved(trigger);
       onClose();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "This trigger could not be saved.");
@@ -271,7 +261,7 @@ function TriggerEditor({
             if (isProvider(event.target.value)) setProvider(event.target.value);
           }}
         >
-          {COMPANION_TRIGGER_V2_PROVIDERS.map((option) => (
+          {COMPANION_TRIGGER_PROVIDERS.map((option) => (
             <option key={option} value={option}>{PROVIDER_LABELS[option]}</option>
           ))}
         </select>
@@ -336,7 +326,7 @@ function TriggerEditor({
 
       <fieldset className="companions-trigger-mode">
         <legend>When an event arrives</legend>
-        {(Object.keys(MODE_LABELS) as CompanionTriggerV2Mode[]).map((option) => (
+        {TRIGGER_MODES.map((option) => (
           <label key={option} className={mode === option ? "companions-trigger-mode__option companions-trigger-mode__option--selected" : "companions-trigger-mode__option"}>
             <input
               type="radio"
@@ -384,7 +374,7 @@ export function CompanionTriggers({
 }: {
   orgId: string;
   companionId: string;
-  triggers: readonly (CompanionTrigger | CompanionTriggerV2)[];
+  triggers: readonly CompanionTrigger[];
   memberTimezone?: string | null;
   canEdit: boolean;
   /** Only attached, credential-free account projections should be passed here. */
@@ -400,11 +390,7 @@ export function CompanionTriggers({
   const [actionError, setActionError] = useState<string | null>(null);
   const [confirmingRotateId, setConfirmingRotateId] = useState<string | null>(null);
   const copyResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const emitChange = (next: CompanionTriggerV2[]) => {
-    // The legacy callback remains accepted for the transition checkout; the v2 response is
-    // structurally compatible at runtime and the shared contract will remove this cast after rebase.
-    (onChange as (triggers: CompanionTriggerV2[]) => void)(next);
-  };
+  const emitChange = (next: CompanionTrigger[]) => onChange(next);
 
   useEffect(() => () => {
     if (copyResetRef.current) clearTimeout(copyResetRef.current);
@@ -419,7 +405,7 @@ export function CompanionTriggers({
       const updated = await api.updateCompanionTrigger(orgId, companionId, trigger.id, {
         enabled: !trigger.enabled,
       });
-      emitChange(triggers.map((item) => item.id === updated.id ? asV2Trigger(updated) : asV2Trigger(item)));
+      emitChange(triggers.map((item) => item.id === updated.id ? updated : item));
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : "This trigger could not be updated.");
     } finally {
@@ -434,7 +420,7 @@ export function CompanionTriggers({
     setConfirmingRotateId(null);
     try {
       await api.deleteCompanionTrigger(orgId, companionId, trigger.id);
-      emitChange(triggers.filter((item) => item.id !== trigger.id).map(asV2Trigger));
+      emitChange(triggers.filter((item) => item.id !== trigger.id));
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : "This trigger could not be deleted.");
     } finally {
@@ -455,7 +441,7 @@ export function CompanionTriggers({
     setConfirmingRotateId(null);
     try {
       const updated = await api.rotateCompanionTriggerSecret(orgId, companionId, trigger.id);
-      emitChange(triggers.map((item) => item.id === updated.id ? asV2Trigger(updated) : asV2Trigger(item)));
+      emitChange(triggers.map((item) => item.id === updated.id ? updated : item));
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : "The secret could not be rotated.");
     } finally {
@@ -473,7 +459,7 @@ export function CompanionTriggers({
     setActionError(null);
     try {
       const updated = await api.retryCompanionTriggerRegistration(orgId, companionId, trigger.id);
-      emitChange(triggers.map((item) => item.id === updated.id ? asV2Trigger(updated) : asV2Trigger(item)));
+      emitChange(triggers.map((item) => item.id === updated.id ? updated : item));
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : "This provider registration could not be retried.");
     } finally {
@@ -519,10 +505,10 @@ export function CompanionTriggers({
       ) : (
         <ul className="chat-context__resources">
           {triggers.map((rawTrigger) => {
-            const trigger = asV2Trigger(rawTrigger);
+            const trigger = rawTrigger;
             const registrationError = trigger.last_registration_error
               ?? (trigger.registration_status === "failed" ? trigger.last_error_message : null);
-            const mode = trigger.mode ?? "relay";
+            const mode = trigger.mode;
             return (
               <li key={trigger.id} className="chat-context__resource chat-context__trigger-resource">
                 <div className="chat-context__routine-main">
@@ -615,7 +601,7 @@ export function CompanionTriggers({
                 </div>
 
                 {canEdit && trigger.webhook_url && (
-                  <details className="chat-context__trigger-technical" open>
+                  <details className="chat-context__trigger-technical">
                     <summary>Technical details</summary>
                     <div className="chat-context__trigger-technical-body">
                       <span className="chat-context__caption">Fallback webhook URL (keep private)</span>
@@ -654,8 +640,8 @@ export function CompanionTriggers({
           onSaved={(trigger) => {
             const exists = triggers.some((item) => item.id === trigger.id);
             emitChange(exists
-              ? triggers.map((item) => item.id === trigger.id ? trigger : asV2Trigger(item))
-              : [...triggers.map(asV2Trigger), trigger]);
+              ? triggers.map((item) => item.id === trigger.id ? trigger : item)
+              : [...triggers, trigger]);
           }}
           onClose={() => setEditing(null)}
         />

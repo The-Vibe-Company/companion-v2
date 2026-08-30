@@ -68,6 +68,11 @@ bounded internal transcript pages, and safe errors. A routine-origin chat entry 
 clickable marker instead of a prompt bubble; it opens that exact run, while surfaced `relay` and
 `notify` outputs remain ordinary main-thread history. These reads use the shared bounded API,
 remain available to Viewers, and never wake Box or Pi. The details page queues the existing Pi-only
+restart. Trigger rows are a distinct result surface beside plugins: they show provider, notify/relay
+mode, remote registration state, retry failures, and newest-first fire history with bounded received
+payloads. Creation and chat approval reuse the matching attached MCP credential and let Companion
+register the remote webhook end to end. iOS never asks for a callback URL or a second provider key;
+the platform URL and secret rotation remain collapsed technical controls for editors only. The details page queues the existing Pi-only
 restart as **Restart Companion** and the existing full-Box restart as **Restart server**; both are
 confirmed, idempotent lifecycle intents whose PostgreSQL-projected queued/stopping/starting/completed
 state is polled without contacting Box or Pi. Viewer sees the page read-only, including redacted

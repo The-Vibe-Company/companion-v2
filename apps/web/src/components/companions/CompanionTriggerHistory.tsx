@@ -33,7 +33,7 @@ type StatusTone = "neutral" | "ok" | "warn" | "danger";
 const FOCUSABLE =
   'a[href], button:not([disabled]), details > summary, input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
-const STATUS_LABELS: Record<CompanionTriggerHistoryStatus, string> = {
+const STATUS_LABELS = {
   queued: "Queued",
   starting: "Starting",
   dispatching: "Dispatching",
@@ -43,7 +43,7 @@ const STATUS_LABELS: Record<CompanionTriggerHistoryStatus, string> = {
   failed: "Failed",
   interrupted: "Interrupted",
   cancelled: "Cancelled",
-};
+} satisfies Record<CompanionTriggerHistoryStatus, string>;
 
 function statusTone(status: CompanionTriggerHistoryStatus): StatusTone {
   if (status === "succeeded") return "ok";
@@ -57,14 +57,16 @@ function statusLabel(status: CompanionTriggerHistoryStatus): string {
 }
 
 function outcomeLabel(run: CompanionTriggerHistorySummary): string {
-  if (run.outcome === "notify") return "Notified in main chat";
-  if (run.outcome === "relay") return "Relayed to main Companion";
-  return "No output";
+  if (run.outcome === "surfaced" && run.surface_mode === "notify") return "Notified in main chat";
+  if (run.outcome === "surfaced" && run.surface_mode === "relay") return "Relayed to main Companion";
+  if (run.outcome === "no_output") return "No output";
+  if (run.outcome === "error") return "Processing failed";
+  return "Processing";
 }
 
 function outcomeIcon(outcome: CompanionTriggerHistorySummary["outcome"], mode: CompanionTriggerHistoryMode | null | undefined) {
-  if (outcome === "notify" || mode === "notify") return <BellIcon aria-hidden="true" className="size-3.5" />;
-  if (outcome === "relay" || mode === "relay") return <CornerDownRightIcon aria-hidden="true" className="size-3.5" />;
+  if (outcome === "surfaced" && mode === "notify") return <BellIcon aria-hidden="true" className="size-3.5" />;
+  if (outcome === "surfaced" && mode === "relay") return <CornerDownRightIcon aria-hidden="true" className="size-3.5" />;
   return <WebhookIcon aria-hidden="true" className="size-3.5" />;
 }
 
@@ -85,7 +87,7 @@ function TriggerRunRow({
             <time dateTime={run.created_at}>{formatMemberDateTime(run.created_at, timezone)}</time>
           </span>
           <span className="trigger-history__run-outcome">
-            {outcomeIcon(run.outcome, run.mode)}
+            {outcomeIcon(run.outcome, run.surface_mode)}
             {outcomeLabel(run)}
           </span>
         </span>
@@ -106,7 +108,7 @@ function Entry({ entry, timezone }: { entry: CompanionTriggerHistoryEntry; timez
         : entry.role === "tool"
           ? entry.tool?.name ?? "Tool"
           : entry.decision?.name ?? entry.role ?? "Event";
-  const payload = entry.payload_excerpt ?? entry.payload;
+  const payload = entry.role === "user" ? entry.content : null;
 
   return (
     <li className={`trigger-history__entry trigger-history__entry--${entry.role ?? "event"}`}>
@@ -224,7 +226,7 @@ export function CompanionTriggerHistory({
     }
   }, [api, companionId, orgId, target.triggerId]);
 
-  const loadDetail = useCallback(async (runId: string, cursor?: string | number) => {
+  const loadDetail = useCallback(async (runId: string, cursor?: number) => {
     const generation = ++detailRequestGenerationRef.current;
     const requestIsCurrent = () => detailRequestGenerationRef.current === generation
       && selectedRunIdRef.current === runId;
@@ -345,7 +347,7 @@ export function CompanionTriggerHistory({
                   <div>
                     <span>Result</span>
                     <strong className="trigger-history__result">
-                      {outcomeIcon(selectedSummary.outcome, selectedSummary.mode)}
+                      {outcomeIcon(selectedSummary.outcome, selectedSummary.surface_mode)}
                       {outcomeLabel(selectedSummary)}
                     </strong>
                   </div>
@@ -413,4 +415,3 @@ export function CompanionTriggerHistory({
     </div>
   );
 }
-

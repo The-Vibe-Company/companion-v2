@@ -1445,8 +1445,25 @@ final class CompanionUITests: XCTestCase {
         XCTAssertTrue(trigger.waitForExistence(timeout: 2))
         XCTAssertTrue(trigger.label.contains("GitHub"))
         XCTAssertTrue(trigger.label.contains("Webhook registered"))
+        XCTAssertTrue(trigger.label.contains("Ask the Companion"))
         XCTAssertTrue(trigger.label.contains("Active"))
+        XCTAssertTrue(app.buttons[
+            "companion.details.trigger-history.44444444-4444-4444-8444-444444444444"
+        ].exists)
         XCTAssertFalse(app.navigationBars["Connected resources"].exists)
+    }
+
+    @MainActor
+    func testTriggerCreationReusesProviderAccountAndNeverAsksForWebhookSetup() throws {
+        let app = launchCompanionDetails(access: "owner")
+        let addTrigger = scrollToButton("companion.details.triggers.add", in: app)
+        addTrigger.tap()
+
+        XCTAssertTrue(app.navigationBars["New trigger"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.descendants(matching: .any)["companion.trigger-editor.mode"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["companion.trigger-editor.account-reused"].exists)
+        XCTAssertFalse(app.textFields.matching(NSPredicate(format: "placeholderValue CONTAINS[c] 'url'")).firstMatch.exists)
+        XCTAssertFalse(app.secureTextFields.firstMatch.exists)
     }
 
     @MainActor

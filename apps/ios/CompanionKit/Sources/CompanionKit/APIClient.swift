@@ -150,6 +150,10 @@ public actor APIClient {
         let trigger: CompanionTrigger
     }
 
+    private struct TriggerRunDetailEnvelope: Decodable {
+        let run: CompanionTriggerRunDetail
+    }
+
     private struct SocialSignInResponse: Decodable {
         let url: URL
         let redirect: Bool
@@ -639,6 +643,52 @@ public actor APIClient {
             method: "POST",
             body: Data("{}".utf8)
         ).trigger
+    }
+
+    public func retryCompanionTriggerRegistration(
+        companionID: String,
+        triggerID: String
+    ) async throws -> CompanionTrigger {
+        let companion = Self.encodedPathComponent(companionID)
+        let trigger = Self.encodedPathComponent(triggerID)
+        return try await decode(
+            TriggerEnvelope.self,
+            path: "/v1/companions/\(companion)/triggers/\(trigger)/registration",
+            method: "POST",
+            body: Data("{}".utf8)
+        ).trigger
+    }
+
+    public func listCompanionTriggerRuns(
+        companionID: String,
+        triggerID: String,
+        limit: Int = 50,
+        cursor: String? = nil
+    ) async throws -> CompanionTriggerRunList {
+        let companion = Self.encodedPathComponent(companionID)
+        let trigger = Self.encodedPathComponent(triggerID)
+        var query = "limit=\(limit)"
+        if let cursor { query += "&cursor=\(Self.encodedPathComponent(cursor))" }
+        return try await decode(
+            CompanionTriggerRunList.self,
+            path: "/v1/companions/\(companion)/triggers/\(trigger)/runs?\(query)"
+        )
+    }
+
+    public func readCompanionTriggerRun(
+        companionID: String,
+        runID: String,
+        entryLimit: Int = 50,
+        entryCursor: Int? = nil
+    ) async throws -> CompanionTriggerRunDetail {
+        let companion = Self.encodedPathComponent(companionID)
+        let run = Self.encodedPathComponent(runID)
+        var query = "entry_limit=\(entryLimit)"
+        if let entryCursor { query += "&entry_cursor=\(entryCursor)" }
+        return try await decode(
+            TriggerRunDetailEnvelope.self,
+            path: "/v1/companions/\(companion)/trigger-runs/\(run)?\(query)"
+        ).run
     }
 
     public func registerNotificationDevice(

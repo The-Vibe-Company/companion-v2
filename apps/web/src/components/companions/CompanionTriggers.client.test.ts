@@ -11,6 +11,7 @@ const companionsApi = {
   deleteCompanionTrigger: vi.fn<CompanionTriggersApi["deleteCompanionTrigger"]>(),
   updateCompanionTrigger: vi.fn<CompanionTriggersApi["updateCompanionTrigger"]>(),
   rotateCompanionTriggerSecret: vi.fn<CompanionTriggersApi["rotateCompanionTriggerSecret"]>(),
+  retryCompanionTriggerRegistration: vi.fn<NonNullable<CompanionTriggersApi["retryCompanionTriggerRegistration"]>>(),
 } satisfies CompanionTriggersApi;
 
 Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
@@ -53,6 +54,7 @@ async function mount(input: {
   triggers?: CompanionTrigger[];
   canEdit?: boolean;
   memberTimezone?: string | null;
+  accountOptions?: Array<{ id: string; provider: string; label: string }>;
   onChange?: (triggers: CompanionTrigger[]) => void;
 } = {}) {
   const container = document.createElement("div");
@@ -66,6 +68,7 @@ async function mount(input: {
       triggers: input.triggers ?? [],
       memberTimezone: input.memberTimezone,
       canEdit: input.canEdit ?? true,
+      accountOptions: input.accountOptions,
       onChange: input.onChange ?? (() => undefined),
       api: companionsApi,
     }));
@@ -154,7 +157,60 @@ describe("Companion triggers panel", () => {
     expect(container.textContent).toContain("GitHub");
     expect(container.textContent).toContain("Ticket opened");
     expect(container.textContent).toContain("Linear");
+    expect(container.textContent).toContain("Ask the Companion");
     expect(container.textContent).toContain("This trigger was disabled after repeated failures.");
+  });
+
+  it("retries failed remote registration and replaces the row with the refreshed result", async () => {
+    const failed = trigger({
+      registration_status: "failed",
+      last_registration_error: "GitHub token is missing hook write scope.",
+      webhook_url: null,
+    });
+    const registered = trigger({
+      registration_status: "registered",
+      remote_hook_id: "hook-42",
+      last_registration_error: null,
+      webhook_url: null,
+    });
+    companionsApi.retryCompanionTriggerRegistration.mockResolvedValue(registered);
+    const onChange = vi.fn();
+    const container = await mount({ triggers: [failed], onChange });
+
+    expect(container.textContent).toContain("GitHub token is missing hook write scope.");
+    await act(async () => {
+      requireNamedButton(container, "Retry registration")
+        .dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+
+    expect(companionsApi.retryCompanionTriggerRegistration).toHaveBeenCalledWith(
+      "org-1",
+      companionId,
+      triggerId,
+    );
+    expect(onChange).toHaveBeenCalledWith([registered]);
+  });
+
+  it("reuses the sole attached provider account without asking for a key or URL", async () => {
+    const created = trigger({ registration_status: "registered", provider_account_id: "account-1" });
+    companionsApi.createCompanionTrigger.mockResolvedValue(created);
+    const container = await mount({
+      accountOptions: [{ id: "account-1", provider: "github", label: "Acme GitHub" }],
+    });
+
+    await act(async () => {
+      requireButton(container, "[aria-label='Add a trigger']")
+        .dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    const provider = [...container.querySelectorAll("select")]
+      .find((select) => [...select.options].some((option) => option.value === "github"));
+    if (!provider) throw new Error("Missing provider picker");
+    await act(async () => { setControlled(provider, "github"); });
+
+    expect(container.textContent).toContain("Using the attached GitHub account “Acme GitHub”.");
+    expect(container.textContent?.toLowerCase()).not.toContain("paste");
+    expect(container.querySelector("input[placeholder*='URL']")).toBeNull();
+    expect(container.querySelector("input[placeholder*='key']")).toBeNull();
   });
 
   it("shows trigger activity in the stored member timezone", async () => {
@@ -217,12 +273,13 @@ describe("Companion triggers panel", () => {
       add.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     });
 
-    setControlled(requireInput(container), "Deploy finished");
-    setControlled(requireTextArea(container), "Report the deploy.");
-    setControlled(requireSelect(container), "custom");
-    await act(async () => {});
+    await act(async () => {
+      setControlled(requireInput(container), "Deploy finished");
+      setControlled(requireTextArea(container), "Report the deploy.");
+      setControlled(requireSelect(container), "custom");
+    });
 
-    const create = requireNamedButton(container, "Create");
+    const create = requireNamedButton(container, "Create trigger");
     expect(create.disabled).toBe(false);
     await act(async () => {
       create.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
@@ -236,6 +293,7 @@ describe("Companion triggers panel", () => {
         name: "Deploy finished",
         prompt: "Report the deploy.",
         provider: "custom",
+        mode: "relay",
         enabled: true,
       }),
     );

@@ -329,6 +329,12 @@ struct CompanionDecisionCard: View {
             Text(proposal.provider)
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(CompanionIOSTheme.textSecondary)
+            Label(
+                proposal.mode == .notify ? "Notify me" : "Ask the Companion",
+                systemImage: proposal.mode == .notify ? "bell" : "arrow.turn.down.right"
+            )
+            .font(.caption.weight(.medium))
+            .foregroundStyle(CompanionIOSTheme.textSecondary)
             if let repo = proposal.target?.repo {
                 Text(repo)
                     .font(.system(.caption, design: .monospaced))

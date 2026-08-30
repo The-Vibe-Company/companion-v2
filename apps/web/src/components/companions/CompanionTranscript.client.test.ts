@@ -978,7 +978,7 @@ describe("a permission card in the thread", () => {
           kind: "trigger",
           name: "CI failed",
           prompt: "Summarize the failure.",
-          mode: "relay",
+          mode: "notify",
           provider: "github",
         },
       }),
@@ -996,7 +996,7 @@ describe("a permission card in the thread", () => {
     expect(decide).toHaveBeenCalledWith("org-1", companionId, "trigger-1", { action: "allow" });
   });
 
-  it("tells an approved trigger card where the webhook URL lives", () => {
+  it("confirms an approved trigger was registered end to end", () => {
     const container = mount(thread([entry({
       role: "decision",
       event_id: "decision:trigger-2",
@@ -1013,13 +1013,14 @@ describe("a permission card in the thread", () => {
           kind: "trigger",
           name: "CI failed",
           prompt: "Summarize the failure.",
-          mode: "relay",
+          mode: "notify",
           provider: "github",
         },
       }),
     })]));
 
-    expect(container.textContent).toContain("Copy the webhook URL from the Triggers panel.");
+    expect(container.textContent).toContain("Done — the Companion registered this provider event.");
+    expect(container.textContent).not.toContain("Copy the webhook URL");
   });
 
   it("keeps a config card pending and shows the error when approval fails", async () => {

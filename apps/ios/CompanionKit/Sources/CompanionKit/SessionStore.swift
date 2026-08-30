@@ -622,6 +622,65 @@ public final class SessionStore {
         }
     }
 
+    public func retryCompanionTriggerRegistration(
+        companionID: String,
+        triggerID: String
+    ) async throws -> CompanionTrigger {
+        do {
+            let trigger = try await client.retryCompanionTriggerRegistration(
+                companionID: companionID,
+                triggerID: triggerID
+            )
+            await persistRollingAuthority()
+            return trigger
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func listCompanionTriggerRuns(
+        companionID: String,
+        triggerID: String,
+        limit: Int = 50,
+        cursor: String? = nil
+    ) async throws -> CompanionTriggerRunList {
+        do {
+            let runs = try await client.listCompanionTriggerRuns(
+                companionID: companionID,
+                triggerID: triggerID,
+                limit: limit,
+                cursor: cursor
+            )
+            await persistRollingAuthority()
+            return runs
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
+    public func readCompanionTriggerRun(
+        companionID: String,
+        runID: String,
+        entryLimit: Int = 50,
+        entryCursor: Int? = nil
+    ) async throws -> CompanionTriggerRunDetail {
+        do {
+            let run = try await client.readCompanionTriggerRun(
+                companionID: companionID,
+                runID: runID,
+                entryLimit: entryLimit,
+                entryCursor: entryCursor
+            )
+            await persistRollingAuthority()
+            return run
+        } catch let error as APIError where error.status == 401 {
+            await clearLocalSession()
+            throw error
+        }
+    }
+
     public func createCompanion(_ input: CreateCompanionInput) async throws -> CompanionSummary {
         do {
             let companion = try await client.createCompanion(input)

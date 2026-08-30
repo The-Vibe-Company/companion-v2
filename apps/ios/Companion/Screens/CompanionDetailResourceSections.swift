@@ -14,6 +14,7 @@ struct CompanionResourceSectionsServices {
     let updateTrigger: ((String, UpdateCompanionTriggerInput) async throws -> CompanionTrigger)?
     let deleteTrigger: ((String) async throws -> Void)?
     let rotateTriggerSecret: ((String) async throws -> CompanionTrigger)?
+    let retryTriggerRegistration: ((String) async throws -> CompanionTrigger)?
 
     init(
         load: @escaping () async throws -> CompanionConnectedResources,
@@ -24,7 +25,8 @@ struct CompanionResourceSectionsServices {
         createTrigger: ((CreateCompanionTriggerInput) async throws -> CompanionTrigger)? = nil,
         updateTrigger: ((String, UpdateCompanionTriggerInput) async throws -> CompanionTrigger)? = nil,
         deleteTrigger: ((String) async throws -> Void)? = nil,
-        rotateTriggerSecret: ((String) async throws -> CompanionTrigger)? = nil
+        rotateTriggerSecret: ((String) async throws -> CompanionTrigger)? = nil,
+        retryTriggerRegistration: ((String) async throws -> CompanionTrigger)? = nil
     ) {
         self.load = load
         self.listPlugins = listPlugins
@@ -35,6 +37,7 @@ struct CompanionResourceSectionsServices {
         self.updateTrigger = updateTrigger
         self.deleteTrigger = deleteTrigger
         self.rotateTriggerSecret = rotateTriggerSecret
+        self.retryTriggerRegistration = retryTriggerRegistration
     }
 }
 
@@ -64,6 +67,7 @@ struct CompanionResourceSections: View {
     @State private var editingTrigger: CompanionTrigger?
     @State private var showingNewTrigger = false
     @State private var confirmingRotateTriggerID: String?
+    @State private var historyTrigger: CompanionTrigger?
 
     init(
         companion: CompanionSummary,
@@ -156,6 +160,7 @@ struct CompanionResourceSections: View {
         }
         .sheet(isPresented: $showingNewTrigger) {
             CompanionTriggerEditorView(
+                accountOptions: triggerAccountOptions,
                 create: { try await createTrigger($0) },
                 update: { id, input in try await updateTrigger(id: id, input: input) }
             ) {
@@ -167,11 +172,22 @@ struct CompanionResourceSections: View {
         .sheet(item: $editingTrigger) { trigger in
             CompanionTriggerEditorView(
                 initial: trigger,
+                accountOptions: triggerAccountOptions,
                 create: { try await createTrigger($0) },
                 update: { id, input in try await updateTrigger(id: id, input: input) }
             ) {
                 editingTrigger = nil
                 Task { await load() }
+            }
+            .tint(visualTheme.accent)
+        }
+        .sheet(item: $historyTrigger) { trigger in
+            NavigationStack {
+                CompanionTriggerHistoryView(
+                    companionID: companion.id,
+                    triggerID: trigger.id,
+                    triggerName: trigger.name
+                )
             }
             .tint(visualTheme.accent)
         }
@@ -422,6 +438,9 @@ struct CompanionResourceSections: View {
                 Text(trigger.providerName)
                     .font(.footnote.weight(.medium))
                     .foregroundStyle(Color.companionInk.opacity(0.82))
+                Text(trigger.mode == .notify ? "Notify me" : "Ask the Companion")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(Color.companionMuted)
                 Text(trigger.registrationDescription)
                     .font(.caption)
                     .foregroundStyle(
@@ -437,7 +456,7 @@ struct CompanionResourceSections: View {
                         .font(.caption)
                         .foregroundStyle(Color.companionMuted)
                 }
-                if let message = trigger.lastErrorMessage {
+                if let message = trigger.lastRegistrationError ?? trigger.lastErrorMessage {
                     Text(message)
                         .font(.caption)
                         .foregroundStyle(Color.companionDanger)
@@ -446,17 +465,27 @@ struct CompanionResourceSections: View {
             }
             Spacer(minLength: 8)
             statusBadge(trigger.status)
-            if canEditResources, trigger.webhookURL != nil {
+            Button {
+                historyTrigger = trigger
+            } label: {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.body.weight(.semibold))
+                    .frame(width: 32, height: 32)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Fire history for \(trigger.name)")
+            .accessibilityIdentifier("companion.details.trigger-history.\(trigger.id)")
+            if canEditResources, trigger.registrationStatus == .failed, busyResourceID != trigger.id {
                 Button {
-                    copyWebhookURL(trigger)
+                    Task { await retryTriggerRegistration(trigger) }
                 } label: {
-                    Image(systemName: "doc.on.doc")
+                    Image(systemName: "arrow.clockwise")
                         .font(.body.weight(.semibold))
                         .frame(width: 32, height: 32)
                 }
                 .buttonStyle(.borderless)
-                .accessibilityLabel("Copy webhook URL for \(trigger.name)")
-                .accessibilityIdentifier("companion.details.trigger-copy.\(trigger.id)")
+                .accessibilityLabel("Retry registration for \(trigger.name)")
+                .accessibilityIdentifier("companion.details.trigger-retry.\(trigger.id)")
             }
             if canEditResources {
                 if busyResourceID == trigger.id {
@@ -471,8 +500,13 @@ struct CompanionResourceSections: View {
                         Button("Edit", systemImage: "pencil") {
                             editingTrigger = trigger
                         }
+                        if trigger.registrationStatus == .failed {
+                            Button("Retry registration", systemImage: "arrow.clockwise") {
+                                Task { await retryTriggerRegistration(trigger) }
+                            }
+                        }
                         if trigger.webhookURL != nil {
-                            Button("Copy webhook URL", systemImage: "doc.on.doc") {
+                            Button("Copy technical URL", systemImage: "doc.on.doc") {
                                 copyWebhookURL(trigger)
                             }
                             Button(
@@ -501,7 +535,7 @@ struct CompanionResourceSections: View {
             }
         }
         .padding(16)
-        .accessibilityElement(children: canEditResources ? .contain : .combine)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel(
             triggerAccessibilityLabel(trigger)
         )
@@ -589,7 +623,12 @@ struct CompanionResourceSections: View {
     }
 
     private func triggerAccessibilityLabel(_ trigger: CompanionTrigger) -> String {
-        var parts = [trigger.name, trigger.providerName, trigger.registrationDescription]
+        var parts = [
+            trigger.name,
+            trigger.providerName,
+            trigger.mode == .notify ? "Notify me" : "Ask the Companion",
+            trigger.registrationDescription
+        ]
         if let last = MemberTimezone.formatInstant(trigger.lastFiredAt, in: effectiveMemberTimezone) {
             parts.append("Last fired \(last) in \(effectiveMemberTimezone)")
         }
@@ -799,6 +838,11 @@ struct CompanionResourceSections: View {
         currentCompanion.access.canEditCompanionSettings
     }
 
+    private var triggerAccountOptions: [CompanionPluginAccount] {
+        let attached = Set(currentCompanion.selectedMCPAccountIDs)
+        return plugins.filter { attached.contains($0.id) && $0.connected }
+    }
+
     private var effectiveMemberTimezone: String {
         sessionStore.memberTimezone ?? MemberTimezone.deviceIdentifier
     }
@@ -879,6 +923,29 @@ struct CompanionResourceSections: View {
             await load()
         } catch {
             resourceActionError = companionDisplayMessage(error, fallback: "The webhook secret could not be rotated.")
+        }
+        busyResourceID = nil
+    }
+
+    private func retryTriggerRegistration(_ trigger: CompanionTrigger) async {
+        guard canEditResources, busyResourceID == nil else { return }
+        busyResourceID = trigger.id
+        resourceActionError = nil
+        do {
+            if let retry = services?.retryTriggerRegistration {
+                _ = try await retry(trigger.id)
+            } else {
+                _ = try await sessionStore.retryCompanionTriggerRegistration(
+                    companionID: companion.id,
+                    triggerID: trigger.id
+                )
+            }
+            await load()
+        } catch {
+            resourceActionError = companionDisplayMessage(
+                error,
+                fallback: "The provider registration could not be retried."
+            )
         }
         busyResourceID = nil
     }
@@ -1077,8 +1144,12 @@ enum CompanionResourceDemoFixtures {
               "id":"44444444-4444-4444-8444-444444444444",
               "name":"Pull request opened",
               "prompt":"Summarize the pull request.",
+              "mode":"relay",
               "provider":"github",
+              "provider_account_id":"55555555-5555-4555-8555-555555555555",
               "registration_status":"registered",
+              "remote_hook_account_id":"55555555-5555-4555-8555-555555555555",
+              "remote_hook_id":"hook-42",
               "enabled":true,
               "last_error_message":null
             }
@@ -1087,7 +1158,7 @@ enum CompanionResourceDemoFixtures {
     }
 
     static var plugins: [CompanionPluginAccount] {
-        [decode(#"{"id":"55555555-5555-4555-8555-555555555555","provider":"linear","label":"work","transport":"http","endpoint":"https://mcp.linear.app","connected":true,"created_at":"2026-08-25T08:00:00.000Z","updated_at":"2026-08-25T08:00:00.000Z"}"#)]
+        [decode(#"{"id":"55555555-5555-4555-8555-555555555555","provider":"github","label":"work","transport":"http","endpoint":"https://api.githubcopilot.com/mcp","connected":true,"created_at":"2026-08-25T08:00:00.000Z","updated_at":"2026-08-25T08:00:00.000Z"}"#)]
     }
 
     static func restartOperation(_ target: CompanionRuntimeRestartTarget) -> CompanionOperationSummary {

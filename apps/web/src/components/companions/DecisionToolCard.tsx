@@ -294,7 +294,7 @@ export const DecisionToolCard: ToolCallMessagePartComponent<CompanionDecisionArg
       )}
       {trigger && decision.status === "allowed" && canAct && (
         <p className="text-muted-foreground mt-1.5 text-xs">
-          Copy the webhook URL from the Triggers panel.
+          Done — the Companion registered this provider event. Its status is available in Triggers.
         </p>
       )}
       {!pending && decision.decided_by_name && (

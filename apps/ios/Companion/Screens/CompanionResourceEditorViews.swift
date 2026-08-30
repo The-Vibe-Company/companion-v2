@@ -199,10 +199,13 @@ struct CompanionTriggerEditorView: View {
     let create: (CreateCompanionTriggerInput) async throws -> CompanionTrigger
     let update: (String, UpdateCompanionTriggerInput) async throws -> CompanionTrigger
     let onSaved: () -> Void
+    let accountOptions: [CompanionPluginAccount]
 
     @State private var name: String
     @State private var prompt: String
     @State private var provider: CompanionTriggerProvider
+    @State private var mode: CompanionTriggerMode
+    @State private var providerAccountID: String
     @State private var repository: String
     @State private var events: String
     @State private var enabled: Bool
@@ -212,6 +215,7 @@ struct CompanionTriggerEditorView: View {
 
     init(
         initial: CompanionTrigger? = nil,
+        accountOptions: [CompanionPluginAccount] = [],
         create: @escaping (CreateCompanionTriggerInput) async throws -> CompanionTrigger,
         update: @escaping (String, UpdateCompanionTriggerInput) async throws -> CompanionTrigger,
         onSaved: @escaping () -> Void
@@ -220,9 +224,19 @@ struct CompanionTriggerEditorView: View {
         self.create = create
         self.update = update
         self.onSaved = onSaved
+        self.accountOptions = accountOptions
         _name = State(initialValue: initial?.name ?? "")
         _prompt = State(initialValue: initial?.prompt ?? "")
-        _provider = State(initialValue: CompanionTriggerProvider(rawValue: initial?.provider ?? "custom") ?? .custom)
+        let defaultProvider = accountOptions.compactMap { CompanionTriggerProvider(rawValue: $0.provider) }
+            .first(where: { $0 == .github || $0 == .linear }) ?? .webhook
+        let selectedProvider = CompanionTriggerProvider(rawValue: initial?.provider ?? defaultProvider.rawValue) ?? .webhook
+        let matchingAccounts = accountOptions.filter {
+            $0.connected && $0.provider.lowercased() == selectedProvider.rawValue
+        }
+        let soleAccount = matchingAccounts.count == 1 ? matchingAccounts[0] : nil
+        _provider = State(initialValue: selectedProvider)
+        _mode = State(initialValue: initial?.mode ?? .relay)
+        _providerAccountID = State(initialValue: initial?.providerAccountID ?? soleAccount?.id ?? "")
         _repository = State(initialValue: initial?.target?.repo ?? "")
         _events = State(initialValue: initial?.target?.events?.joined(separator: ", ") ?? "")
         _enabled = State(initialValue: initial?.enabled ?? true)
@@ -245,11 +259,37 @@ struct CompanionTriggerEditorView: View {
                         .textInputAutocapitalization(.sentences)
                         .accessibilityIdentifier("companion.trigger-editor.name")
                     Picker("Provider", selection: $provider) {
+                        Text("Webhook").tag(CompanionTriggerProvider.webhook)
                         Text("Custom").tag(CompanionTriggerProvider.custom)
                         Text("GitHub").tag(CompanionTriggerProvider.github)
                         Text("Linear").tag(CompanionTriggerProvider.linear)
                     }
                     .accessibilityIdentifier("companion.trigger-editor.provider")
+                    .onChange(of: provider) { _, _ in chooseSoleAccount() }
+
+                    if eligibleAccounts.count == 1, let account = eligibleAccounts.first {
+                        LabeledContent("Connected account", value: account.label)
+                            .accessibilityIdentifier("companion.trigger-editor.account-reused")
+                    } else if eligibleAccounts.count > 1 {
+                        Picker("Connected account", selection: $providerAccountID) {
+                            Text("Choose account").tag("")
+                            ForEach(eligibleAccounts) { account in
+                                Text(account.label).tag(account.id)
+                            }
+                        }
+                        .accessibilityIdentifier("companion.trigger-editor.account")
+                    } else if provider == .github || provider == .linear {
+                        Text("Connect this provider in Plugins. Companion will reuse that account automatically.")
+                            .font(.footnote)
+                            .foregroundStyle(Color.companionMuted)
+                    }
+
+                    Picker("Mode", selection: $mode) {
+                        Text("Notify me").tag(CompanionTriggerMode.notify)
+                        Text("Ask the Companion").tag(CompanionTriggerMode.relay)
+                    }
+                    .pickerStyle(.segmented)
+                    .accessibilityIdentifier("companion.trigger-editor.mode")
                     TextField("Prompt", text: $prompt, axis: .vertical)
                         .lineLimit(4...10)
                         .textInputAutocapitalization(.sentences)
@@ -259,7 +299,7 @@ struct CompanionTriggerEditorView: View {
                 } header: {
                     Text(initial == nil ? "New trigger" : "Edit trigger")
                 } footer: {
-                    Text("A webhook fires this prompt as an ordinary turn. Trigger creation has no timezone.")
+                    Text("Companion registers the provider event end to end. No webhook URL or separate key is required.")
                 }
 
                 if provider == .github {
@@ -349,7 +389,20 @@ struct CompanionTriggerEditorView: View {
     }
 
     private var saveDisabled: Bool {
-        saving || !formIsValid || provider == .unknown
+        saving || !formIsValid || provider == .unknown || (eligibleAccounts.count > 1 && providerAccountID.isEmpty)
+    }
+
+    private var eligibleAccounts: [CompanionPluginAccount] {
+        guard provider == .github || provider == .linear else { return [] }
+        return accountOptions.filter { $0.connected && $0.provider.lowercased() == provider.rawValue }
+    }
+
+    private func chooseSoleAccount() {
+        if eligibleAccounts.count == 1 {
+            providerAccountID = eligibleAccounts[0].id
+        } else if !eligibleAccounts.contains(where: { $0.id == providerAccountID }) {
+            providerAccountID = ""
+        }
     }
 
     private func saveTrigger() async {
@@ -365,7 +418,9 @@ struct CompanionTriggerEditorView: View {
                     UpdateCompanionTriggerInput(
                         name: trimmedName,
                         prompt: trimmedPrompt,
+                        mode: mode,
                         provider: provider,
+                        providerAccountID: providerAccountID.isEmpty ? nil : providerAccountID,
                         target: target,
                         enabled: enabled
                     )
@@ -376,7 +431,9 @@ struct CompanionTriggerEditorView: View {
                         id: createID,
                         name: trimmedName,
                         prompt: trimmedPrompt,
+                        mode: mode,
                         provider: provider,
+                        providerAccountID: providerAccountID.isEmpty ? nil : providerAccountID,
                         target: target,
                         enabled: enabled
                     )

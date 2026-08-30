@@ -63,6 +63,9 @@ excluded product surface.
 - Every tenant row/query is scoped by `org_id`; RLS is defense in depth.
 - Secrets are envelope-encrypted, write-only, referenced by id, and never logged or returned as
   plaintext.
+- The project is built for zero user friction: Companion completes provider-trigger registration
+  end to end. Users never paste callback URLs or configure remote webhooks manually; triggers reuse
+  the same consented, encrypted credentials as the matching MCP plugin.
 - The control plane never executes skill package scripts. Archives and transfer tickets remain
   fail-closed.
 - Public releases pin an exact immutable version and checksum.

@@ -93,7 +93,7 @@ const trigger: CompanionTrigger = {
   companion_id: companionId,
   name: "Repository push",
   prompt: "Summarize the pushed changes.",
-  mode: "relay",
+  mode: "notify",
   provider: "github",
   provider_account_id: null,
   target: { repo: "acme/companion", events: ["push"] },
@@ -158,7 +158,8 @@ describe("CompanionContext connected resources", () => {
     expect(markup).toContain("Active");
     expect(markup).toContain("Repository push");
     expect(markup).toContain("GitHub");
-    expect(markup).toContain("Webhook registered");
+    expect(markup).toContain("Registered");
+    expect(markup).toContain("Notify me");
     expect(markup).toContain("Disabled");
   });
 
