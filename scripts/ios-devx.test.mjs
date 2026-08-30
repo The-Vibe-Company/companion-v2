@@ -1093,7 +1093,10 @@ test("iOS navigation has one Companion details route and no legacy resource page
     details,
     /private func apply[\s\S]{0,180}?let preservesProviderDraft = changedProviderOrModel[\s\S]{0,300}?if !preservesProviderDraft/,
   );
-  assert.match(roster, /case \.details\(let companionID\):[\s\S]{0,500}?path = \[\.chat\(companionID\)\]/);
+  assert.match(roster, /case \.details\(let companionID\):[\s\S]{0,300}?CompanionDetailView\(/);
+  assert.doesNotMatch(roster, /case \.details\(let companionID\):[\s\S]{0,500}?onOpenChat/);
+  assert.doesNotMatch(details, /onOpenChat|Button\("Open chat"|companion\.details\.open-chat/);
+  assert.doesNotMatch(detailDemo, /onOpenChat/);
   assert.doesNotMatch(detailDemo, /struct CompanionLegacySettingsView|navigationTitle\("Companion settings"\)/);
   assert.doesNotMatch(root, /-companion-resources-demo|CompanionConnectedResourcesDemoView/);
 });
