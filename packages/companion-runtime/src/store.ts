@@ -883,7 +883,7 @@ export class PostgresRuntimeStore implements RuntimeStore {
                routine_material.routine_isolated, routine_material.routine_context_id,
                routine_material.routine_context_sha256, routine_material.routine_context_content,
                routine_material.relay_source_content,
-               trigger_material.trigger_name, trigger_material.trigger_mode
+               NULL::text AS trigger_name, NULL::text AS trigger_mode
         FROM public.companion_runtime_get_material(
           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
           $6::text, $7::public.companion_runtime_work_kind, $8::uuid, $9::integer
@@ -896,13 +896,23 @@ export class PostgresRuntimeStore implements RuntimeStore {
           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
           $6::text, $7::public.companion_runtime_work_kind, $8::uuid, $9::integer
         ) routine_material
-        CROSS JOIN public.companion_runtime_get_trigger_material(
-          $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
-          $6::text, $7::public.companion_runtime_work_kind, $8::uuid, $9::integer
-        ) trigger_material
       `, [...fenceParameters(fence), leaseSeconds]);
       if (rows.length === 0) return null;
-      return decodeMaterial(one(rows, "work material"));
+      const row = one(rows, "work material");
+      if (row.routine_snapshot_id !== null && row.routine_name === null) {
+        const triggerRows = await this.sql.unsafe<RuntimeSqlRow[]>(`
+          SELECT trigger_name, trigger_mode
+          FROM public.companion_runtime_get_trigger_material(
+            $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
+            $6::text, $7::public.companion_runtime_work_kind, $8::uuid, $9::integer
+          )
+        `, [...fenceParameters(fence), leaseSeconds]);
+        if (triggerRows.length === 0) return null;
+        const triggerRow = one(triggerRows, "trigger material");
+        row.trigger_name = triggerRow.trigger_name;
+        row.trigger_mode = triggerRow.trigger_mode;
+      }
+      return decodeMaterial(row);
     }, true);
   }
 
