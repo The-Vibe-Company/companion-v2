@@ -506,7 +506,7 @@ export const COMPANION_TRIGGER_MAX_PER_COMPANION = 10;
 export const COMPANION_TRIGGER_MIN_INTERVAL_MS = 60 * 1000;
 export const COMPANION_TRIGGER_MAX_CONSECUTIVE_FAILURES = 5;
 export const COMPANION_TRIGGER_PAYLOAD_EXCERPT_MAX_CHARACTERS = 4_096;
-export const COMPANION_TRIGGER_PROVIDERS = ["webhook", "linear", "github", "custom"] as const;
+export const COMPANION_TRIGGER_PROVIDERS = ["webhook", "linear", "github", "sentry", "custom"] as const;
 export const companionTriggerProviderSchema = z.enum(COMPANION_TRIGGER_PROVIDERS);
 export type CompanionTriggerProvider = z.infer<typeof companionTriggerProviderSchema>;
 
@@ -514,7 +514,7 @@ export type CompanionTriggerProvider = z.infer<typeof companionTriggerProviderSc
  * Legacy provider labels retained as delivery hints for clients that still render provider marks.
  * They do not grant, require, or imply any external account or runtime capability.
  */
-export const COMPANION_PLUGIN_TRIGGER_PROVIDERS = ["linear", "github"] as const;
+export const COMPANION_PLUGIN_TRIGGER_PROVIDERS = ["linear", "github", "sentry"] as const;
 
 
 /**
@@ -951,9 +951,47 @@ export const companionTriggerPromptSchema = z.string().trim().min(1).max(
 export const companionTriggerModeSchema = z.enum(["notify", "relay"]);
 export type CompanionTriggerMode = z.infer<typeof companionTriggerModeSchema>;
 
-export const companionTriggerRegistrationStatusSchema = z.enum(["manual", "registered", "failed"]);
+export const companionTriggerRegistrationStatusSchema = z.enum([
+  "manual",
+  "unregistered",
+  "registered",
+  "failed",
+]);
 export type CompanionTriggerRegistrationStatus = z.infer<
   typeof companionTriggerRegistrationStatusSchema
+>;
+
+export const COMPANION_TRIGGER_PROVIDER_ACCOUNT_PROVIDERS = ["github", "linear", "sentry"] as const;
+export const companionTriggerProviderAccountProviderSchema = z.enum(
+  COMPANION_TRIGGER_PROVIDER_ACCOUNT_PROVIDERS,
+);
+export const companionTriggerProviderAccountStatusSchema = z.enum(["connected", "disconnected"]);
+export const companionTriggerProviderCredentialSourceSchema = z.enum(["mcp_oauth", "api_key"]);
+
+/** Member-scoped authority to register provider webhooks; never attached to one Companion. */
+export const companionTriggerProviderAccountSchema = z.object({
+  id: z.string().uuid(),
+  provider: companionTriggerProviderAccountProviderSchema,
+  label: z.string().trim().min(1).max(40),
+  credential_source: companionTriggerProviderCredentialSourceSchema,
+  mcp_account_id: z.string().uuid().nullable(),
+  status: companionTriggerProviderAccountStatusSchema,
+  dependent_trigger_count: z.number().int().nonnegative(),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime(),
+}).strict();
+export type CompanionTriggerProviderAccount = z.infer<typeof companionTriggerProviderAccountSchema>;
+
+export const createCompanionTriggerProviderAccountInputSchema = z.object({
+  provider: companionTriggerProviderAccountProviderSchema,
+  label: z.string().trim().min(1).max(40),
+  credential: z.string().min(1).max(512).refine(
+    (value) => !/[\r\n\0]/.test(value),
+    "credential must be a single line",
+  ),
+}).strict();
+export type CreateCompanionTriggerProviderAccountInput = z.infer<
+  typeof createCompanionTriggerProviderAccountInputSchema
 >;
 
 /** Bounded legacy delivery metadata a trigger may carry. */
@@ -962,6 +1000,9 @@ export const COMPANION_TRIGGER_MAX_EVENTS = 30;
 export const companionTriggerTargetSchema = z.object({
   /** Repository hint as "owner/repo" for providers that support repository delivery. */
   repo: z.string().trim().max(200).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9._-]+$/).optional(),
+  /** Sentry organization/project slugs for project service-hook registration. */
+  organization: z.string().trim().max(100).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/).optional(),
+  project: z.string().trim().max(100).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/).optional(),
   /**
    * Provider webhook event names; "*" requests every event where supported. The provider has the
    * final word: an unknown name fails registration, never the trigger definition.
@@ -989,7 +1030,7 @@ export const companionTriggerSchema = z.object({
   /** Older rows omit mode; readers treat those rows as relay. */
   mode: companionTriggerModeSchema.default("relay"),
   provider: companionTriggerProviderSchema.default("webhook"),
-  /** Selected external credential reference, when one was explicitly chosen. */
+  /** Member-scoped trigger-provider authority. It is not attached to this Companion. */
   provider_account_id: z.string().uuid().nullable().default(null),
   /**
    * Legacy provider-side delivery metadata. A registration adapter may use it when supported.
@@ -997,7 +1038,7 @@ export const companionTriggerSchema = z.object({
   target: z.lazy(() => companionTriggerTargetSchema).nullable().default(null),
   registration_status: companionTriggerRegistrationStatusSchema.default("manual"),
   enabled: z.boolean().default(true),
-  /** Selected provider account after registration resolution, if any. */
+  /** Provider account used for the current remote registration, if any. */
   remote_hook_account_id: z.string().uuid().nullable().default(null),
   /** Provider-side hook identifier, if registration succeeded. */
   remote_hook_id: z.string().max(200).nullable().default(null),

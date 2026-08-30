@@ -10,6 +10,7 @@ import {
   createCompanionTriggerV2,
   createCompanionV2,
   deleteCompanionTriggerV2,
+  deleteCompanionPlugin,
   failCompanionTriggerFire,
   fireCompanionTrigger,
   getCompanionTriggerForWebhook,
@@ -19,6 +20,7 @@ import {
   listCompanionsV2,
   readCompanionThreadV2,
   registerCompanionTriggerWebhookV2,
+  ensureOAuthCompanionTriggerProviderAccount,
   rotateCompanionTriggerSecretV2,
   saveCompanionPlugin,
   saveCompanionPluginTriggerKey,
@@ -181,6 +183,14 @@ describe("Companion triggers over the real database", () => {
         client: { clientId: "integration-client", clientSecret: null, tokenEndpointAuthMethod: "none" },
       },
       masterKey,
+      database: integrationDb,
+    });
+    await ensureOAuthCompanionTriggerProviderAccount({
+      actor: fixture.owner,
+      orgId: fixture.orgA,
+      mcpAccountId: plugin.id,
+      provider: "github",
+      label: "GitHub",
       database: integrationDb,
     });
     await integrationDb.update(schema.companions)
@@ -407,7 +417,7 @@ describe("Companion triggers over the real database", () => {
     await expectSqlState(createTrigger(fixture.owner, "One too many"), "P0001");
   });
 
-  it("keeps trigger definitions autonomous while shared provider account refs stay attached", async () => {
+  it("uses a member-wide trigger provider account without attaching it to each Companion", async () => {
     const [account] = await integrationDb
       .select({ id: schema.companionMcpAccounts.id })
       .from(schema.companionMcpAccounts)
@@ -417,8 +427,15 @@ describe("Companion triggers over the real database", () => {
       .where(eq(schema.companions.id, companionId));
     expect(account).toBeDefined();
 
-    const autonomous = await createTrigger(fixture.owner, "No github plugin");
-    expect(autonomous).toMatchObject({ provider: "github", provider_account_id: null });
+    const [providerAccount] = await integrationDb
+      .select({ id: schema.companionTriggerProviderAccounts.id })
+      .from(schema.companionTriggerProviderAccounts)
+      .where(eq(schema.companionTriggerProviderAccounts.orgId, fixture.orgA));
+    const autonomous = await createTrigger(fixture.owner, "No github attachment");
+    expect(autonomous).toMatchObject({
+      provider: "github",
+      provider_account_id: providerAccount!.id,
+    });
 
     // `custom` needs no plugin.
     const custom = await asActor(fixture.owner, (database) => createCompanionTriggerV2({
@@ -443,12 +460,12 @@ describe("Companion triggers over the real database", () => {
     }));
     expect(updated.provider).toBe("github");
 
-    // Attaching the account unlocks the provider on both paths.
+    // MCP attachment remains independent and does not change trigger authority on either path.
     await integrationDb.update(schema.companions)
       .set({ selectedMcpAccountIds: [account!.id] })
       .where(eq(schema.companions.id, companionId));
     const attached = await createTrigger(fixture.owner, "With github plugin");
-    expect(attached).toMatchObject({ provider: "github", provider_account_id: account!.id });
+    expect(attached).toMatchObject({ provider: "github", provider_account_id: providerAccount!.id });
     await asActor(fixture.owner, (database) => updateCompanionTriggerV2({
       orgId: fixture.orgA,
       companionId,
@@ -458,6 +475,61 @@ describe("Companion triggers over the real database", () => {
       database,
       webhookBaseUrl: WEBHOOK_BASE_URL,
     }));
+  });
+
+  it("degrades every dependent Companion trigger when the shared MCP credential disconnects", async () => {
+    const [mcpAccount] = await integrationDb
+      .select({ id: schema.companionMcpAccounts.id })
+      .from(schema.companionMcpAccounts)
+      .where(and(
+        eq(schema.companionMcpAccounts.orgId, fixture.orgA),
+        eq(schema.companionMcpAccounts.provider, "github"),
+      ));
+    const first = await createTrigger(fixture.owner, "First shared trigger");
+    const secondCompanion = await asActor(fixture.owner, (database) => createCompanionV2({
+      actor: fixture.owner,
+      orgId: fixture.orgA,
+      name: "Second trigger runner",
+      persona: "Also answers external webhooks",
+      providerId: "anthropic",
+      modelId: "claude-opus-4-8",
+      database,
+    }));
+    const second = await asActor(fixture.owner, (database) => createCompanionTriggerV2({
+      orgId: fixture.orgA,
+      companionId: secondCompanion.id,
+      ...draft("Second shared trigger"),
+      database,
+      webhookBaseUrl: WEBHOOK_BASE_URL,
+    }));
+    expect(second.provider_account_id).toBe(first.provider_account_id);
+
+    await integrationDb.update(schema.companionTriggers).set({ registrationStatus: "registered" })
+      .where(and(
+        eq(schema.companionTriggers.orgId, fixture.orgA),
+        eq(schema.companionTriggers.providerAccountId, first.provider_account_id!),
+      ));
+    await asActor(fixture.owner, (database) => deleteCompanionPlugin({
+      actor: fixture.owner,
+      orgId: fixture.orgA,
+      accountId: mcpAccount!.id,
+      database,
+    }));
+
+    const rows = await integrationDb.select({ status: schema.companionTriggers.registrationStatus })
+      .from(schema.companionTriggers)
+      .where(and(
+        eq(schema.companionTriggers.orgId, fixture.orgA),
+        eq(schema.companionTriggers.providerAccountId, first.provider_account_id!),
+      ));
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => row.status === "unregistered")).toBe(true);
+    const providerAccount = await integrationDb.query.companionTriggerProviderAccounts.findFirst({
+      where: eq(schema.companionTriggerProviderAccounts.id, first.provider_account_id!),
+    });
+    expect(providerAccount).toMatchObject({ status: "disconnected", mcpAccountId: null });
+    expect((await getCompanionTriggerForWebhook({ triggerId: first.id, database: integrationDb }))?.enabled)
+      .toBe(false);
   });
 
   it("fires once as the Owner, masks the prompt behind the trigger name, and collapses replays", async () => {
@@ -810,11 +882,11 @@ describe("Companion triggers over the real database", () => {
     // Registration is on demand: approval and creation leave the row manual.
     expect((await triggerRow(trigger.id)).registrationStatus).toBe("manual");
     const [githubAccount] = await integrationDb
-      .select({ id: schema.companionMcpAccounts.id })
-      .from(schema.companionMcpAccounts)
+      .select({ id: schema.companionTriggerProviderAccounts.id })
+      .from(schema.companionTriggerProviderAccounts)
       .where(and(
-        eq(schema.companionMcpAccounts.orgId, fixture.orgA),
-        eq(schema.companionMcpAccounts.provider, "github"),
+        eq(schema.companionTriggerProviderAccounts.orgId, fixture.orgA),
+        eq(schema.companionTriggerProviderAccounts.provider, "github"),
       ));
 
     // A rejected registration persists its failure instead of silently staying manual.
@@ -865,7 +937,7 @@ describe("Companion triggers over the real database", () => {
       database: integrationDb,
     }))!.secret);
 
-    // Unregistering removes the remote hook and returns the row to manual.
+    // Unregistering removes the remote hook and keeps provider intent explicitly unregistered.
     const deleteRequests: string[] = [];
     const deleteFetch = asFetch(async (url) => {
       deleteRequests.push(String(url));
@@ -881,11 +953,11 @@ describe("Companion triggers over the real database", () => {
       fetch: deleteFetch,
     }));
     row = await triggerRow(trigger.id);
-    expect(row.registrationStatus).toBe("manual");
+    expect(row.registrationStatus).toBe("unregistered");
     expect(row.remoteHookId).toBeNull();
     expect(deleteRequests[0]).toBe("https://api.github.com/repos/acme/demo/hooks/424242");
 
-    // Linear has no webhook wiring yet and says so plainly.
+    // Linear needs a member-scoped API-key provider account and says so plainly when absent.
     const linearAccount = await saveCompanionPlugin({
       actor: fixture.owner,
       orgId: fixture.orgA,
@@ -912,7 +984,7 @@ describe("Companion triggers over the real database", () => {
       webhookBaseUrl: WEBHOOK_BASE_URL,
       masterKey,
       database,
-    }))).resolves.toMatchObject({ status: "failed", error: /minimal encrypted webhook credential/ });
+    }))).resolves.toMatchObject({ status: "failed", error: /no connected linear trigger provider account/ });
   });
 
   it("registers a linear webhook once the plugin's trigger key is stored, and unwires it", async () => {
@@ -944,7 +1016,7 @@ describe("Companion triggers over the real database", () => {
       webhookBaseUrl: WEBHOOK_BASE_URL,
       masterKey,
       database,
-    }))).resolves.toMatchObject({ status: "failed", error: /minimal encrypted webhook credential/ });
+    }))).resolves.toMatchObject({ status: "failed", error: /no connected linear trigger provider account/ });
 
     // Storing the key unlocks the GraphQL registration path.
     await asActor(fixture.owner, (database) => saveCompanionPluginTriggerKey({
@@ -984,7 +1056,7 @@ describe("Companion triggers over the real database", () => {
     expect((requests[0]!.init.headers as Record<string, string>).authorization)
       .toBe("lin_api_integration_key");
 
-    // Unregistering removes the remote subscription and returns the row to manual.
+    // Unregistering removes the remote subscription and keeps provider intent unregistered.
     const rejectedDeleteFetch = asFetch(async () => new Response(JSON.stringify({
       errors: [{ message: "subscription could not be removed" }],
       data: { webhookSubscriptionDelete: { success: false } },
@@ -1020,7 +1092,7 @@ describe("Companion triggers over the real database", () => {
       fetch: deleteFetch,
     }));
     const row = await triggerRow(trigger.id);
-    expect(row.registrationStatus).toBe("manual");
+    expect(row.registrationStatus).toBe("unregistered");
     expect(row.remoteHookId).toBeNull();
     const deleteBody = JSON.parse(String(deleteRequests[0]!.init.body));
     expect(deleteBody.variables.id).toBe("linear-hook-1");

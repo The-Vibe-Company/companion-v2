@@ -574,11 +574,13 @@ place, while a different name creates a new routine.
 
 A `companion:trigger:<name>` confirmation with a strict JSON `{summary, proposal}` body projects as
 `request_kind = trigger_proposal`. Pi emits these through the staged `propose_trigger` tool. The
-payload is name, prompt, mode (`notify` or `relay`), and provider (`webhook`, `linear`, `github`, or
-`custom`), plus provider target metadata
-(`repo`, `events`) when Pi already knows what to watch; a redacted or malformed
+payload is name, prompt, mode (`notify` or `relay`), and provider (`webhook`, `linear`, `github`,
+`sentry`, or `custom`), plus provider target metadata
+(`repo`, `organization`, `project`, `events`) when Pi already knows what to watch; a redacted or malformed
 message is counted as unknown. Trigger definitions are autonomous and are not gated on an MCP
-plugin merely to exist. Remote registration reuses a matching attached provider account; one
+plugin merely to exist. Remote registration uses a member-scoped trigger-provider account that is
+available to every Companion the member can operate; it never depends on the Companion's MCP
+attachment selection. OAuth-backed accounts reuse the matching MCP credential in place. One
 eligible account defaults silently and multiple accounts require `provider_account_id`.
 Owner/Editor approval
 runs `companion_api_answer_trigger_decision`,
@@ -787,11 +789,14 @@ durable in PostgreSQL but lost in that round trip, and every fire would then los
 A trigger is the event-driven sibling of a routine, at most ten per Companion. Its stable contract
 is `{name, prompt, mode, provider, provider_account_id, registration_status, enabled}` where mode is
 `notify` or `relay`. Definitions are autonomous: creating one never requires an MCP plugin. Provider
-credentials are used only for remote registration. GitHub reuses the selected attached MCP OAuth
-credential (whose classic OAuth grant includes `admin:repo_hook`); exactly one eligible account is
-selected silently, while multiple accounts require an explicit `provider_account_id`. A revoked or
+credentials are used only for remote registration. Trigger-provider accounts are connected once at
+member scope and become available to every Companion without an attach step. GitHub and Sentry
+reuse the member's MCP OAuth credential in place (GitHub's classic OAuth grant includes
+`admin:repo_hook`); exactly one eligible account is selected silently, while multiple accounts
+require an explicit `provider_account_id`. A disconnected, revoked, or
 legacy insufficient-scope token produces `registration_status = failed`, never a second credential
-prompt. Linear keeps the minimal separate encrypted webhook key because its current MCP grant does
+prompt. Disconnect preserves dependent triggers as `unregistered`; it never silently reattaches a
+tool account. Linear keeps the minimal separate encrypted webhook key because its current MCP grant does
 not cover the registration adapter. `webhook` and `custom` are manual fallback providers only when
 the source has no remote-registration API.
 
@@ -800,7 +805,8 @@ stored profile timezone, using their detected device zone only while the profile
 
 Create, update, secret rotation, and approved `propose_trigger` reconcile provider registration in
 the same request. Auto-registerable creation therefore returns synchronously as `registered` or
-`failed`; `manual` is reserved for the fallback providers above. Provider rejection is a successful
+`failed`; there is no pending creation response. `unregistered` is the durable disconnected or
+unwired state, while `manual` is reserved for the fallback providers above. Provider rejection is a successful
 HTTP response carrying the refreshed trigger plus a bounded `last_registration_error`, so clients
 can render and retry it. `POST /v1/companions/:id/triggers/:triggerId/registration` retries and
 returns `{trigger}`; `DELETE …/registration` unwires. Deleting a registered trigger unwires first,
@@ -809,6 +815,10 @@ new definition.
 
 The shared first-party API is:
 
+- `GET /v1/companion-trigger-provider-accounts` → `{accounts}` for the current member;
+- `POST /v1/companion-trigger-provider-accounts` with
+  `{provider,label,credential}` → `201 {account}` for the API-key fallback;
+- `DELETE /v1/companion-trigger-provider-accounts/:accountId` → `{account}` after soft disconnect;
 - `GET /v1/companions/:id/triggers` → `{triggers}`;
 - `POST /v1/companions/:id/triggers` → `201 {trigger}`;
 - `PATCH /v1/companions/:id/triggers/:triggerId` → `{trigger}`;
@@ -820,6 +830,18 @@ The shared first-party API is:
   `{runs,next_cursor}`;
 - `GET /v1/companions/:id/trigger-runs/:runId?entry_limit=&entry_cursor=` → `{run}` with a
   bounded `internal_entries` page.
+
+OAuth connect continues through `POST /v1/companion-plugins/oauth/start` and its callback. For
+GitHub and Sentry the callback also materializes the matching trigger-provider account, referencing
+the same encrypted MCP credential rather than copying it. Provider account reads have the exact
+write-only-safe shape
+`{id,provider,label,credential_source,mcp_account_id,status,dependent_trigger_count,created_at,updated_at}`.
+`credential_source` is `mcp_oauth|api_key`; `status` is `connected|disconnected`. No response ever
+contains an OAuth token, API key, or encrypted envelope. Disconnect erases an API key or removes the
+shared MCP OAuth account, but keeps the provider-account row and every per-Companion trigger that
+references it, changes those trigger registrations to `unregistered`,
+and makes their callback a silent no-op until reconnect plus registration retry. There is no
+per-Companion provider-account attach endpoint or selected state.
 
 Create accepts `{id?,name,prompt,mode?,provider?,provider_account_id?,target?,enabled?}`; update is
 the partial shape without `id`. Defaults are `mode=relay`, `provider=webhook`, and `enabled=true`.

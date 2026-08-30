@@ -149,7 +149,7 @@ describe("Companion plugin OAuth broker", () => {
     expect(authorization.origin + authorization.pathname).toBe("https://mcp.sentry.dev/oauth/authorize");
     expect(authorization.searchParams.get("resource")).toBe("https://mcp.sentry.dev/mcp");
     expect(authorization.searchParams.get("scope")).toBe(
-      "org:read project:write team:write event:write",
+      "org:read project:write project:admin team:write event:write",
     );
     expect(authorization.searchParams.get("code_challenge_method")).toBe("S256");
   });

@@ -34,6 +34,7 @@ const PROVIDER_LABELS = {
   webhook: "Webhook",
   linear: "Linear",
   github: "GitHub",
+  sentry: "Sentry",
   custom: "Custom",
 } satisfies Record<CompanionTriggerProvider, string>;
 

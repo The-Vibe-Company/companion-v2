@@ -1,10 +1,196 @@
 -- Trigger v2: autonomous definitions, shared provider credentials, isolated payload validation,
 -- and read-only run history. Existing rows keep relay semantics and their current callback URL.
 
+-- A trigger-provider connection is member-scoped authority, not a Companion MCP attachment.
+-- OAuth rows reuse the encrypted MCP credential in place; API-key rows own a separate write-only
+-- envelope. Soft disconnect keeps dependent triggers visible and retryable.
+CREATE TABLE public.companion_trigger_provider_accounts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id uuid NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
+  owner_id text NOT NULL REFERENCES public."user"(id) ON DELETE CASCADE,
+  provider text NOT NULL,
+  label text NOT NULL,
+  credential_source text NOT NULL,
+  mcp_account_id uuid REFERENCES public.companion_mcp_accounts(id) ON DELETE SET NULL,
+  credential_generation uuid,
+  ciphertext text,
+  iv text,
+  auth_tag text,
+  wrapped_dek text,
+  wrap_iv text,
+  wrap_auth_tag text,
+  key_id text,
+  status text NOT NULL DEFAULT 'connected',
+  disconnected_at timestamp with time zone,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT companion_trigger_provider_accounts_owner_membership_fk
+    FOREIGN KEY (org_id, owner_id) REFERENCES public.memberships(org_id, user_id) ON DELETE CASCADE,
+  CONSTRAINT companion_trigger_provider_accounts_provider_check
+    CHECK (provider IN ('github', 'linear', 'sentry')),
+  CONSTRAINT companion_trigger_provider_accounts_label_check
+    CHECK (char_length(label) BETWEEN 1 AND 40),
+  CONSTRAINT companion_trigger_provider_accounts_status_check
+    CHECK (status IN ('connected', 'disconnected')),
+  CONSTRAINT companion_trigger_provider_accounts_credential_check CHECK (
+    (credential_source = 'mcp_oauth'
+      AND credential_generation IS NULL AND ciphertext IS NULL AND iv IS NULL AND auth_tag IS NULL
+      AND wrapped_dek IS NULL AND wrap_iv IS NULL AND wrap_auth_tag IS NULL AND key_id IS NULL
+      AND (status = 'disconnected' OR mcp_account_id IS NOT NULL))
+    OR
+    (credential_source = 'api_key' AND mcp_account_id IS NULL AND (
+      (status = 'connected' AND credential_generation IS NOT NULL AND ciphertext IS NOT NULL
+        AND iv IS NOT NULL AND auth_tag IS NOT NULL AND wrapped_dek IS NOT NULL
+        AND wrap_iv IS NOT NULL AND wrap_auth_tag IS NOT NULL AND key_id IS NOT NULL)
+      OR
+      (status = 'disconnected' AND credential_generation IS NULL AND ciphertext IS NULL
+        AND iv IS NULL AND auth_tag IS NULL AND wrapped_dek IS NULL
+        AND wrap_iv IS NULL AND wrap_auth_tag IS NULL AND key_id IS NULL)
+    ))
+  ),
+  CONSTRAINT companion_trigger_provider_accounts_disconnected_check
+    CHECK ((status = 'disconnected') = (disconnected_at IS NOT NULL))
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX companion_trigger_provider_accounts_provider_label_uq
+  ON public.companion_trigger_provider_accounts(org_id, owner_id, provider, lower(label));
+--> statement-breakpoint
+CREATE INDEX companion_trigger_provider_accounts_owner_idx
+  ON public.companion_trigger_provider_accounts(org_id, owner_id, updated_at);
+--> statement-breakpoint
+ALTER TABLE public.companion_trigger_provider_accounts ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE public.companion_trigger_provider_accounts FORCE ROW LEVEL SECURITY;
+--> statement-breakpoint
+CREATE POLICY companion_trigger_provider_accounts_owner_select_rls
+  ON public.companion_trigger_provider_accounts FOR SELECT
+  USING (org_id = NULLIF(current_setting('app.org_id', true), '')::uuid
+    AND owner_id = NULLIF(current_setting('app.user_id', true), ''));
+--> statement-breakpoint
+CREATE POLICY companion_trigger_provider_accounts_owner_insert_rls
+  ON public.companion_trigger_provider_accounts FOR INSERT
+  WITH CHECK (org_id = NULLIF(current_setting('app.org_id', true), '')::uuid
+    AND owner_id = NULLIF(current_setting('app.user_id', true), '')
+    AND EXISTS (SELECT 1 FROM public.memberships m
+      WHERE m.org_id = companion_trigger_provider_accounts.org_id
+        AND m.user_id = companion_trigger_provider_accounts.owner_id));
+--> statement-breakpoint
+CREATE POLICY companion_trigger_provider_accounts_owner_update_rls
+  ON public.companion_trigger_provider_accounts FOR UPDATE
+  USING (org_id = NULLIF(current_setting('app.org_id', true), '')::uuid
+    AND owner_id = NULLIF(current_setting('app.user_id', true), ''))
+  WITH CHECK (org_id = NULLIF(current_setting('app.org_id', true), '')::uuid
+    AND owner_id = NULLIF(current_setting('app.user_id', true), ''));
+--> statement-breakpoint
+CREATE POLICY companion_trigger_provider_accounts_owner_delete_rls
+  ON public.companion_trigger_provider_accounts FOR DELETE
+  USING (org_id = NULLIF(current_setting('app.org_id', true), '')::uuid
+    AND owner_id = NULLIF(current_setting('app.user_id', true), ''));
+--> statement-breakpoint
+
+CREATE FUNCTION public.companion_degrade_trigger_provider_account()
+RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, public SET row_security = off
+AS $$
+BEGIN
+  IF NEW.status = 'disconnected' OR (NEW.credential_source = 'mcp_oauth' AND NEW.mcp_account_id IS NULL) THEN
+    UPDATE public.companion_triggers trigger_row
+    SET registration_status = 'unregistered',
+        last_registration_error = 'Provider account disconnected. Reconnect it, then retry registration.',
+        updated_at = clock_timestamp()
+    WHERE trigger_row.org_id = NEW.org_id
+      AND trigger_row.provider_account_id = NEW.id
+      AND trigger_row.registration_status <> 'manual';
+  END IF;
+  RETURN NEW;
+END
+$$;
+--> statement-breakpoint
+CREATE TRIGGER companion_trigger_provider_accounts_degrade_dependents
+AFTER UPDATE OF status, mcp_account_id ON public.companion_trigger_provider_accounts
+FOR EACH ROW EXECUTE FUNCTION public.companion_degrade_trigger_provider_account();
+--> statement-breakpoint
+
+CREATE FUNCTION public.companion_disconnect_trigger_provider_for_mcp()
+RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, public SET row_security = off
+AS $$
+BEGIN
+  UPDATE public.companion_trigger_provider_accounts provider_account
+  SET status = 'disconnected', disconnected_at = clock_timestamp(), updated_at = clock_timestamp()
+  WHERE provider_account.mcp_account_id = OLD.id;
+  RETURN OLD;
+END
+$$;
+--> statement-breakpoint
+CREATE TRIGGER companion_mcp_accounts_disconnect_trigger_provider
+BEFORE DELETE ON public.companion_mcp_accounts
+FOR EACH ROW EXECUTE FUNCTION public.companion_disconnect_trigger_provider_for_mcp();
+--> statement-breakpoint
+
+-- Existing OAuth-capable MCP connections become trigger authority without a second consent or key.
+INSERT INTO public.companion_trigger_provider_accounts(
+  org_id, owner_id, provider, label, credential_source, mcp_account_id
+)
+SELECT account.org_id, account.owner_id, account.provider, account.label, 'mcp_oauth', account.id
+FROM public.companion_mcp_accounts account
+WHERE account.provider IN ('github', 'sentry');
+--> statement-breakpoint
+
+-- Preserve the historical Linear registration key as a member-scoped API-key connection.
+INSERT INTO public.companion_trigger_provider_accounts(
+  org_id, owner_id, provider, label, credential_source, credential_generation,
+  ciphertext, iv, auth_tag, wrapped_dek, wrap_iv, wrap_auth_tag, key_id
+)
+SELECT key_row.org_id, account.owner_id, key_row.provider, account.label, 'api_key',
+  key_row.credential_generation, key_row.ciphertext, key_row.iv, key_row.auth_tag,
+  key_row.wrapped_dek, key_row.wrap_iv, key_row.wrap_auth_tag, key_row.key_id
+FROM public.companion_plugin_trigger_keys key_row
+JOIN public.companion_mcp_accounts account ON account.id = key_row.account_id;
+--> statement-breakpoint
+
 ALTER TABLE public.companion_triggers
   ADD COLUMN mode text NOT NULL DEFAULT 'relay',
   ADD COLUMN provider_account_id uuid
-    REFERENCES public.companion_mcp_accounts(id) ON DELETE SET NULL;
+    REFERENCES public.companion_trigger_provider_accounts(id) ON DELETE SET NULL;
+--> statement-breakpoint
+ALTER TABLE public.companion_triggers
+  DROP CONSTRAINT IF EXISTS companion_triggers_remote_hook_account_id_fkey;
+--> statement-breakpoint
+-- Remap existing GitHub registrations to the member-scoped account and preserve the new primary
+-- provider reference used by webhook authorization.
+UPDATE public.companion_triggers trigger_row
+SET provider_account_id = provider_account.id,
+    remote_hook_account_id = provider_account.id
+FROM public.companion_trigger_provider_accounts provider_account
+WHERE trigger_row.provider = 'github'
+  AND provider_account.mcp_account_id = trigger_row.remote_hook_account_id;
+--> statement-breakpoint
+-- Historical Linear registrations recorded the MCP account which owned the separate trigger key.
+-- Translate that legacy account through the key row to its new API-key provider account before the
+-- remote-hook foreign key changes target.
+UPDATE public.companion_triggers trigger_row
+SET provider_account_id = provider_account.id,
+    remote_hook_account_id = provider_account.id
+FROM public.companion_plugin_trigger_keys key_row
+JOIN public.companion_mcp_accounts legacy_account
+  ON legacy_account.org_id = key_row.org_id AND legacy_account.id = key_row.account_id
+JOIN public.companion_trigger_provider_accounts provider_account
+  ON provider_account.org_id = key_row.org_id
+ AND provider_account.owner_id = legacy_account.owner_id
+ AND provider_account.provider = key_row.provider
+ AND provider_account.credential_source = 'api_key'
+ AND provider_account.credential_generation = key_row.credential_generation
+WHERE trigger_row.provider = 'linear'
+  AND trigger_row.org_id = key_row.org_id
+  AND trigger_row.remote_hook_account_id = key_row.account_id;
+--> statement-breakpoint
+ALTER TABLE public.companion_triggers
+  ADD CONSTRAINT companion_triggers_remote_hook_account_id_companion_trigger_provider_accounts_id_fk
+  FOREIGN KEY (remote_hook_account_id)
+  REFERENCES public.companion_trigger_provider_accounts(id) ON DELETE SET NULL;
 --> statement-breakpoint
 ALTER TABLE public.companion_triggers
   ADD CONSTRAINT companion_triggers_mode_check CHECK (mode IN ('notify', 'relay'));
@@ -12,7 +198,12 @@ ALTER TABLE public.companion_triggers
 ALTER TABLE public.companion_triggers
   DROP CONSTRAINT companion_triggers_provider_check,
   ADD CONSTRAINT companion_triggers_provider_check
-    CHECK (provider IN ('webhook', 'linear', 'github', 'custom'));
+    CHECK (provider IN ('webhook', 'linear', 'github', 'sentry', 'custom'));
+--> statement-breakpoint
+ALTER TABLE public.companion_triggers
+  DROP CONSTRAINT companion_triggers_registration_status_check,
+  ADD CONSTRAINT companion_triggers_registration_status_check
+    CHECK (registration_status IN ('manual', 'unregistered', 'registered', 'failed'));
 --> statement-breakpoint
 
 ALTER TABLE public.companion_turns ADD COLUMN trigger_mode text;
@@ -59,6 +250,34 @@ AS $$
 $$;
 --> statement-breakpoint
 
+CREATE OR REPLACE FUNCTION public.companion_api_set_trigger_registration(
+  p_org_id uuid, p_companion_id uuid, p_trigger_id uuid,
+  p_remote_hook_account_id uuid, p_remote_hook_id text,
+  p_registration_status text, p_last_registration_error text
+)
+RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, public SET row_security = on
+AS $$
+BEGIN
+  PERFORM public.companion_api_require_access(p_org_id,p_companion_id,'editor');
+  IF p_trigger_id IS NULL
+     OR p_registration_status NOT IN ('manual','unregistered','registered','failed')
+     OR (p_registration_status='registered' AND (p_remote_hook_id IS NULL OR p_remote_hook_account_id IS NULL))
+     OR char_length(COALESCE(p_last_registration_error,''))>500 THEN
+    RAISE EXCEPTION 'invalid Companion trigger registration' USING ERRCODE='22023';
+  END IF;
+  UPDATE public.companion_triggers trigger_row
+  SET remote_hook_id=p_remote_hook_id, remote_hook_account_id=p_remote_hook_account_id,
+      registration_status=p_registration_status,
+      last_registration_error=p_last_registration_error, updated_at=clock_timestamp()
+  WHERE trigger_row.org_id=p_org_id AND trigger_row.companion_id=p_companion_id
+    AND trigger_row.id=p_trigger_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Companion trigger not found' USING ERRCODE='P0002'; END IF;
+  RETURN public.companion_api_trigger_json(p_org_id,p_companion_id,p_trigger_id,true);
+END $$;
+--> statement-breakpoint
+
 CREATE FUNCTION public.companion_api_create_trigger(
   p_org_id uuid, p_companion_id uuid, p_id uuid, p_name text, p_prompt text,
   p_mode text, p_provider text, p_provider_account_id uuid, p_target jsonb,
@@ -77,7 +296,7 @@ BEGIN
   PERFORM public.companion_api_require_access(p_org_id, p_companion_id, 'editor');
   IF p_id IS NULL OR char_length(v_name) NOT BETWEEN 1 AND 80 OR v_name ~ E'[\n\r]'
      OR char_length(v_prompt) NOT BETWEEN 1 AND 16384 OR p_mode NOT IN ('notify','relay')
-     OR p_provider NOT IN ('webhook','linear','github','custom')
+     OR p_provider NOT IN ('webhook','linear','github','sentry','custom')
      OR p_target IS NULL OR jsonb_typeof(p_target) <> 'object'
      OR p_secret !~ '^[0-9a-f]{32,128}$' OR p_enabled IS NULL THEN
     RAISE EXCEPTION 'invalid Companion trigger' USING ERRCODE = '22023';
@@ -86,19 +305,23 @@ BEGIN
    WHERE c.org_id=p_org_id AND c.id=p_companion_id FOR UPDATE;
   IF NOT FOUND THEN RAISE EXCEPTION 'Companion not found' USING ERRCODE='P0002'; END IF;
 
-  IF p_provider = 'github' AND v_account_id IS NULL THEN
-    SELECT CASE WHEN count(*) = 1 THEN min(a.id::text)::uuid ELSE NULL END INTO v_account_id
-    FROM public.companions c JOIN public.companion_mcp_accounts a
-      ON a.org_id=c.org_id AND COALESCE(c.selected_mcp_account_ids,'[]'::jsonb) ? a.id::text
-    WHERE c.org_id=p_org_id AND c.id=p_companion_id AND a.provider='github';
+  IF p_provider IN ('github','linear','sentry') AND v_account_id IS NULL THEN
+    SELECT CASE WHEN count(*) = 1 THEN min(a.id::text)::uuid ELSE NULL END, count(*)::integer
+      INTO v_account_id, v_count
+    FROM public.companion_trigger_provider_accounts a
+    WHERE a.org_id=p_org_id AND a.owner_id=v_actor_id AND a.provider=p_provider
+      AND a.status='connected';
+    IF v_count > 1 THEN
+      RAISE EXCEPTION 'multiple trigger provider accounts are eligible; choose provider_account_id'
+        USING ERRCODE='22023';
+    END IF;
   END IF;
   IF v_account_id IS NOT NULL AND NOT EXISTS (
-    SELECT 1 FROM public.companions c JOIN public.companion_mcp_accounts a
-      ON a.org_id=c.org_id AND COALESCE(c.selected_mcp_account_ids,'[]'::jsonb) ? a.id::text
-    WHERE c.org_id=p_org_id AND c.id=p_companion_id AND a.id=v_account_id
-      AND a.provider=p_provider
+    SELECT 1 FROM public.companion_trigger_provider_accounts a
+    WHERE a.org_id=p_org_id AND a.owner_id=v_actor_id AND a.id=v_account_id
+      AND a.provider=p_provider AND a.status='connected'
   ) THEN
-    RAISE EXCEPTION 'provider account is not attached to this Companion' USING ERRCODE='42501';
+    RAISE EXCEPTION 'trigger provider account is not connected for this member' USING ERRCODE='42501';
   END IF;
 
   SELECT * INTO v_existing FROM public.companion_triggers WHERE id=p_id FOR UPDATE;
@@ -236,8 +459,15 @@ RETURNS TABLE(org_id uuid,companion_id uuid,name text,prompt text,provider text,
 LANGUAGE sql STABLE SECURITY DEFINER
 SET search_path=pg_catalog,public SET row_security=on
 AS $$
-  SELECT t.org_id,t.companion_id,t.name,t.prompt,t.provider,t.secret,t.enabled
-  FROM public.companion_triggers t WHERE t.id=p_trigger_id
+  SELECT t.org_id,t.companion_id,t.name,t.prompt,t.provider,t.secret,
+    t.enabled AND (
+      t.provider IN ('webhook','custom')
+      OR (t.registration_status='registered' AND provider_account.status='connected')
+    )
+  FROM public.companion_triggers t
+  LEFT JOIN public.companion_trigger_provider_accounts provider_account
+    ON provider_account.org_id=t.org_id AND provider_account.id=t.provider_account_id
+  WHERE t.id=p_trigger_id
 $$;
 --> statement-breakpoint
 
@@ -481,29 +711,34 @@ AS $$
 DECLARE
   v_name text:=btrim(p_name); v_prompt text:=btrim(p_prompt);
   v_trigger public.companion_triggers%ROWTYPE; v_account_id uuid:=p_provider_account_id;
-  v_changed boolean;
+  v_changed boolean; v_count integer;
 BEGIN
   PERFORM public.companion_api_require_access(p_org_id,p_companion_id,'editor');
   IF p_trigger_id IS NULL OR char_length(v_name) NOT BETWEEN 1 AND 80 OR v_name ~ E'[\n\r]'
      OR char_length(v_prompt) NOT BETWEEN 1 AND 16384 OR p_mode NOT IN ('notify','relay')
-     OR p_provider NOT IN ('webhook','linear','github','custom')
+     OR p_provider NOT IN ('webhook','linear','github','sentry','custom')
      OR p_target IS NULL OR jsonb_typeof(p_target)<>'object' OR p_enabled IS NULL THEN
     RAISE EXCEPTION 'invalid Companion trigger' USING ERRCODE='22023';
   END IF;
   SELECT * INTO v_trigger FROM public.companion_triggers
    WHERE org_id=p_org_id AND companion_id=p_companion_id AND id=p_trigger_id FOR UPDATE;
   IF NOT FOUND THEN RAISE EXCEPTION 'Companion trigger not found' USING ERRCODE='P0002'; END IF;
-  IF p_provider='github' AND v_account_id IS NULL THEN
-    SELECT CASE WHEN count(*)=1 THEN min(a.id::text)::uuid ELSE NULL END INTO v_account_id
-    FROM public.companions c JOIN public.companion_mcp_accounts a
-      ON a.org_id=c.org_id AND COALESCE(c.selected_mcp_account_ids,'[]'::jsonb) ? a.id::text
-    WHERE c.org_id=p_org_id AND c.id=p_companion_id AND a.provider='github';
+  IF p_provider IN ('github','linear','sentry') AND v_account_id IS NULL THEN
+    SELECT CASE WHEN count(*)=1 THEN min(a.id::text)::uuid ELSE NULL END, count(*)::integer
+      INTO v_account_id, v_count
+    FROM public.companion_trigger_provider_accounts a
+    WHERE a.org_id=p_org_id AND a.owner_id=public.companion_api_actor(p_org_id)
+      AND a.provider=p_provider AND a.status='connected';
+    IF v_count > 1 THEN
+      RAISE EXCEPTION 'multiple trigger provider accounts are eligible; choose provider_account_id'
+        USING ERRCODE='22023';
+    END IF;
   END IF;
   IF v_account_id IS NOT NULL AND NOT EXISTS (
-    SELECT 1 FROM public.companions c JOIN public.companion_mcp_accounts a
-      ON a.org_id=c.org_id AND COALESCE(c.selected_mcp_account_ids,'[]'::jsonb) ? a.id::text
-    WHERE c.org_id=p_org_id AND c.id=p_companion_id AND a.id=v_account_id AND a.provider=p_provider
-  ) THEN RAISE EXCEPTION 'provider account is not attached to this Companion' USING ERRCODE='42501'; END IF;
+    SELECT 1 FROM public.companion_trigger_provider_accounts a
+    WHERE a.org_id=p_org_id AND a.owner_id=public.companion_api_actor(p_org_id)
+      AND a.id=v_account_id AND a.provider=p_provider AND a.status='connected'
+  ) THEN RAISE EXCEPTION 'trigger provider account is not connected for this member' USING ERRCODE='42501'; END IF;
   v_changed := v_trigger.provider IS DISTINCT FROM p_provider
     OR v_trigger.provider_account_id IS DISTINCT FROM v_account_id
     OR v_trigger.target IS DISTINCT FROM p_target;
@@ -511,7 +746,8 @@ BEGIN
     provider_account_id=v_account_id,target=p_target,enabled=p_enabled,
     remote_hook_id=CASE WHEN v_changed THEN NULL ELSE remote_hook_id END,
     remote_hook_account_id=CASE WHEN v_changed THEN NULL ELSE remote_hook_account_id END,
-    registration_status=CASE WHEN v_changed THEN 'manual' ELSE registration_status END,
+    registration_status=CASE WHEN v_changed AND p_provider IN ('github','linear','sentry')
+      THEN 'unregistered' WHEN v_changed THEN 'manual' ELSE registration_status END,
     last_registration_error=CASE WHEN v_changed THEN NULL ELSE last_registration_error END,
     last_error_code=NULL,last_error_message=NULL,last_error_at=NULL,consecutive_failures=0,
     updated_at=clock_timestamp()
@@ -573,7 +809,7 @@ BEGIN
     RAISE EXCEPTION 'invalid Companion trigger proposal' USING ERRCODE='22023'; END;
   IF char_length(v_name) NOT BETWEEN 1 AND 80 OR v_name~E'[\n\r]'
     OR char_length(v_prompt) NOT BETWEEN 1 AND 16384 OR v_mode NOT IN ('notify','relay')
-    OR v_provider NOT IN ('webhook','linear','github','custom') THEN
+    OR v_provider NOT IN ('webhook','linear','github','sentry','custom') THEN
     RAISE EXCEPTION 'invalid Companion trigger proposal' USING ERRCODE='22023';
   END IF;
   IF p_action='allow' THEN

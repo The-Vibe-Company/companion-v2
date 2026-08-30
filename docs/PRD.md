@@ -118,11 +118,14 @@ explicitly recoverable interruption even after the browser, API, or one runtime 
 ### Triggers
 
 - A Companion may have at most ten named triggers — the event-driven siblings of routines. Each has
-  a prompt of at most 16,384 characters and a provider label (`webhook`, `linear`, `github`, or `custom`) that
+  a prompt of at most 16,384 characters and a provider label (`webhook`, `linear`, `github`, `sentry`, or `custom`) that
   hints at the delivery id; it is not an auth scheme.
 - Creation is Owner/Editor only: the context-panel + control, or Pi `propose_trigger` approved as a
   decision card. Creation and approval register the remote webhook end-to-end with the selected
-  attached MCP credential. One eligible account is selected silently; multiple accounts require
+  member-scoped trigger-provider account. That authority is immediately available to every
+  Companion the member can operate and is never attached through `selected_mcp_account_ids`.
+  OAuth-backed accounts reuse the existing MCP credential in place. One eligible account is
+  selected silently; multiple accounts require
   `provider_account_id`. `manual` plus the platform URL is only the exceptional fallback for a
   source without a registration API. Users never paste URLs or secrets in the primary flow.
 - `POST /v1/hooks/triggers/:triggerId/:secret` is registered before session middleware, capped at

@@ -398,9 +398,11 @@ export default function companionPermissionBroker(pi: ExtensionAPI) {
       name: Type.String({ description: "Short unique name, max 80 characters" }),
       prompt: Type.String({ description: "The prompt the Companion will run on each webhook event" }),
       mode: Type.Optional(Type.String({ description: "notify to inform only, or relay for the main Companion to act; defaults to relay" })),
-      provider: Type.Optional(Type.String({ description: "webhook, linear, github, or custom; defaults to webhook" })),
-      provider_account_id: Type.Optional(Type.String({ description: "Attached provider account UUID only when selecting among multiple eligible accounts" })),
+      provider: Type.Optional(Type.String({ description: "webhook, linear, github, sentry, or custom; defaults to webhook" })),
+      provider_account_id: Type.Optional(Type.String({ description: "Member-scoped trigger provider account UUID only when selecting among multiple eligible accounts" })),
       repo: Type.Optional(Type.String({ description: "github only: repository as owner/repo the webhook watches" })),
+      organization: Type.Optional(Type.String({ description: "sentry only: organization slug" })),
+      project: Type.Optional(Type.String({ description: "sentry only: project slug" })),
       events: Type.Optional(Type.Array(Type.String(), { description: "github only: webhook event names (push, pull_request, ...) or a single "*"; max 30" })),
       summary: Type.Optional(Type.String({ description: "One-line confirm copy for the human" })),
     }),
@@ -414,6 +416,8 @@ export default function companionPermissionBroker(pi: ExtensionAPI) {
         ? params.provider_account_id.trim().toLowerCase()
         : "";
       const repo = typeof params.repo === "string" ? params.repo.trim() : "";
+      const organization = typeof params.organization === "string" ? params.organization.trim() : "";
+      const project = typeof params.project === "string" ? params.project.trim() : "";
       const events = asStringList(params.events).map((event) => event.trim().toLowerCase()).filter(Boolean);
       const summaryArg = typeof params.summary === "string" ? params.summary.trim() : "";
       if (!TRIGGER_PROVIDERS.includes(provider)) {
@@ -436,9 +440,27 @@ export default function companionPermissionBroker(pi: ExtensionAPI) {
           details: { proposal: null, confirmed: null },
         };
       }
-      if (provider !== "github" && (repo || events.length)) {
+      if (provider === "sentry" && (!organization || !project || events.length === 0)) {
         return {
-          content: [{ type: "text", text: \`Error: \${provider} triggers do not take a repo or events yet\` }],
+          content: [{ type: "text", text: "Error: propose_trigger sentry triggers need organization, project, and at least one event" }],
+          details: { proposal: null, confirmed: null },
+        };
+      }
+      if (provider !== "github" && repo) {
+        return {
+          content: [{ type: "text", text: \`Error: \${provider} triggers do not take a repo\` }],
+          details: { proposal: null, confirmed: null },
+        };
+      }
+      if (provider !== "sentry" && (organization || project)) {
+        return {
+          content: [{ type: "text", text: \`Error: \${provider} triggers do not take a Sentry organization or project\` }],
+          details: { proposal: null, confirmed: null },
+        };
+      }
+      if (!["github", "sentry"].includes(provider) && events.length) {
+        return {
+          content: [{ type: "text", text: \`Error: \${provider} triggers do not take events yet\` }],
           details: { proposal: null, confirmed: null },
         };
       }
@@ -448,7 +470,9 @@ export default function companionPermissionBroker(pi: ExtensionAPI) {
           details: { proposal: null, confirmed: null },
         };
       }
-      const target = provider === "github" ? { repo, events } : undefined;
+      const target = provider === "github"
+        ? { repo, events }
+        : provider === "sentry" ? { organization, project, events } : undefined;
       if (
         !name || name.length > 80 || /[\\n\\r]/.test(name)
         || !prompt || prompt.length > 16384

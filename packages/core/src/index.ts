@@ -20,6 +20,7 @@ export * from "./companionTriggerFireId";
 export * from "./companionTriggersApi";
 export * from "./companionTriggerWebhookRegistration";
 export * from "./companionPluginTriggerKeys";
+export * from "./companionTriggerProviderAccounts";
 export * from "./companionProviderCatalog";
 export * from "./companionProviderOAuth";
 export * from "./companionPluginOAuth";

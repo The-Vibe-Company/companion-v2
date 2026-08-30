@@ -106,8 +106,11 @@ import {
   pollOpenAICodexProviderOAuth,
   saveCompanionProvider,
   saveCompanionPlugin,
-  saveCompanionPluginTriggerKey,
   saveCompanionOAuthPlugin,
+  disconnectCompanionTriggerProviderAccount,
+  ensureOAuthCompanionTriggerProviderAccount,
+  listCompanionTriggerProviderAccounts,
+  saveCompanionTriggerProviderAccount,
   setDefaultCompanionProvider,
   CompanionMcpBrokerAuthorizationError,
   companionMcpAccessTokenInputSchema,
@@ -144,6 +147,7 @@ import {
   companionTriggerRunListQuerySchema,
   companionTriggerRunDetailQuerySchema,
   createCompanionTriggerInputSchema,
+  createCompanionTriggerProviderAccountInputSchema,
   declaredCompanionAttachmentContentType,
   isCompanionAttachmentImage,
   sanitizeCompanionAttachmentFilename,
@@ -250,6 +254,7 @@ function defaultCompanionRouteDependencies() {
     transcribeCompanionAudio,
     answerCompanionRoutineDecisionV2,
     listCompanionTriggersV2,
+    listCompanionTriggerProviderAccounts,
     listCompanionTriggerRunsV2,
     getCompanionTriggerRunV2,
     createCompanionTriggerV2,
@@ -259,6 +264,9 @@ function defaultCompanionRouteDependencies() {
     answerCompanionTriggerDecisionV2,
     registerCompanionTriggerWebhookV2,
     unregisterCompanionTriggerWebhookV2,
+    disconnectCompanionTriggerProviderAccount,
+    ensureOAuthCompanionTriggerProviderAccount,
+    saveCompanionTriggerProviderAccount,
     getCompanionTriggerForWebhook,
     fireCompanionTrigger,
     failCompanionTriggerFire,
@@ -355,12 +363,12 @@ function triggerRegistrationErrorCode<T>(error: T): string | null {
 }
 
 /**
- * Only legacy providers with an adapter and enough delivery metadata are auto-wired. The default
+ * Only providers with an adapter and enough delivery metadata are auto-wired. The default
  * webhook provider and custom/unknown delivery hints remain valid trigger definitions with no
  * remote registration side effect.
  */
 function supportsAutomaticTriggerRegistration(trigger: CompanionTrigger): boolean {
-  return trigger.provider === "linear" || trigger.provider === "github";
+  return trigger.provider === "linear" || trigger.provider === "github" || trigger.provider === "sentry";
 }
 
 function isOptionalTriggerRegistrationFailure<T>(error: T): boolean {
@@ -727,6 +735,7 @@ export function registerCompanionRoutes(
     transcribeCompanionAudio,
     answerCompanionRoutineDecisionV2,
     listCompanionTriggersV2,
+    listCompanionTriggerProviderAccounts,
     listCompanionTriggerRunsV2,
     getCompanionTriggerRunV2,
     createCompanionTriggerV2,
@@ -736,6 +745,9 @@ export function registerCompanionRoutes(
     answerCompanionTriggerDecisionV2,
     registerCompanionTriggerWebhookV2,
     unregisterCompanionTriggerWebhookV2,
+    disconnectCompanionTriggerProviderAccount,
+    ensureOAuthCompanionTriggerProviderAccount,
+    saveCompanionTriggerProviderAccount,
     readCompanionThreadV2,
     syncCompanionThreadV2,
     retryCompanionTurnV2,
@@ -1376,16 +1388,15 @@ export function registerCompanionRoutes(
         provider: z.literal("linear"),
         credential: z.string().min(1).max(256),
       }).parse(await c.req.json());
-      await tenant(c, ({ actor, orgId, database }) =>
-        saveCompanionPluginTriggerKey({
+      const account = await tenant(c, ({ actor, orgId, database }) =>
+        saveCompanionTriggerProviderAccount({
           actor,
           orgId,
-          provider: body.provider,
-          credential: body.credential,
+          account: { provider: body.provider, label: "Linear", credential: body.credential },
           masterKey: loadSecretsMasterKey(env.COMPANION_SECRETS_MASTER_KEY),
           database,
         }));
-      return c.json({ stored: true });
+      return c.json({ stored: true, account });
     } catch (error) {
       return routeError(c, error);
     }
@@ -1468,16 +1479,26 @@ export function registerCompanionRoutes(
       });
       await withTenantContext(
         { orgId: state.orgId, userId: actor.id },
-        (database) => saveCompanionOAuthPlugin({
-          actor,
-          orgId: state.orgId,
-          provider: pending.flow.provider,
-          label: pending.label,
-          remoteUrl: pending.flow.remoteUrl,
-          credential,
-          masterKey,
-          database,
-        }),
+        async (database) => {
+          const mcpAccount = await saveCompanionOAuthPlugin({
+            actor,
+            orgId: state.orgId,
+            provider: pending.flow.provider,
+            label: pending.label,
+            remoteUrl: pending.flow.remoteUrl,
+            credential,
+            masterKey,
+            database,
+          });
+          await ensureOAuthCompanionTriggerProviderAccount({
+            actor,
+            orgId: state.orgId,
+            mcpAccountId: mcpAccount.id,
+            provider: pending.flow.provider,
+            label: pending.label,
+            database,
+          });
+        },
       );
       setCookie(c, "companion_org", state.orgId, {
         path: "/",
@@ -1522,6 +1543,47 @@ export function registerCompanionRoutes(
       await tenant(c, ({ actor, orgId, database }) =>
         deleteCompanionPlugin({ actor, orgId, accountId, database }));
       return c.json({ ok: true });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.get("/v1/companion-trigger-provider-accounts", async (c) => {
+    try {
+      const accounts = await tenant(c, ({ actor, orgId, database }) =>
+        listCompanionTriggerProviderAccounts({ actor, orgId, database }));
+      c.header("Cache-Control", "private, no-store");
+      return c.json({ accounts });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.post("/v1/companion-trigger-provider-accounts", async (c) => {
+    try {
+      const body = createCompanionTriggerProviderAccountInputSchema.parse(await c.req.json());
+      const account = await tenant(c, ({ actor, orgId, database }) =>
+        saveCompanionTriggerProviderAccount({
+          actor,
+          orgId,
+          account: body,
+          masterKey: loadSecretsMasterKey(env.COMPANION_SECRETS_MASTER_KEY),
+          database,
+        }));
+      c.header("Cache-Control", "private, no-store");
+      return c.json({ account }, 201);
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.delete("/v1/companion-trigger-provider-accounts/:id", async (c) => {
+    try {
+      const accountId = companionIdSchema.parse(c.req.param("id"));
+      const account = await tenant(c, ({ actor, orgId, database }) =>
+        disconnectCompanionTriggerProviderAccount({ actor, orgId, accountId, database }));
+      c.header("Cache-Control", "private, no-store");
+      return c.json({ account });
     } catch (error) {
       return routeError(c, error);
     }

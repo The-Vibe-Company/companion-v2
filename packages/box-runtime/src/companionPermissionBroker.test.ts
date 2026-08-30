@@ -102,11 +102,13 @@ describe("Companion Pi interaction extension", () => {
       .toContain("never ask the person to paste a URL or use a provider console");
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE)
       .toContain("User denied or timed out. No trigger was created.");
-    // A github proposal may carry a repo/events target; other providers must not.
+    // GitHub and Sentry carry their complete provider-specific target through approval.
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE)
       .toContain('provider === "github"');
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE)
-      .toContain("do not take a repo or events yet");
+      .toContain('provider === "sentry"');
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE)
+      .toContain("sentry triggers need organization, project, and at least one event");
   });
 
   it("keeps trigger proposals autonomous from Box-side plugin attachment gates", () => {

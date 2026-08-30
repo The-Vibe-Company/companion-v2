@@ -24,8 +24,10 @@ A hosted Pi teammate may propose settings with `propose_config` (skills, plugins
 and `request_plugin_connection` (Linear, GitHub, Notion, Conductor, Slack, Gmail, or Sentry), may propose a scheduled routine with
 `propose_routine` (name, prompt, cron, timezone), and may propose a webhook trigger with
 `propose_trigger` (name, prompt, `notify` or `relay` mode, provider, and provider target metadata).
-Trigger definitions are autonomous; for remote registration Companion reuses the selected attached
-MCP credential, defaulting silently when exactly one account is eligible. Those tools emit a decision
+Trigger definitions are autonomous. A member-scoped trigger-provider connection is immediately
+available to every Companion the member can operate, with no per-Companion attachment step. Where
+possible it references the same encrypted MCP OAuth credential without copying it, defaulting
+silently when exactly one account is eligible. Those tools emit a decision
 card; they never apply changes themselves and
 never touch hub access, name, or provider. Owner/Editor approval in the thread applies after the
 current turn. After a plugin connection is approved, the human finishes it in the web Plugins UI; Pi
@@ -1382,7 +1384,7 @@ skills view shows the correct status and version. Report the version from this s
 `companion.json.version`:
 
 ```sh
-printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.99.0","agent":"<your assistant name>"}}' \
+printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.100.0","agent":"<your assistant name>"}}' \
   | node scripts/companion-agent-client.mjs
 ```
 

@@ -170,6 +170,11 @@ BEGIN
       'public.companion_sections'::regclass
     ];
   END IF;
+  IF pg_catalog.to_regclass('public.companion_trigger_provider_accounts') IS NOT NULL THEN
+    worker_forbidden_companion_tables := worker_forbidden_companion_tables || ARRAY[
+      'public.companion_trigger_provider_accounts'::regclass
+    ];
+  END IF;
   IF api_role IS NULL OR worker_role IS NULL OR companion_runtime_role IS NULL THEN
     RAISE EXCEPTION 'companion API, worker, and runtime roles are required';
   END IF;

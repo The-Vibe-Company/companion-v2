@@ -59,6 +59,10 @@ const coreMocks = {
   deleteCompanionRoutineV2: vi.fn<typeof coreModule.deleteCompanionRoutineV2>(),
   answerCompanionRoutineDecisionV2: vi.fn<typeof coreModule.answerCompanionRoutineDecisionV2>(),
   listCompanionTriggersV2: vi.fn<typeof coreModule.listCompanionTriggersV2>(),
+  listCompanionTriggerProviderAccounts: vi.fn<typeof coreModule.listCompanionTriggerProviderAccounts>(),
+  saveCompanionTriggerProviderAccount: vi.fn<typeof coreModule.saveCompanionTriggerProviderAccount>(),
+  disconnectCompanionTriggerProviderAccount: vi.fn<typeof coreModule.disconnectCompanionTriggerProviderAccount>(),
+  ensureOAuthCompanionTriggerProviderAccount: vi.fn<typeof coreModule.ensureOAuthCompanionTriggerProviderAccount>(),
   listCompanionTriggerRunsV2: vi.fn<typeof coreModule.listCompanionTriggerRunsV2>(),
   getCompanionTriggerRunV2: vi.fn<typeof coreModule.getCompanionTriggerRunV2>(),
   createCompanionTriggerV2: vi.fn<typeof coreModule.createCompanionTriggerV2>(),
@@ -163,6 +167,18 @@ const section = {
   owner_id: owner.id,
   name: "Work",
   position: 0,
+  created_at: NOW,
+  updated_at: NOW,
+};
+
+const triggerProviderAccount = {
+  id: "88888888-8888-4888-8888-888888888888",
+  provider: "github" as const,
+  label: "GitHub",
+  credential_source: "mcp_oauth" as const,
+  mcp_account_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  status: "connected" as const,
+  dependent_trigger_count: 2,
   created_at: NOW,
   updated_at: NOW,
 };
@@ -391,6 +407,13 @@ describe("Companions Runtime v2 API", () => {
     coreMocks.listCompanionRoutineRunsV2.mockResolvedValue({ runs: [], next_cursor: null });
     coreMocks.answerCompanionTriggerDecisionV2.mockResolvedValue(undefined);
     coreMocks.listCompanionTriggersV2.mockResolvedValue([]);
+    coreMocks.listCompanionTriggerProviderAccounts.mockResolvedValue([triggerProviderAccount]);
+    coreMocks.saveCompanionTriggerProviderAccount.mockResolvedValue(triggerProviderAccount);
+    coreMocks.disconnectCompanionTriggerProviderAccount.mockResolvedValue({
+      ...triggerProviderAccount,
+      status: "disconnected",
+      mcp_account_id: null,
+    });
     coreMocks.getCompanionDecisionV2.mockResolvedValue({
       requestKey: "question-1",
       requestKind: "question",
@@ -410,6 +433,29 @@ describe("Companions Runtime v2 API", () => {
       token_type: "Bearer",
       expires_at: "2026-08-17T00:15:00.000Z",
       credential_version: 4,
+    });
+  });
+
+  it("lists, connects, and disconnects member-wide trigger provider accounts", async () => {
+    const app = appWithRoutes();
+    const listed = await app.request("/v1/companion-trigger-provider-accounts");
+    const created = await app.request(jsonPost("/v1/companion-trigger-provider-accounts", {
+      provider: "linear",
+      label: "Linear",
+      credential: "lin_api_test",
+    }));
+    const disconnected = await app.request(
+      `/v1/companion-trigger-provider-accounts/${triggerProviderAccount.id}`,
+      { method: "DELETE" },
+    );
+
+    expect([listed.status, created.status, disconnected.status]).toEqual([200, 201, 200]);
+    await expect(listed.json()).resolves.toEqual({ accounts: [triggerProviderAccount] });
+    expect(coreMocks.saveCompanionTriggerProviderAccount).toHaveBeenCalledWith(expect.objectContaining({
+      account: { provider: "linear", label: "Linear", credential: "lin_api_test" },
+    }));
+    await expect(disconnected.json()).resolves.toEqual({
+      account: { ...triggerProviderAccount, status: "disconnected", mcp_account_id: null },
     });
   });
 

@@ -7,16 +7,13 @@ import {
   decryptCompanionMcpRuntimeCredential,
 } from "./companionRuntimeCredentials";
 import { decryptOpaqueValue } from "./secretsCrypto";
-import {
-  COMPANION_PLUGIN_TRIGGER_KEY_PURPOSE,
-  getCompanionPluginTriggerKeyEnvelope,
-} from "./companionPluginTriggerKeys";
+import { COMPANION_TRIGGER_PROVIDER_CREDENTIAL_PURPOSE } from "./companionTriggerProviderAccounts";
 import type { Db } from "@companion/db";
 
 /**
  * Provider-side webhook wiring for zero-friction triggers. Creation and chat approval invoke this
- * synchronously: GitHub reuses an attached MCP OAuth credential, while Linear uses its minimal
- * encrypted webhook key until its MCP authorization can cover remote registration.
+ * synchronously. Trigger-provider authority is member-scoped and never depends on a Companion's
+ * MCP attachments. OAuth providers reuse the MCP credential; API-key providers own an envelope.
  */
 export class CompanionTriggerRegistrationError extends Error {
   constructor(
@@ -24,7 +21,7 @@ export class CompanionTriggerRegistrationError extends Error {
       | "trigger_not_found"
       | "target_required"
       | "provider_unwired"
-      | "plugin_not_attached"
+      | "provider_account_disconnected"
       | "provider_account_ambiguous"
       | "plugin_auth_invalid"
       | "provider_rejected",
@@ -37,15 +34,21 @@ export class CompanionTriggerRegistrationError extends Error {
 
 const GITHUB_API = "https://api.github.com";
 const LINEAR_API = "https://api.linear.app/graphql";
+const SENTRY_API = "https://sentry.io/api/0";
 
 /** The raw secret row the registration path needs: the secret doubles as the provider HMAC key. */
 const registrationTriggerSchema = z.object({
   id: z.string().uuid(),
   companion_id: z.string().uuid(),
   name: z.string(),
-  provider: z.enum(["webhook", "linear", "github", "custom"]),
+  provider: z.enum(["webhook", "linear", "github", "sentry", "custom"]),
   provider_account_id: z.string().uuid().nullable().default(null),
-  target: z.object({ repo: z.string().optional(), events: z.array(z.string()).optional() })
+  target: z.object({
+    repo: z.string().optional(),
+    organization: z.string().optional(),
+    project: z.string().optional(),
+    events: z.array(z.string()).optional(),
+  })
     .nullable()
     .default(null),
   webhook_url: z.string().url(),
@@ -80,8 +83,10 @@ async function loadRegistrationTrigger(input: {
   return parsed.data;
 }
 
-interface AttachedGithubQueryRow {
-  id: unknown;
+interface TriggerProviderQueryRow {
+  provider_account_id: unknown;
+  credential_source: unknown;
+  mcp_account_id: unknown;
   credential_generation: unknown;
   ciphertext: unknown;
   iv: unknown;
@@ -92,8 +97,10 @@ interface AttachedGithubQueryRow {
   key_id: unknown;
 }
 
-interface AttachedGithubAccount {
+interface TriggerProviderAccount {
   id: string;
+  credentialSource: "mcp_oauth" | "api_key";
+  credentialAccountId: string;
   credentialGeneration: string;
   envelope: {
     ciphertext: string;
@@ -106,45 +113,62 @@ interface AttachedGithubAccount {
   };
 }
 
-async function loadAttachedGithubAccount(input: {
+async function loadTriggerProviderAccount(input: {
   orgId: string;
-  companionId: string;
+  provider: "github" | "linear" | "sentry";
   providerAccountId?: string | null;
   database: Db;
-}): Promise<AttachedGithubAccount> {
+}): Promise<TriggerProviderAccount> {
   const result = await input.database.execute(sql`
-    select account.id, account.credential_generation,
-           account.ciphertext, account.iv, account.auth_tag,
-           account.wrapped_dek, account.wrap_iv, account.wrap_auth_tag, account.key_id
-    from public.companions companion
-    join public.companion_mcp_accounts account
-      on account.org_id = companion.org_id
-     and COALESCE(companion.selected_mcp_account_ids, '[]'::jsonb) ? account.id::text
-    where companion.org_id = ${input.orgId}::uuid
-      and companion.id = ${input.companionId}::uuid
-      and account.provider = 'github'
+    select provider_account.id as provider_account_id, provider_account.credential_source,
+           provider_account.mcp_account_id,
+           coalesce(mcp_account.credential_generation, provider_account.credential_generation) as credential_generation,
+           coalesce(mcp_account.ciphertext, provider_account.ciphertext) as ciphertext,
+           coalesce(mcp_account.iv, provider_account.iv) as iv,
+           coalesce(mcp_account.auth_tag, provider_account.auth_tag) as auth_tag,
+           coalesce(mcp_account.wrapped_dek, provider_account.wrapped_dek) as wrapped_dek,
+           coalesce(mcp_account.wrap_iv, provider_account.wrap_iv) as wrap_iv,
+           coalesce(mcp_account.wrap_auth_tag, provider_account.wrap_auth_tag) as wrap_auth_tag,
+           coalesce(mcp_account.key_id, provider_account.key_id) as key_id
+    from public.companion_trigger_provider_accounts provider_account
+    left join public.companion_mcp_accounts mcp_account
+      on mcp_account.org_id = provider_account.org_id
+     and mcp_account.id = provider_account.mcp_account_id
+    where provider_account.org_id = ${input.orgId}::uuid
+      and provider_account.owner_id = public.companion_api_actor(${input.orgId}::uuid)
+      and provider_account.provider = ${input.provider}
+      and provider_account.status = 'connected'
       and (${input.providerAccountId ?? null}::uuid is null
-        or account.id = ${input.providerAccountId ?? null}::uuid)
-    order by account.updated_at desc
+        or provider_account.id = ${input.providerAccountId ?? null}::uuid)
+    order by provider_account.updated_at desc
     limit 2
   `);
-  // SAFETY: database.execute resolves to an iterable of rows; this query selects exactly the AttachedGithubQueryRow columns above.
-  const found = Array.from(result as Iterable<AttachedGithubQueryRow>);
+  // SAFETY: the query above selects exactly the TriggerProviderQueryRow aliases.
+  const found = Array.from(result as Iterable<TriggerProviderQueryRow>);
   const [row] = found;
   if (!row) {
     throw new CompanionTriggerRegistrationError(
-      "plugin_not_attached",
-      "the github plugin must be attached before registering webhooks",
+      "provider_account_disconnected",
+      `no connected ${input.provider} trigger provider account is available`,
     );
   }
   if (found.length > 1) {
     throw new CompanionTriggerRegistrationError(
       "provider_account_ambiguous",
-      "multiple attached github accounts are eligible; choose provider_account_id",
+      `multiple ${input.provider} trigger provider accounts are eligible; choose provider_account_id`,
+    );
+  }
+  const credentialSource = String(row.credential_source);
+  if (credentialSource !== "mcp_oauth" && credentialSource !== "api_key") {
+    throw new CompanionTriggerRegistrationError(
+      "plugin_auth_invalid",
+      "the trigger provider credential source is invalid; reconnect the provider",
     );
   }
   return {
-    id: String(row.id),
+    id: String(row.provider_account_id),
+    credentialSource,
+    credentialAccountId: String(row.mcp_account_id ?? row.provider_account_id),
     credentialGeneration: String(row.credential_generation),
     envelope: {
       ciphertext: String(row.ciphertext),
@@ -158,21 +182,29 @@ async function loadAttachedGithubAccount(input: {
   };
 }
 
-function githubTokenOf(account: AttachedGithubAccount, orgId: string, masterKey: Buffer): string {
+function providerTokenOf(account: TriggerProviderAccount, orgId: string, masterKey: Buffer): string {
   try {
-    const credential = decryptCompanionMcpRuntimeCredential({
+    if (account.credentialSource === "mcp_oauth") {
+      const credential = decryptCompanionMcpRuntimeCredential({
+        orgId,
+        accountId: account.credentialAccountId,
+        credentialGeneration: account.credentialGeneration,
+        envelope: account.envelope,
+      }, masterKey);
+      if (credential.kind !== "oauth") throw new Error("expected an oauth credential");
+      return credential.credential.accessToken;
+    }
+    return decryptOpaqueValue({
       orgId,
-      accountId: account.id,
-      credentialGeneration: account.credentialGeneration,
-      envelope: account.envelope,
+      purpose: COMPANION_TRIGGER_PROVIDER_CREDENTIAL_PURPOSE,
+      subjectId: `${account.id}:${account.credentialGeneration}`,
+      ...account.envelope,
     }, masterKey);
-    if (credential.kind !== "oauth") throw new Error("expected an oauth credential");
-    return credential.credential.accessToken;
   } catch (error) {
     if (error instanceof CompanionRuntimeCredentialError) {
       throw new CompanionTriggerRegistrationError(
         "plugin_auth_invalid",
-        "the github plugin credential is unreadable; reconnect the plugin",
+        "the provider credential is unreadable; reconnect the provider",
       );
     }
     throw error;
@@ -185,7 +217,7 @@ async function persistRegistration(input: {
   triggerId: string;
   accountId: string | null;
   remoteHookId: string | null;
-  status: "manual" | "registered" | "failed";
+  status: "manual" | "unregistered" | "registered" | "failed";
   error: string | null;
   database: Db;
 }): Promise<void> {
@@ -224,50 +256,27 @@ const LINEAR_DELETE_MUTATION = `
 
 async function linearTriggerKeyToken(input: {
   orgId: string;
-  companionId: string;
+  providerAccountId?: string | null;
   masterKey: Buffer;
   database: Db;
 }): Promise<{ accountId: string; token: string }> {
-  const envelope = await getCompanionPluginTriggerKeyEnvelope({
+  const account = await loadTriggerProviderAccount({
     orgId: input.orgId,
-    companionId: input.companionId,
     provider: "linear",
+    providerAccountId: input.providerAccountId,
     database: input.database,
   });
-  if (!envelope) {
-    throw new CompanionTriggerRegistrationError(
-      "provider_unwired",
-      "linear registration needs the minimal encrypted webhook credential",
-    );
-  }
-  let token: string;
-  try {
-    token = decryptOpaqueValue({
-      orgId: input.orgId,
-      purpose: COMPANION_PLUGIN_TRIGGER_KEY_PURPOSE,
-      subjectId: `${envelope.account_id}:${envelope.credential_generation}`,
-      ciphertext: envelope.ciphertext,
-      iv: envelope.iv,
-      authTag: envelope.auth_tag,
-      wrappedDek: envelope.wrapped_dek,
-      wrapIv: envelope.wrap_iv,
-      wrapAuthTag: envelope.wrap_auth_tag,
-      keyId: envelope.key_id,
-    }, input.masterKey);
-  } catch {
-    throw new CompanionTriggerRegistrationError(
-      "plugin_auth_invalid",
-      "the Linear trigger key is unreadable; store it again",
-    );
-  }
-  return { accountId: envelope.account_id, token };
+  return { accountId: account.id, token: providerTokenOf(account, input.orgId, input.masterKey) };
 }
 
 async function registerLinearTriggerWebhook(
   input: Parameters<typeof loadRegistrationTrigger>[0] & { masterKey: Buffer; fetch?: typeof globalThis.fetch },
   trigger: RegistrationTrigger,
 ): Promise<CompanionTriggerRegistrationOutcome> {
-  const key = await linearTriggerKeyToken(input);
+  const key = await linearTriggerKeyToken({
+    ...input,
+    providerAccountId: trigger.provider_account_id,
+  });
   const doFetch = input.fetch ?? globalThis.fetch;
   let response: Response;
   try {
@@ -345,6 +354,73 @@ async function persistLinearFailure(
   return { status: "failed", error: message };
 }
 
+async function registerSentryTriggerWebhook(
+  input: Parameters<typeof loadRegistrationTrigger>[0] & { masterKey: Buffer; fetch?: typeof globalThis.fetch },
+  trigger: RegistrationTrigger,
+): Promise<CompanionTriggerRegistrationOutcome> {
+  if (!trigger.target?.organization || !trigger.target.project || !trigger.target.events?.length) {
+    const error = "a Sentry trigger needs organization, project, and at least one event";
+    await persistRegistration({ ...input, accountId: trigger.provider_account_id, remoteHookId: null, status: "failed", error });
+    return { status: "failed", error };
+  }
+  let account: TriggerProviderAccount;
+  let token: string;
+  try {
+    account = await loadTriggerProviderAccount({
+      orgId: input.orgId,
+      provider: "sentry",
+      providerAccountId: trigger.provider_account_id,
+      database: input.database,
+    });
+    token = providerTokenOf(account, input.orgId, input.masterKey);
+  } catch (error) {
+    const message = error instanceof CompanionTriggerRegistrationError
+      ? error.message
+      : "Sentry credential could not be resolved";
+    await persistRegistration({
+      ...input,
+      accountId: trigger.provider_account_id,
+      remoteHookId: null,
+      status: "failed",
+      error: sanitizeCompanionRuntimeError(message).slice(0, 500),
+    });
+    return { status: "failed", error: message };
+  }
+  const projectPath = [trigger.target.organization, trigger.target.project]
+    .map(encodeURIComponent)
+    .join("/");
+  let response: Response;
+  try {
+    response = await (input.fetch ?? globalThis.fetch)(`${SENTRY_API}/projects/${projectPath}/hooks/`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ url: trigger.webhook_url, events: trigger.target.events }),
+    });
+  } catch {
+    const error = "Sentry webhook registration could not reach the provider";
+    await persistRegistration({ ...input, accountId: account.id, remoteHookId: null, status: "failed", error });
+    return { status: "failed", error };
+  }
+  const created = z.object({ id: z.string().min(1).max(200) })
+    .safeParse(await response.json().catch(() => null));
+  if (!response.ok || !created.success) {
+    const error = sanitizeCompanionRuntimeError(`Sentry rejected the webhook (${response.status})`).slice(0, 500);
+    await persistRegistration({ ...input, accountId: account.id, remoteHookId: null, status: "failed", error });
+    return { status: "failed", error };
+  }
+  await persistRegistration({
+    ...input,
+    accountId: account.id,
+    remoteHookId: created.data.id,
+    status: "registered",
+    error: null,
+  });
+  return { status: "registered", remote_hook_id: created.data.id };
+}
+
 /**
  * Attempt the provider-side wiring. Provider rejection is a recorded outcome (`failed`), never an
  * exception: the failure row must survive the caller's transaction. Missing, ambiguous, revoked,
@@ -360,6 +436,7 @@ export async function registerCompanionTriggerWebhookV2(input: {
   fetch?: typeof globalThis.fetch;
 }): Promise<CompanionTriggerRegistrationOutcome> {
   const trigger = await loadRegistrationTrigger(input);
+  if (trigger.provider === "sentry") return registerSentryTriggerWebhook(input, trigger);
   if (trigger.provider === "linear") {
     try {
       return await registerLinearTriggerWebhook(input, trigger);
@@ -388,14 +465,16 @@ export async function registerCompanionTriggerWebhookV2(input: {
     return { status: "failed", error: message };
   }
 
-  let account: AttachedGithubAccount;
+  let account: TriggerProviderAccount;
   let token: string;
   try {
-    account = await loadAttachedGithubAccount({
-      ...input,
+    account = await loadTriggerProviderAccount({
+      orgId: input.orgId,
+      provider: "github",
+      database: input.database,
       providerAccountId: trigger.provider_account_id,
     });
-    token = githubTokenOf(account, input.orgId, input.masterKey);
+    token = providerTokenOf(account, input.orgId, input.masterKey);
   } catch (error) {
     const message = error instanceof CompanionTriggerRegistrationError
       ? error.message
@@ -501,12 +580,15 @@ export async function unregisterCompanionTriggerWebhookV2(input: {
         ...input,
         accountId: null,
         remoteHookId: null,
-        status: "manual",
+        status: "unregistered",
         error: null,
       });
       return;
     }
-    const key = await linearTriggerKeyToken(input);
+    const key = await linearTriggerKeyToken({
+      ...input,
+      providerAccountId: trigger.remote_hook_account_id ?? trigger.provider_account_id,
+    });
     const doFetch = input.fetch ?? globalThis.fetch;
     let response: Response;
     try {
@@ -547,7 +629,55 @@ export async function unregisterCompanionTriggerWebhookV2(input: {
       ...input,
       accountId: null,
       remoteHookId: null,
-      status: "manual",
+      status: "unregistered",
+      error: null,
+    });
+    return;
+  }
+  if (trigger.provider === "sentry") {
+    if (!trigger.remote_hook_id || !trigger.target?.organization || !trigger.target.project) {
+      await persistRegistration({
+        ...input,
+        accountId: null,
+        remoteHookId: null,
+        status: "unregistered",
+        error: null,
+      });
+      return;
+    }
+    const account = await loadTriggerProviderAccount({
+      orgId: input.orgId,
+      provider: "sentry",
+      providerAccountId: trigger.remote_hook_account_id ?? trigger.provider_account_id,
+      database: input.database,
+    });
+    const token = providerTokenOf(account, input.orgId, input.masterKey);
+    const projectPath = [trigger.target.organization, trigger.target.project]
+      .map(encodeURIComponent)
+      .join("/");
+    let response: Response;
+    try {
+      response = await (input.fetch ?? globalThis.fetch)(
+        `${SENTRY_API}/projects/${projectPath}/hooks/${encodeURIComponent(trigger.remote_hook_id)}/`,
+        { method: "DELETE", headers: { authorization: `Bearer ${token}` } },
+      );
+    } catch {
+      throw new CompanionTriggerRegistrationError(
+        "provider_rejected",
+        "Sentry webhook removal could not reach the provider; the registration is kept",
+      );
+    }
+    if (!response.ok && response.status !== 404) {
+      throw new CompanionTriggerRegistrationError(
+        "provider_rejected",
+        `Sentry refused to remove the webhook (${response.status})`,
+      );
+    }
+    await persistRegistration({
+      ...input,
+      accountId: null,
+      remoteHookId: null,
+      status: "unregistered",
       error: null,
     });
     return;
@@ -557,16 +687,18 @@ export async function unregisterCompanionTriggerWebhookV2(input: {
       ...input,
       accountId: null,
       remoteHookId: null,
-      status: "manual",
+      status: trigger.provider === "webhook" || trigger.provider === "custom" ? "manual" : "unregistered",
       error: null,
     });
     return;
   }
-  const account = await loadAttachedGithubAccount({
-    ...input,
+  const account = await loadTriggerProviderAccount({
+    orgId: input.orgId,
+    provider: "github",
+    database: input.database,
     providerAccountId: trigger.remote_hook_account_id ?? trigger.provider_account_id,
   });
-  const token = githubTokenOf(account, input.orgId, input.masterKey);
+  const token = providerTokenOf(account, input.orgId, input.masterKey);
   const doFetch = input.fetch ?? globalThis.fetch;
   const repoPath = trigger.target.repo.split("/").map(encodeURIComponent).join("/");
   let response: Response | null;
@@ -601,7 +733,7 @@ export async function unregisterCompanionTriggerWebhookV2(input: {
     ...input,
     accountId: null,
     remoteHookId: null,
-    status: "manual",
+    status: "unregistered",
     error: null,
   });
 }
