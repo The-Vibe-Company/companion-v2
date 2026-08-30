@@ -558,7 +558,10 @@ The web and native Apple routine rows expose run history, and a routine-origin t
 `run_id` is a compact button rather than a message bubble. Both clients use only the bounded
 routine-history APIs, list newest runs first, distinguish notify, relay, silent, pending, and error
 outcomes, and page the private transcript forward by ordinal. A deleted routine remains directly
-readable from its marker because the run id and identity snapshot are durable. Web presents a
+readable from its marker because the run id and identity snapshot are durable. An interrupted run
+keeps the explicit Retry/Cancel safety boundary in that history surface so an Owner/Editor can
+recycle only the isolated routine session or cancel it to release blocked shared lifecycle work;
+Viewer sees no mutation controls. Web presents a
 responsive right-side drawer that traps focus, uses a scrim and Esc dismissal, and takes the full
 chat stage on a phone; iOS uses native navigation from Connected Resources and a modal navigation
 stack from the marker. Neither client contacts or wakes Box.

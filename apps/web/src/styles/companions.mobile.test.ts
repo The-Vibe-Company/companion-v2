@@ -170,6 +170,15 @@ describe("Companions mobile viewport", () => {
     expect(desktop).toContain("min-height: 44px;");
   });
 
+  it("keeps interrupted routine recovery actions touch-sized", () => {
+    const recovery = declarationsFor(
+      ".routine-history__recovery-actions .cds-btn",
+      COARSE_POINTER,
+    )[0];
+    expect(recovery).toContain("min-width: 44px;");
+    expect(recovery).toContain("min-height: 44px;");
+  });
+
   it("makes Companion details a full-width, touch-safe phone view", () => {
     const phonePanel = declarationsFor(".chat-context", PHONE)[0];
     expect(phonePanel).toContain("width: 100%;");

@@ -254,6 +254,7 @@ PostgreSQL-only Viewer reads, queue count, input-needed cards, interrupted Retry
 Full Box confirmation, attachment chips and inline images inside the message they belong to, a
 routine fire that shows `Routine: <name>` with the prompt hidden in the thread and on the list row,
 a context-panel routine create,
+an interrupted routine run whose history drawer offers Retry/Cancel only to Owner/Editor,
 and no excluded voice, multi-Bot, harness, deployment, or file-library chrome.
 
 ## Change verification
