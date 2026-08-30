@@ -299,8 +299,8 @@ private struct CompanionTriggerRunDetailView: View {
 
 private func resultLabel(_ run: CompanionTriggerRunSummary) -> String {
     switch (run.outcome, run.surfaceMode) {
-    case (.surfaced, .notify): "Notified in main chat"
-    case (.surfaced, .relay): "Relayed to main Companion"
+    case (.surfaced, .some(.notify)): "Notified in main chat"
+    case (.surfaced, .some(.relay)): "Relayed to main Companion"
     case (.noOutput, _): "No output"
     case (.error, _): "Processing failed"
     default: "Processing"

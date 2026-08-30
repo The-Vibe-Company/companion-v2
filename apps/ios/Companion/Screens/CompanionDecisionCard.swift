@@ -66,7 +66,7 @@ struct CompanionDecisionCard: View {
 
     private func settledBubble(_ outcome: CompanionDecisionCardOutcome) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(outcome.bubbleText)
+            Text(settledBubbleText(outcome))
                 .font(.body)
                 .foregroundStyle(CompanionIOSTheme.textPrimary)
 
@@ -84,6 +84,13 @@ struct CompanionDecisionCard: View {
         )
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("decision.outcome.\(decision.requestID)")
+    }
+
+    private func settledBubbleText(_ outcome: CompanionDecisionCardOutcome) -> String {
+        if decision.kind == .trigger, outcome == .allowed {
+            return "Approved — Companion handled the provider setup. Check Triggers for its registration status."
+        }
+        return outcome.bubbleText
     }
 
     private var header: some View {
