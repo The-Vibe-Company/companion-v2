@@ -785,6 +785,7 @@ async function handleIsolatedRoutineAttempt(
           boxId: runtime.boxId,
           runId,
           persona: authorization(context).persona,
+          validationOnly: materialValue.triggerName !== null,
           expectedInvocationId: routineInvocationId,
           signal,
         }));

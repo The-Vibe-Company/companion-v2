@@ -555,7 +555,8 @@ the user controls. First-party creation registers supported remote webhooks with
 provider credential; manual URL copying is only the fallback for sources with no registration API.
 The route persists an isolated validation run as the immutable Companion Owner through
 `companion_api_fire_trigger` and never contacts Box or Pi. Runtime evaluates the bounded untrusted
-payload against the trigger prompt, then either stays silent, surfaces a notify entry, or surfaces a
+payload against the trigger prompt in a disposable Pi session with only `surface_to_main` enabled;
+MCP, provider-tool credentials, skills, and project context are absent. It then either stays silent, surfaces a notify entry, or surfaces a
 relay entry plus an ordinary main-Pi turn. A delivery id derived from
 provider headers, or from the body hash, collapses redeliveries to one turn; disabled, throttled,
 and pileup fires are skipped without enqueuing.

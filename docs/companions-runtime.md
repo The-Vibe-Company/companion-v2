@@ -838,7 +838,10 @@ A fire is API-level isolated validation-run persistence. `companion_api_fire_tri
 Companion Owner through the same transaction-local GUCs as `companion_fire_routine` and calls the
 ordinary `companion_api_enqueue_turn`, so membership, retirement, warm-send, one-active-turn, and
 FIFO ordering all apply; the webhook route never contacts Box or Pi. Runtime pins the same bounded
-main-thread substrate as an isolated routine and exposes memory read-only. The validator treats the
+main-thread substrate as an isolated routine and copies memory into the disposable run root. Unlike
+a trusted scheduled routine, the validator starts with extension discovery, skills, project context,
+MCP gateway, and provider-tool credentials disabled; Pi's tool allowlist contains only
+`surface_to_main`. The validator treats the
 payload as data: mismatch finishes successfully with `no_output`; match must call `surface_to_main`
 exactly once using the trigger's configured mode. `notify` commits one visible assistant entry and
 no main-Pi turn. `relay` commits that entry plus an ordinary visible turn for main Pi to process.

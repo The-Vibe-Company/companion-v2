@@ -985,6 +985,24 @@ describe("Companion triggers over the real database", () => {
       .toBe("lin_api_integration_key");
 
     // Unregistering removes the remote subscription and returns the row to manual.
+    const rejectedDeleteFetch = asFetch(async () => new Response(JSON.stringify({
+      errors: [{ message: "subscription could not be removed" }],
+      data: { webhookSubscriptionDelete: { success: false } },
+    }), { status: 200 }));
+    await expect(asActor(fixture.owner, (database) => unregisterCompanionTriggerWebhookV2({
+      orgId: fixture.orgA,
+      companionId,
+      triggerId: trigger.id,
+      webhookBaseUrl: WEBHOOK_BASE_URL,
+      masterKey,
+      database,
+      fetch: rejectedDeleteFetch,
+    }))).rejects.toMatchObject({ code: "provider_rejected" });
+    expect(await triggerRow(trigger.id)).toMatchObject({
+      registrationStatus: "registered",
+      remoteHookId: "linear-hook-1",
+    });
+
     const deleteRequests: Array<{ url: string; init: RequestInit }> = [];
     const deleteFetch = asFetch(async (url, init) => {
       deleteRequests.push({ url: String(url), init: init ?? {} });

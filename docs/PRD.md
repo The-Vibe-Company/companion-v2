@@ -129,7 +129,9 @@ explicitly recoverable interruption even after the browser, API, or one runtime 
   1 MB, and compares the server-generated secret with `timingSafeEqual`. There is deliberately no
   per-provider HMAC: sources are services the user controls, and a wrong URL is a 404 or 401.
 - Fire is API-level isolated validation-run enqueue as the immutable Companion Owner; the webhook
-  route never contacts Box or Pi. Runtime evaluates the untrusted payload read-only, then performs
+  route never contacts Box or Pi. Runtime evaluates the untrusted payload in a disposable Pi session
+  whose only enabled tool is `surface_to_main`; it receives no MCP gateway, provider-tool credentials,
+  skills, or project context. The pinned memory copy remains isolated from main Pi. Runtime then performs
   one configured `notify` (visible entry only), `relay` (visible entry plus main-Pi turn), or silent
   no-op. The message id is deterministic (`uuidv5(triggerId|deliveryId)`), so provider
   redeliveries collapse to one turn. The prompt carries a payload excerpt of at most 4,096

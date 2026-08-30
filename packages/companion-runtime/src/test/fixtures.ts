@@ -710,6 +710,7 @@ export interface FakePorts {
   promptCalls: { attemptId: string; message: string }[];
   routinePromptCalls: { attemptId: string; runId: string; message: string }[];
   routineStarts: string[];
+  routineValidationOnlyStarts: boolean[];
   routineTerminates: string[];
   abortCalls: { attemptId: string; boxId: string }[];
   decisionCalls: { attemptId: string }[];
@@ -730,6 +731,7 @@ export function fakePorts(store: MemoryRuntimeStore): FakePorts {
   const promptCalls: FakePorts["promptCalls"] = [];
   const routinePromptCalls: FakePorts["routinePromptCalls"] = [];
   const routineStarts: string[] = [];
+  const routineValidationOnlyStarts: boolean[] = [];
   const routineTerminates: string[] = [];
   const routineInvocationIds = new Map<string, string>();
   const abortCalls: FakePorts["abortCalls"] = [];
@@ -808,8 +810,9 @@ export function fakePorts(store: MemoryRuntimeStore): FakePorts {
       return { outcome: "accepted", invocationId: PI_INVOCATION_ID };
     },
     routineSession: {
-      start: async ({ runId, expectedInvocationId }) => {
+      start: async ({ runId, expectedInvocationId, validationOnly }) => {
         routineStarts.push(runId);
+        routineValidationOnlyStarts.push(validationOnly);
         const invocationId = expectedInvocationId;
         routineInvocationIds.set(runId, invocationId);
         return { state: "idle", invocationId };
@@ -941,6 +944,7 @@ export function fakePorts(store: MemoryRuntimeStore): FakePorts {
     promptCalls,
     routinePromptCalls,
     routineStarts,
+    routineValidationOnlyStarts,
     routineTerminates,
     abortCalls,
     decisionCalls,

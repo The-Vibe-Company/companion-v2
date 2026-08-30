@@ -530,6 +530,19 @@ export async function unregisterCompanionTriggerWebhookV2(input: {
         `linear refused to remove the webhook (${response.status})`,
       );
     }
+    const payload = z.object({
+      data: z.object({
+        webhookSubscriptionDelete: z.object({ success: z.literal(true) }),
+      }).optional(),
+      errors: z.array(z.object({ message: z.string() })).optional(),
+    }).safeParse(await response.json().catch(() => null));
+    if (!payload.success || payload.data.errors?.length
+      || !payload.data.data?.webhookSubscriptionDelete.success) {
+      throw new CompanionTriggerRegistrationError(
+        "provider_rejected",
+        "linear refused to remove the webhook; the registration is kept",
+      );
+    }
     await persistRegistration({
       ...input,
       accountId: null,

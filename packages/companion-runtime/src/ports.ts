@@ -112,6 +112,8 @@ export interface RuntimePiRoutineSessionControl {
     runId: string;
     /** Owner persona used by box-runtime to compose the run-only operating brief. */
     persona: string | null;
+    /** Remove every tool except surface_to_main when this run validates an untrusted webhook. */
+    validationOnly: boolean;
     /** Invocation identity persisted in dispatch_write_intent before this run root is launched. */
     expectedInvocationId: string;
     signal: AbortSignal;

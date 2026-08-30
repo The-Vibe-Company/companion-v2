@@ -63,7 +63,6 @@ export const COMPANION_PI_ROUTINE_SURFACE_EXTENSION_SOURCE = `/**
  * installed in the main Companion Pi directory.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
 
 const MAX_MESSAGE = 16_384;
 
@@ -73,10 +72,17 @@ export default function companionRoutineSurface(pi: ExtensionAPI) {
     label: "Surface to main",
     description:
       "Return one terse terminal result from this routine to the main Companion. Use one short sentence with no process narration. The first accepted call ends the routine; use relay when the main Companion should answer and notify when it should only receive the result.",
-    parameters: Type.Object({
-      mode: Type.Union([Type.Literal("relay"), Type.Literal("notify")]),
-      message: Type.String({ maxLength: MAX_MESSAGE, description: "One short owner-facing result with no process narration, at most 16,384 characters" }),
-    }),
+    // Keep this schema dependency-free: validation roots intentionally omit the installed package
+    // tree, and Pi accepts ordinary JSON Schema objects in addition to TypeBox schemas.
+    parameters: {
+      type: "object",
+      properties: {
+        mode: { enum: ["relay", "notify"] },
+        message: { type: "string", maxLength: MAX_MESSAGE, description: "One short owner-facing result with no process narration, at most 16,384 characters" },
+      },
+      required: ["mode", "message"],
+      additionalProperties: false,
+    },
     executionMode: "sequential",
     async execute(_toolCallId, params) {
       const mode = params.mode === "relay" || params.mode === "notify" ? params.mode : null;
