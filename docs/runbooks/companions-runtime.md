@@ -333,10 +333,12 @@ than attributed to a later turn.
 
 ### Box lifecycle/provider outage
 
-The runtime retries only idempotent lifecycle calls on network, 429, and 5xx failures. For create,
-it discovers the generation-qualified name before retrying and selects one canonical Box. Do not
-manually delete suspected duplicates until their generation and ownership are proven. A permanent
-delete failure keeps the operation and ownership rows; never finalize them by hand.
+The runtime retries only idempotent lifecycle and broker-observation calls on network, 429, and 5xx
+failures. Observation-only broker state and journal reads also retry a transient provider-state 409;
+prompt and decision writes do not. For create, it discovers the generation-qualified name before
+retrying and selects one canonical Box. Do not manually delete suspected duplicates until their
+generation and ownership are proven. A permanent delete failure keeps the operation and ownership
+rows; never finalize them by hand.
 
 ### Desktop failures
 
