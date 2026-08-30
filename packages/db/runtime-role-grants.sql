@@ -832,6 +832,25 @@ BEGIN
         'public.companion_api_answer_trigger_decision(uuid,uuid,text,text,uuid,text)'::regprocedure
       ];
     END IF;
+    -- 0145 adds autonomous Trigger v2 definitions, read-only history, and one runtime-only
+    -- identity/mode reader for the isolated validation lane.
+    IF pg_catalog.to_regprocedure(
+      'public.companion_api_create_trigger(uuid,uuid,uuid,text,text,text,text,uuid,jsonb,text,boolean)'
+    ) IS NOT NULL THEN
+      companion_api_functions := companion_api_functions || ARRAY[
+        'public.companion_api_create_trigger(uuid,uuid,uuid,text,text,text,text,uuid,jsonb,text,boolean)'::regprocedure,
+        'public.companion_api_update_trigger(uuid,uuid,uuid,text,text,text,text,uuid,jsonb,boolean)'::regprocedure,
+        'public.companion_api_list_trigger_runs(uuid,uuid,uuid,uuid,integer)'::regprocedure,
+        'public.companion_api_get_trigger_run(uuid,uuid,uuid,integer,integer)'::regprocedure
+      ];
+      companion_runtime_functions := companion_runtime_functions || ARRAY[
+        'public.companion_runtime_get_trigger_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)'::regprocedure
+      ];
+      internal_runtime_functions := internal_runtime_functions || ARRAY[
+        'public.companion_api_trigger_run_json(uuid,uuid,uuid,boolean,integer,integer)'::regprocedure,
+        'public.companion_api_trigger_run_summary_json(uuid,uuid,uuid,boolean)'::regprocedure
+      ];
+    END IF;
 
     -- A migration owner can carry arbitrary ALTER DEFAULT PRIVILEGES grants installed by an
     -- earlier operator. Runtime v2 never relies on default function EXECUTE: erase every named

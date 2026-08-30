@@ -264,6 +264,8 @@ export function attemptMaterial(overrides: Partial<RuntimeWorkMaterial> = {}): R
     memberTimezone: "UTC",
     routineId: null,
     routineName: null,
+    triggerName: null,
+    triggerMode: null,
     routineIsolated: false,
     routineContext: null,
     decisionRequestKind: null,

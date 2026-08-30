@@ -20,6 +20,17 @@ function formBody(init: RequestInit | undefined): URLSearchParams {
 }
 
 describe("Companion plugin OAuth broker", () => {
+  it("keeps the shared GitHub credential authorized for repository webhook registration", () => {
+    const scopes = COMPANION_PLUGIN_OAUTH_SERVERS["io.github.github/github-mcp-server"].scopes;
+    expect(scopes).toEqual([
+      "repo",
+      "read:org",
+      "read:user",
+      "user:email",
+      "admin:repo_hook",
+    ]);
+  });
+
   it("keeps Gmail OAuth limited to the exact read-and-draft scope pair", () => {
     const scopes = COMPANION_PLUGIN_OAUTH_SERVERS["com.google.workspace/gmail"].scopes;
 

@@ -449,7 +449,8 @@ function decodeMaterial(row: RuntimeSqlRow): RuntimeWorkMaterial {
     : null;
   if ((triggerName === null) !== (triggerMode === null)) throw new RuntimeStoreContractError();
   const routineIsolated = booleanValue(row.routine_isolated);
-  if (routineIsolated === null || (routineId === null) !== (routineName === null)) {
+  if (routineIsolated === null
+      || (routineId === null) !== (routineName === null && triggerName === null)) {
     throw new RuntimeStoreContractError();
   }
   const contextId = nullableUuidText(row, "routine_context_id");

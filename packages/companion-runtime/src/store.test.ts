@@ -39,6 +39,12 @@ class RecordingSql implements RuntimeSqlClient {
           routine_context_content: row.routine_context_content ?? null,
         });
       }
+      if (query.includes("companion_runtime_get_trigger_material")) {
+        Object.assign(copy, {
+          trigger_name: row.trigger_name ?? null,
+          trigger_mode: row.trigger_mode ?? null,
+        });
+      }
       if (query.includes("companion_runtime_project_event_batch_v2")) {
         copy.routine_returned = row.routine_returned ?? false;
       }

@@ -1877,10 +1877,12 @@ describe("Companions Runtime v2 API", () => {
       prompt: "Investigate the failing workflow.",
       mode: "relay" as const,
       provider: "github" as const,
+      provider_account_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
       target: { repo: "acme/widgets", events: ["workflow_run"] },
       registration_status: "registered" as const,
       remote_hook_id: "42",
       remote_hook_account_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      last_registration_error: null,
       enabled: true,
       webhook_url: `http://127.0.0.1:3000/v1/hooks/triggers/${TRIGGER_ID}/${TRIGGER_SECRET}`,
       last_fired_at: null,
@@ -1901,7 +1903,7 @@ describe("Companions Runtime v2 API", () => {
     const listed = await app.request(`/v1/companions/${COMPANION_ID}/triggers`);
     expect(listed.status).toBe(200);
     await expect(listed.json()).resolves.toEqual({ triggers: [trigger] });
-    // Each Owner/Editor row embeds the webhook secret in its URL.
+    // The callback URL is secondary setup detail; a bare secret is never returned.
     expect(listed.headers.get("cache-control")).toBe("private, no-store");
 
     const created = await app.request(
@@ -1956,6 +1958,73 @@ describe("Companions Runtime v2 API", () => {
       companionId: COMPANION_ID,
       triggerId: TRIGGER_ID,
     }));
+  });
+
+  it("retries remote trigger registration and serves bounded trigger history", async () => {
+    const failedTrigger = {
+      id: TRIGGER_ID,
+      companion_id: COMPANION_ID,
+      name: "CI failed on main",
+      prompt: "Investigate the failing workflow.",
+      mode: "relay" as const,
+      provider: "github" as const,
+      provider_account_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      target: { repo: "acme/widgets", events: ["workflow_run"] },
+      registration_status: "failed" as const,
+      remote_hook_id: null,
+      remote_hook_account_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      last_registration_error: "github rejected the webhook (403)",
+      enabled: true,
+      webhook_url: `http://127.0.0.1:3000/v1/hooks/triggers/${TRIGGER_ID}/${TRIGGER_SECRET}`,
+      last_fired_at: null,
+      last_error_code: null,
+      last_error_message: null,
+      last_error_at: null,
+      consecutive_failures: 0,
+      created_at: NOW,
+      updated_at: NOW,
+    };
+    const registered = {
+      ...failedTrigger,
+      registration_status: "registered" as const,
+      remote_hook_id: "43",
+      last_registration_error: null,
+    };
+    coreMocks.listCompanionTriggersV2
+      .mockResolvedValueOnce([failedTrigger])
+      .mockResolvedValueOnce([registered]);
+    coreMocks.registerCompanionTriggerWebhookV2.mockResolvedValueOnce({
+      status: "registered",
+      remote_hook_id: "43",
+    });
+    const app = appWithRoutes();
+    const retried = await app.request(
+      `/v1/companions/${COMPANION_ID}/triggers/${TRIGGER_ID}/registration`,
+      { method: "POST" },
+    );
+    expect(retried.status).toBe(200);
+    await expect(retried.json()).resolves.toEqual({ trigger: registered });
+
+    const history = { runs: [], next_cursor: null };
+    coreMocks.listCompanionTriggerRunsV2.mockResolvedValueOnce(history);
+    const listed = await app.request(
+      `/v1/companions/${COMPANION_ID}/triggers/${TRIGGER_ID}/runs?limit=25`,
+    );
+    expect(listed.status).toBe(200);
+    await expect(listed.json()).resolves.toEqual(history);
+    expect(coreMocks.listCompanionTriggerRunsV2).toHaveBeenCalledWith(expect.objectContaining({
+      triggerId: TRIGGER_ID,
+      limit: 25,
+    }));
+
+    // SAFETY: this route test only verifies transport passthrough; the core mock owns validation.
+    const run = { run_id: TURN_ID, internal_entries: [], next_entry_cursor: null } as never;
+    coreMocks.getCompanionTriggerRunV2.mockResolvedValueOnce(run);
+    const detail = await app.request(
+      `/v1/companions/${COMPANION_ID}/trigger-runs/${TURN_ID}?entry_limit=10`,
+    );
+    expect(detail.status).toBe(200);
+    await expect(detail.json()).resolves.toEqual({ run });
   });
 
   it("maps trigger authorization, absence, and conflict failures onto their statuses", async () => {
@@ -2151,6 +2220,22 @@ describe("Companion trigger webhook", () => {
     }
     expect(coreMocks.fireCompanionTrigger).not.toHaveBeenCalled();
     expect(coreMocks.failCompanionTriggerFire).not.toHaveBeenCalled();
+  });
+
+  it("rejects an oversized payload before trigger lookup or isolated validation", async () => {
+    const body = "x".repeat(1024 * 1024 + 1);
+    const response = await webhookApp().request(fire({
+      body,
+      headers: { "content-length": String(Buffer.byteLength(body)) },
+    }));
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toEqual({
+      ok: false,
+      error: "trigger payload exceeds the 1 MB limit",
+    });
+    expect(coreMocks.getCompanionTriggerForWebhook).not.toHaveBeenCalled();
+    expect(coreMocks.fireCompanionTrigger).not.toHaveBeenCalled();
   });
 
   it("fires with the provider delivery id collapsed into a deterministic message id", async () => {

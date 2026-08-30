@@ -288,7 +288,6 @@ BEGIN
     UPDATE public.companion_turns SET
       routine_snapshot_id=v_trigger.id,
       routine_snapshot_created_at=v_trigger.created_at,
-      routine_name=v_trigger.name,
       trigger_mode=v_trigger.mode,
       updated_at=clock_timestamp()
     WHERE org_id=p_org_id AND companion_id=v_trigger.companion_id AND id=v_turn_id;
@@ -298,6 +297,154 @@ BEGIN
     last_error_code=NULL,last_error_message=NULL,last_error_at=NULL,updated_at=clock_timestamp()
   WHERE id=p_trigger_id;
   RETURN QUERY SELECT CASE WHEN v_replayed THEN 'replayed' ELSE 'fired' END,v_turn,v_replayed;
+END $$;
+--> statement-breakpoint
+
+-- Reuse the proven routine context builder without copying its 200-line renderer. The wrapper
+-- temporarily supplies the legacy lane label inside this transaction, calls the old implementation,
+-- then removes it before any other transaction can observe the trigger as a routine.
+ALTER FUNCTION public.companion_runtime_prepare_routine_run(
+  uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,boolean
+) RENAME TO companion_runtime_prepare_isolated_run_internal;
+--> statement-breakpoint
+
+CREATE FUNCTION public.companion_runtime_prepare_routine_run(
+  p_org_id uuid,p_companion_id uuid,p_claim_token uuid,p_claim_epoch bigint,p_gate_epoch bigint,
+  p_executor_id text,p_work_kind public.companion_runtime_work_kind,p_work_id uuid,
+  p_enable_new_isolation boolean
+)
+RETURNS TABLE(isolated boolean,context_id uuid,context_sha256 text,context_content text)
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path=pg_catalog,public SET row_security=on
+AS $$
+DECLARE v_turn_id uuid; v_trigger_name text; v_row record;
+BEGIN
+  IF p_work_kind='attempt' THEN
+    SELECT t.id,t.trigger_name INTO v_turn_id,v_trigger_name
+    FROM public.companion_runtime_leases l
+    JOIN public.companion_runtime_control c ON c.id='runtime-v2'
+    JOIN public.companion_turn_attempts a
+      ON a.org_id=l.org_id AND a.companion_id=l.companion_id AND a.id=p_work_id
+    JOIN public.companion_turns t
+      ON t.org_id=a.org_id AND t.companion_id=a.companion_id AND t.id=a.turn_id
+    WHERE l.org_id=p_org_id AND l.companion_id=p_companion_id
+      AND l.claim_token=p_claim_token AND l.claim_epoch=p_claim_epoch AND l.gate_epoch=p_gate_epoch
+      AND l.executor_id=p_executor_id AND l.work_kind=p_work_kind AND l.work_id=p_work_id
+      AND l.expires_at>clock_timestamp() AND c.enabled AND c.gate_epoch=p_gate_epoch
+      AND a.claim_epoch=p_claim_epoch AND a.status IN ('starting','dispatching','running','needs_input')
+    FOR UPDATE OF l,a,t;
+    IF v_trigger_name IS NOT NULL THEN
+      UPDATE public.companion_turns SET routine_name=v_trigger_name
+      WHERE id=v_turn_id AND org_id=p_org_id AND companion_id=p_companion_id AND routine_name IS NULL;
+    END IF;
+  END IF;
+  SELECT * INTO v_row FROM public.companion_runtime_prepare_isolated_run_internal(
+    p_org_id,p_companion_id,p_claim_token,p_claim_epoch,p_gate_epoch,p_executor_id,
+    p_work_kind,p_work_id,p_enable_new_isolation
+  );
+  IF v_trigger_name IS NOT NULL THEN
+    UPDATE public.companion_turns SET routine_name=NULL
+    WHERE id=v_turn_id AND org_id=p_org_id AND companion_id=p_companion_id AND trigger_name IS NOT NULL;
+  END IF;
+  IF v_row IS NOT NULL THEN
+    RETURN QUERY SELECT v_row.isolated,v_row.context_id,v_row.context_sha256,v_row.context_content;
+  END IF;
+END $$;
+--> statement-breakpoint
+
+CREATE FUNCTION public.companion_record_trigger_run_outcome()
+RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path=pg_catalog,public SET row_security=on
+AS $$
+DECLARE v_now timestamptz:=COALESCE(NEW.settled_at,clock_timestamp());
+BEGIN
+  IF OLD.status IS NOT DISTINCT FROM NEW.status OR NEW.trigger_name IS NULL
+    OR NEW.status NOT IN ('succeeded','failed','interrupted','cancelled') THEN RETURN NULL; END IF;
+  IF NEW.status='succeeded' THEN
+    UPDATE public.companion_triggers SET consecutive_failures=0,last_error_code=NULL,
+      last_error_message=NULL,last_error_at=NULL,updated_at=v_now
+    WHERE org_id=NEW.org_id AND companion_id=NEW.companion_id
+      AND id=NEW.routine_snapshot_id AND created_at=NEW.routine_snapshot_created_at;
+  ELSIF NEW.status='failed' THEN
+    UPDATE public.companion_triggers SET consecutive_failures=consecutive_failures+1,
+      last_error_code=NEW.last_error_code,last_error_message=NEW.last_error_message,last_error_at=v_now,
+      enabled=CASE WHEN consecutive_failures+1>=5 THEN false ELSE enabled END,updated_at=v_now
+    WHERE org_id=NEW.org_id AND companion_id=NEW.companion_id
+      AND id=NEW.routine_snapshot_id AND created_at=NEW.routine_snapshot_created_at;
+  END IF;
+  RETURN NULL;
+END $$;
+--> statement-breakpoint
+
+DO $exclude_triggers_from_routine_accounting$
+DECLARE v_definition text; v_old text:='     OR NEW.routine_snapshot_id IS NULL';
+  v_new text:=E'     OR NEW.routine_snapshot_id IS NULL\n     OR NEW.trigger_name IS NOT NULL';
+BEGIN
+  v_definition:=pg_get_functiondef(to_regprocedure('public.companion_record_routine_run_outcome()'));
+  IF v_definition IS NULL OR strpos(v_definition,v_old)=0 THEN
+    RAISE EXCEPTION 'routine outcome accounting shape changed' USING ERRCODE='55000';
+  END IF;
+  EXECUTE replace(v_definition,v_old,v_new);
+END $exclude_triggers_from_routine_accounting$;
+--> statement-breakpoint
+
+DO $exclude_triggers_from_routine_history$
+DECLARE v_sig text; v_definition text;
+BEGIN
+  FOREACH v_sig IN ARRAY ARRAY[
+    'public.companion_api_routine_run_json(uuid,uuid,uuid,boolean,integer,integer)',
+    'public.companion_api_list_routine_runs(uuid,uuid,uuid,uuid,integer)'
+  ] LOOP
+    v_definition:=pg_get_functiondef(to_regprocedure(v_sig));
+    IF v_definition IS NULL OR strpos(v_definition,'turn_row.routine_name IS NOT NULL')=0 THEN
+      RAISE EXCEPTION 'routine history shape changed for %',v_sig USING ERRCODE='55000';
+    END IF;
+    EXECUTE replace(v_definition,'turn_row.routine_name IS NOT NULL',
+      'turn_row.routine_name IS NOT NULL AND turn_row.trigger_name IS NULL');
+  END LOOP;
+END $exclude_triggers_from_routine_history$;
+--> statement-breakpoint
+REVOKE ALL ON FUNCTION public.companion_record_trigger_run_outcome() FROM PUBLIC;
+CREATE TRIGGER companion_turns_record_trigger_run_outcome
+AFTER UPDATE OF status ON public.companion_turns
+FOR EACH ROW EXECUTE FUNCTION public.companion_record_trigger_run_outcome();
+--> statement-breakpoint
+
+ALTER FUNCTION public.companion_runtime_surface_routine_return(
+  uuid,uuid,uuid,public.companion_routine_surface_mode,text
+) RENAME TO companion_runtime_surface_isolated_return_internal;
+--> statement-breakpoint
+
+CREATE FUNCTION public.companion_runtime_surface_routine_return(
+  p_org_id uuid,p_companion_id uuid,p_run_id uuid,
+  p_mode public.companion_routine_surface_mode,p_message text
+)
+RETURNS boolean
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path=pg_catalog,public SET row_security=on
+AS $$
+DECLARE v_trigger_name text; v_trigger_mode text; v_result boolean; v_relay_turn_id uuid;
+BEGIN
+  SELECT trigger_name,trigger_mode INTO v_trigger_name,v_trigger_mode
+  FROM public.companion_turns
+  WHERE org_id=p_org_id AND companion_id=p_companion_id AND id=p_run_id;
+  IF v_trigger_name IS NOT NULL AND v_trigger_mode IS DISTINCT FROM p_mode::text THEN
+    RAISE EXCEPTION 'trigger surface mode does not match its configured mode' USING ERRCODE='22023';
+  END IF;
+  v_result:=public.companion_runtime_surface_isolated_return_internal(
+    p_org_id,p_companion_id,p_run_id,p_mode,p_message
+  );
+  IF v_result AND v_trigger_name IS NOT NULL AND p_mode='relay' THEN
+    SELECT relay_turn_id INTO v_relay_turn_id FROM public.companion_routine_returns
+    WHERE org_id=p_org_id AND companion_id=p_companion_id AND run_id=p_run_id;
+    UPDATE public.companion_transcript_entries e
+    SET content='A webhook trigger surfaced the next Companion entry. Read it and respond to that entry.'
+    FROM public.companion_turns t
+    WHERE t.org_id=p_org_id AND t.companion_id=p_companion_id AND t.id=v_relay_turn_id
+      AND e.org_id=t.org_id AND e.companion_id=t.companion_id AND e.event_id=t.message_event_id;
+  END IF;
+  RETURN v_result;
 END $$;
 --> statement-breakpoint
 

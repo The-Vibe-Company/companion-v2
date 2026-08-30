@@ -956,10 +956,6 @@ export type CompanionTriggerRegistrationStatus = z.infer<
   typeof companionTriggerRegistrationStatusSchema
 >;
 
-/** A compact status used by clients that do not need registration details. */
-export const companionTriggerStatusSchema = z.enum(["active", "disabled", "error"]);
-export type CompanionTriggerStatus = z.infer<typeof companionTriggerStatusSchema>;
-
 /** Bounded legacy delivery metadata a trigger may carry. */
 export const COMPANION_TRIGGER_MAX_EVENTS = 30;
 
@@ -994,21 +990,19 @@ export const companionTriggerSchema = z.object({
   mode: companionTriggerModeSchema.default("relay"),
   provider: companionTriggerProviderSchema.default("webhook"),
   /** Selected external credential reference, when one was explicitly chosen. */
-  provider_account_id: z.string().uuid().nullable().optional(),
+  provider_account_id: z.string().uuid().nullable().default(null),
   /**
    * Legacy provider-side delivery metadata. A registration adapter may use it when supported.
    */
   target: z.lazy(() => companionTriggerTargetSchema).nullable().default(null),
   registration_status: companionTriggerRegistrationStatusSchema.default("manual"),
-  /** Optional aggregate status for compact clients; registration_status remains authoritative. */
-  status: companionTriggerStatusSchema.optional(),
   enabled: z.boolean().default(true),
   /** Selected provider account after registration resolution, if any. */
-  remote_hook_account_id: z.string().uuid().nullable().optional(),
+  remote_hook_account_id: z.string().uuid().nullable().default(null),
   /** Provider-side hook identifier, if registration succeeded. */
-  remote_hook_id: z.string().max(200).nullable().optional(),
+  remote_hook_id: z.string().max(200).nullable().default(null),
   /** Bounded provider registration diagnostic; never a raw provider payload. */
-  last_registration_error: z.string().max(500).nullable().optional(),
+  last_registration_error: z.string().max(500).nullable().default(null),
   /** Full URL an external service posts to. Null for Viewers. */
   webhook_url: z.string().url().nullable(),
   last_fired_at: z.string().datetime().nullable(),

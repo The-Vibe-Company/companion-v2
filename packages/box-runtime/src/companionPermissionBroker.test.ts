@@ -1,6 +1,5 @@
 import {
   COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS,
-  COMPANION_PLUGIN_TRIGGER_PROVIDERS,
   COMPANION_TRIGGER_PROVIDERS,
 } from "@companion/contracts";
 import { describe, expect, it } from "vitest";
@@ -87,7 +86,8 @@ describe("Companion Pi interaction extension", () => {
   it("proposes triggers through confirm with a companion:trigger title and the contract providers", () => {
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain('name: "propose_trigger"');
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("companion:trigger:");
-    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("never claim a trigger is active");
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE)
+      .toContain("registers supported provider webhooks itself with held credentials");
     // The provider list is interpolated from the contract constant, never hardcoded in the tool.
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain(
       `const TRIGGER_PROVIDERS = ${JSON.stringify(COMPANION_TRIGGER_PROVIDERS)} as string[]`,
@@ -99,7 +99,7 @@ describe("Companion Pi interaction extension", () => {
       '"propose_routine", "propose_trigger", "request_plugin_connection"',
     );
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE)
-      .toContain("the person pastes its webhook URL into the external service");
+      .toContain("never ask the person to paste a URL or use a provider console");
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE)
       .toContain("User denied or timed out. No trigger was created.");
     // A github proposal may carry a repo/events target; other providers must not.
@@ -109,20 +109,13 @@ describe("Companion Pi interaction extension", () => {
       .toContain("do not take a repo or events yet");
   });
 
-  it("gates plugin-backed trigger providers on the attached plugin from the config catalog", () => {
-    // The plugin-backed provider list is interpolated from the contract constant, never hardcoded.
-    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain(
-      `const PLUGIN_TRIGGER_PROVIDERS = ${JSON.stringify(COMPANION_PLUGIN_TRIGGER_PROVIDERS)} as string[]`,
-    );
+  it("keeps trigger proposals autonomous from Box-side plugin attachment gates", () => {
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).not.toContain("PLUGIN_TRIGGER_PROVIDERS");
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).not.toContain("hasAttachedPlugin");
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE)
-      .toContain("function hasAttachedPlugin(provider: string): boolean");
-    // The gate reads the staged config catalog and fails closed when it is unreadable.
+      .toContain("provider_account_id: Type.Optional");
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE)
-      .toContain("plugin.provider === provider && plugin.selected === true");
-    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE.indexOf("hasAttachedPlugin(provider)"))
-      .toBeGreaterThan(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE.indexOf('name: "propose_trigger"'));
-    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE)
-      .toContain("triggers require the");
+      .toContain("Companion creates the trigger and registers the provider webhook end-to-end");
   });
 
   it("classifies shell runs with the control plane's own catalog, priority order included", () => {

@@ -1639,7 +1639,7 @@ describe("staged Companion instructions", () => {
       `At most ${COMPANION_ROUTINE_MAX_PER_COMPANION} per Companion, at least ${COMPANION_ROUTINE_MIN_INTERVAL_MS / 60_000} minutes apart.`,
     );
     expect(text).toContain(
-      `At most ${COMPANION_TRIGGER_MAX_PER_COMPANION} per Companion. You cannot create one yourself.`,
+      `At most ${COMPANION_TRIGGER_MAX_PER_COMPANION} per Companion.`,
     );
     expect(text).toContain(COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS.join(", "));
   });

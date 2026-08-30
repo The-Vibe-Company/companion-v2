@@ -153,8 +153,8 @@ describe("Companion triggers over the real database", () => {
       database,
     }));
     companionId = companion.id;
-    // Plugin-backed trigger providers (linear, github) require the matching plugin attached; the
-    // default fixture attaches a github account so the ordinary CRUD tests keep using `github`.
+    // The default fixture attaches one GitHub account so registration can silently reuse the same
+    // OAuth credential as MCP. Trigger definitions themselves remain autonomous.
     const plugin = await saveCompanionPlugin({
       actor: fixture.owner,
       orgId: fixture.orgA,
@@ -405,9 +405,7 @@ describe("Companion triggers over the real database", () => {
     await expectSqlState(createTrigger(fixture.owner, "One too many"), "P0001");
   });
 
-  it("refuses plugin-backed providers without the matching plugin attached, in create and update", async () => {
-    // Detach the fixture's github account: the provider is connected at the org level through the
-    // account row, but this Companion no longer has it attached.
+  it("keeps trigger definitions autonomous while shared provider account refs stay attached", async () => {
     const [account] = await integrationDb
       .select({ id: schema.companionMcpAccounts.id })
       .from(schema.companionMcpAccounts)
@@ -417,7 +415,8 @@ describe("Companion triggers over the real database", () => {
       .where(eq(schema.companions.id, companionId));
     expect(account).toBeDefined();
 
-    await expectSqlState(createTrigger(fixture.owner, "No github plugin"), "P0001");
+    const autonomous = await createTrigger(fixture.owner, "No github plugin");
+    expect(autonomous).toMatchObject({ provider: "github", provider_account_id: null });
 
     // `custom` needs no plugin.
     const custom = await asActor(fixture.owner, (database) => createCompanionTriggerV2({
@@ -431,8 +430,7 @@ describe("Companion triggers over the real database", () => {
     }));
     expect(custom.provider).toBe("custom");
 
-    // An update cannot sneak a plugin-backed provider in either.
-    await expectSqlState(asActor(fixture.owner, (database) => updateCompanionTriggerV2({
+    const updated = await asActor(fixture.owner, (database) => updateCompanionTriggerV2({
       orgId: fixture.orgA,
       companionId,
       triggerId: custom.id,
@@ -440,14 +438,15 @@ describe("Companion triggers over the real database", () => {
       target: { repo: "acme/demo", events: ["push"] },
       database,
       webhookBaseUrl: WEBHOOK_BASE_URL,
-    })), "P0001");
+    }));
+    expect(updated.provider).toBe("github");
 
     // Attaching the account unlocks the provider on both paths.
     await integrationDb.update(schema.companions)
       .set({ selectedMcpAccountIds: [account!.id] })
       .where(eq(schema.companions.id, companionId));
     const attached = await createTrigger(fixture.owner, "With github plugin");
-    expect(attached.provider).toBe("github");
+    expect(attached).toMatchObject({ provider: "github", provider_account_id: account!.id });
     await asActor(fixture.owner, (database) => updateCompanionTriggerV2({
       orgId: fixture.orgA,
       companionId,
@@ -490,6 +489,10 @@ describe("Companion triggers over the real database", () => {
       actorId: fixture.owner.id,
       triggerId: trigger.id,
       triggerName: trigger.name,
+      triggerMode: "relay",
+      routineSnapshotId: trigger.id,
+      routineIsolated: false,
+      routineName: null,
       routineId: null,
     });
 
@@ -610,7 +613,7 @@ describe("Companion triggers over the real database", () => {
     `)), "22023");
   });
 
-  it("records classified failures, disables after five, and clears them on the next success", async () => {
+  it("records fire failures, disables after five, and does not mistake enqueue for validation success", async () => {
     const trigger = await createTrigger(fixture.owner, "Flaky trigger");
     const fail = () => failCompanionTriggerFire({
       orgId: fixture.orgA,
@@ -631,7 +634,8 @@ describe("Companion triggers over the real database", () => {
     });
     expect(afterTwo.lastErrorAt).not.toBeNull();
 
-    // One successful fire wipes the failure streak.
+    // Enqueue only starts isolated validation; it cannot claim the run itself succeeded or erase
+    // the existing failure streak.
     await expect(fireCompanionTrigger({
       orgId: fixture.orgA,
       triggerId: trigger.id,
@@ -641,7 +645,7 @@ describe("Companion triggers over the real database", () => {
     })).resolves.toMatchObject({ outcome: "fired" });
     const afterSuccess = await triggerRow(trigger.id);
     expect(afterSuccess).toMatchObject({
-      consecutiveFailures: 0,
+      consecutiveFailures: 2,
       lastErrorCode: null,
       lastErrorMessage: null,
       lastErrorAt: null,
@@ -690,9 +694,8 @@ describe("Companion triggers over the real database", () => {
     });
   });
 
-  it("requires a github target, refuses targets elsewhere, and records on-demand registrations", async () => {
-    // A github trigger without a repo/events target is rejected before it reaches SQL.
-    await expect(asActor(fixture.owner, (database) => createCompanionTriggerV2({
+  it("decouples definitions from delivery metadata and records shared-credential registrations", async () => {
+    const incomplete = await asActor(fixture.owner, (database) => createCompanionTriggerV2({
       orgId: fixture.orgA,
       companionId,
       name: "No target",
@@ -700,9 +703,9 @@ describe("Companion triggers over the real database", () => {
       provider: "github",
       database,
       webhookBaseUrl: WEBHOOK_BASE_URL,
-    }))).rejects.toThrow(/requires a target repo/);
-    // No other provider accepts a target yet.
-    await expect(asActor(fixture.owner, (database) => createCompanionTriggerV2({
+    }));
+    expect(incomplete.provider).toBe("github");
+    const customWithTarget = await asActor(fixture.owner, (database) => createCompanionTriggerV2({
       orgId: fixture.orgA,
       companionId,
       name: "Custom with target",
@@ -711,7 +714,8 @@ describe("Companion triggers over the real database", () => {
       target: { repo: "acme/demo", events: ["push"] },
       database,
       webhookBaseUrl: WEBHOOK_BASE_URL,
-    }))).rejects.toThrow(/does not support a target/);
+    }));
+    expect(customWithTarget.target).toEqual({ repo: "acme/demo", events: ["push"] });
 
     const trigger = await createTrigger(fixture.owner, "Wired trigger");
 
@@ -726,7 +730,8 @@ describe("Companion triggers over the real database", () => {
       ));
 
     // A rejected registration persists its failure instead of silently staying manual.
-    const failingFetch = asFetch(async () => new Response("{}", { status: 422 }));
+    // Legacy consent without admin:repo_hook and revoked tokens are ordinary retryable failures.
+    const failingFetch = asFetch(async () => new Response("{}", { status: 403 }));
     await expect(asActor(fixture.owner, (database) => registerCompanionTriggerWebhookV2({
       orgId: fixture.orgA,
       companionId,
@@ -819,7 +824,7 @@ describe("Companion triggers over the real database", () => {
       webhookBaseUrl: WEBHOOK_BASE_URL,
       masterKey,
       database,
-    }))).rejects.toThrow(/Linear API key/);
+    }))).resolves.toMatchObject({ status: "failed", error: /minimal encrypted webhook credential/ });
   });
 
   it("registers a linear webhook once the plugin's trigger key is stored, and unwires it", async () => {
@@ -851,7 +856,7 @@ describe("Companion triggers over the real database", () => {
       webhookBaseUrl: WEBHOOK_BASE_URL,
       masterKey,
       database,
-    }))).rejects.toThrow(/Linear API key/);
+    }))).resolves.toMatchObject({ status: "failed", error: /minimal encrypted webhook credential/ });
 
     // Storing the key unlocks the GraphQL registration path.
     await asActor(fixture.owner, (database) => saveCompanionPluginTriggerKey({

@@ -349,7 +349,7 @@ function companionWebhookBaseUrl(env: NodeJS.ProcessEnv): string {
   return env.COMPANION_WEB_URL ?? "http://127.0.0.1:3000";
 }
 
-function triggerRegistrationErrorCode(error: unknown): string | null {
+function triggerRegistrationErrorCode<T>(error: T): string | null {
   const parsed = z.object({ code: z.string() }).passthrough().safeParse(error);
   return parsed.success ? parsed.data.code : null;
 }
@@ -360,19 +360,18 @@ function triggerRegistrationErrorCode(error: unknown): string | null {
  * remote registration side effect.
  */
 function supportsAutomaticTriggerRegistration(trigger: CompanionTrigger): boolean {
-  if (trigger.provider === "linear") return true;
-  return trigger.provider === "github"
-    && Boolean(trigger.target?.repo && trigger.target.events?.length);
+  return trigger.provider === "linear" || trigger.provider === "github";
 }
 
-function isOptionalTriggerRegistrationFailure(error: unknown): boolean {
-  return ["provider_unwired", "target_required", "plugin_not_attached"].includes(
+function isOptionalTriggerRegistrationFailure<T>(error: T): boolean {
+  return ["provider_unwired"].includes(
     triggerRegistrationErrorCode(error) ?? "",
   );
 }
 
-function triggerIdFromDecisionResult(result: unknown): string | null {
-  if (typeof result === "string") return result;
+function triggerIdFromDecisionResult<T>(result: T): string | null {
+  const stringResult = z.string().safeParse(result);
+  if (stringResult.success) return stringResult.data;
   const parsed = z.object({
     trigger_id: z.string().uuid().nullable().optional(),
     id: z.string().uuid().nullable().optional(),

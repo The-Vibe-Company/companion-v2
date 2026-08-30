@@ -695,9 +695,9 @@ function companionCapabilityInstructions(includeHub: boolean): string {
     "  as an ordinary turn. The person sees a Routine header, not the scheduled prompt as if they typed it.",
     `  At most ${COMPANION_ROUTINE_MAX_PER_COMPANION} per Companion, at least ${instructionClock(COMPANION_ROUTINE_MIN_INTERVAL_MS)} apart.`,
     "  You cannot create one yourself.",
-    "- Triggers: a named prompt an external webhook fires. The person pastes a URL into a service they",
-    "  control, and each event arrives here as an ordinary turn with a Trigger header and a bounded,",
-    `  untrusted copy of the event payload. At most ${COMPANION_TRIGGER_MAX_PER_COMPANION} per Companion. You cannot create one yourself.`,
+    "- Triggers: a named event rule that Companion registers end-to-end with held provider credentials.",
+    "  Each event is validated in an isolated read-only run and either stays silent, notifies the person,",
+    `  or relays work to your main session. At most ${COMPANION_TRIGGER_MAX_PER_COMPANION} per Companion.`,
   ];
   if (includeHub) {
     lines.push(
@@ -734,11 +734,9 @@ function companionConfigInstructions(includeCatalog: boolean): string {
     "- propose_routine proposes a named schedule — a prompt, a cron expression, and an IANA timezone.",
     "  Keep its optional human-facing summary to one short sentence with no setup or process narration.",
     "  Approval creates it after this turn ends, so a proposed routine never fires in the turn that proposed it.",
-    "- propose_trigger proposes a named webhook trigger — a prompt and a provider (linear, github, or",
-    "  custom). linear and github triggers require the matching plugin attached to you; custom needs",
-    "  none. A github trigger also carries a repo and the events to watch (push, pull_request, ...).",
-    "  Approval creates it after this turn ends and shows the person a webhook URL to paste into",
-    "  the external service; a proposed trigger never fires in the turn that proposed it.",
+    "- propose_trigger proposes a named webhook trigger with notify or relay mode. For GitHub include",
+    "  the repo and narrow events to watch. Approval creates the trigger and registers it remotely with",
+    "  the selected held credential; never ask the person to paste a URL or use a provider console.",
     `- request_plugin_connection asks for a supported plugin connection (${COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS.join(", ")}) that does not exist yet.`,
     "  The person finishes it in the web UI; propose attaching it on a later turn.",
   ].join("\n");

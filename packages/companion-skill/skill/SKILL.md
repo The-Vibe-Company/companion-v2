@@ -23,16 +23,17 @@ does not authorize Companion chat, turns, decisions, desktop, provider settings,
 A hosted Pi teammate may propose settings with `propose_config` (skills, plugins, model, persona)
 and `request_plugin_connection` (Linear, GitHub, Notion, Conductor, Slack, Gmail, or Sentry), may propose a scheduled routine with
 `propose_routine` (name, prompt, cron, timezone), and may propose a webhook trigger with
-`propose_trigger` (name, prompt, provider — `linear`, `github`, or `custom`, a display label rather
-than an auth scheme; `linear` and `github` triggers require the matching plugin attached to the
-Companion, and a `github` trigger also names its repo and events). Those tools only emit a decision
+`propose_trigger` (name, prompt, `notify` or `relay` mode, provider, and provider target metadata).
+Trigger definitions are autonomous; for remote registration Companion reuses the selected attached
+MCP credential, defaulting silently when exactly one account is eligible. Those tools emit a decision
 card; they never apply changes themselves and
 never touch hub access, name, or provider. Owner/Editor approval in the thread applies after the
 current turn. After a plugin connection is approved, the human finishes it in the web Plugins UI; Pi
-may propose attaching that account on a later turn. After a trigger is approved, the human copies its
-webhook URL from the Triggers panel and pastes it into the external service; a proposed trigger never
-fires in the turn that proposed it. Approved routines and triggers fire as ordinary turns whose
-prompt is hidden in the thread. Their hosted operating brief uses terse delivery semantics: one short
+may propose attaching that account on a later turn. After a trigger is approved, Companion registers
+the remote webhook end-to-end; users never paste URLs, secrets, or configure provider consoles when
+held credentials can do it. A proposed trigger never fires in its proposing turn. Webhook payloads
+run first in an isolated read-only validator which either stays silent, notifies, or relays one main
+Pi turn. Their hosted operating brief uses terse delivery semantics: one short
 sentence for an update, one word for an acknowledgement, and no process narration or filler; the
 owner's persona still owns voice. Consecutive attachment-free notify returns from one routine may be
 collapsed by the thread projection while their durable entries and routine history remain complete.

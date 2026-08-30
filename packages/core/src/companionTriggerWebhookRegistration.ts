@@ -362,7 +362,14 @@ export async function registerCompanionTriggerWebhookV2(input: {
 }): Promise<CompanionTriggerRegistrationOutcome> {
   const trigger = await loadRegistrationTrigger(input);
   if (trigger.provider === "linear") {
-    return registerLinearTriggerWebhook(input, trigger);
+    try {
+      return await registerLinearTriggerWebhook(input, trigger);
+    } catch (error) {
+      const message = error instanceof CompanionTriggerRegistrationError
+        ? error.message
+        : "linear credential could not be resolved";
+      return persistLinearFailure(input, message);
+    }
   }
   if (trigger.provider === "custom") {
     return { status: "manual" };
@@ -371,10 +378,15 @@ export async function registerCompanionTriggerWebhookV2(input: {
     return { status: "manual" };
   }
   if (!trigger.target?.repo || !trigger.target.events?.length) {
-    throw new CompanionTriggerRegistrationError(
-      "target_required",
-      "a github trigger needs a target repo and at least one event before registration",
-    );
+    const message = "a github trigger needs a target repo and at least one event before registration";
+    await persistRegistration({
+      ...input,
+      accountId: trigger.provider_account_id,
+      remoteHookId: null,
+      status: "failed",
+      error: message,
+    });
+    return { status: "failed", error: message };
   }
 
   let account: AttachedGithubAccount;
