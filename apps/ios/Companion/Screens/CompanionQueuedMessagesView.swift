@@ -43,6 +43,10 @@ struct CompanionQueuedMessagesView: View {
                 self.removingTurnID = nil
             }
         }
+        .onChange(of: routineQueueIdentity) { oldIdentity, newIdentity in
+            guard !newIdentity.isEmpty, oldIdentity != newIdentity else { return }
+            collapseForRoutineArrival()
+        }
     }
 
     @ViewBuilder
@@ -98,6 +102,23 @@ struct CompanionQueuedMessagesView: View {
     }
 
     private var queueHeader: some View {
+        HStack(spacing: 0) {
+            queueToggle
+
+            // The routine's cancel action remains available in the compact row. It is omitted
+            // from the expanded header because the corresponding row action is then visible.
+            if !expanded,
+               let entry = headerEntry,
+               entry.routine != nil,
+               canManageRemoval(for: entry),
+               let turnID = entry.turnID {
+                queueHeaderRemoval(for: entry, turnID: turnID)
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+    }
+
+    private var queueToggle: some View {
         Button(action: toggleExpanded) {
             HStack(spacing: 11) {
                 attachmentPeek
@@ -106,10 +127,11 @@ struct CompanionQueuedMessagesView: View {
                     Text(queueCountLabel)
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(CompanionIOSTheme.textPrimary)
-                    Text(firstPreview)
+                    Text(headerPreview)
                         .font(.caption)
                         .foregroundStyle(CompanionIOSTheme.textSecondary)
                         .lineLimit(1)
+                        .truncationMode(.tail)
                 }
 
                 Spacer(minLength: 8)
@@ -120,7 +142,8 @@ struct CompanionQueuedMessagesView: View {
                     .rotationEffect(.degrees(expanded ? 180 : 0))
                     .accessibilityHidden(true)
             }
-            .padding(.horizontal, 14)
+            .padding(.leading, 14)
+            .padding(.trailing, 8)
             .padding(.vertical, 10)
             .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
             .contentShape(.rect)
@@ -128,14 +151,36 @@ struct CompanionQueuedMessagesView: View {
         .buttonStyle(.plain)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibleQueueCount)
-        .accessibilityValue(firstPreview)
+        .accessibilityValue(headerPreview)
         .accessibilityHint(expanded ? "Double-tap to collapse the queue" : "Double-tap to show the queue")
         .accessibilityIdentifier("chat.queue.toggle")
     }
 
+    private func queueHeaderRemoval(for entry: TranscriptEntry, turnID: String) -> some View {
+        Button(role: .destructive) {
+            requestRemoval(of: entry)
+        } label: {
+            Group {
+                if removingTurnID == turnID {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: "trash")
+                }
+            }
+            .frame(width: 44, height: 44)
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(CompanionIOSTheme.danger)
+        .disabled(removingTurnID != nil)
+        .accessibilityLabel(removalAccessibilityLabel(for: entry))
+        .accessibilityHint("This message will not run")
+        .accessibilityIdentifier("chat.queue.remove.\(turnID)")
+    }
+
     @ViewBuilder
     private var attachmentPeek: some View {
-        let count = entries.first?.attachments.count ?? 0
+        let count = headerEntry?.attachments.count ?? 0
         if count > 0 {
             ZStack(alignment: .bottomTrailing) {
                 Image(systemName: firstAttachmentSymbol)
@@ -173,7 +218,7 @@ struct CompanionQueuedMessagesView: View {
                 Text(entry.content)
                     .font(.subheadline)
                     .foregroundStyle(CompanionIOSTheme.textPrimary)
-                    .lineLimit(2)
+                    .lineLimit(entry.routine == nil ? 2 : nil)
 
                 if let attachmentSummary = attachmentSummary(for: entry) {
                     Label(attachmentSummary, systemImage: attachmentSymbol(for: entry))
@@ -229,18 +274,44 @@ struct CompanionQueuedMessagesView: View {
         "\(entries.count) queued \(entries.count == 1 ? "message" : "messages")"
     }
 
-    private var firstPreview: String {
-        guard let first = entries.first else { return "" }
-        let text = first.content.trimmingCharacters(in: .whitespacesAndNewlines)
-        let summary = attachmentSummary(for: first)
+    private var headerEntry: TranscriptEntry? {
+        // A routine entry gets a named chip even when a main-lane entry is also queued. This
+        // keeps a routine prompt out of the compact surface and gives its cancel action a home.
+        entries.first(where: { $0.routine != nil }) ?? entries.first
+    }
+
+    private var headerPreview: String {
+        guard let first = headerEntry else { return "" }
+        if let routine = first.routine {
+            return "Routine: \(routine.name)"
+        }
+
+        return ordinaryPreview(for: first)
+    }
+
+    private func ordinaryPreview(for entry: TranscriptEntry) -> String {
+        let text = entry.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let summary = attachmentSummary(for: entry)
         if text.isEmpty { return summary ?? "Queued message" }
         if let summary { return "\(text), \(summary)" }
         return text
     }
 
     private var firstAttachmentSymbol: String {
-        guard let first = entries.first else { return "paperclip" }
+        guard let first = headerEntry else { return "paperclip" }
         return attachmentSymbol(for: first)
+    }
+
+    private var routineQueueIdentity: [RoutineQueueIdentity] {
+        entries.compactMap { entry in
+            guard let routine = entry.routine else { return nil }
+            return RoutineQueueIdentity(
+                eventID: entry.eventID,
+                routineID: routine.id,
+                runID: routine.runID,
+                name: routine.name
+            )
+        }
     }
 
     private func attachmentSymbol(for entry: TranscriptEntry) -> String {
@@ -266,6 +337,10 @@ struct CompanionQueuedMessagesView: View {
     }
 
     private func removalAccessibilityLabel(for entry: TranscriptEntry) -> String {
+        if let routine = entry.routine {
+            return "Delete queued routine: \(routine.name)"
+        }
+
         let text = entry.content.trimmingCharacters(in: .whitespacesAndNewlines)
         if !text.isEmpty {
             return "Delete queued message: \(String(text.prefix(80)))"
@@ -312,6 +387,17 @@ struct CompanionQueuedMessagesView: View {
         }
     }
 
+    private func collapseForRoutineArrival() {
+        guard expanded else { return }
+        if reduceMotion {
+            expanded = false
+        } else {
+            withAnimation(.easeOut(duration: 0.2)) {
+                expanded = false
+            }
+        }
+    }
+
     private func remove(_ entry: TranscriptEntry) {
         guard removingTurnID == nil, let turnID = entry.turnID else { return }
         removalCandidate = nil
@@ -326,5 +412,12 @@ struct CompanionQueuedMessagesView: View {
                 removalError = "The message could not be removed. Try again."
             }
         }
+    }
+
+    private struct RoutineQueueIdentity: Equatable {
+        let eventID: String
+        let routineID: String?
+        let runID: String?
+        let name: String
     }
 }
