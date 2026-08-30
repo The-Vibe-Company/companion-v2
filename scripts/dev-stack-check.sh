@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 bash -n scripts/dev-stack.sh scripts/setup-conductor.sh scripts/dev-conductor.sh \
+  scripts/dev-environment.sh scripts/dev-ios-live.sh \
   scripts/dev-stack-check.sh scripts/dev-process.sh scripts/dev-runtime.sh scripts/dev-worker.sh \
   scripts/dev-runtime-mode.sh scripts/box-lab.sh scripts/ci-create-db-roles.sh scripts/ci-rsc-smoke.sh
 
@@ -249,9 +250,10 @@ fi
 # The repo-root .env is intentionally shared only with the launcher. Child
 # wrappers enforce the API/worker/runtime/web trust boundaries.
 # shellcheck disable=SC2016
-process_env_probe='for name in COMPANION_BOX_API_KEY COMPANION_PI_INSTALL_COMMAND DATABASE_URL DATABASE_WORKER_URL DATABASE_COMPANION_RUNTIME_URL DATABASE_MIGRATION_URL COMPANION_RUNTIME_PRIVATE_URL COMPANION_RUNTIME_DESKTOP_HMAC_SECRET COMPANION_SECRETS_MASTER_KEY COMPANION_GEMINI_TRANSCRIPTION_API_KEY COMPANION_MCP_GITHUB_CLIENT_ID COMPANION_MCP_GITHUB_CLIENT_SECRET COMPANION_MCP_SLACK_CLIENT_ID COMPANION_MCP_SLACK_CLIENT_SECRET COMPANION_MCP_GMAIL_CLIENT_ID COMPANION_MCP_GMAIL_CLIENT_SECRET BETTER_AUTH_SECRET STRIPE_SECRET_KEY GITHUB_APP_PRIVATE_KEY RESEND_API_KEY S3_SECRET_ACCESS_KEY UNKNOWN_PROVIDER_API_KEY COMPANION_SEED_PASSWORD BOX_SIM_CONTROL_TOKEN BOX_LAB_API_KEY BOX_LAB_DRIVER BOX_LAB_WORKSPACE_ID BOX_LAB_REAL_PROVIDER_AUTH_JSON BOX_LAB_REAL_PROVIDER_MODEL_ID; do if [ -n "${!name+x}" ]; then printf "%s=%s\n" "$name" "${!name}"; else printf "%s=unset\n" "$name"; fi; done'
+process_env_probe='for name in COMPANION_BOX_API_KEY COMPANION_IOS_LOCAL_ZAI_API_KEY COMPANION_PI_INSTALL_COMMAND DATABASE_URL DATABASE_WORKER_URL DATABASE_COMPANION_RUNTIME_URL DATABASE_MIGRATION_URL COMPANION_RUNTIME_PRIVATE_URL COMPANION_RUNTIME_DESKTOP_HMAC_SECRET COMPANION_SECRETS_MASTER_KEY COMPANION_GEMINI_TRANSCRIPTION_API_KEY COMPANION_MCP_GITHUB_CLIENT_ID COMPANION_MCP_GITHUB_CLIENT_SECRET COMPANION_MCP_SLACK_CLIENT_ID COMPANION_MCP_SLACK_CLIENT_SECRET COMPANION_MCP_GMAIL_CLIENT_ID COMPANION_MCP_GMAIL_CLIENT_SECRET BETTER_AUTH_SECRET STRIPE_SECRET_KEY GITHUB_APP_PRIVATE_KEY RESEND_API_KEY S3_SECRET_ACCESS_KEY UNKNOWN_PROVIDER_API_KEY COMPANION_SEED_PASSWORD BOX_SIM_CONTROL_TOKEN BOX_LAB_API_KEY BOX_LAB_DRIVER BOX_LAB_WORKSPACE_ID BOX_LAB_REAL_PROVIDER_AUTH_JSON BOX_LAB_REAL_PROVIDER_MODEL_ID; do if [ -n "${!name+x}" ]; then printf "%s=%s\n" "$name" "${!name}"; else printf "%s=unset\n" "$name"; fi; done'
 common_probe_env=(
   COMPANION_BOX_API_KEY=box-secret
+  COMPANION_IOS_LOCAL_ZAI_API_KEY=ios-zai-secret
   COMPANION_PI_INSTALL_COMMAND=pi-secret
   DATABASE_URL=postgres://api
   DATABASE_WORKER_URL=postgres://worker
@@ -284,6 +286,7 @@ common_probe_env=(
 
 api_process_env="$(env "${common_probe_env[@]}" bash scripts/dev-process.sh api bash -c "$process_env_probe")"
 printf '%s\n' "$api_process_env" | grep -Fxq 'COMPANION_BOX_API_KEY=unset'
+printf '%s\n' "$api_process_env" | grep -Fxq 'COMPANION_IOS_LOCAL_ZAI_API_KEY=unset'
 printf '%s\n' "$api_process_env" | grep -Fxq 'COMPANION_PI_INSTALL_COMMAND=unset'
 printf '%s\n' "$api_process_env" | grep -Fxq 'DATABASE_URL=postgres://api'
 printf '%s\n' "$api_process_env" | grep -Fxq 'DATABASE_COMPANION_RUNTIME_URL=unset'
@@ -305,6 +308,7 @@ printf '%s\n' "$api_process_env" | grep -Fxq 'BOX_LAB_WORKSPACE_ID=unset'
 
 worker_process_env="$(env "${common_probe_env[@]}" bash scripts/dev-worker.sh bash -c "$process_env_probe")"
 printf '%s\n' "$worker_process_env" | grep -Fxq 'COMPANION_BOX_API_KEY=unset'
+printf '%s\n' "$worker_process_env" | grep -Fxq 'COMPANION_IOS_LOCAL_ZAI_API_KEY=unset'
 printf '%s\n' "$worker_process_env" | grep -Fxq 'DATABASE_URL=postgres://worker'
 printf '%s\n' "$worker_process_env" | grep -Fxq 'DATABASE_COMPANION_RUNTIME_URL=unset'
 printf '%s\n' "$worker_process_env" | grep -Fxq 'COMPANION_RUNTIME_DESKTOP_HMAC_SECRET=unset'
@@ -324,6 +328,7 @@ printf '%s\n' "$worker_process_env" | grep -Fxq 'BOX_LAB_API_KEY=unset'
 
 runtime_process_env="$(env "${common_probe_env[@]}" bash scripts/dev-process.sh runtime bash -c "$process_env_probe")"
 printf '%s\n' "$runtime_process_env" | grep -Fxq 'COMPANION_BOX_API_KEY=box-secret'
+printf '%s\n' "$runtime_process_env" | grep -Fxq 'COMPANION_IOS_LOCAL_ZAI_API_KEY=unset'
 printf '%s\n' "$runtime_process_env" | grep -Fxq 'DATABASE_URL=unset'
 printf '%s\n' "$runtime_process_env" | grep -Fxq 'DATABASE_COMPANION_RUNTIME_URL=postgres://runtime'
 printf '%s\n' "$runtime_process_env" | grep -Fxq 'COMPANION_RUNTIME_DESKTOP_HMAC_SECRET=hmac-secret'
@@ -347,6 +352,7 @@ printf '%s\n' "$runtime_process_env" | grep -Fxq 'BOX_LAB_WORKSPACE_ID=unset'
 
 web_process_env="$(env "${common_probe_env[@]}" bash scripts/dev-process.sh web bash -c "$process_env_probe")"
 printf '%s\n' "$web_process_env" | grep -Fxq 'COMPANION_BOX_API_KEY=unset'
+printf '%s\n' "$web_process_env" | grep -Fxq 'COMPANION_IOS_LOCAL_ZAI_API_KEY=unset'
 printf '%s\n' "$web_process_env" | grep -Fxq 'DATABASE_URL=unset'
 printf '%s\n' "$web_process_env" | grep -Fxq 'COMPANION_RUNTIME_DESKTOP_HMAC_SECRET=unset'
 printf '%s\n' "$web_process_env" | grep -Fxq 'COMPANION_SECRETS_MASTER_KEY=unset'
@@ -367,6 +373,7 @@ printf '%s\n' "$web_process_env" | grep -Fxq 'BOX_LAB_API_KEY=unset'
 
 seed_process_env="$(env "${common_probe_env[@]}" bash scripts/dev-process.sh api-seed bash -c "$process_env_probe")"
 printf '%s\n' "$seed_process_env" | grep -Fxq 'COMPANION_SEED_PASSWORD=seed-secret'
+printf '%s\n' "$seed_process_env" | grep -Fxq 'COMPANION_IOS_LOCAL_ZAI_API_KEY=unset'
 printf '%s\n' "$seed_process_env" | grep -Fxq 'COMPANION_RUNTIME_DESKTOP_HMAC_SECRET=unset'
 printf '%s\n' "$seed_process_env" | grep -Fxq 'COMPANION_SECRETS_MASTER_KEY=unset'
 printf '%s\n' "$seed_process_env" | grep -Fxq 'COMPANION_GEMINI_TRANSCRIPTION_API_KEY=unset'
@@ -383,6 +390,16 @@ printf '%s\n' "$seed_process_env" | grep -Fxq 'RESEND_API_KEY=unset'
 printf '%s\n' "$seed_process_env" | grep -Fxq 'S3_SECRET_ACCESS_KEY=storage-secret'
 printf '%s\n' "$seed_process_env" | grep -Fxq 'UNKNOWN_PROVIDER_API_KEY=unset'
 printf '%s\n' "$seed_process_env" | grep -Fxq 'BOX_LAB_API_KEY=unset'
+
+ios_local_process_env="$(env "${common_probe_env[@]}" bash scripts/dev-process.sh ios-local bash -c "$process_env_probe")"
+printf '%s\n' "$ios_local_process_env" | grep -Fxq 'COMPANION_IOS_LOCAL_ZAI_API_KEY=ios-zai-secret'
+printf '%s\n' "$ios_local_process_env" | grep -Fxq 'COMPANION_SEED_PASSWORD=seed-secret'
+printf '%s\n' "$ios_local_process_env" | grep -Fxq 'COMPANION_BOX_API_KEY=unset'
+printf '%s\n' "$ios_local_process_env" | grep -Fxq 'COMPANION_PI_INSTALL_COMMAND=unset'
+printf '%s\n' "$ios_local_process_env" | grep -Fxq 'DATABASE_URL=unset'
+printf '%s\n' "$ios_local_process_env" | grep -Fxq 'COMPANION_RUNTIME_DESKTOP_HMAC_SECRET=unset'
+printf '%s\n' "$ios_local_process_env" | grep -Fxq 'COMPANION_SECRETS_MASTER_KEY=unset'
+printf '%s\n' "$ios_local_process_env" | grep -Fxq 'UNKNOWN_PROVIDER_API_KEY=unset'
 
 if DATABASE_MIGRATION_URL=postgres://owner@127.0.0.1/test \
   bash scripts/ci-create-db-roles.sh >/dev/null 2>&1; then
@@ -835,6 +852,7 @@ fi
 
   mkdir -p "$lock_test_dir/scripts" "$lock_test_dir/.conductor-pg"
   cp "$ROOT/scripts/dev-conductor.sh" "$lock_test_dir/scripts/dev-conductor.sh"
+  cp "$ROOT/scripts/dev-environment.sh" "$lock_test_dir/scripts/dev-environment.sh"
   cp "$ROOT/scripts/dev-runtime-mode.sh" "$lock_test_dir/scripts/dev-runtime-mode.sh"
   cd "$lock_test_dir"
   # Keep bash as the long-lived process so `ps` retains the launcher marker.

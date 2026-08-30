@@ -140,12 +140,13 @@ product, architecture, accessibility, and verification rules.
 
 ## Local development
 
-Start the repository stack with the default Conductor run, then run the local-only iOS action. The
-launcher derives the API URL from `CONDUCTOR_PORT + 1`, builds the Debug app, and starts it in an iOS
-simulator with a launch-argument override.
+Start the repository stack with the default Conductor run, then run `pnpm ios:dev` from a Conductor
+terminal. The launcher derives the API URL from `CONDUCTOR_PORT + 1`, builds the Debug app, and
+starts it in an iOS simulator with a launch-argument override. It stays a terminal command because
+Conductor Run actions are intentionally nonconcurrent for this repository.
 
 ```bash
-bash apps/ios/scripts/dev-conductor.sh
+pnpm ios:dev
 ```
 
 Run package tests with:
@@ -156,6 +157,50 @@ xcodebuildmcp swift-package test --package-path apps/ios/CompanionKit
 
 Release builds ignore launch arguments and environment variables and always use
 `https://api.thecompanion.sh`.
+
+### Live Box cycle from Conductor
+
+Use the **iOS (live Box)** run when you want the complete local control plane with a real
+box.ascii.dev Box and a real z.ai reply. Add these launcher-only values to the workspace `.env`:
+
+```bash
+BOX_API_KEY=<ascii.dev-key>
+COMPANION_IOS_LOCAL_ZAI_API_KEY=<z.ai-key>
+```
+
+`COMPANION_BOX_API_KEY` is also accepted instead of `BOX_API_KEY`. Conductor copies `.env` files
+into new workspaces through its standard file-copy behavior. The repository run mode is
+`nonconcurrent`, so Conductor permits only one Run action at a time; the existing stack launcher
+lock also refuses a duplicate stack inside the same workspace. There is no additional PID or lock
+mechanism for iOS.
+
+Select **iOS (live Box)** in Conductor, or run `pnpm ios:live` from a local macOS workspace. The
+launcher forces live Box mode, starts PostgreSQL, API, worker, runtime, and web, waits for API and
+runtime health, connects z.ai through the ordinary `/v1/companion-providers/zai` route, and then
+builds and opens the Debug app through XcodeBuildMCP. It deliberately does not create a Companion.
+Sign in with `admin@thevibecompany.co` / `adminadmin` unless `COMPANION_SEED_EMAIL` or
+`COMPANION_SEED_PASSWORD` overrides the local seed.
+
+Use this manual production-like check:
+
+1. Confirm z.ai is connected under Providers, then create a Companion in the app.
+2. Send a message and wait for the real Box/Pi/z.ai response.
+3. Close and reopen the app with `pnpm ios:dev`; confirm the roster and thread return before and
+   after fresh synchronization.
+4. With the stack still running, stop exactly that Companion from a Conductor terminal:
+
+   ```bash
+   pnpm ios:live:stop -- --companion "Exact Companion name or id"
+   ```
+
+5. Confirm the app projects `stopped`, send another message, and verify the existing Box resumes
+   and replies. Then exercise **Restart Companion** and **Restart server** in settings.
+6. Delete the Companion in the app when cleanup is wanted and wait for it to disappear; this is the
+   product path that permanently deletes its Box.
+
+Stopping the Run keeps `.conductor-pg/` and the live Companion durable for the next launch. Do not
+use Conductor Archive while retaining a live Companion: archive removes the workspace database,
+whereas permanent live Box deletion must be requested from the app first.
 
 ## External authorization and Universal Links
 

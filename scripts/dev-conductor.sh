@@ -39,38 +39,21 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# shellcheck disable=SC1091
+source "$REPO_ROOT/scripts/dev-environment.sh"
+
 # Load the repo-root .env (if present) so GitHub, storage, email and skill-secret settings reach the
 # child processes without depending on the launcher's environment. Per-process
 # wrappers remove credentials outside each process's trust boundary. Dotenv semantics: never overrides variables
 # already in the environment, and skips empty assignments (a copied .env.example full of empty
 # values must not nuke exported shell vars).
-if [ "${COMPANION_DEV_SKIP_ENV_FILE:-0}" != "1" ] && [ -f "$REPO_ROOT/.env" ]; then
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in ''|\#*) continue ;; esac
-    key="${line%%=*}"
-    value="${line#*=}"
-    case "$key" in *[!A-Za-z0-9_]*|'') continue ;; esac
-    [ -n "$value" ] || continue
-    if [ -z "${!key:-}" ]; then
-      case "$value" in
-        \"*\") value="${value%\"}"; value="${value#\"}" ;;
-        \'*\') value="${value%\'}"; value="${value#\'}" ;;
-      esac
-      export "$key=$value"
-    fi
-  done < "$REPO_ROOT/.env"
-fi
+companion_load_repo_env "$REPO_ROOT"
 
 # ascii.dev calls this credential BOX_API_KEY in its own tooling. Accept that
 # spelling only at the local launcher boundary, normalize it to Companion's
 # runtime-only name, then remove the broad alias before any child is spawned.
 # The canonical name wins when both are present.
-if [ -n "${BOX_API_KEY:-}" ]; then
-  if [ -z "${COMPANION_BOX_API_KEY:-}" ]; then
-    export COMPANION_BOX_API_KEY="$BOX_API_KEY"
-  fi
-  unset BOX_API_KEY
-fi
+companion_normalize_box_api_key
 cd "$REPO_ROOT"
 # shellcheck disable=SC1091
 source "$REPO_ROOT/scripts/dev-runtime-mode.sh"
