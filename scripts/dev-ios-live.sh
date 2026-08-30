@@ -43,8 +43,9 @@ wait_for_endpoint() {
 run_client() {
   local base_port="${CONDUCTOR_PORT:-3000}"
   case "$base_port" in ''|*[!0-9]*) die "CONDUCTOR_PORT must be numeric" ;; esac
-  [ "$base_port" -ge 1024 ] && [ "$base_port" -le 65526 ] \
-    || die "CONDUCTOR_PORT must be between 1024 and 65526"
+  if [ "$base_port" -lt 1024 ] || [ "$base_port" -gt 65526 ]; then
+    die "CONDUCTOR_PORT must be between 1024 and 65526"
+  fi
 
   wait_for_endpoint "API" "http://127.0.0.1:$((base_port + 1))/health"
   wait_for_endpoint "Runtime" "http://127.0.0.1:$((base_port + 7))/healthz"
