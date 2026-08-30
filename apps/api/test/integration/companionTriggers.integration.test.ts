@@ -13,6 +13,8 @@ import {
   failCompanionTriggerFire,
   fireCompanionTrigger,
   getCompanionTriggerForWebhook,
+  getCompanionTriggerRunV2,
+  listCompanionTriggerRunsV2,
   listCompanionTriggersV2,
   listCompanionsV2,
   readCompanionThreadV2,
@@ -111,7 +113,7 @@ describe("Companion triggers over the real database", () => {
   function createTrigger(
     actor: TestActor,
     name: string,
-    overrides: { id?: string; prompt?: string; enabled?: boolean } = {},
+    overrides: { id?: string; prompt?: string; mode?: "notify" | "relay"; enabled?: boolean } = {},
   ) {
     return asActor(actor, (database) => createCompanionTriggerV2({
       orgId: fixture.orgA,
@@ -215,7 +217,7 @@ describe("Companion triggers over the real database", () => {
     }));
     expect(listed).toEqual([created]);
 
-    // An ordinary update never touches the secret: the pasted URL keeps working.
+    // An ordinary update never touches the secret: the registered callback keeps working.
     const disabled = await asActor(fixture.owner, (database) => updateCompanionTriggerV2({
       orgId: fixture.orgA,
       companionId,
@@ -553,6 +555,92 @@ describe("Companion triggers over the real database", () => {
       content: composeTriggerPrompt(trigger.prompt, '{"action":"reopened"}'),
       database: integrationDb,
     }), "23505");
+  });
+
+  it("serves trigger-only history and enforces the configured terminal surface mode", async () => {
+    const trigger = await createTrigger(fixture.owner, "Notify on CI failure", { mode: "notify" });
+    const fired = await fireCompanionTrigger({
+      orgId: fixture.orgA,
+      triggerId: trigger.id,
+      clientMessageId: triggerFireMessageId({ triggerId: trigger.id, deliveryId: "history-1" }),
+      content: composeTriggerPrompt(trigger.prompt, '{"conclusion":"failure"}'),
+      database: integrationDb,
+    });
+    const runId = fired.turn!.id;
+    const [marker] = await integrationDb
+      .select({ ordinal: schema.companionTranscriptEntries.ordinal })
+      .from(schema.companionTranscriptEntries)
+      .where(eq(schema.companionTranscriptEntries.turnId, runId));
+    const [substrate] = await integrationDb
+      .insert(schema.companionRoutineContextSubstrates)
+      .values({
+        orgId: fixture.orgA,
+        companionId,
+        summarySha256: null,
+        builtThroughOrdinal: marker?.ordinal ?? 0,
+        content: "Pinned main conversation context.",
+        sha256: "e".repeat(64),
+      })
+      .returning({ id: schema.companionRoutineContextSubstrates.id });
+    await integrationDb.update(schema.companionTurns)
+      .set({ routineIsolated: true, routineContextSubstrateId: substrate!.id })
+      .where(eq(schema.companionTurns.id, runId));
+    await integrationDb.insert(schema.companionRoutineRunEntries).values({
+      orgId: fixture.orgA,
+      companionId,
+      runId,
+      eventId: "trigger:validation:1",
+      ordinal: 0,
+      role: "assistant",
+      content: "Validated the external payload.",
+    });
+
+    await expectSqlState(integrationSql`
+      select companion_runtime_surface_routine_return(
+        ${fixture.orgA}::uuid, ${companionId}::uuid, ${runId}::uuid,
+        'relay', 'This mode must be rejected.'
+      )
+    `, "22023");
+    const [surfaced] = await integrationSql<{ accepted: boolean }[]>`
+      select companion_runtime_surface_routine_return(
+        ${fixture.orgA}::uuid, ${companionId}::uuid, ${runId}::uuid,
+        'notify', 'The main workflow failed.'
+      ) as accepted
+    `;
+    expect(surfaced).toEqual({ accepted: true });
+
+    const history = await asActor(fixture.owner, (database) => listCompanionTriggerRunsV2({
+      orgId: fixture.orgA,
+      companionId,
+      triggerId: trigger.id,
+      database,
+    }));
+    expect(history).toMatchObject({
+      next_cursor: null,
+      runs: [{
+        run_id: runId,
+        trigger: { id: trigger.id, name: trigger.name },
+        mode: "notify",
+        outcome: "surfaced",
+        surface_mode: "notify",
+        relay_turn_id: null,
+      }],
+    });
+    const detail = await asActor(fixture.owner, (database) => getCompanionTriggerRunV2({
+      orgId: fixture.orgA,
+      companionId,
+      runId,
+      entryLimit: 10,
+      database,
+    }));
+    expect(detail).toMatchObject({
+      run_id: runId,
+      internal_entries: [{
+        event_id: "trigger:validation:1",
+        content: "Validated the external payload.",
+      }],
+      next_entry_cursor: null,
+    });
   });
 
   it("skips disabled, throttled, and piled-up fires without advancing last_fired_at", async () => {

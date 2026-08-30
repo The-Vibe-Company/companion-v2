@@ -981,6 +981,7 @@ describe("Pi journal validation and projection", () => {
       kind: "trigger" as const,
       name: "ci-failed",
       prompt: "Investigate the failing build.",
+      mode: "relay" as const,
       provider: "github" as const,
       target: { repo: "acme/ci", events: ["push"] },
     };

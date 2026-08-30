@@ -60,6 +60,8 @@ function workMaterial(accessExpiresAt?: string | null): RuntimeWorkMaterial {
     memberTimezone: null,
     routineId: null,
     routineName: null,
+    triggerName: null,
+    triggerMode: null,
     routineIsolated: false,
     routineContext: null,
     decisionRequestKind: null,

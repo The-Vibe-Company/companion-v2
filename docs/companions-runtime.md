@@ -796,9 +796,34 @@ The shared first-party API is:
 - `POST /v1/companions/:id/triggers` → `201 {trigger}`;
 - `PATCH /v1/companions/:id/triggers/:triggerId` → `{trigger}`;
 - `DELETE /v1/companions/:id/triggers/:triggerId` → `204`;
-- `POST …/:triggerId/rotate-secret` and `POST …/:triggerId/registration` → `{trigger}`;
-- `GET …/triggers/:triggerId/runs` → `{runs,next_cursor}`;
-- `GET …/trigger-runs/:runId` → `{run}` with a bounded `internal_entries` page.
+- `POST /v1/companions/:id/triggers/:triggerId/rotate-secret` → `{trigger}`;
+- `POST /v1/companions/:id/triggers/:triggerId/registration` → `{trigger}`;
+- `DELETE /v1/companions/:id/triggers/:triggerId/registration` → `204`;
+- `GET /v1/companions/:id/triggers/:triggerId/runs?limit=&cursor=` →
+  `{runs,next_cursor}`;
+- `GET /v1/companions/:id/trigger-runs/:runId?entry_limit=&entry_cursor=` → `{run}` with a
+  bounded `internal_entries` page.
+
+Create accepts `{id?,name,prompt,mode?,provider?,provider_account_id?,target?,enabled?}`; update is
+the partial shape without `id`. Defaults are `mode=relay`, `provider=webhook`, and `enabled=true`.
+Every create, update, read, rotation, or retry projection has this exact trigger shape:
+
+```text
+{id, companion_id, name, prompt, mode, provider, provider_account_id,
+ target, registration_status, remote_hook_account_id, remote_hook_id,
+ last_registration_error, enabled, webhook_url, last_fired_at,
+ last_error_code, last_error_message, last_error_at, consecutive_failures,
+ created_at, updated_at}
+```
+
+A run summary is `{run_id,companion_id,trigger:{id,name},status,mode,outcome,surface_mode,
+main_entry_event_id,relay_turn_id,created_at,started_at,settled_at,error}`. Run detail adds
+`internal_entries` and `next_entry_cursor`; each private entry is
+`{event_id,ordinal,role,content,reasoning,tool,decision,created_at}`. List pagination is capped at
+100 and detail-entry pagination defaults to 50 and caps at 100. Ordinary route failures are
+`{ok:false,error,code?}` with 400/401/403/404/409 as applicable. A provider registration refusal is
+not a route failure: create/update/retry returns 201/200 with `registration_status=failed` and the
+bounded `last_registration_error`.
 
 The trigger response includes `remote_hook_id`, `remote_hook_account_id`,
 `last_registration_error`, and the secondary `webhook_url`; it never returns the bare secret.

@@ -14,10 +14,9 @@ import {
 import type { Db } from "@companion/db";
 
 /**
- * On-demand provider-side webhook wiring for plugin-backed triggers. Approval of a trigger never
- * registers anything; the Companion (or an Owner/Editor) calls this when it decides to wire the
- * trigger into the external service. GitHub today; Linear needs its own API key and Notion has no
- * outbound webhooks at all, so neither is wired here.
+ * Provider-side webhook wiring for zero-friction triggers. Creation and chat approval invoke this
+ * synchronously: GitHub reuses an attached MCP OAuth credential, while Linear uses its minimal
+ * encrypted webhook key until its MCP authorization can cover remote registration.
  */
 export class CompanionTriggerRegistrationError extends Error {
   constructor(
@@ -348,8 +347,8 @@ async function persistLinearFailure(
 
 /**
  * Attempt the provider-side wiring. Provider rejection is a recorded outcome (`failed`), never an
- * exception: the failure row must survive the caller's transaction. Precondition violations (no
- * target, plugin detached or unreadable) throw before anything external happens.
+ * exception: the failure row must survive the caller's transaction. Missing, ambiguous, revoked,
+ * or insufficient credentials are persisted as failed registration state for an explicit retry.
  */
 export async function registerCompanionTriggerWebhookV2(input: {
   orgId: string;
