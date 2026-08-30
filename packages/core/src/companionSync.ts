@@ -158,14 +158,10 @@ function assertOrderMatchesRecords(
 function assertThreadRecords(
   records: readonly { id: string; digest: string; ordinal: number }[],
 ): void {
+  // Ordinals identify transcript position but are not event identity. Defensive handling of
+  // historical projections with tied ordinals keeps each event, while event IDs remain canonical
+  // and unique so cursor integrity and replay semantics stay fail-closed.
   assertSortedUnique(records);
-  const ordinals = new Set<number>();
-  for (const record of records) {
-    if (ordinals.has(record.ordinal)) {
-      throw new CompanionSyncCursorError("invalid Companion thread cursor ordinals");
-    }
-    ordinals.add(record.ordinal);
-  }
 }
 
 function decodeCursor(
@@ -316,9 +312,9 @@ function threadCursor(input: {
     throw new CompanionSyncCursorError("Companion thread is too large for a sync cursor");
   }
   // Validate the complete projection before reducing it to a bounded cursor. Transcript ordinals
-  // are unique and monotonic; keeping a small exact tail keeps the opaque query parameter below
-  // intermediary request-line limits, while a prefix digest detects any exceptional historical
-  // edit or deletion and forces a reset.
+  // are ordered, and defensive handling permits historical tied ordinals; keeping a small exact
+  // tail keeps the opaque query parameter below intermediary request-line limits, while a prefix
+  // digest detects any exceptional historical edit or deletion and forces a reset.
   assertThreadRecords(entryDigestRecords(orderedEntries));
   const prefixCount = Math.max(
     0,

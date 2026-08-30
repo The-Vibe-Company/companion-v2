@@ -78,6 +78,7 @@ function entry(
   eventId: string,
   ordinal: number,
   content: string,
+  queued = false,
 ): CompanionTranscriptEntry {
   return {
     event_id: eventId,
@@ -92,7 +93,7 @@ function entry(
     routine: null,
     trigger: null,
     turn_id: null,
-    queued: false,
+    queued,
     attachments: [],
     created_at: NOW,
   };
@@ -269,6 +270,56 @@ describe("Companion stateless sync projections", () => {
       thread: updated,
       cursor: initial.cursor,
     })).toEqual(next);
+  });
+
+  it("accepts queued entries with duplicate ordinals and replays their cursor", () => {
+    const original = thread([
+      entry(EVENT_ONE, 1, "one"),
+      entry(EVENT_TWO, 3, "two"),
+    ]);
+    const initial = buildCompanionThreadDelta({
+      orgId: ORG_ID,
+      actorId: OWNER_ID,
+      companionId: COMPANION_ID,
+      thread: original,
+    });
+    const updatedEntries = [
+      entry(EVENT_ONE, 1, "one"),
+      entry("msg:gamma", 2, "gamma", true),
+      entry("msg:alpha", 2, "alpha", true),
+      entry("msg:beta", 2, "beta"),
+    ];
+    const next = buildCompanionThreadDelta({
+      orgId: ORG_ID,
+      actorId: OWNER_ID,
+      companionId: COMPANION_ID,
+      thread: thread(updatedEntries),
+      cursor: initial.cursor,
+    });
+
+    expect(next.reset_entries).toBe(false);
+    expect(next.changed_entries.map((item) => item.event_id)).toEqual([
+      "msg:alpha",
+      "msg:beta",
+      "msg:gamma",
+    ]);
+    expect(new Set(next.changed_entries.map((item) => item.event_id)).size)
+      .toBe(next.changed_entries.length);
+    expect(next.changed_entries.filter((item) => item.queued).map((item) => item.event_id))
+      .toEqual(["msg:alpha", "msg:gamma"]);
+    expect(next.deleted_event_ids).toEqual([EVENT_TWO]);
+
+    const replay = buildCompanionThreadDelta({
+      orgId: ORG_ID,
+      actorId: OWNER_ID,
+      companionId: COMPANION_ID,
+      thread: thread(updatedEntries),
+      cursor: next.cursor,
+    });
+    expect(replay.reset_entries).toBe(false);
+    expect(replay.changed_entries).toEqual([]);
+    expect(replay.deleted_event_ids).toEqual([]);
+    expect(replay.cursor).toBe(next.cursor);
   });
 
   it("keeps long-thread cursors bounded and sends only appended tail entries", () => {

@@ -206,10 +206,12 @@ private final class OversizedThreadCursorURLProtocol: URLProtocol, @unchecked Se
 private final class RejectedThreadCursorURLProtocol: URLProtocol, @unchecked Sendable {
     private static let lock = NSLock()
     private nonisolated(unsafe) static var requestedCursors: [String?] = []
+    private nonisolated(unsafe) static var rejectedStatusCode = 431
 
-    static func reset() {
+    static func reset(statusCode: Int = 431) {
         lock.lock()
         requestedCursors = []
+        rejectedStatusCode = statusCode
         lock.unlock()
     }
 
@@ -229,8 +231,9 @@ private final class RejectedThreadCursorURLProtocol: URLProtocol, @unchecked Sen
         )?.queryItems?.first(where: { $0.name == "cursor" })?.value
         Self.lock.lock()
         Self.requestedCursors.append(cursor)
+        let rejectedStatusCode = Self.rejectedStatusCode
         Self.lock.unlock()
-        let statusCode = cursor == nil ? 200 : 431
+        let statusCode = cursor == nil ? 200 : rejectedStatusCode
         let payload = cursor == nil
             ? #"{"cursor":"transport-safe","reset_entries":true,"changed_entries":[],"deleted_event_ids":[],"thread":{"companion_id":"22222222-2222-4222-8222-222222222222","viewer_id":"user-1","read_only":false,"can_send":true,"transcription_available":true,"active_turn":null,"queued_count":0,"interrupted_turn":null}}"#
             : ""
@@ -832,37 +835,39 @@ func oversizedLegacyThreadCursorRecoversWithAFullSynchronization() async throws 
 
 @Test @MainActor
 func rejectedThreadCursorRetriesOnceWithoutCursor() async throws {
-    RejectedThreadCursorURLProtocol.reset()
-    let fixture = try cacheFixture()
-    defer { try? FileManager.default.removeItem(at: fixture.directory) }
-    let session = testSession()
-    let companionID = "22222222-2222-4222-8222-222222222222"
-    try fixture.cache.saveThread(
-        CompanionThreadSnapshot(
-            cursor: "short-cursor",
-            thread: try companionThread(entries: [try transcriptEntry(ordinal: 1)])
-        ),
-        scope: "org-1:user-1",
-        companionID: companionID
-    )
-    let configuration = URLSessionConfiguration.ephemeral
-    configuration.protocolClasses = [RejectedThreadCursorURLProtocol.self]
-    let client = APIClient(
-        baseURL: URL(string: "https://example.test")!,
-        session: URLSession(configuration: configuration),
-        initialAuthority: session
-    )
-    let store = SessionStore(
-        apiURL: URL(string: "https://example.test")!,
-        storage: FixedSessionStorage(data: try JSONEncoder().encode(session)),
-        cache: fixture.cache,
-        apiClient: client
-    )
+    for statusCode in [400, 414, 431] {
+        RejectedThreadCursorURLProtocol.reset(statusCode: statusCode)
+        let fixture = try cacheFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let session = testSession()
+        let companionID = "22222222-2222-4222-8222-222222222222"
+        try fixture.cache.saveThread(
+            CompanionThreadSnapshot(
+                cursor: "short-cursor",
+                thread: try companionThread(entries: [try transcriptEntry(ordinal: 1)])
+            ),
+            scope: "org-1:user-1",
+            companionID: companionID
+        )
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RejectedThreadCursorURLProtocol.self]
+        let client = APIClient(
+            baseURL: URL(string: "https://example.test")!,
+            session: URLSession(configuration: configuration),
+            initialAuthority: session
+        )
+        let store = SessionStore(
+            apiURL: URL(string: "https://example.test")!,
+            storage: FixedSessionStorage(data: try JSONEncoder().encode(session)),
+            cache: fixture.cache,
+            apiClient: client
+        )
 
-    let synchronization = try await store.synchronizeThread(companionID: companionID)
-    #expect(RejectedThreadCursorURLProtocol.capturedCursors == ["short-cursor", nil])
-    #expect(synchronization.value.cursor == "transport-safe")
-    #expect(synchronization.value.thread.entries.isEmpty)
+        let synchronization = try await store.synchronizeThread(companionID: companionID)
+        #expect(RejectedThreadCursorURLProtocol.capturedCursors == ["short-cursor", nil])
+        #expect(synchronization.value.cursor == "transport-safe")
+        #expect(synchronization.value.thread.entries.isEmpty)
+    }
 }
 
 @Test

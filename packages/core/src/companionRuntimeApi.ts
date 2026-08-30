@@ -584,6 +584,11 @@ export function collapseRoutineNotifyEntries(
   entries: readonly CompanionTranscriptEntry[],
   notifyReturns: readonly RoutineNotifyReturn[],
 ): CompanionTranscriptEntry[] {
+  // PostgreSQL projections historically ordered only by ordinal. Normalize ties before interpreting
+  // marker/update adjacency so legacy duplicate ordinals cannot change grouping between reads.
+  const orderedEntries = [...entries].sort((left, right) =>
+    left.ordinal - right.ordinal
+    || (left.event_id < right.event_id ? -1 : left.event_id > right.event_id ? 1 : 0));
   const notifyByRun = new Map(notifyReturns.map((returned) => [returned.run_id, returned]));
   const collapsed: CompanionTranscriptEntry[] = [];
   let open: RoutineNotifyUnit[] = [];
@@ -607,9 +612,9 @@ export function collapseRoutineNotifyEntries(
     open = [];
   };
 
-  for (let index = 0; index < entries.length;) {
-    const marker = entries[index]!;
-    const update = entries[index + 1];
+  for (let index = 0; index < orderedEntries.length;) {
+    const marker = orderedEntries[index]!;
+    const update = orderedEntries[index + 1];
     const runId = marker.routine?.run_id ?? null;
     const returned = runId ? notifyByRun.get(runId) : undefined;
     const collapsible = returned !== undefined

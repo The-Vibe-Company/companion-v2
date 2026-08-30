@@ -371,6 +371,9 @@ returns an explicit replacement projection. Missing cursors produce the initial 
 projection, while malformed or cross-scope cursors fail closed. Native iOS omits oversized legacy
 thread cursors and retries proxy `414`/`431` rejection once without a cursor, yielding that complete
 replacement projection instead of a permanent refresh failure.
+Thread entry identity is `event_id`: if an authorized historical projection contains tied ordinals,
+the delta preserves every distinct event and orders the tie by event id instead of rejecting the
+refresh. Native iOS also retries a server `400` cursor rejection once without the cursor.
 Foreground activation and APNs `content-available` invalidation reuse these same endpoints rather
 than introducing a mobile-only capability contract.
 

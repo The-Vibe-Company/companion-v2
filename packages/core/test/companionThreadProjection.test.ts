@@ -169,6 +169,37 @@ describe("routine notify thread projection", () => {
     ].map((entry) => entry.event_id)).toEqual(source.map((entry) => entry.event_id));
   });
 
+  it("normalizes historical tied ordinals before collapsing routine returns", () => {
+    const firstMarker = marker(FIRST_RUN_ID, 0);
+    const firstUpdate = update(FIRST_RUN_ID, 0, "First");
+    const secondMarker = marker(SECOND_RUN_ID, 1);
+    const secondUpdate = update(SECOND_RUN_ID, 1, "Second");
+    const notifyReturns = [returned(FIRST_RUN_ID), returned(SECOND_RUN_ID)];
+
+    const first = collapseRoutineNotifyEntries([
+      secondUpdate,
+      firstMarker,
+      secondMarker,
+      firstUpdate,
+    ], notifyReturns);
+    const second = collapseRoutineNotifyEntries([
+      firstUpdate,
+      secondMarker,
+      firstMarker,
+      secondUpdate,
+    ], notifyReturns);
+
+    expect(first).toEqual(second);
+    expect(first.map((entry) => entry.event_id)).toEqual([
+      secondMarker.event_id,
+      secondUpdate.event_id,
+    ]);
+    expect(first[1]?.routine_notify_group?.hidden_entries.map((entry) => entry.event_id)).toEqual([
+      firstMarker.event_id,
+      firstUpdate.event_id,
+    ]);
+  });
+
   it("keeps notify returns with attachments visible and outside later groups", () => {
     const attached = update(SECOND_RUN_ID, 3, "See the report.");
     attached.attachments = [{
