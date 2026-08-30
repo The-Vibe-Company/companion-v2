@@ -30,6 +30,12 @@ import {
   type RestartCompanionRuntimeInput,
 } from "@companion/contracts/companion-runtime";
 import { apiFetch } from "./apiClient";
+import type {
+  CompanionTriggerHistoryDetail,
+  CompanionTriggerHistoryDetailOptions,
+  CompanionTriggerHistoryListOptions,
+  CompanionTriggerHistoryListResponse,
+} from "@/components/companions/CompanionTriggerHistoryTypes";
 
 function orgHeaders(orgId: string): HeadersInit {
   return { "x-companion-org": orgId };
@@ -616,4 +622,50 @@ export async function rotateCompanionTriggerSecret(
     { method: "POST", headers: orgHeaders(orgId), body: "{}" },
   );
   return result.trigger;
+}
+
+/**
+ * Ask the API to reconcile a trigger with its provider webhook. The endpoint returns the refreshed
+ * trigger projection (rather than a bare `{ registered: true }` acknowledgement), so the row can
+ * immediately show registered/failed state and its safe registration error.
+ */
+export async function retryCompanionTriggerRegistration(
+  orgId: string,
+  companionId: string,
+  triggerId: string,
+): Promise<CompanionTrigger> {
+  const result = await apiFetch<{ trigger: CompanionTrigger }>(
+    `/v1/companions/${encodeURIComponent(companionId)}/triggers/${encodeURIComponent(triggerId)}/registration`,
+    { method: "POST", headers: orgHeaders(orgId), body: "{}" },
+  );
+  return result.trigger;
+}
+
+/** Trigger fire history is a control-plane read and never wakes the Companion Box. */
+export async function listCompanionTriggerRuns(
+  orgId: string,
+  companionId: string,
+  triggerId: string,
+  options: CompanionTriggerHistoryListOptions,
+): Promise<CompanionTriggerHistoryListResponse> {
+  const params = new URLSearchParams({ limit: String(options.limit) });
+  if (options.cursor) params.set("cursor", options.cursor);
+  return apiFetch<CompanionTriggerHistoryListResponse>(
+    `/v1/companions/${encodeURIComponent(companionId)}/triggers/${encodeURIComponent(triggerId)}/runs?${params.toString()}`,
+    { headers: orgHeaders(orgId) },
+  );
+}
+
+export async function readCompanionTriggerRun(
+  orgId: string,
+  companionId: string,
+  runId: string,
+  options: CompanionTriggerHistoryDetailOptions,
+): Promise<CompanionTriggerHistoryDetail> {
+  const params = new URLSearchParams({ entry_limit: String(options.entryLimit) });
+  if (options.entryCursor !== undefined) params.set("entry_cursor", String(options.entryCursor));
+  return apiFetch<CompanionTriggerHistoryDetail>(
+    `/v1/companions/${encodeURIComponent(companionId)}/trigger-runs/${encodeURIComponent(runId)}?${params.toString()}`,
+    { headers: orgHeaders(orgId) },
+  );
 }

@@ -20,6 +20,12 @@ import {
   CompanionRoutineHistory,
   type RoutineHistoryTarget,
 } from "./CompanionRoutineHistory";
+import {
+  CompanionTriggerHistory,
+  type TriggerHistoryTarget,
+} from "./CompanionTriggerHistory";
+import type { CompanionTriggerHistoryApi } from "./CompanionTriggerHistoryTypes";
+import type { CompanionTriggerAccountOption, CompanionTriggerV2 } from "./CompanionTriggerTypes";
 import { replyExpected } from "./transcript";
 import { useVisualViewportPin } from "./useVisualViewportPin";
 
@@ -212,6 +218,8 @@ export function CompanionThread({
   onRoutinesChange,
   contextTriggers = [],
   onTriggersChange,
+  contextTriggerAccounts = [],
+  contextTriggerHistoryApi,
   contextPlugins = [],
   contextModels = [],
   lastReadOrdinal,
@@ -240,6 +248,10 @@ export function CompanionThread({
   onRoutinesChange?: (routines: CompanionRoutine[]) => void;
   contextTriggers?: CompanionTrigger[];
   onTriggersChange?: (triggers: CompanionTrigger[]) => void;
+  /** Credential-free MCP account projections already attached to this Companion. */
+  contextTriggerAccounts?: readonly CompanionTriggerAccountOption[];
+  /** Optional read adapter for the trigger history drawer. */
+  contextTriggerHistoryApi?: CompanionTriggerHistoryApi;
   /** Connected plugins this reader can already name on a config card. */
   contextPlugins?: Array<{ id: string; label: string }>;
   /** Provider catalog models this surface already loaded. */
@@ -261,8 +273,10 @@ export function CompanionThread({
   const headingRef = useRef<HTMLHeadingElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const routineHistoryOpenerRef = useRef<HTMLElement | null>(null);
+  const triggerHistoryOpenerRef = useRef<HTMLElement | null>(null);
   const [overlay, setOverlay] = useState(false);
   const [routineHistory, setRoutineHistory] = useState<RoutineHistoryTarget | null>(null);
+  const [triggerHistory, setTriggerHistory] = useState<TriggerHistoryTarget | null>(null);
   const status = companionStatus(companion.runtime.state);
   // "Companion is replying…" is only ever the durable ACKed projection, so the icon animates on
   // exactly the same signal instead of guessing from lifecycle state.
@@ -299,20 +313,29 @@ export function CompanionThread({
       : null;
     setRoutineHistory({ routineId: routine.id, runId: routine.run_id, name: routine.name });
   }, []);
+  const openTriggerHistory = useCallback((trigger: CompanionTriggerV2) => {
+    if (!contextTriggerHistoryApi) return;
+    triggerHistoryOpenerRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    setTriggerHistory({ triggerId: trigger.id, runId: null, name: trigger.name });
+  }, [contextTriggerHistoryApi]);
 
   // Opening a thread unmounts the list control that was focused, so focus moves to this thread.
   useEffect(() => {
     headingRef.current?.focus();
     setRoutineHistory(null);
+    setTriggerHistory(null);
   }, [companion.id]);
 
   useEffect(() => {
-    if (!routineHistory) return;
+    if (!routineHistory && !triggerHistory) return;
     const chat = chatRef.current;
     if (!chat) return;
     const blocked = Array.from(chat.children).filter(
       (child): child is HTMLElement => child instanceof HTMLElement
-        && !child.classList.contains("routine-history-layer"),
+      && !child.classList.contains("routine-history-layer")
+      && !child.classList.contains("trigger-history-layer"),
     );
     const previous = blocked.map((element) => element.inert);
     blocked.forEach((element) => {
@@ -323,20 +346,21 @@ export function CompanionThread({
         element.inert = previous[index] ?? false;
       });
     };
-  }, [routineHistory]);
+  }, [routineHistory, triggerHistory]);
 
   // Restore focus only after the modal has unmounted and the rest of the thread is interactive
   // again. Doing this in the close handler can race React's inert cleanup in browsers and tests.
   useEffect(() => {
-    if (routineHistory) return;
-    const opener = routineHistoryOpenerRef.current;
+    if (routineHistory || triggerHistory) return;
+    const opener = triggerHistoryOpenerRef.current ?? routineHistoryOpenerRef.current;
+    triggerHistoryOpenerRef.current = null;
     routineHistoryOpenerRef.current = null;
     if (!opener) return;
     const frame = window.requestAnimationFrame(() => {
       if (opener.isConnected) opener.focus();
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [routineHistory]);
+  }, [routineHistory, triggerHistory]);
 
   // Once Retry or Cancel releases the blocked turn, return keyboard users to the place work resumes.
   useEffect(() => {
@@ -541,7 +565,9 @@ export function CompanionThread({
             onRoutinesChange={onRoutinesChange ?? (() => undefined)}
             onOpenRoutineHistory={openRoutineHistory}
             triggers={contextTriggers}
+            triggerAccounts={contextTriggerAccounts}
             onTriggersChange={onTriggersChange ?? (() => undefined)}
+            onOpenTriggerHistory={contextTriggerHistoryApi ? openTriggerHistory : undefined}
             onJoin={context.onJoin}
             onDesktop={onDesktop}
             onSettings={onSettings}
@@ -561,6 +587,17 @@ export function CompanionThread({
           onRetry={onRetryInterrupted}
           onCancel={onCancelInterrupted}
           onClose={closeRoutineHistory}
+        />
+      ) : null}
+      {triggerHistory && contextTriggerHistoryApi ? (
+        <CompanionTriggerHistory
+          key={`${triggerHistory.triggerId ?? "deleted"}:${triggerHistory.runId ?? "list"}`}
+          orgId={orgId}
+          companionId={companion.id}
+          target={triggerHistory}
+          memberTimezone={memberTimezone}
+          api={contextTriggerHistoryApi}
+          onClose={() => setTriggerHistory(null)}
         />
       ) : null}
     </section>

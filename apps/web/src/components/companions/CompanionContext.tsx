@@ -14,6 +14,7 @@ import { skillsRouteHref } from "../skills/route";
 import { companionStatus } from "./status";
 import { CompanionRoutines } from "./CompanionRoutines";
 import { CompanionTriggers } from "./CompanionTriggers";
+import type { CompanionTriggerAccountOption, CompanionTriggerV2 } from "./CompanionTriggerTypes";
 
 /** One library skill this Companion may stage on its Box, named the way the Skills list names it. */
 export type CompanionContextSkill = Pick<SkillListRow, "id" | "slug" | "description" | "scope">;
@@ -45,7 +46,9 @@ export function CompanionContext({
   onRoutinesChange,
   onOpenRoutineHistory,
   triggers,
+  triggerAccounts = [],
   onTriggersChange,
+  onOpenTriggerHistory,
   onJoin,
   onDesktop,
   onSettings,
@@ -64,7 +67,9 @@ export function CompanionContext({
   onRoutinesChange: (routines: CompanionRoutine[]) => void;
   onOpenRoutineHistory: (routine: CompanionRoutine) => void;
   triggers: CompanionTrigger[];
+  triggerAccounts?: readonly CompanionTriggerAccountOption[];
   onTriggersChange: (triggers: CompanionTrigger[]) => void;
+  onOpenTriggerHistory?: (trigger: CompanionTriggerV2) => void;
   onJoin: () => void;
   onDesktop: () => void;
   /** Null for a Viewer, who does not receive the runner-only context panel. */
@@ -238,9 +243,11 @@ export function CompanionContext({
           orgId={orgId}
           companionId={companion.id}
           triggers={triggers}
+          accountOptions={triggerAccounts}
           memberTimezone={memberTimezone}
           canEdit={onSettings !== null}
           onChange={onTriggersChange}
+          onOpenHistory={onOpenTriggerHistory}
         />
       </div>
     </aside>

@@ -42,9 +42,11 @@ import {
   listCompanions,
   listCompanionProviders,
   listCompanionRoutines,
+  listCompanionTriggerRuns,
   listCompanionTriggers,
   openCompanionDesktop,
   retryCompanionTurn,
+  readCompanionTriggerRun,
   sendCompanionMessage,
   setCompanionProvider,
   updateCompanionMemberState,
@@ -56,6 +58,7 @@ import { CompanionPlugins } from "./CompanionPlugins";
 import { CompanionSettings } from "./CompanionSettings";
 import type { CompanionContextSkill } from "./CompanionContext";
 import { CompanionThread } from "./CompanionThread";
+import type { CompanionTriggerHistoryApi } from "./CompanionTriggerHistoryTypes";
 import { NewCompanionDialog } from "./NewCompanionDialog";
 import { ShareCompanionDialog } from "./ShareCompanionDialog";
 import { companionStatus } from "./status";
@@ -79,6 +82,11 @@ const PENDING_POLL_MS = 3_000;
  * wakes a Box for any Companion — including the ones nobody has opened.
  */
 const LIST_POLL_MS = 45_000;
+
+const companionTriggerHistoryApi: CompanionTriggerHistoryApi = {
+  listCompanionTriggerRuns,
+  readCompanionTriggerRun,
+};
 /**
  * The list cadence while any Companion in it is working — replying, transitioning, or carrying a
  * pending operation — so sidebar avatars and a requested delete track what is happening without a
@@ -1276,6 +1284,14 @@ export function CompanionsApp({
               onRoutinesChange={setRoutines}
               contextTriggers={triggers}
               onTriggersChange={setTriggers}
+              contextTriggerAccounts={initialPlugins
+                .filter((plugin) => opened.selected_mcp_account_ids.includes(plugin.id))
+                .map((plugin) => ({
+                  id: plugin.id,
+                  provider: plugin.provider,
+                  label: plugin.label,
+                }))}
+              contextTriggerHistoryApi={companionTriggerHistoryApi}
               contextPlugins={initialPlugins.map((plugin) => ({
                 id: plugin.id,
                 label: `${plugin.provider} · ${plugin.label}`,
