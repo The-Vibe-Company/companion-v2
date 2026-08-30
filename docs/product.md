@@ -99,6 +99,12 @@ account grants only search/read and draft creation; the member reviews and sends
 Gmail. Companion does not expose send, label mutation, deletion, or new-email triggers in v1.
 Email content is external untrusted data and never becomes runtime instruction.
 
+Sentry is a product-owned, member-level plugin backed by Sentry's official hosted MCP remote. A
+labeled account can inspect the issues, events, traces, releases, and debugging context authorized
+in Sentry. The OAuth approval remains the authority for any optional triage or project-management
+tools, and runtime treats all captured request data, breadcrumbs, tags, and user values as external
+untrusted data.
+
 ## Explicit exclusions
 
 Historical Projects and generic skill runs remain removed. This release adds no multi-Bot

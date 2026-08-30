@@ -6,7 +6,7 @@ import {
 } from "../src/companionPluginCatalog";
 
 describe("Companion plugin catalog contracts", () => {
-  it("ships exactly the product-owned Linear, GitHub, Notion, Conductor, Slack, and Gmail catalog", () => {
+  it("ships exactly the product-owned Linear, GitHub, Notion, Conductor, Slack, Gmail, and Sentry catalog", () => {
     expect(COMPANION_PLUGIN_CATALOG.map((entry) => ({
       server_name: entry.server_name,
       provider: entry.provider,
@@ -30,6 +30,7 @@ describe("Companion plugin catalog contracts", () => {
         provider: "gmail",
         title: "Gmail",
       },
+      { server_name: "io.sentry/mcp", provider: "sentry", title: "Sentry" },
     ]);
   });
 

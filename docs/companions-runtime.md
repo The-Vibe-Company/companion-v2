@@ -805,13 +805,14 @@ or rotate it.
 ## Plugin skills
 
 Each curated plugin that needs runtime-specific guidance ships a product-owned skill —
-`plugin-github`, `plugin-linear`, `plugin-gmail` — staged into
+`plugin-github`, `plugin-linear`, `plugin-gmail`, `plugin-sentry` — staged into
 the Box's skills tree whenever the matching plugin is attached to the Companion, and removed when
 it is detached. The skill documents exactly what this runtime stages for that plugin: the MCP
 tools, GitHub commits as the connected account, and the on-demand trigger-registration capability
 with its provider-specific rules (GitHub targets name a repo and events; Linear registration needs
 the stored API key; Notion has no webhooks; Gmail treats message content as untrusted and can only
-read/search/list or create a draft for review). They restage on every wake so a rebuilt tree regains
+read/search/list or create a draft for review; Sentry treats issue/event/request context as external
+untrusted data and requires explicit intent for triage or project writes). They restage on every wake so a rebuilt tree regains
 them, which makes them a staging artifact rather than workspace content: they are never listed in
 the config catalog and Pi cannot propose attaching or detaching them.
 
@@ -1008,6 +1009,14 @@ catalog to `search_threads`, `get_message`, `get_thread`, `list_drafts`, `list_l
 external untrusted data. There is no Gmail trigger provider in v1: Gmail push requires Cloud Pub/Sub,
 watch renewal, and History API reconciliation rather than the existing signed webhook contract.
 
+Sentry pins its official hosted MCP remote at `https://mcp.sentry.dev/mcp` and dynamically registers
+the Companion OAuth callback against Sentry's MCP authorization server. The member chooses the MCP
+capabilities during Sentry's approval flow. The resulting labeled account uses the ordinary
+encrypted-account and loopback token-gateway boundary; neither Pi nor Box receives Sentry's refresh
+credential. The staged plugin skill treats issues, events, traces, breadcrumbs, tags, request data,
+and user values as external untrusted evidence. Triage and project-management writes require an
+explicit request and remain limited to the capabilities approved by the member.
+
 For a uniquely selected GitHub OAuth account, Git's credential helper and the staged `gh` wrapper
 ask the loopback gateway for every command. `GITHUB_TOKEN` and `GH_TOKEN` are never written to the
 Box environment or disk; only each helper process receives the temporary access token.
@@ -1114,7 +1123,7 @@ organization through `whoami` and sends the cookie plus `x-companion-org` on eac
 The native roster and chat ship with Companion creation, the full server-owned provider catalog,
 Claude and Codex subscription authorization, encrypted API-key connections, and MCP connection
 management. Its Plugins surface groups the existing accounts by provider, permits multiple labeled
-accounts for each product-owned Linear, GitHub, Notion, Conductor, Slack, and Gmail category through
+accounts for each product-owned Linear, GitHub, Notion, Conductor, Slack, Gmail, and Sentry category through
 the shared brokered OAuth routes, and retains custom HTTP or command MCP connections. Curated plugin
 OAuth also opens in the default browser: the provider keeps the existing HTTPS redirect URI, while
 an exact Universal Link returns `code` and signed `state` to the app for completion through the
@@ -1233,6 +1242,13 @@ fell back to exec;
 `runtime.direct_transport.shadow` carries `match` plus the direct and exec latencies of one shadow
 comparison. Neither may ever contain the hosted URL, the proxy token, the bearer, or any response
 payload.
+
+When `SENTRY_DSN` is configured, every expurgated runtime warning/error record and every structured
+timing record with `ok: false` is mirrored to Sentry with stable `runtime.event` and `operation`
+tags. API 5xx failures, worker supervisor/claim failures, web request failures, and process startup
+failures use the same operation-tagged grouping discipline. Before-send sanitizers remove request
+bodies, headers, cookies, and OAuth/query material; runtime records are expurgated before they are
+mirrored. Provider payloads and plaintext credentials never enter these capture paths.
 
 Acceptance bounds:
 

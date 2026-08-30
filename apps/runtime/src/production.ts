@@ -54,6 +54,7 @@ import {
   createRuntimeSchedulerAdapter,
   type RuntimeKernelScheduler,
 } from "./schedulerAdapter";
+import { createSentryRuntimeProcessLog } from "./sentry";
 
 export interface RuntimeArchiveStorage {
   load(storagePath: string, signal: AbortSignal): Promise<Buffer>;
@@ -144,7 +145,7 @@ export async function buildProductionRuntimeService(
     // A valid URL is insufficient: a mistakenly privileged API/owner login must fail startup.
     await database.verifyRole();
     const store = factories.createStore(database);
-    const log = createJsonRuntimeProcessLog();
+    const log = createSentryRuntimeProcessLog(createJsonRuntimeProcessLog());
     if (!config.companionsEnabled) {
       const kernel = factories.createKernel({
         store,

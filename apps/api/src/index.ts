@@ -1,6 +1,6 @@
 /* oxlint-disable anti-slop/no-conditional-empty-object-spread, anti-slop/no-known-value-widening, anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unknown-returns, anti-slop/no-unsafe-dictionary-type, anti-slop/no-chained-type-assertions, anti-slop/require-safety-comment-for-type-assertion -- This route module predates the incremental anti-slop gate; adding one profile field does not rewrite its unrelated boundary debt. */
 import "./sentry";
-import { captureServerError } from "./sentry";
+import { captureServerError, Sentry } from "./sentry";
 import { serve } from "@hono/node-server";
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -291,7 +291,12 @@ import {
 const app = new Hono<{ Variables: ApiVariables }>();
 
 app.onError((err, c) => {
-  captureServerError(err);
+  captureServerError(err, {
+    operation: "http.unhandled",
+    method: c.req.method,
+    route: c.req.routePath || "unmatched",
+    status: 500,
+  });
   return c.json({ ok: false, error: "Internal Server Error" }, 500);
 });
 
@@ -810,6 +815,11 @@ async function publishCanonical(input: {
     return { ...published, slug: fm.name, checksum: canonical.checksum, sizeBytes: canonical.sizeBytes };
   } catch (error) {
     await deleteSkillArchive({ key }).catch((cleanupError) => {
+      captureServerError(cleanupError, {
+        operation: "skill.archive.cleanup",
+        level: "warning",
+        retryable: true,
+      });
       console.error(`failed to delete orphaned skill archive ${key}`, cleanupError);
     });
     throw error;
@@ -871,7 +881,14 @@ app.all("/trpc/*", async (c) => {
     router: appRouter,
     createContext: async () => ({ actor, orgId }),
     onError({ error }) {
-      if (error.code === "INTERNAL_SERVER_ERROR") captureServerError(error);
+      if (error.code === "INTERNAL_SERVER_ERROR") {
+        captureServerError(error, {
+          operation: "trpc.request",
+          method: "POST",
+          route: "/trpc/:procedure",
+          status: 500,
+        });
+      }
     },
   });
 });
@@ -1407,6 +1424,11 @@ app.put("/v1/users/me", async (c) => {
       await auth.api
         .updateUser({ headers: c.req.raw.headers, body: { name: profile.name } })
         .catch((authError) => {
+          captureServerError(authError, {
+            operation: "auth.profile_name.sync",
+            level: "warning",
+            retryable: true,
+          });
           console.error("failed to sync Better Auth user name", authError);
         });
     }
@@ -1461,6 +1483,11 @@ app.post("/v1/onboarding/create", async (c) => {
       await sendTransactionalEmail(
         inviteEmail({ to: email, orgName: input.org.name, inviteUrl: `${base}/join/${token}` }),
       ).catch((emailError) => {
+        captureServerError(emailError, {
+          operation: "onboarding.invitation_email.send",
+          level: "warning",
+          retryable: true,
+        });
         console.error(`onboarding invite email to ${email} failed`, emailError);
       });
     }
@@ -1484,6 +1511,10 @@ app.get("/v1/orgs/current/settings", async (c) => {
     const settings = await withTenant(c, ({ actor, orgId, database }) => getOrgSettings({ actor, orgId, database }));
     const parsed = orgSettingsResponseSchema.safeParse(settings);
     if (!parsed.success) {
+      captureServerError(new Error("Invalid org settings response"), {
+        operation: "org.settings.serialize",
+        status: 500,
+      });
       console.error(
         "Invalid org settings response",
         parsed.error.issues.slice(0, 5).map((issue) => ({
@@ -1678,6 +1709,11 @@ app.delete("/v1/users/me/avatar", async (c) => {
     // the two stores cannot diverge into a still-servable orphan.
     const result = await clearUserAvatar({ actor });
     await deleteUserAvatar({ userId: actor.id }).catch((err) => {
+      captureServerError(err, {
+        operation: "avatar.object.delete",
+        level: "warning",
+        retryable: true,
+      });
       console.error("failed to delete avatar object", err);
     });
     return c.json(result);
@@ -1737,6 +1773,11 @@ app.post("/v1/invitations", async (c) => {
       await withTenantContext({ orgId: createdOrgId, userId: createdActor.id }, (database) =>
         revokeInvitation({ actor: createdActor!, orgId: createdOrgId!, inviteId: createdInvite!.id, database }),
       ).catch((cleanupError) => {
+        captureServerError(cleanupError, {
+          operation: "invitation.rollback",
+          level: "error",
+          retryable: true,
+        });
         console.error(`failed to revoke invitation ${createdInvite?.id} after email failure`, cleanupError);
       });
     }
@@ -3947,8 +3988,22 @@ app.delete("/v1/tokens/:id", async (c) => {
 
 const port = Number(process.env.COMPANION_API_PORT ?? process.env.PORT ?? 3001);
 const hostname = process.env.COMPANION_API_HOST;
-assertBillingEnvironmentConfigured();
-warnIfCompanionsMisconfigured();
-serve({ fetch: app.fetch, port, ...(hostname ? { hostname } : {}) }, (info) => {
-  console.log(`Companion API listening on ${hostname ? `http://${hostname}:${info.port}` : `port ${info.port}`}`);
+
+async function startApi(): Promise<void> {
+  assertBillingEnvironmentConfigured();
+  warnIfCompanionsMisconfigured();
+  serve({ fetch: app.fetch, port, ...(hostname ? { hostname } : {}) }, (info) => {
+    console.log(`Companion API listening on ${hostname ? `http://${hostname}:${info.port}` : `port ${info.port}`}`);
+  });
+}
+
+void startApi().catch(async (error: unknown) => {
+  captureServerError(error, {
+    operation: "process.start",
+    level: "fatal",
+    retryable: false,
+  });
+  console.error("Companion API failed to start");
+  await Sentry.flush(2_000);
+  process.exitCode = 1;
 });

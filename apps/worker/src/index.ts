@@ -1,5 +1,5 @@
 import "./sentry";
-import { Sentry } from "./sentry";
+import { captureWorkerError, Sentry } from "./sentry";
 import { closeDb } from "@companion/db";
 import { keepWorkerProcessAliveWhenIdle, startWorkerSupervisors } from "./supervisors";
 
@@ -32,7 +32,12 @@ async function main(): Promise<void> {
 }
 
 main().catch(async (error: Error) => {
-  Sentry.captureException(error);
+  captureWorkerError(error, {
+    supervisor: "worker",
+    operation: "process.start",
+    level: "fatal",
+    retryable: false,
+  });
   console.error("worker failed to start");
   await Sentry.flush(2000);
   process.exitCode = 1;

@@ -177,6 +177,14 @@ public struct CompanionPluginSheetModel: Equatable, Sendable {
             category: "Communication",
             featured: false
         ),
+        CompanionPluginCatalogItem(
+            id: "io.sentry/mcp",
+            provider: "sentry",
+            title: "Sentry",
+            detail: "Issues, events, traces, releases, and debugging context",
+            category: "Developer tools",
+            featured: true
+        ),
     ]
 
     public var query: String

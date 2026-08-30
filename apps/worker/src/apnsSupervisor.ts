@@ -13,6 +13,7 @@ import {
 import { db, type Db } from "@companion/db";
 
 import type { Supervisor } from "./billingSupervisor";
+import { captureWorkerError } from "./sentry";
 import { plainTextNotificationBody } from "./notificationText";
 
 const CLAIM_INTERVAL_MS = 2_000;
@@ -260,7 +261,13 @@ async function settleClaim(input: {
     let response: ApnsResponse;
     try {
       response = await input.sender.send(claim);
-    } catch {
+    } catch (error) {
+      captureWorkerError(error, {
+        supervisor: "apns",
+        operation: "notification.send",
+        level: "warning",
+        retryable: true,
+      });
       await deferCompanionNotificationDelivery({
         deliveryId: claim.deliveryId,
         claimToken: claim.claimToken,

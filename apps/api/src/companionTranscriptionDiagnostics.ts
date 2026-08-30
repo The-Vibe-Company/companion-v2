@@ -1,3 +1,5 @@
+import { captureServerError, type ServerErrorContext } from "./sentry";
+
 export type CompanionTranscriptionFailureCategory =
   | "transport"
   | "4xx"
@@ -52,6 +54,13 @@ export function createCompanionTranscriptionDiagnostics(
     };
     if (status !== undefined) record.status = status;
     write(JSON.stringify(record));
+    const errorContext: ServerErrorContext = {
+      operation: record.event,
+      level: category === "5xx" || category === "transport" ? "error" : "warning",
+      retryable: category !== "4xx",
+    };
+    if (status !== undefined) errorContext.status = status;
+    captureServerError(new Error(`Companion transcription provider failure (${category})`), errorContext);
     failureReported = true;
   };
 

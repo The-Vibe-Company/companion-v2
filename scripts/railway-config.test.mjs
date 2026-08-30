@@ -43,6 +43,8 @@ test("the web image inlines public PostHog and Sentry values at build time", () 
   assert.match(dockerfile, /ENV NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN=\$\{NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN\}/);
   assert.match(dockerfile, /ARG NEXT_PUBLIC_SENTRY_DSN/);
   assert.match(dockerfile, /ARG NEXT_PUBLIC_SENTRY_ENVIRONMENT/);
+  assert.match(dockerfile, /ARG NEXT_PUBLIC_SENTRY_RELEASE/);
   assert.match(dockerfile, /ENV NEXT_PUBLIC_SENTRY_DSN=\$\{NEXT_PUBLIC_SENTRY_DSN\}/);
   assert.match(dockerfile, /ENV NEXT_PUBLIC_SENTRY_ENVIRONMENT=\$\{NEXT_PUBLIC_SENTRY_ENVIRONMENT\}/);
+  assert.match(dockerfile, /ENV NEXT_PUBLIC_SENTRY_RELEASE=\$\{NEXT_PUBLIC_SENTRY_RELEASE\}/);
 });

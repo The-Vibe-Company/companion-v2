@@ -22,22 +22,26 @@ describe("apiFetch deadlines", () => {
 
   it("fails a hung request closed as a retryable timeout", async () => {
     vi.stubGlobal("fetch", hangingFetch());
+    const captureFailure = vi.fn();
 
-    await expect(apiFetch("/v1/companions", undefined, { timeoutMs: 5 }))
+    await expect(apiFetch("/v1/companions", undefined, { timeoutMs: 5, captureFailure }))
       .rejects.toMatchObject({ name: "ApiFetchError", status: 408 });
+    expect(captureFailure).toHaveBeenCalledOnce();
   });
 
   it("keeps a deadline that fires mid-body a timeout instead of a fake empty success", async () => {
     // A 200 whose body read is aborted must not resolve to `{}` — callers would dereference a
     // response that never arrived.
-    vi.stubGlobal("fetch", vi.fn(async () => ({
-      ok: true,
-      status: 200,
-      json: () => Promise.reject(new DOMException("body aborted", "TimeoutError")),
-    }) as unknown as Response));
+    const response = new Response(null, { status: 200 });
+    Object.defineProperty(response, "json", {
+      value: () => Promise.reject(new DOMException("body aborted", "TimeoutError")),
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => response));
+    const captureFailure = vi.fn();
 
-    await expect(apiFetch("/v1/companions", undefined, { timeoutMs: 5 }))
+    await expect(apiFetch("/v1/companions", undefined, { timeoutMs: 5, captureFailure }))
       .rejects.toMatchObject({ name: "ApiFetchError", status: 408 });
+    expect(captureFailure).toHaveBeenCalledOnce();
   });
 
   it("applies a default deadline when the caller brings neither signal nor budget", async () => {

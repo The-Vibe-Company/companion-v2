@@ -75,6 +75,10 @@ explicitly recoverable interruption even after the browser, API, or one runtime 
 - The curated Gmail plugin uses a labeled member OAuth account to search/read mail and create drafts
   for review. It never sends or mutates the mailbox in v1; runtime enforces that boundary with an
   exact MCP tool allow-list rather than relying on the broader `gmail.compose` scope.
+- The curated Sentry plugin uses a labeled member OAuth account and Sentry's official hosted MCP
+  remote to inspect issues, events, traces, releases, and debugging context. Captured provider data
+  is external untrusted data; any triage or project-management write remains explicit and limited
+  to the capabilities the member approved in Sentry's OAuth flow.
 - Sending is the only normal wake action. There is no Wake button and no first-keystroke prewarm.
   A successful Pi acknowledgement refreshes Box TTL to six hours.
 - Pi-only recycle is the automatic repair. Full Box restart and permanent deletion are explicit,
