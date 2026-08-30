@@ -200,6 +200,8 @@ describe("companion runtime SQL budget contract", () => {
   it("keeps the routine and trigger twin constants aligned with their SQL intervals", () => {
     const routine = intervalsByFunction.get("companion_fire_routine") ?? [];
     expect(routine.map(sqlIntervalToMs)).toEqual([COMPANION_ROUTINE_MISSED_GRACE_MS]);
+    const routineQueue = intervalsByFunction.get("companion_runtime_expire_queued_routine_turns") ?? [];
+    expect(routineQueue.map(sqlIntervalToMs)).toEqual([COMPANION_ROUTINE_MISSED_GRACE_MS]);
     const trigger = intervalsByFunction.get("companion_api_fire_trigger") ?? [];
     expect(trigger.map(sqlIntervalToMs)).toEqual([COMPANION_TRIGGER_MIN_INTERVAL_MS]);
   });

@@ -667,6 +667,20 @@ routine definition's creation instant, so a deleted routine's late outcome canno
 definition that reuses its UUID. After delete, `routine_id` on historical turns is set null and
 `routine_name` remains as the transcript header.
 
+Queued routine-origin turns are executable only while their exact routine definition remains live.
+Disabling a routine—including the fifth genuine-failure auto-disable—or deleting it atomically
+cancels every still-queued turn for that definition generation. The turn, message, and transcript
+history remain durable with a bounded expurgated skip reason and the explicit `none` action; the
+cancelled outcome is not a retryable failure, does not advance routine failure accounting, and does
+not emit a terminal notification. Migration 0145 also runs a one-time backfill for every pre-existing
+queued routine-origin turn older than the same ten-minute missed-fire grace, including rows whose
+routine definition was already deleted. Each Runtime v2 claim sweep repeats a bounded `SKIP LOCKED`
+cleanup before the lane-aware claim, using the live gate epoch so stale or disabled executors cannot
+mutate queue state. If a routine's cold-start `Start` was already claimed, renewal denies further
+Box contact after its source turn is skipped. The next claim sweep terminalizes that derivative
+after its lease is free or expired, preserving ambiguous-create evidence when necessary, before it
+can retain the one-running-operation slot. Main-lane claims remain independent of routine attempts.
+
 During the additive migration, the routine-origin turn id is also its stable run id, and a plain
 `routine_snapshot_id` preserves the routine UUID after definition deletion. Read-only history APIs
 list runs by that snapshot and read one run by id without Box contact. The private

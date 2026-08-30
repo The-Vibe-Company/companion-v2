@@ -188,6 +188,8 @@ describe("SQL budget contract", () => {
       .toEqual([base.coldStartDeadlineMs, base.coldStartDeadlineMs]);
     expect(contract.companion_fire_routine?.map(sqlIntervalToMs))
       .toEqual([COMPANION_ROUTINE_MISSED_GRACE_MS]);
+    expect(contract.companion_runtime_expire_queued_routine_turns?.map(sqlIntervalToMs))
+      .toEqual([COMPANION_ROUTINE_MISSED_GRACE_MS]);
     expect(contract.companion_api_fire_trigger?.map(sqlIntervalToMs))
       .toEqual([COMPANION_TRIGGER_MIN_INTERVAL_MS]);
   });

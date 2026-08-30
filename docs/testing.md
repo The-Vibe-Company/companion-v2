@@ -23,7 +23,7 @@ slow, local-only final validation and is intentionally not part of CI.
 | Agent Auth grants only exact-workspace Skills Hub capabilities | Mixed workspace approval or hosted-runtime access | HTTP + compatibility + PostgreSQL | Broaden the capability registry |
 | Agent Auth child PATs inherit only the active exact-workspace grant snapshot | PAT-to-PAT minting, caller-chosen scope/org, expired inheritance, target mismatch, or plaintext persistence | Contracts + Core + HTTP + PostgreSQL + bundled client | Remove provenance, target binding, pipe-only handoff, or redaction |
 | One accepted message creates exactly one durable turn | Duplicate message/turn after client or proxy retry | Contracts + HTTP + PostgreSQL | Remove `(companion_id, client_message_id)` uniqueness |
-| A due Companion routine fires exactly once per scheduled instant | Duplicate turn after worker retry, catch-up after flag-off, or pileup on an in-flight routine turn | Core + worker + PostgreSQL | Drop uuidv5 stamping, skip-missed grace, or the active-turn fence |
+| A due Companion routine fires exactly once per scheduled instant, and queued routine work is skipped on disable/delete or after ten minutes | Duplicate turn after worker retry, catch-up after flag-off, stuck work after a routine mutation, or a routine row blocking a user message | Core + worker + runtime + PostgreSQL | Drop uuidv5 stamping, the ten-minute cleanup, generation match, or the lane fence |
 | A Companion response notifies only its still-authorized durable author | Cross-user preview disclosure, duplicate push, stale-device delivery, or cancelled-turn alert | Contracts + HTTP + worker + PostgreSQL + iOS | Skip claim-time ACL revalidation or event uniqueness |
 | The API persists runtime intent but never contacts Box/Pi | Lost work after `202`, request-held lifecycle, or duplicate executor | HTTP + provider spy + PostgreSQL | Construct the Box adapter in an API route |
 | One main attempt and one isolated routine attempt may run together, while each lane stays ordered and independently fenced | Main messages blocked by routines, same-lane concurrent prompts, cross-lane takeover, or queue reordering | Runtime unit + PostgreSQL + simulator | Merge lane leases, remove per-lane uniqueness, or broaden retry/cancel/preemption |
@@ -170,6 +170,16 @@ live canary does not replace local installation acceptance.
 - Cover multiple pending operations but one running operation, one active attempt per lane, ordered turns,
   idempotent `client_message_id`, unique `retry_id`, configuration revision ordering, and kill-switch
   claims.
+- Enqueue a routine turn first, then an ordinary user turn; prove one main claim takes the user turn,
+  the routine remains queued, and a routine-lane claim takes it independently. Disable and delete
+  routines with queued turns and assert the durable rows carry stable expurgated skip reasons and
+  action `none`; roll back a disable transaction and prove neither mutation nor cancellation remains.
+  Age a queued routine turn beyond ten minutes and prove the runtime claim sweep settles it before
+  claiming an ordinary main turn. Verify the 0145 migration backfill settles old rows for both live
+  and already-deleted definitions, while stale/disabled gate epochs perform no cleanup. Claim a
+  routine-origin cold Start, disable its source routine, and prove renewal denies further Box work;
+  expire that executor lease and prove the next sweep terminalizes the orphan before claiming the
+  later ordinary user's Start.
 - Replay migrations from an historical snapshot and test legacy purge report, dry-run, confirmation,
   advisory lock, Box `404`, provider error, resume after partial progress, and preservation of
   provider/MCP encrypted rows.

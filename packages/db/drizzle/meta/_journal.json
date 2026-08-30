@@ -1016,6 +1016,13 @@
       "when": 1792256800000,
       "tag": "0144_companion_routine_lane_failure_accounting",
       "breakpoints": true
+    },
+    {
+      "idx": 145,
+      "version": "7",
+      "when": 1792343200000,
+      "tag": "0145_companion_routine_queue_cleanup",
+      "breakpoints": true
     }
   ]
 }
