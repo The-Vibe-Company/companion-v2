@@ -106,6 +106,43 @@ describe("Companion plugin OAuth broker", () => {
     expect(authorization.searchParams.get("resource")).toBe("https://api.conductor.build/mcp");
   });
 
+  it("discovers and dynamically registers the official Sentry MCP remote", async () => {
+    const fetchImpl = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({
+        resource: "https://mcp.sentry.dev/mcp",
+        authorization_servers: ["https://mcp.sentry.dev"],
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        authorization_endpoint: "https://mcp.sentry.dev/oauth/authorize",
+        token_endpoint: "https://mcp.sentry.dev/oauth/token",
+        registration_endpoint: "https://mcp.sentry.dev/oauth/register",
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        client_id: "sentry-client",
+        token_endpoint_auth_method: "none",
+      }));
+
+    const started = await beginCompanionPluginOAuth({
+      serverName: "io.sentry/mcp",
+      redirectUri: "https://companion.example/v1/companion-plugins/oauth/callback",
+      state: "sentry-state",
+      fetchImpl,
+    });
+
+    expect(fetchImpl.mock.calls.map((call) => call[0])).toEqual([
+      "https://mcp.sentry.dev/.well-known/oauth-protected-resource/mcp",
+      "https://mcp.sentry.dev/.well-known/oauth-authorization-server",
+      "https://mcp.sentry.dev/oauth/register",
+    ]);
+    const authorization = new URL(started.authorizationUrl);
+    expect(authorization.origin + authorization.pathname).toBe("https://mcp.sentry.dev/oauth/authorize");
+    expect(authorization.searchParams.get("resource")).toBe("https://mcp.sentry.dev/mcp");
+    expect(authorization.searchParams.get("scope")).toBe(
+      "org:read project:write team:write event:write",
+    );
+    expect(authorization.searchParams.get("code_challenge_method")).toBe("S256");
+  });
+
   it("exchanges and refreshes tokens without exposing provider response bodies", async () => {
     const exchangeFetch = vi.fn<typeof fetch>(async (_url, init) => {
       const body = formBody(init);

@@ -135,10 +135,12 @@ func pluginSheetProjectsTrailingStateSearchAndMultipleAccountChips() throws {
     let github = try #require(rows.first(where: { $0.item.provider == "github" }))
     let notion = try #require(rows.first(where: { $0.item.provider == "notion" }))
     let slack = try #require(rows.first(where: { $0.item.provider == "slack" }))
+    let sentry = try #require(rows.first(where: { $0.item.provider == "sentry" }))
     #expect(github.connectionState == .added)
     #expect(github.connectedAccountLabels == ["default", "quivr"])
     #expect(notion.connectionState == .authorize)
     #expect(slack.connectionState == .add)
+    #expect(sentry.connectionState == .add)
 
     model.yoursOnly = true
     #expect(Set(model.sections.flatMap(\.rows).map(\.item.provider)) == ["github", "notion"])

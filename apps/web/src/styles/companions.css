@@ -287,6 +287,13 @@
   color: oklch(1 0 0);
 }
 
+.companions-plugin-icon--sentry,
+.companions-plugin-dialog--sentry .og-dialog__ic {
+  background: #362d59;
+  border-color: #362d59;
+  color: #fff;
+}
+
 :root[data-theme="dark"] .companions-plugin-icon--conductor,
 :root[data-theme="dark"] .companions-plugin-dialog--conductor .og-dialog__ic {
   background: var(--color-fg);

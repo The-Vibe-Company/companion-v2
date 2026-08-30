@@ -6,6 +6,8 @@ const SENTRY_DSN = process.env.NEXT_PUBLIC_SENTRY_DSN;
 if (SENTRY_DSN) {
   Sentry.init({
     dsn: SENTRY_DSN,
+    release: process.env.NEXT_PUBLIC_SENTRY_RELEASE,
+    attachStacktrace: true,
     sendDefaultPii: false,
     tracesSampleRate: sentryTracesSampleRate(),
     environment: process.env.NEXT_PUBLIC_SENTRY_ENVIRONMENT || process.env.NODE_ENV || "development",

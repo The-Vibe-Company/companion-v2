@@ -522,7 +522,7 @@ export function CompanionPlugins({
           {groups.length === 0 ? (
             <div className="companions-plugin-empty">
               <p>No plugins connected yet.</p>
-              <p>Connect Linear, GitHub, Notion, Conductor, Slack, or Gmail below, or add a custom MCP server.</p>
+              <p>Connect Linear, GitHub, Notion, Conductor, Slack, Gmail, or Sentry below, or add a custom MCP server.</p>
             </div>
           ) : (
             <div className="companions-plugin-list">

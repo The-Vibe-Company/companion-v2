@@ -362,6 +362,7 @@ struct CreateCompanionView: View {
         case "conductor": return "Conductor"
         case "slack": return "Slack"
         case "gmail": return "Gmail"
+        case "sentry": return "Sentry"
         default:
             return provider.split(separator: "-").map { $0.capitalized }.joined(separator: " ")
         }

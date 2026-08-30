@@ -790,6 +790,7 @@ struct CompanionResourceSections: View {
         case "conductor": "Conductor"
         case "slack": "Slack"
         case "gmail": "Gmail"
+        case "sentry": "Sentry"
         default: provider.split(separator: "-").map { $0.capitalized }.joined(separator: " ")
         }
     }

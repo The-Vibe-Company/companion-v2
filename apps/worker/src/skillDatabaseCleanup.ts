@@ -6,6 +6,7 @@ import {
 } from "@companion/core";
 import { deleteSkillArchive } from "@companion/storage";
 import type { Supervisor } from "./billingSupervisor";
+import { captureWorkerError } from "./sentry";
 
 export interface SkillDatabaseObjectSweepResult {
   deleted: number;
@@ -38,7 +39,13 @@ export async function sweepSkillDatabaseObjects(input: {
     try {
       await deleteObject(deletion.storageKey, AbortSignal.timeout(deleteTimeoutMs));
       if (await complete({ deletion })) result.deleted += 1;
-    } catch {
+    } catch (error) {
+      captureWorkerError(error, {
+        supervisor: "skill-database",
+        operation: "object.delete",
+        level: "warning",
+        retryable: true,
+      });
       result.failed += 1;
       await deferDeletion({ deletion }).catch(() => false);
     }
@@ -67,7 +74,14 @@ export async function startSkillDatabaseCleanupSupervisor(input: {
   let active: Promise<void> | null = null;
   const run = () => {
     if (stopping || active) return;
-    active = sweep().then(() => undefined, () => undefined).finally(() => {
+    active = sweep().then(() => undefined, (error) => {
+      captureWorkerError(error, {
+        supervisor: "skill-database",
+        operation: "sweep",
+        level: "warning",
+        retryable: true,
+      });
+    }).finally(() => {
       active = null;
     });
   };

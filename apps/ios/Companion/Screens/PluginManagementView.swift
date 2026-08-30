@@ -45,6 +45,12 @@ private let curatedCompanionPlugins = [
         title: "Gmail",
         detail: "Search and read email, and create drafts for review in Gmail. It never sends mail."
     ),
+    CuratedCompanionPlugin(
+        id: "io.sentry/mcp",
+        provider: "sentry",
+        title: "Sentry",
+        detail: "Issues, events, traces, releases, and debugging context."
+    ),
 ]
 
 private struct LegacyPluginManagementView: View {
@@ -778,6 +784,7 @@ struct PluginMark: View {
         case "slack": return "number"
         case "conductor": return "square.stack.3d.up.fill"
         case "gmail": return "envelope.fill"
+        case "sentry": return "exclamationmark.triangle.fill"
         default: return "puzzlepiece.extension.fill"
         }
     }

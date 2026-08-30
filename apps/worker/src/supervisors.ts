@@ -1,4 +1,4 @@
-import { Sentry } from "./sentry";
+import { captureWorkerError } from "./sentry";
 import { startBillingSupervisor, type Supervisor } from "./billingSupervisor";
 import { startGitHubSupervisor } from "./githubSupervisor";
 import { startRoutineSupervisor } from "./routineSupervisor";
@@ -12,7 +12,20 @@ async function startSafely(name: string, start: SupervisorStart): Promise<Superv
     return await start();
   } catch (error) {
     // Supervisors are isolated: one optional subsystem failing configuration must not stop another.
-    Sentry.captureException(error);
+    captureWorkerError(error, {
+      supervisor: name === "billing"
+        ? "billing"
+        : name === "GitHub sync"
+          ? "github"
+          : name === "Skill Database cleanup"
+            ? "skill-database"
+            : name === "Companion routines"
+              ? "routines"
+              : "apns",
+      operation: "supervisor.start",
+      level: "error",
+      retryable: false,
+    });
     console.error(`${name} supervisor failed to start`);
     return null;
   }

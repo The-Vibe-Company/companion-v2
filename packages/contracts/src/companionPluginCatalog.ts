@@ -12,6 +12,7 @@ export const COMPANION_PLUGIN_OAUTH_SERVER_NAMES = [
   "build.conductor/mcp",
   "com.slack/mcp",
   "com.google.workspace/gmail",
+  "io.sentry/mcp",
 ] as const;
 export const companionPluginOAuthServerNameSchema = z.enum(
   COMPANION_PLUGIN_OAUTH_SERVER_NAMES,
@@ -22,7 +23,7 @@ export type CompanionPluginOAuthServerName = z.infer<
 
 export interface CompanionPluginCatalogEntry {
   server_name: CompanionPluginOAuthServerName;
-  provider: "linear" | "github" | "notion" | "conductor" | "slack" | "gmail";
+  provider: "linear" | "github" | "notion" | "conductor" | "slack" | "gmail" | "sentry";
   title: string;
   description: string;
 }
@@ -64,6 +65,12 @@ export const COMPANION_PLUGIN_CATALOG = [
     provider: "gmail",
     title: "Gmail",
     description: "Search and read email, and create drafts for review in Gmail.",
+  },
+  {
+    server_name: "io.sentry/mcp",
+    provider: "sentry",
+    title: "Sentry",
+    description: "Sentry issues, events, traces, releases, and debugging context.",
   },
 ] as const satisfies readonly CompanionPluginCatalogEntry[];
 

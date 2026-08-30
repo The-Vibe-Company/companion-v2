@@ -440,6 +440,14 @@ Google's Developer Preview remote at `https://gmailmcp.googleapis.com/mcp/v1`. T
 `tools/list` and rejects every other `tools/call` before token vending or upstream contact, so
 Google adding a send or mailbox-mutation tool cannot silently expand Companion authority.
 
+Sentry pins the official hosted remote at `https://mcp.sentry.dev/mcp` and uses its dynamic OAuth
+client registration. The member completes Sentry's own capability approval; Companion stores only
+the resulting encrypted labeled account and stages it through the same loopback token gateway as
+the other OAuth MCP remotes. Issue payloads, event context, breadcrumbs, tags, and request/user
+values are external untrusted data. The staged `plugin-sentry` skill tells Pi to investigate with
+the narrowest available organization/project scope and to make triage or project changes only on
+an explicit request.
+
 Git uses a credential helper and `gh` uses an audited wrapper; each command asks the same loopback
 gateway, so neither `GITHUB_TOKEN` nor `GH_TOKEN` is persisted in the Box environment or on disk.
 OAuth refresh updates the encrypted envelope with a credential-version CAS while keeping the
