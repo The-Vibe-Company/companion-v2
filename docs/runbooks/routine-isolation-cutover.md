@@ -92,6 +92,40 @@ PR #472 does not contain this fix. It makes routine context multiline-safe and u
 turn ID as the isolated run ID; it does not change `packages/box-runtime`, prepare recovery, or
 teardown.
 
+## Parallel-lane cancellation incident and one-time repair
+
+The first protocol-4 release made PostgreSQL lane-aware but left two process-level serial guards in
+place. `RuntimeScheduler` keyed active work by Companion id, so one replica released the second
+lane's valid claim. Routine startup also ran the main-broker idle repair; if a main turn was active,
+that repair recycled the main Pi even though the routine had its own process and socket. The active
+observer then reported an invocation change. Depending on the exact pre-accept checkpoint, routine
+startup could also leave a `routine_session_cancelled` terminal error.
+
+Migration `0144_companion_routine_lane_failure_accounting.sql` is the rollout and data-repair
+boundary for this incident. Deploy its release migration and the matching runtime SHA together:
+
+1. Keep the Companions feature gate enabled unless active ambiguity requires containment; no new
+   parallelism flag exists.
+2. Run the normal one-shot release migration as the migration owner. The migration installs
+   terminal run-outcome accounting and re-enables only a disabled routine whose old five-failure
+   marker is backed by five latest run outcomes carrying exact scheduler-cascade codes. The repaired
+   row is due once immediately; the worker computes its next cron instant through the ordinary
+   fenced fire path. Historical outcomes must also match the live definition-generation timestamp;
+   deleting and recreating a routine with the same UUID never transfers failure state.
+3. Deploy `apps/runtime` at the same SHA. Verify one main message during an active routine and one
+   routine fire during an active main turn. Both attempts must keep their original invocation ids
+   and settle independently.
+4. Use the named read-only routine diagnostic to confirm `enabled`, `consecutive_failures`, the next
+   fire, and recent run outcomes. Do not infer an abnormal cancellation from a Box-side
+   `.cancelled` tombstone alone: exact routine termination writes that marker for normal cleanup too.
+5. If a historical run is still `interrupted`, an Owner/Editor must explicitly Retry or Cancel that
+   run. The migration never resolves ambiguous external effects and never restarts or deletes a Box.
+
+After this migration, successful enqueue no longer clears the streak. A succeeded run clears it;
+only a terminal `failed` run increments it. `interrupted`, `cancelled`, and
+`routine_session_cancelled` do not count. Five genuine failures still disable the routine and clear
+`next_fire_at`.
+
 ## Ordered Railway cutover
 
 1. Record the exact target Git SHA and confirm that it includes migrations 0137 and 0139, the final #466

@@ -681,17 +681,10 @@ async function handleIsolatedRoutineAttempt(
     orgId: context.claim.orgId,
     material: materialValue,
   });
-  const mainState = await repairMainBrokerBeforeDispatch(context, await brokerState(context));
-  if (
-    !mainState.layoutCurrent
-    || !mainBrokerIsIdle(mainState)
-  ) {
-    throw new RuntimeInvariantError({
-      code: "pi_not_idle",
-      message: "The main Pi daemon was not idle before the isolated routine run.",
-      action: "restart_pi",
-    });
-  }
+  // The routine broker owns a separate process, socket, journal, and invocation. Shared layout and
+  // settings mutations are already fenced by the main/routine claim protocol, so observing or
+  // recycling the persistent main broker here would turn legitimate cross-lane concurrency into a
+  // main-turn interruption.
   const runtime = requiredRuntime(context);
   const authorizationBeforeStart = await context.session.reauthorize();
   if (

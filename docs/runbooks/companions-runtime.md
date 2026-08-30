@@ -5,6 +5,10 @@ purge, kill switch, incident response, and rollback. The state
 machine and protocol contract remain authoritative in `docs/companions-runtime.md`; Railway-specific
 configuration lives in `deploy/railway/README.md`.
 
+Routine-isolation rollout, parallel-lane incident recovery, and the owner-approved one-time
+re-enable procedure live in the
+[routine isolation runbook](./routine-isolation-cutover.md#parallel-lane-cancellation-incident-and-one-time-repair).
+
 ## Safety rules
 
 - `apps/runtime` is the only long-lived process with the Box key or permission to claim Runtime v2

@@ -1029,6 +1029,8 @@ export const companionTurns = pgTable(
     routineName: text("routine_name"),
     /** Immutable routine id snapshot; unlike routine_id it survives routine deletion. */
     routineSnapshotId: uuid("routine_snapshot_id"),
+    /** Exact routine-definition generation; prevents a reused UUID from adopting old outcomes. */
+    routineSnapshotCreatedAt: timestamp("routine_snapshot_created_at", { withTimezone: true }),
     /** Durable execution-mode pin. Once true, takeover never falls back to the main Pi session. */
     routineIsolated: boolean("routine_isolated").notNull().default(false),
     /** Content-addressed runtime-only main-conversation background pinned before Box contact. */

@@ -171,7 +171,8 @@ recycles the main Pi.
 `companion_runtime_leases` stores independently fenced `main` and `routine` leases per Companion,
 each with claim token, epoch, executor id, and expiration. A shared instance write epoch allocates
 monotonically increasing epochs across both lanes. Runtime sweeps every two seconds, claims for 30
-seconds, and renews every ten seconds. Eight work items may execute concurrently by default.
+seconds, and renews every ten seconds. Eight work items may execute concurrently by default; one
+Companion may occupy one main and one routine slot.
 
 Every checkpoint and terminal update includes the exact token and epoch in its predicate. Once a
 lease expires, its old holder cannot commit database progress. Provider calls are not fenceable, so
@@ -653,9 +654,15 @@ member timezone while continuing to show the schedule's own timezone as server t
 
 `client_message_id` is `uuidv5(routineId + '|' + scheduledFor.toISOString(), ROUTINE_FIRE_NAMESPACE)`.
 A scheduled instant older than ten minutes is `skipped_missed`. An in-flight turn for the same
-routine is `skipped_pileup`. Skips still advance `next_fire_at` and drop the lease. Five consecutive
-classified failures disable the routine. After delete, `routine_id` on historical turns is set null
-and `routine_name` remains as the transcript header.
+routine is `skipped_pileup`. Skips still advance `next_fire_at` and drop the lease. A successful
+enqueue does not reset failure accounting: the run's terminal result does. A succeeded run resets
+the streak, while a failed run increments it and the fifth consecutive genuine failure disables the
+routine. `interrupted` and `cancelled` runs do not count because neither proves the routine task
+failed; the historical `routine_session_cancelled` scheduler artifact is excluded for the same
+reason. Worker-side fire failures remain genuine classified failures. Every run also snapshots the
+routine definition's creation instant, so a deleted routine's late outcome cannot mutate a new
+definition that reuses its UUID. After delete, `routine_id` on historical turns is set null and
+`routine_name` remains as the transcript header.
 
 During the additive migration, the routine-origin turn id is also its stable run id, and a plain
 `routine_snapshot_id` preserves the routine UUID after definition deletion. Read-only history APIs
@@ -678,6 +685,13 @@ same Pi binary with the same tools and configuration in a run-scoped session dir
 lease may concurrently dispatch an ordinary turn to the persistent main Pi. This is two fenced
 scheduling lanes inside one runtime owner and one Box, not a second harness or provider. Box
 concurrency is bounded to two Pi processes: the main daemon and one isolated routine process.
+
+The process-local scheduler tracks exact claim tokens rather than Companion ids. PostgreSQL is the
+authority that admits at most one claim per lane, so a single runtime replica may execute the main
+and routine claims for one Companion together while still rejecting an accidentally duplicated
+claim. Routine startup never reads, idles, or recycles the persistent main broker; its own broker
+state and attempt-bound invocation are the only Pi identity used by routine observation. Conversely,
+ordinary main turns never inspect or terminate the run-scoped routine broker.
 
 Shared Box lifecycle and staging stays on the main lane and waits for the routine lane to be
 quiescent. An active or interrupted routine therefore prevents Pi recycle, Box restart, settings

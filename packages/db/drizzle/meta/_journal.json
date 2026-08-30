@@ -1009,6 +1009,13 @@
       "when": 1792170400000,
       "tag": "0143_companion_delete_routine_preemption",
       "breakpoints": true
+    },
+    {
+      "idx": 144,
+      "version": "7",
+      "when": 1792256800000,
+      "tag": "0144_companion_routine_lane_failure_accounting",
+      "breakpoints": true
     }
   ]
 }

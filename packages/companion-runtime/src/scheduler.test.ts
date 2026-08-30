@@ -111,7 +111,7 @@ describe("RuntimeScheduler", () => {
     expect(scheduler.snapshot().lastSweepCompletedAt).not.toBeNull();
   });
 
-  it("claims at most eight Companions and leaves no local duplicate active", async () => {
+  it("claims at most eight executions", async () => {
     const base = attemptClaim();
     const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(base) });
     store.claims.push(...Array.from({ length: 10 }, (_, index) => numberedClaim(index)));
@@ -156,10 +156,33 @@ describe("RuntimeScheduler", () => {
     expect(scheduler.snapshot().gateEnabled).toBe(false);
   });
 
-  it("releases a defensive duplicate claim for the same Companion", async () => {
+  it("runs distinct claims for the same Companion concurrently", async () => {
     const base = attemptClaim();
     const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(base) });
-    store.claims.push(numberedClaim(0, 7), numberedClaim(1, 7));
+    const first = { ...numberedClaim(0, 7), claimToken: "44444444-4444-4444-8444-000000000001" };
+    const second = { ...numberedClaim(1, 7), claimToken: "44444444-4444-4444-8444-000000000002" };
+    store.claims.push(first, second);
+    const engine = new HoldingEngine();
+    const scheduler = new RuntimeScheduler({
+      store,
+      engine,
+      clock: new TestClock(),
+      executorId: "scheduler-test",
+      claimsEnabled: true,
+    });
+
+    await scheduler.sweepOnce();
+
+    expect(engine.claims).toEqual([first, second]);
+    expect(store.releases).toBe(0);
+    expect(scheduler.snapshot().activeCount).toBe(2);
+  });
+
+  it("ignores a defensive duplicate claim with the same fence", async () => {
+    const base = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(base) });
+    const claim = numberedClaim(0, 7);
+    store.claims.push(claim, { ...claim });
     const engine = new HoldingEngine();
     const scheduler = new RuntimeScheduler({
       store,
@@ -172,7 +195,7 @@ describe("RuntimeScheduler", () => {
     await scheduler.sweepOnce();
 
     expect(engine.claims).toHaveLength(1);
-    expect(store.releases).toBe(1);
+    expect(store.releases).toBe(0);
     expect(scheduler.snapshot().activeCount).toBe(1);
   });
 

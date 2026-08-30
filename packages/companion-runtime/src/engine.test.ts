@@ -1045,11 +1045,10 @@ describe("RuntimeEngine attempts", () => {
       }),
     });
     const ports = fakePorts(store);
-    const brokerState = ports.pi.brokerState;
-    ports.pi.brokerState = async (input) => ({
-      ...await brokerState(input),
-      invocationId: mainInvocationId,
+    const mainBrokerState = vi.fn(async () => {
+      throw new Error("the isolated routine must not observe or recycle a busy main Pi");
     });
+    ports.pi.brokerState = mainBrokerState;
     const projectedInvocationIds: string[] = [];
     const projectEventBatch = ports.eventProjector.projectEventBatch;
     ports.eventProjector.projectEventBatch = async (input) => {
@@ -1081,6 +1080,7 @@ describe("RuntimeEngine attempts", () => {
     expect(store.routinePreparations).toBe(1);
     expect(ports.promptCalls).toHaveLength(0);
     expect(ports.routineStarts).toEqual([TURN_ID]);
+    expect(mainBrokerState).not.toHaveBeenCalled();
     expect(ports.routinePromptCalls).toHaveLength(1);
     expect(ports.routinePromptCalls[0]?.message).toContain("Routine context substrate v1:test:1");
     expect(ports.routinePromptCalls[0]?.message).toContain("Routine: conductor-progress-check");
