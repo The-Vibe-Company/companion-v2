@@ -54,8 +54,8 @@ later roster poll may honestly reintroduce a Companion the control plane still r
 row opens the Companion's chat directly; Settings in its long-press menu opens the one details page. That page owns the character,
 name, instructions, provider and model, routines and run history, notifications, Skills, plugins,
 selected MCP accounts, triggers, runtime restart controls, and Owner-only deletion. The chat header
-pill opens the same page, while its explicit **Open chat** action replaces the detail route so chat
-and detail do not accumulate duplicate cycles. Identity editing keeps the shared shape and color
+pill opens the same page. Details does not repeat the roster's one-tap chat action; Back returns to
+the route that opened it. Identity editing keeps the shared shape and color
 character picker; Viewer access remains read-only. Opening a thread advances that member's unread
 watermark, so there is no separate Mark as read command; Mark as unread remains available through
 the existing member-state endpoint. The current list contract projects unread as a Boolean, so

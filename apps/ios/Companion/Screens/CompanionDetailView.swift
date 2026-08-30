@@ -9,9 +9,6 @@ struct CompanionDetailView: View {
 
     let companion: CompanionSummary
     let onSaved: (CompanionSummary) -> Void
-    /// Replaces the detail route with the existing chat route. The roster owns this replacement
-    /// so opening chat from details never creates a second chat/detail cycle on the stack.
-    let onOpenChat: () -> Void
     let onDeletionStarted: (CompanionSummary, UUID) -> Void
     let onDeletionAccepted: (String, CompanionOperationSummary) -> Void
     let onDeletionFailed: (CompanionSummary, UUID, Error) -> Void
@@ -44,7 +41,6 @@ struct CompanionDetailView: View {
     init(
         companion: CompanionSummary,
         onSaved: @escaping (CompanionSummary) -> Void,
-        onOpenChat: @escaping () -> Void = {},
         onDeletionStarted: @escaping (CompanionSummary, UUID) -> Void = { _, _ in },
         onDeletionAccepted: @escaping (String, CompanionOperationSummary) -> Void,
         onDeletionFailed: @escaping (CompanionSummary, UUID, Error) -> Void = { _, _, _ in },
@@ -52,7 +48,6 @@ struct CompanionDetailView: View {
     ) {
         self.companion = companion
         self.onSaved = onSaved
-        self.onOpenChat = onOpenChat
         self.onDeletionStarted = onDeletionStarted
         self.onDeletionAccepted = onDeletionAccepted
         self.onDeletionFailed = onDeletionFailed
@@ -74,15 +69,7 @@ struct CompanionDetailView: View {
                         title: "Bot details",
                         leadingStyle: .back,
                         leadingAction: { dismiss() }
-                    ) {
-                        Button("Open chat", systemImage: "bubble.left.and.bubble.right") {
-                            onOpenChat()
-                        }
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(CompanionIOSTheme.actionBlue)
-                        .frame(minHeight: 44)
-                        .accessibilityIdentifier("companion.details.open-chat")
-                    }
+                    )
 
                     characterHero
                     titleCard

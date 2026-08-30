@@ -104,7 +104,6 @@ struct CompanionDetailDemoView: View {
                     CompanionDetailView(
                         companion: companion,
                         onSaved: { companion = $0 },
-                        onOpenChat: { showingDetails = false },
                         onDeletionStarted: { _, _ in
                             deletionRequested = true
                             showingDetails = false

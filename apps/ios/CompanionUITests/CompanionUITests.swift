@@ -1354,7 +1354,7 @@ final class CompanionUITests: XCTestCase {
 
         details.tap()
         XCTAssertTrue(app.staticTexts["Bot details"].waitForExistence(timeout: 3))
-        XCTAssertTrue(app.buttons["companion.details.open-chat"].exists)
+        XCTAssertFalse(app.buttons["companion.details.open-chat"].exists)
     }
 
     @MainActor
@@ -1719,7 +1719,6 @@ final class CompanionUITests: XCTestCase {
         start.press(forDuration: 0.05, thenDragTo: end)
 
         XCTAssertTrue(app.staticTexts["Bot details"].waitForExistence(timeout: 2))
-        XCTAssertTrue(app.buttons["companion.details.open-chat"].exists)
     }
 
     @MainActor
