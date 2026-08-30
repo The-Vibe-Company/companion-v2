@@ -189,9 +189,11 @@ orders its decision response, active attempt, and next routine turn. Main lifecy
 quiescent routine lane without preempting its renewal; permanent delete is the exception: its claim
 fences and settles an active/interrupted routine lane, then runtime terminates that exact run-scoped
 Pi invocation before contacting the provider. A routine Retry addresses only that run.
-Lifecycle calls that are known
-idempotent retry network, `429`, and `5xx` failures up to five times with jittered
-1/2/5/10/30-second backoff. Epoch predicates prevent an expired executor from committing after a
+Lifecycle and broker-observation calls that are known idempotent retry network, `429`, and `5xx`
+failures up to five times with jittered 1/2/5/10/30-second backoff. Observation-only broker state
+and journal reads also retry `409` while the provider is temporarily transitioning the Box. Every
+attempt revalidates the lease before Box contact. Prompt and decision writes never use this path.
+Epoch predicates prevent an expired executor from committing after a
 replacement claims the work, but database fencing never pretends to fence a provider side effect.
 
 Box identity uses the generation-qualified name `Companion <id> g<generation>`. Known ids are read

@@ -1033,6 +1033,83 @@ describe("RuntimeEngine attempts", () => {
     });
   });
 
+  it("survives transient provider failures while observing an accepted main attempt", async () => {
+    const claim = attemptClaim({
+      checkpoint: "dispatch_accepted",
+      checkpointSequence: 1n,
+      attemptStatus: "running",
+      turnStatus: "running",
+      dispatchState: "accepted",
+    });
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(claim, {
+        piInvocationId: PI_INVOCATION_ID,
+        eventCursor: 0n,
+      }),
+    });
+    const ports = fakePorts(store);
+    const clock = new TestClock();
+    const readBrokerState = ports.pi.brokerState;
+    let stateReads = 0;
+    ports.pi.brokerState = async (input) => {
+      stateReads += 1;
+      if (stateReads === 1) {
+        throw Object.assign(new Error("Box is updating"), { status: 409 });
+      }
+      return await readBrokerState(input);
+    };
+    const readEvents = ports.pi.readBrokerEvents;
+    let eventReads = 0;
+    ports.eventReads.push(assistantAndSettlementPage());
+    ports.pi.readBrokerEvents = async (input) => {
+      eventReads += 1;
+      if (eventReads === 1) {
+        throw Object.assign(new Error("provider unavailable"), { status: 502 });
+      }
+      return await readEvents(input);
+    };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports, clock })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(ports.promptCalls).toHaveLength(0);
+    expect(stateReads).toBe(2);
+    expect(eventReads).toBe(2);
+    expect(clock.sleeps).toEqual([1_000, 1_000]);
+    expect(store.settlements).toEqual([{ terminalStatus: "succeeded" }]);
+  });
+
+  it("stops accepted main read retries before Box contact after losing the fence", async () => {
+    const claim = attemptClaim({
+      checkpoint: "dispatch_accepted",
+      checkpointSequence: 1n,
+      attemptStatus: "running",
+      turnStatus: "running",
+      dispatchState: "accepted",
+    });
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(claim, {
+        piInvocationId: PI_INVOCATION_ID,
+        eventCursor: 0n,
+      }),
+    });
+    const ports = fakePorts(store);
+    const clock = new TestClock();
+    let stateReads = 0;
+    ports.pi.brokerState = async () => {
+      stateReads += 1;
+      store.renewReturnsNull = true;
+      throw Object.assign(new Error("provider unavailable"), { status: 502 });
+    };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports, clock })).execute(claim);
+
+    expect(result.outcome).toBe("fence_lost");
+    expect(stateReads).toBe(1);
+    expect(clock.sleeps).toEqual([1_000]);
+    expect(store.settlements).toHaveLength(0);
+  });
+
   it("runs a routine in its private Pi session and commits the first terminal return", async () => {
     const claim = attemptClaim();
     const mainInvocationId = "main-pi";
@@ -1096,6 +1173,106 @@ describe("RuntimeEngine attempts", () => {
     expect(ports.log.indexOf("project")).toBeLessThan(ports.log.indexOf("routine-ack"));
     expect(ports.log.indexOf("routine-ack")).toBeLessThan(ports.log.indexOf("routine-terminate"));
     expect(ports.routineTerminates).toEqual([TURN_ID]);
+  });
+
+  it("survives transient provider failures while observing an accepted routine", async () => {
+    const claim = attemptClaim({
+      checkpoint: "dispatch_accepted",
+      checkpointSequence: 1n,
+      attemptStatus: "running",
+      turnStatus: "running",
+      dispatchState: "accepted",
+    });
+    const routineInvocationId = `routine:${TURN_ID}:dispatch-v2:invocation`;
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(claim, {
+        piInvocationId: "main-pi",
+        commandPiInvocationId: routineInvocationId,
+        eventCursor: 0n,
+      }),
+      material: attemptMaterial({
+        routineId: ROUTINE_SNAPSHOT_ID,
+        routineName: "transient-provider-check",
+        routineIsolated: true,
+      }),
+    });
+    const ports = fakePorts(store);
+    const clock = new TestClock();
+    const readRoutineState = ports.pi.routineSession!.state;
+    let stateReads = 0;
+    ports.pi.routineSession!.state = async (input) => {
+      stateReads += 1;
+      if (stateReads === 1) {
+        throw Object.assign(new Error("provider unavailable"), { status: 502 });
+      }
+      return await readRoutineState(input);
+    };
+    const readRoutineEvents = ports.pi.routineSession!.read;
+    let eventReads = 0;
+    ports.routineEventReads.push({
+      events: [{
+        sequence: 1,
+        invocationId: routineInvocationId,
+        attemptId: ATTEMPT_ID,
+        kind: "pi_event",
+        event: { type: "agent_settled" },
+      }],
+      nextCursor: 1,
+      acknowledgedCursor: 0,
+      hasMore: false,
+    });
+    ports.pi.routineSession!.read = async (input) => {
+      eventReads += 1;
+      if (eventReads === 1) {
+        throw Object.assign(new Error("Box is updating"), { status: 409 });
+      }
+      return await readRoutineEvents(input);
+    };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports, clock })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(stateReads).toBeGreaterThanOrEqual(3);
+    expect(eventReads).toBe(2);
+    expect(clock.sleeps).toEqual([1_000, 1_000]);
+    expect(ports.routineTerminates).toEqual([TURN_ID]);
+  });
+
+  it("interrupts an accepted routine only after exhausting observation retries", async () => {
+    const claim = attemptClaim({
+      checkpoint: "dispatch_accepted",
+      checkpointSequence: 1n,
+      attemptStatus: "running",
+      turnStatus: "running",
+      dispatchState: "accepted",
+    });
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(claim, {
+        piInvocationId: "main-pi",
+        commandPiInvocationId: `routine:${TURN_ID}:dispatch-v2:invocation`,
+        eventCursor: 0n,
+      }),
+      material: attemptMaterial({
+        routineId: ROUTINE_SNAPSHOT_ID,
+        routineName: "provider-exhaustion-check",
+        routineIsolated: true,
+      }),
+    });
+    const ports = fakePorts(store);
+    const clock = new TestClock();
+    let stateReads = 0;
+    ports.pi.routineSession!.state = async () => {
+      stateReads += 1;
+      throw Object.assign(new Error("provider unavailable"), { status: 502 });
+    };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports, clock })).execute(claim);
+
+    expect(result.outcome).toBe("interrupted");
+    expect(stateReads).toBe(6);
+    expect(clock.sleeps).toEqual([1_000, 2_000, 5_000, 10_000, 30_000]);
+    expect(ports.routineEventReads).toHaveLength(0);
+    expect(store.settlements).toEqual([expect.objectContaining({ terminalStatus: "interrupted" })]);
   });
 
   it("fails closed when the isolated routine broker reports a replacement invocation", async () => {
@@ -2217,6 +2394,27 @@ describe("RuntimeEngine decisions", () => {
       nextCheckpoint: "write_intent",
       commandId: COMMAND_ID,
     });
+  });
+
+  it("retries a transient broker observation before delivering one decision response", async () => {
+    const { claim, store, ports } = decisionSetup();
+    const clock = new TestClock();
+    const readBrokerState = ports.pi.brokerState;
+    let stateReads = 0;
+    ports.pi.brokerState = async (input) => {
+      stateReads += 1;
+      if (stateReads === 1) {
+        throw Object.assign(new Error("Box is updating"), { status: 409 });
+      }
+      return await readBrokerState(input);
+    };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports, clock })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(stateReads).toBe(2);
+    expect(clock.sleeps).toEqual([1_000]);
+    expect(ports.decisionCalls).toEqual([{ attemptId: ATTEMPT_ID }]);
   });
 
   it("refuses a decision when Pi is bound to another attempt", async () => {
