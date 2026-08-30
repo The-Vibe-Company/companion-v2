@@ -290,10 +290,16 @@ private final class SuspendedRosterSyncURLProtocol: URLProtocol, @unchecked Send
             Self.lock.lock()
             Self.rosterRequestDidStart = true
             Self.lock.unlock()
-            _ = Self.releaseResponse.wait(timeout: .now() + 5)
-            statusCode = 200
-            headers = ["Content-Type": "application/json"]
-            payload = #"{"cursor":"old-fresh","changed_companions":[],"deleted_companion_ids":[],"companion_ids":[],"changed_sections":[],"deleted_section_ids":[],"section_ids":[]}"#
+            let releaseResponse = Self.releaseResponse
+            DispatchQueue.global().async { [weak self] in
+                _ = releaseResponse.wait(timeout: .now() + 5)
+                self?.finish(
+                    statusCode: 200,
+                    headers: ["Content-Type": "application/json"],
+                    payload: #"{"cursor":"old-fresh","changed_companions":[],"deleted_companion_ids":[],"companion_ids":[],"changed_sections":[],"deleted_section_ids":[],"section_ids":[]}"#
+                )
+            }
+            return
         case let path where path.hasSuffix("/thread-delta"):
             let cursor = URLComponents(
                 url: request.url!,
@@ -303,13 +309,20 @@ private final class SuspendedRosterSyncURLProtocol: URLProtocol, @unchecked Send
                 Self.lock.lock()
                 Self.oldThreadRequestDidStart = true
                 Self.lock.unlock()
-                _ = Self.releaseResponse.wait(timeout: .now() + 5)
+                let releaseResponse = Self.releaseResponse
+                DispatchQueue.global().async { [weak self] in
+                    _ = releaseResponse.wait(timeout: .now() + 5)
+                    self?.finish(
+                        statusCode: 200,
+                        headers: ["Content-Type": "application/json"],
+                        payload: #"{"cursor":"old-thread-fresh","reset_entries":false,"changed_entries":[],"deleted_event_ids":[],"thread":{"companion_id":"22222222-2222-4222-8222-222222222222","viewer_id":"user-1","read_only":false,"can_send":true,"transcription_available":true,"active_turn":null,"queued_count":0,"interrupted_turn":null}}"#
+                    )
+                }
+                return
             }
             statusCode = 200
             headers = ["Content-Type": "application/json"]
-            let responseCursor = cursor == "old-thread" ? "old-thread-fresh" : "new-thread-fresh"
-            let viewerID = cursor == "old-thread" ? "user-1" : "user-2"
-            payload = #"{"cursor":"\#(responseCursor)","reset_entries":false,"changed_entries":[],"deleted_event_ids":[],"thread":{"companion_id":"22222222-2222-4222-8222-222222222222","viewer_id":"\#(viewerID)","read_only":false,"can_send":true,"transcription_available":true,"active_turn":null,"queued_count":0,"interrupted_turn":null}}"#
+            payload = #"{"cursor":"new-thread-fresh","reset_entries":false,"changed_entries":[],"deleted_event_ids":[],"thread":{"companion_id":"22222222-2222-4222-8222-222222222222","viewer_id":"user-2","read_only":false,"can_send":true,"transcription_available":true,"active_turn":null,"queued_count":0,"interrupted_turn":null}}"#
         case "/v1/auth/logout":
             statusCode = 200
             headers = nil
@@ -327,6 +340,10 @@ private final class SuspendedRosterSyncURLProtocol: URLProtocol, @unchecked Send
             headers = ["Content-Type": "application/json"]
             payload = #"{"code":"not_found","message":"Unexpected test request"}"#
         }
+        finish(statusCode: statusCode, headers: headers, payload: payload)
+    }
+
+    private func finish(statusCode: Int, headers: [String: String]?, payload: String) {
         let response = HTTPURLResponse(
             url: request.url!,
             statusCode: statusCode,

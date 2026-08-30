@@ -184,7 +184,7 @@ jobs:
         run: bash scripts/run-skill-guards.sh
 
       - name: Test CompanionKit
-        if: needs.scope.outputs.ios == 'true' || needs.scope.outputs.macos == 'true'
+        if: needs.scope.outputs.ios != needs.scope.outputs.macos
         run: swift test --package-path apps/ios/CompanionKit
 
       - name: Build native app
@@ -209,12 +209,15 @@ jobs:
           -derivedDataPath "$RUNNER_TEMP/companion-mac-derived-data"
           CODE_SIGNING_ALLOWED=NO
 
-      # CompanionKit changes exercise both native clients. Keep them inside the same capped Apple
-      # job, but use independent derived-data trees so the two platform builds can run concurrently.
+      # Shared changes exercise CompanionKit and both native clients. Keep all three signals inside
+      # the same capped Apple job, with at most two compilers contending for the runner at once.
       - name: Validate native apps
         if: needs.scope.outputs.ios == 'true' && needs.scope.outputs.macos == 'true'
         shell: bash
         run: |
+          swift test --package-path apps/ios/CompanionKit &
+          companion_kit_pid=$!
+
           xcodebuild build \
             -quiet \
             -workspace apps/ios/Companion.xcworkspace \
@@ -224,6 +227,8 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/companion-derived-data" \
             CODE_SIGNING_ALLOWED=NO &
           ios_pid=$!
+
+          if wait "$companion_kit_pid"; then companion_kit_status=0; else companion_kit_status=$?; fi
 
           xcodebuild test \
             -quiet \
@@ -237,7 +242,7 @@ jobs:
 
           if wait "$ios_pid"; then ios_status=0; else ios_status=$?; fi
           if wait "$macos_pid"; then macos_status=0; else macos_status=$?; fi
-          if (( ios_status != 0 || macos_status != 0 )); then exit 1; fi
+          if (( companion_kit_status != 0 || ios_status != 0 || macos_status != 0 )); then exit 1; fi
 
   quality:
     name: Quality Node 22
