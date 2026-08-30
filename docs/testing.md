@@ -275,7 +275,10 @@ bounded long-thread cursors, historical reset correctness, side-effect-free unre
 background reads, and APNs `content-available` coexistence with ordinary alerts. A transport
 regression test also proves that iOS omits oversized legacy cursors, recovers once without a cursor
 after proxy `414`/`431` rejection, and that newly issued long-thread cursors remain below the safe
-query budget.
+query budget. The server regression covers a valid cursor followed by queued entries with tied
+ordinals: every distinct event remains ordered by ordinal then event id, the returned cursor
+replays, and the route does not return `400`. Native iOS separately proves the same one-shot
+cursorless recovery for a server `400`.
 
 Run targeted affected-package tests first, followed by:
 

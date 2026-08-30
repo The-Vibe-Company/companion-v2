@@ -224,6 +224,7 @@ function threadEntry(
   eventId: string,
   ordinal: number,
   content: string,
+  queued = false,
 ) {
   return {
     event_id: eventId,
@@ -238,7 +239,7 @@ function threadEntry(
     routine: null,
     trigger: null,
     turn_id: null,
-    queued: false,
+    queued,
     attachments: [],
     created_at: NOW,
   };
@@ -915,6 +916,64 @@ describe("Companions Runtime v2 API", () => {
       `/v1/companions/${COMPANION_ID}/thread-delta?cursor=${encodeURIComponent(initial.cursor)}`,
     );
     await expect(replayResponse.json()).resolves.toEqual(next);
+  });
+
+  it("preserves queued entries that share ordinals across a thread cursor", async () => {
+    const app = appWithRoutes();
+    const initialThread: CompanionThread = {
+      ...thread,
+      entries: [threadEntry("event:initial", 1, "initial")],
+    };
+    coreMocks.syncCompanionThreadV2.mockResolvedValue(initialThread);
+    const initialResponse = await app.request(`/v1/companions/${COMPANION_ID}/thread-delta`);
+    // SAFETY: Every successful thread-delta response carries the opaque cursor asserted here.
+    const initial = await initialResponse.json() as { cursor: string };
+    expect(initialResponse.status).toBe(200);
+
+    const queuedThread: CompanionThread = {
+      ...initialThread,
+      entries: [
+        threadEntry("event:initial", 1, "initial"),
+        threadEntry("event:gamma", 2, "gamma", true),
+        threadEntry("event:alpha", 2, "alpha", true),
+        threadEntry("event:beta", 2, "beta"),
+      ],
+    };
+    coreMocks.syncCompanionThreadV2.mockResolvedValue(queuedThread);
+    const response = await app.request(
+      `/v1/companions/${COMPANION_ID}/thread-delta?cursor=${encodeURIComponent(initial.cursor)}`,
+    );
+    expect(response.status).toBe(200);
+    // SAFETY: This test controls the successful route fixture and asserts its bounded delta shape.
+    const next = await response.json() as {
+      cursor: string;
+      reset_entries: boolean;
+      changed_entries: Array<{ event_id: string; queued: boolean; ordinal: number }>;
+      deleted_event_ids: string[];
+    };
+    expect(next.reset_entries).toBe(false);
+    expect(next.changed_entries.map((item) => item.event_id)).toEqual([
+      "event:alpha",
+      "event:beta",
+      "event:gamma",
+    ]);
+    expect(new Set(next.changed_entries.map((item) => item.event_id)).size)
+      .toBe(next.changed_entries.length);
+    expect(next.changed_entries.map((item) => item.ordinal)).toEqual([2, 2, 2]);
+    expect(next.changed_entries.filter((item) => item.queued).map((item) => item.event_id))
+      .toEqual(["event:alpha", "event:gamma"]);
+    expect(next.deleted_event_ids).toEqual([]);
+
+    const replayResponse = await app.request(
+      `/v1/companions/${COMPANION_ID}/thread-delta?cursor=${encodeURIComponent(next.cursor)}`,
+    );
+    expect(replayResponse.status).toBe(200);
+    await expect(replayResponse.json()).resolves.toMatchObject({
+      cursor: next.cursor,
+      reset_entries: false,
+      changed_entries: [],
+      deleted_event_ids: [],
+    });
   });
 
   it("replaces Viewer turn and attempt diagnostics with one generic non-actionable error", async () => {

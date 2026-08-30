@@ -1107,7 +1107,10 @@ legacy cursors and retries a proxy `414`/`431` response once without a cursor. T
 synchronized thread in memory while bounding only its persisted tail. These endpoints may compute
 the current authorized PostgreSQL projection but send only its delta in the ordinary case; they
 never advance unread state, wake, or observe Box or Pi. The visible
-thread clears unread explicitly. APNs invalidation and app foregrounding reuse the same
+thread clears unread explicitly. Thread synchronization treats `event_id` as entry identity.
+Historical ordinal ties are ordered by event id and preserved in the bounded cursor instead of
+turning a valid refresh into `400`; native iOS retries a server cursor `400` once without the cursor
+as a full replacement sync. APNs invalidation and app foregrounding reuse the same
 synchronization path.
 
 ### Native Apple clients
