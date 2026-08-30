@@ -35,6 +35,8 @@
     "dev:app": "pnpm exec concurrently -k -n api,worker,runtime,web \"bash scripts/dev-process.sh api env COMPANION_API_HOST=${COMPANION_API_HOST:-127.0.0.1} pnpm --filter @companion/api dev\" \"bash scripts/dev-worker.sh pnpm --filter @companion/worker dev\" \"bash scripts/dev-runtime.sh pnpm --filter @companion/runtime dev\" \"bash scripts/dev-process.sh web pnpm --filter @companion/web dev --hostname ${COMPANION_WEB_HOST:-127.0.0.1} --port ${COMPANION_WEB_PORT:-3000}\"",
     "dev:check": "bash scripts/dev-stack-check.sh",
     "ios:dev": "bash apps/ios/scripts/dev-conductor.sh",
+    "ios:live": "bash scripts/dev-ios-live.sh",
+    "ios:live:stop": "bash scripts/dev-ios-live.sh stop",
     "ios:test": "xcodebuildmcp swift-package test --package-path apps/ios/CompanionKit",
     "lint": "pnpm lint:anti-slop && turbo run lint",
     "lint:anti-slop": "node scripts/lint-anti-slop.mjs",

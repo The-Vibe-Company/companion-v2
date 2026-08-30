@@ -20,6 +20,7 @@ const HYGIENE_TESTS = [
   "scripts/macos-devx.test.mjs",
   "scripts/ios-release.test.mjs",
   "scripts/ios-e2e-fixture.test.mjs",
+  "scripts/ios-local-live.test.mjs",
   "scripts/verify-change.test.mjs",
 ];
 
@@ -138,6 +139,8 @@ function requiresDevStackCheck(file) {
     "docker-compose.yml",
     "scripts/box-lab.sh",
     "scripts/dev-conductor.sh",
+    "scripts/dev-environment.sh",
+    "scripts/dev-ios-live.sh",
     "scripts/dev-process.sh",
     "scripts/dev-runtime.sh",
     "scripts/dev-runtime-mode.sh",

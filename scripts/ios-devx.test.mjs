@@ -18,13 +18,14 @@ function tomlSection(source, name) {
   return source.slice(start, next === -1 ? source.length : next);
 }
 
-test("Conductor keeps the root stack default and exposes native iOS locally", () => {
+test("Conductor keeps the root stack default and exposes the complete native iOS run locally", () => {
   const settings = read(".conductor/settings.toml");
   assert.match(tomlSection(settings, "scripts.run.dev"), /^default = true$/m);
 
-  const ios = tomlSection(settings, "scripts.run.ios");
+  const ios = tomlSection(settings, "scripts.run.\"iOS (live Box)\"");
   assert.match(ios, /^available_in = \["local"\]$/m);
-  assert.match(ios, /^command = "pnpm ios:dev"$/m);
+  assert.match(ios, /^command = "pnpm ios:live"$/m);
+  assert.doesNotMatch(settings, /\[scripts\.run\.ios\]/);
   assert.doesNotMatch(settings, /scripts\.run\.mobile-|mobile:android|mobile:metro/);
 });
 
@@ -913,6 +914,29 @@ test("the iOS launcher derives the API port from Conductor and uses XcodeBuildMC
   assert.match(launcher, /SIMULATOR_ARGS=\(--simulator-id/);
   assert.match(launcher, /-COMPANION_API_URL/);
   assert.doesNotMatch(launcher, /iPhone 17|\bxcodebuild\b|\bxcrun\b|\bsimctl\b/);
+});
+
+test("the local live iOS action uses Conductor nonconcurrency and the existing stack lock", () => {
+  const settings = read(".conductor/settings.toml");
+  const packageJson = JSON.parse(read("package.json"));
+  const launcher = read("scripts/dev-ios-live.sh");
+  const stack = read("scripts/dev-conductor.sh");
+
+  assert.match(settings, /^run_mode = "nonconcurrent"$/m);
+  assert.match(settings, /^\[scripts\.run\."iOS \(live Box\)"\]$/m);
+  assert.match(settings, /^command = "pnpm ios:live"$/m);
+  assert.equal(packageJson.scripts["ios:live"], "bash scripts/dev-ios-live.sh");
+  assert.equal(packageJson.scripts["ios:live:stop"], "bash scripts/dev-ios-live.sh stop");
+  assert.match(launcher, /COMPANION_DEV_BOX_MODE=live/);
+  assert.match(launcher, /bash scripts\/dev-conductor\.sh/);
+  assert.match(launcher, /bash scripts\/dev-ios-live\.sh client/);
+  assert.match(launcher, /--kill-others-on-fail/);
+  assert.match(launcher, /bash scripts\/dev-process\.sh ios-local node scripts\/ios-local-live\.mjs bootstrap/);
+  assert.match(launcher, /bash apps\/ios\/scripts\/dev-conductor\.sh/);
+  assert.match(launcher, /wait_for_endpoint "API" "http:\/\/127\.0\.0\.1:\$\(\(base_port \+ 1\)\)\/health"/);
+  assert.match(launcher, /wait_for_endpoint "Runtime" "http:\/\/127\.0\.0\.1:\$\(\(base_port \+ 7\)\)\/healthz"/);
+  assert.doesNotMatch(launcher, /\bflock\b|lockfile|\.lock|\bxcodebuild\b|\bxcrun\b|\bsimctl\b/);
+  assert.match(stack, /acquire_run_lock/);
 });
 
 test("CI keeps Apple Quality valuable, native, and under five minutes", () => {

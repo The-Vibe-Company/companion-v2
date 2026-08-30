@@ -5,7 +5,7 @@ spotlight_testing = false
 [scripts]
 setup = "bash scripts/setup-conductor.sh"
 archive = "bash scripts/dev-conductor.sh archive"
-run_mode = "concurrent"
+run_mode = "nonconcurrent"
 
 [scripts.run.dev]
 command = "COMPANION_COMPANIONS_ENABLED=true COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS=thevibecompany.co bash scripts/dev-conductor.sh"
@@ -21,7 +21,7 @@ icon = "box"
 command = "pnpm verify:change"
 icon = "test-tube"
 
-[scripts.run.ios]
+[scripts.run."iOS (live Box)"]
 available_in = ["local"]
-command = "pnpm ios:dev"
+command = "pnpm ios:live"
 icon = "smartphone"

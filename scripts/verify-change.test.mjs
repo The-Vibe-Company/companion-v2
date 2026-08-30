@@ -171,6 +171,8 @@ for (const conductorLauncherPath of [
   ".conductor/settings.toml",
   "scripts/setup-conductor.sh",
   "scripts/box-lab.sh",
+  "scripts/dev-environment.sh",
+  "scripts/dev-ios-live.sh",
 ]) {
   test(`${conductorLauncherPath} schedules the native development stack check`, () => {
     const plan = createVerificationPlan([conductorLauncherPath], {
