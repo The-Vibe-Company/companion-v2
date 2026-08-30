@@ -23,6 +23,27 @@ private final class MemberTimezoneMockURLProtocol: URLProtocol, @unchecked Senda
     override func stopLoading() {}
 }
 
+private final class TriggerRoutesMockURLProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        do {
+            let handler = try #require(Self.handler)
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
 private func memberTimezoneRequestBody(_ request: URLRequest) throws -> Data {
     if let body = request.httpBody { return body }
     let stream = try #require(request.httpBodyStream)
@@ -106,8 +127,8 @@ func profileAndResourceInputsEncodeSharedRoutePayloads() throws {
 @Test
 func triggerRegistrationRetryAndHistoryUseSharedRoutes() async throws {
     let configuration = URLSessionConfiguration.ephemeral
-    configuration.protocolClasses = [MemberTimezoneMockURLProtocol.self]
-    MemberTimezoneMockURLProtocol.handler = { request in
+    configuration.protocolClasses = [TriggerRoutesMockURLProtocol.self]
+    TriggerRoutesMockURLProtocol.handler = { request in
         let requestURL = try #require(request.url)
         let data: Data
         switch (requestURL.path, request.httpMethod) {
@@ -130,7 +151,7 @@ func triggerRegistrationRetryAndHistoryUseSharedRoutes() async throws {
             headerFields: nil
         )), data)
     }
-    defer { MemberTimezoneMockURLProtocol.handler = nil }
+    defer { TriggerRoutesMockURLProtocol.handler = nil }
 
     let client = APIClient(
         baseURL: URL(string: "http://127.0.0.1:3001")!,
