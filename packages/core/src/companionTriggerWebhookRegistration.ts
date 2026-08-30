@@ -26,6 +26,7 @@ export class CompanionTriggerRegistrationError extends Error {
       | "target_required"
       | "provider_unwired"
       | "plugin_not_attached"
+      | "provider_account_ambiguous"
       | "plugin_auth_invalid"
       | "provider_rejected",
     message: string,
@@ -43,13 +44,15 @@ const registrationTriggerSchema = z.object({
   id: z.string().uuid(),
   companion_id: z.string().uuid(),
   name: z.string(),
-  provider: z.enum(["linear", "github", "custom"]),
+  provider: z.enum(["webhook", "linear", "github", "custom"]),
+  provider_account_id: z.string().uuid().nullable().default(null),
   target: z.object({ repo: z.string().optional(), events: z.array(z.string()).optional() })
     .nullable()
     .default(null),
   webhook_url: z.string().url(),
   secret: z.string().regex(/^[0-9a-f]{32,128}$/),
   remote_hook_id: z.string().nullable(),
+  remote_hook_account_id: z.string().uuid().nullable().default(null),
 });
 
 type RegistrationTrigger = z.infer<typeof registrationTriggerSchema>;
@@ -107,6 +110,7 @@ interface AttachedGithubAccount {
 async function loadAttachedGithubAccount(input: {
   orgId: string;
   companionId: string;
+  providerAccountId?: string | null;
   database: Db;
 }): Promise<AttachedGithubAccount> {
   const result = await input.database.execute(sql`
@@ -120,15 +124,24 @@ async function loadAttachedGithubAccount(input: {
     where companion.org_id = ${input.orgId}::uuid
       and companion.id = ${input.companionId}::uuid
       and account.provider = 'github'
+      and (${input.providerAccountId ?? null}::uuid is null
+        or account.id = ${input.providerAccountId ?? null}::uuid)
     order by account.updated_at desc
-    limit 1
+    limit 2
   `);
   // SAFETY: database.execute resolves to an iterable of rows; this query selects exactly the AttachedGithubQueryRow columns above.
-  const [row] = Array.from(result as Iterable<AttachedGithubQueryRow>);
+  const found = Array.from(result as Iterable<AttachedGithubQueryRow>);
+  const [row] = found;
   if (!row) {
     throw new CompanionTriggerRegistrationError(
       "plugin_not_attached",
       "the github plugin must be attached before registering webhooks",
+    );
+  }
+  if (found.length > 1) {
+    throw new CompanionTriggerRegistrationError(
+      "provider_account_ambiguous",
+      "multiple attached github accounts are eligible; choose provider_account_id",
     );
   }
   return {
@@ -225,7 +238,7 @@ async function linearTriggerKeyToken(input: {
   if (!envelope) {
     throw new CompanionTriggerRegistrationError(
       "provider_unwired",
-      "linear registration needs a Linear API key stored with the plugin; store one first or paste the webhook URL",
+      "linear registration needs the minimal encrypted webhook credential",
     );
   }
   let token: string;
@@ -352,10 +365,10 @@ export async function registerCompanionTriggerWebhookV2(input: {
     return registerLinearTriggerWebhook(input, trigger);
   }
   if (trigger.provider === "custom") {
-    throw new CompanionTriggerRegistrationError(
-      "provider_unwired",
-      "custom triggers have no provider to register with; paste the webhook URL into your service",
-    );
+    return { status: "manual" };
+  }
+  if (trigger.provider === "webhook") {
+    return { status: "manual" };
   }
   if (!trigger.target?.repo || !trigger.target.events?.length) {
     throw new CompanionTriggerRegistrationError(
@@ -364,8 +377,27 @@ export async function registerCompanionTriggerWebhookV2(input: {
     );
   }
 
-  const account = await loadAttachedGithubAccount(input);
-  const token = githubTokenOf(account, input.orgId, input.masterKey);
+  let account: AttachedGithubAccount;
+  let token: string;
+  try {
+    account = await loadAttachedGithubAccount({
+      ...input,
+      providerAccountId: trigger.provider_account_id,
+    });
+    token = githubTokenOf(account, input.orgId, input.masterKey);
+  } catch (error) {
+    const message = error instanceof CompanionTriggerRegistrationError
+      ? error.message
+      : "github credential could not be resolved";
+    await persistRegistration({
+      ...input,
+      accountId: trigger.provider_account_id,
+      remoteHookId: null,
+      status: "failed",
+      error: sanitizeCompanionRuntimeError(message).slice(0, 500),
+    });
+    return { status: "failed", error: message };
+  }
   const doFetch = input.fetch ?? globalThis.fetch;
   // Encode each path segment separately so the owner/repo slash survives.
   const repoPath = trigger.target.repo.split("/").map(encodeURIComponent).join("/");
@@ -397,7 +429,7 @@ export async function registerCompanionTriggerWebhookV2(input: {
   } catch (error) {
     await persistRegistration({
       ...input,
-      accountId: null,
+      accountId: account.id,
       remoteHookId: null,
       status: "failed",
       error: sanitizeCompanionRuntimeError(
@@ -413,7 +445,7 @@ export async function registerCompanionTriggerWebhookV2(input: {
     ).slice(0, 500);
     await persistRegistration({
       ...input,
-      accountId: null,
+      accountId: account.id,
       remoteHookId: null,
       status: "failed",
       error: message,
@@ -424,7 +456,7 @@ export async function registerCompanionTriggerWebhookV2(input: {
   if (!created.success) {
     await persistRegistration({
       ...input,
-      accountId: null,
+      accountId: account.id,
       remoteHookId: null,
       status: "failed",
       error: "github returned an unreadable webhook payload",
@@ -506,7 +538,10 @@ export async function unregisterCompanionTriggerWebhookV2(input: {
     });
     return;
   }
-  const account = await loadAttachedGithubAccount(input);
+  const account = await loadAttachedGithubAccount({
+    ...input,
+    providerAccountId: trigger.remote_hook_account_id ?? trigger.provider_account_id,
+  });
   const token = githubTokenOf(account, input.orgId, input.masterKey);
   const doFetch = input.fetch ?? globalThis.fetch;
   const repoPath = trigger.target.repo.split("/").map(encodeURIComponent).join("/");

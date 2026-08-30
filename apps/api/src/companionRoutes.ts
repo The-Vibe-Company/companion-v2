@@ -38,6 +38,7 @@ import {
   CompanionRoutineRunNotFoundError,
   CompanionTriggerDecisionUpdateError,
   CompanionTriggerNotFoundError,
+  CompanionTriggerRunNotFoundError,
   CompanionDecisionConflictError,
   CompanionDecisionNotFoundError,
   CompanionShareForbiddenError,
@@ -74,12 +75,14 @@ import {
   fireCompanionTrigger,
   getCompanionDecisionV2,
   getCompanionRoutineRunV2,
+  getCompanionTriggerRunV2,
   getCompanionTriggerForWebhook,
   getCompanion,
   getCompanionV2,
   listCompanionsV2,
   listCompanionRoutinesV2,
   listCompanionRoutineRunsV2,
+  listCompanionTriggerRunsV2,
   listCompanionTriggersV2,
   readCompanionAttachmentV2,
   readCompanionThreadV2,
@@ -126,6 +129,7 @@ import {
   COMPANION_TRANSCRIPTION_AUDIO_CONTENT_TYPE,
   COMPANION_TRANSCRIPTION_AUDIO_MAX_BYTES,
   type CompanionAttachmentUpload,
+  type CompanionTrigger,
   type CompanionRuntimeSafeError,
   type CompanionThread,
   type CompanionTurn,
@@ -137,6 +141,8 @@ import {
   createCompanionRoutineInputSchema,
   companionRoutineRunListQuerySchema,
   companionRoutineRunDetailQuerySchema,
+  companionTriggerRunListQuerySchema,
+  companionTriggerRunDetailQuerySchema,
   createCompanionTriggerInputSchema,
   declaredCompanionAttachmentContentType,
   isCompanionAttachmentImage,
@@ -244,11 +250,15 @@ function defaultCompanionRouteDependencies() {
     transcribeCompanionAudio,
     answerCompanionRoutineDecisionV2,
     listCompanionTriggersV2,
+    listCompanionTriggerRunsV2,
+    getCompanionTriggerRunV2,
     createCompanionTriggerV2,
     updateCompanionTriggerV2,
     deleteCompanionTriggerV2,
     rotateCompanionTriggerSecretV2,
     answerCompanionTriggerDecisionV2,
+    registerCompanionTriggerWebhookV2,
+    unregisterCompanionTriggerWebhookV2,
     getCompanionTriggerForWebhook,
     fireCompanionTrigger,
     failCompanionTriggerFire,
@@ -337,6 +347,38 @@ function companionPluginOAuthRedirectUri(env: NodeJS.ProcessEnv): string {
 /** Base an external service posts trigger webhooks to; same resolution as the OAuth callback. */
 function companionWebhookBaseUrl(env: NodeJS.ProcessEnv): string {
   return env.COMPANION_WEB_URL ?? "http://127.0.0.1:3000";
+}
+
+function triggerRegistrationErrorCode(error: unknown): string | null {
+  const parsed = z.object({ code: z.string() }).passthrough().safeParse(error);
+  return parsed.success ? parsed.data.code : null;
+}
+
+/**
+ * Only legacy providers with an adapter and enough delivery metadata are auto-wired. The default
+ * webhook provider and custom/unknown delivery hints remain valid trigger definitions with no
+ * remote registration side effect.
+ */
+function supportsAutomaticTriggerRegistration(trigger: CompanionTrigger): boolean {
+  if (trigger.provider === "linear") return true;
+  return trigger.provider === "github"
+    && Boolean(trigger.target?.repo && trigger.target.events?.length);
+}
+
+function isOptionalTriggerRegistrationFailure(error: unknown): boolean {
+  return ["provider_unwired", "target_required", "plugin_not_attached"].includes(
+    triggerRegistrationErrorCode(error) ?? "",
+  );
+}
+
+function triggerIdFromDecisionResult(result: unknown): string | null {
+  if (typeof result === "string") return result;
+  const parsed = z.object({
+    trigger_id: z.string().uuid().nullable().optional(),
+    id: z.string().uuid().nullable().optional(),
+  }).passthrough().safeParse(result);
+  if (!parsed.success) return null;
+  return parsed.data.trigger_id ?? parsed.data.id ?? null;
 }
 
 function companionPluginOAuthCookieName(nonce: string): string {
@@ -515,6 +557,7 @@ function errorStatus<T>(error: T): number {
   if (error instanceof CompanionRoutineNotFoundError) return 404;
   if (error instanceof CompanionRoutineRunNotFoundError) return 404;
   if (error instanceof CompanionTriggerNotFoundError) return 404;
+  if (error instanceof CompanionTriggerRunNotFoundError) return 404;
   if (error instanceof CompanionRoutineInvalidError) return 400;
   if (error instanceof CompanionDecisionConflictError) return 409;
   if (error instanceof CompanionRuntimeForbiddenError) return 403;
@@ -685,11 +728,15 @@ export function registerCompanionRoutes(
     transcribeCompanionAudio,
     answerCompanionRoutineDecisionV2,
     listCompanionTriggersV2,
+    listCompanionTriggerRunsV2,
+    getCompanionTriggerRunV2,
     createCompanionTriggerV2,
     updateCompanionTriggerV2,
     deleteCompanionTriggerV2,
     rotateCompanionTriggerSecretV2,
     answerCompanionTriggerDecisionV2,
+    registerCompanionTriggerWebhookV2,
+    unregisterCompanionTriggerWebhookV2,
     readCompanionThreadV2,
     syncCompanionThreadV2,
     retryCompanionTurnV2,
@@ -708,6 +755,87 @@ export function registerCompanionRoutes(
     reorderCompanionSections,
     assignCompanionSection,
   } = { ...defaultCompanionRouteDependencies(), ...dependencies };
+
+  async function refreshCompanionTrigger(input: {
+    orgId: string;
+    companionId: string;
+    triggerId: string;
+    database: Db;
+    fallback: CompanionTrigger;
+  }): Promise<CompanionTrigger> {
+    const triggers = await listCompanionTriggersV2({
+      orgId: input.orgId,
+      companionId: input.companionId,
+      database: input.database,
+      webhookBaseUrl: companionWebhookBaseUrl(env),
+    });
+    return triggers.find((trigger) => trigger.id === input.triggerId) ?? input.fallback;
+  }
+
+  async function autoRegisterCompanionTrigger(input: {
+    orgId: string;
+    companionId: string;
+    trigger: CompanionTrigger;
+    database: Db;
+  }): Promise<CompanionTrigger> {
+    const trigger = input.trigger;
+    if (!supportsAutomaticTriggerRegistration(trigger)) return trigger;
+    if (trigger.registration_status === "registered" && trigger.remote_hook_id) return trigger;
+
+    let registration: Awaited<ReturnType<typeof registerCompanionTriggerWebhookV2>>;
+    try {
+      registration = await registerCompanionTriggerWebhookV2({
+        orgId: input.orgId,
+        companionId: input.companionId,
+        triggerId: trigger.id,
+        webhookBaseUrl: companionWebhookBaseUrl(env),
+        masterKey: loadSecretsMasterKey(env.COMPANION_SECRETS_MASTER_KEY),
+        database: input.database,
+      });
+    } catch (error) {
+      // A missing target/account is a valid manually-managed trigger. Provider/auth failures are
+      // surfaced by the registration helper when it can persist a failed lifecycle state.
+      if (isOptionalTriggerRegistrationFailure(error)) return trigger;
+      throw error;
+    }
+
+    if (registration.status === "manual") return trigger;
+    return refreshCompanionTrigger({
+      orgId: input.orgId,
+      companionId: input.companionId,
+      triggerId: trigger.id,
+      database: input.database,
+      fallback: {
+        ...trigger,
+        registration_status: registration.status,
+        remote_hook_id: registration.status === "registered"
+          ? registration.remote_hook_id
+          : trigger.remote_hook_id ?? null,
+        last_registration_error: registration.status === "failed"
+          ? registration.error
+          : trigger.last_registration_error ?? null,
+      },
+    });
+  }
+
+  async function unregisterCompanionTriggerIfWired(input: {
+    orgId: string;
+    companionId: string;
+    trigger: CompanionTrigger;
+    database: Db;
+  }): Promise<void> {
+    const trigger = input.trigger;
+    if (!supportsAutomaticTriggerRegistration(trigger)) return;
+    if (trigger.registration_status !== "registered" && !trigger.remote_hook_id) return;
+    await unregisterCompanionTriggerWebhookV2({
+      orgId: input.orgId,
+      companionId: input.companionId,
+      triggerId: trigger.id,
+      webhookBaseUrl: companionWebhookBaseUrl(env),
+      masterKey: loadSecretsMasterKey(env.COMPANION_SECRETS_MASTER_KEY),
+      database: input.database,
+    });
+  }
 
   async function tenant<T>(
     c: Context<{ Variables: ApiVariables }>,
@@ -1638,23 +1766,75 @@ export function registerCompanionRoutes(
     }
   });
 
+  app.get("/v1/companions/:id/triggers/:triggerId/runs", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const triggerId = companionIdSchema.parse(c.req.param("triggerId"));
+      const query = companionTriggerRunListQuerySchema.parse({
+        limit: c.req.query("limit"),
+        cursor: c.req.query("cursor"),
+      });
+      const history = await tenant(c, ({ orgId, database }) =>
+        listCompanionTriggerRunsV2({
+          orgId,
+          companionId,
+          triggerId,
+          limit: query.limit,
+          cursor: query.cursor,
+          database,
+        }));
+      c.header("Cache-Control", "private, no-store");
+      return c.json(history);
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.get("/v1/companions/:id/trigger-runs/:runId", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const runId = companionIdSchema.parse(c.req.param("runId"));
+      const query = companionTriggerRunDetailQuerySchema.parse({
+        entry_limit: c.req.query("entry_limit"),
+        entry_cursor: c.req.query("entry_cursor"),
+      });
+      const run = await tenant(c, ({ orgId, database }) =>
+        getCompanionTriggerRunV2({
+          orgId,
+          companionId,
+          runId,
+          entryLimit: query.entry_limit,
+          entryCursor: query.entry_cursor,
+          database,
+        }));
+      c.header("Cache-Control", "private, no-store");
+      return c.json({ run });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
   app.post("/v1/companions/:id/triggers", async (c) => {
     try {
       const companionId = companionIdSchema.parse(c.req.param("id"));
       const body = createCompanionTriggerInputSchema.parse(await c.req.json());
-      const trigger = await tenant(c, ({ orgId, database }) =>
-        createCompanionTriggerV2({
+      const trigger = await tenant(c, async ({ orgId, database }) => {
+        const created = await createCompanionTriggerV2({
           orgId,
           companionId,
           id: body.id,
           name: body.name,
           prompt: body.prompt,
+          mode: body.mode,
           provider: body.provider,
+          providerAccountId: body.provider_account_id,
           target: body.target ?? null,
           enabled: body.enabled,
           database,
           webhookBaseUrl: companionWebhookBaseUrl(env),
-        }));
+        });
+        return autoRegisterCompanionTrigger({ orgId, companionId, trigger: created, database });
+      });
       return c.json({ trigger }, 201);
     } catch (error) {
       return routeError(c, error);
@@ -1666,19 +1846,45 @@ export function registerCompanionRoutes(
       const companionId = companionIdSchema.parse(c.req.param("id"));
       const triggerId = companionIdSchema.parse(c.req.param("triggerId"));
       const body = updateCompanionTriggerInputSchema.parse(await c.req.json());
-      const trigger = await tenant(c, ({ orgId, database }) =>
-        updateCompanionTriggerV2({
+      const trigger = await tenant(c, async ({ orgId, database }) => {
+        // Provider/target/account changes invalidate an existing remote hook. Remove that hook
+        // before changing the durable definition so a stale external callback cannot survive an
+        // edit that appears successful locally.
+        const registrationChanged = body.provider !== undefined
+          || body.target !== undefined
+          || body.provider_account_id !== undefined;
+        if (registrationChanged) {
+          const current = (await listCompanionTriggersV2({
+            orgId,
+            companionId,
+            database,
+            webhookBaseUrl: companionWebhookBaseUrl(env),
+          })).find((candidate) => candidate.id === triggerId);
+          if (current) {
+            await unregisterCompanionTriggerIfWired({
+              orgId,
+              companionId,
+              trigger: current,
+              database,
+            });
+          }
+        }
+        const updated = await updateCompanionTriggerV2({
           orgId,
           companionId,
           triggerId,
           name: body.name,
           prompt: body.prompt,
+          mode: body.mode,
           provider: body.provider,
+          providerAccountId: body.provider_account_id,
           target: body.target === undefined ? undefined : body.target ?? null,
           enabled: body.enabled,
           database,
           webhookBaseUrl: companionWebhookBaseUrl(env),
-        }));
+        });
+        return autoRegisterCompanionTrigger({ orgId, companionId, trigger: updated, database });
+      });
       return c.json({ trigger });
     } catch (error) {
       return routeError(c, error);
@@ -1689,8 +1895,23 @@ export function registerCompanionRoutes(
     try {
       const companionId = companionIdSchema.parse(c.req.param("id"));
       const triggerId = companionIdSchema.parse(c.req.param("triggerId"));
-      await tenant(c, ({ orgId, database }) =>
-        deleteCompanionTriggerV2({ orgId, companionId, triggerId, database }));
+      await tenant(c, async ({ orgId, database }) => {
+        const current = (await listCompanionTriggersV2({
+          orgId,
+          companionId,
+          database,
+          webhookBaseUrl: companionWebhookBaseUrl(env),
+        })).find((candidate) => candidate.id === triggerId);
+        if (current) {
+          await unregisterCompanionTriggerIfWired({
+            orgId,
+            companionId,
+            trigger: current,
+            database,
+          });
+        }
+        await deleteCompanionTriggerV2({ orgId, companionId, triggerId, database });
+      });
       return c.body(null, 204);
     } catch (error) {
       return routeError(c, error);
@@ -1701,14 +1922,22 @@ export function registerCompanionRoutes(
     try {
       const companionId = companionIdSchema.parse(c.req.param("id"));
       const triggerId = companionIdSchema.parse(c.req.param("triggerId"));
-      const trigger = await tenant(c, ({ orgId, database }) =>
-        rotateCompanionTriggerSecretV2({
+      const trigger = await tenant(c, async ({ orgId, database }) => {
+        const current = (await listCompanionTriggersV2({
+          orgId, companionId, database, webhookBaseUrl: companionWebhookBaseUrl(env),
+        })).find((candidate) => candidate.id === triggerId);
+        if (current) {
+          await unregisterCompanionTriggerIfWired({ orgId, companionId, trigger: current, database });
+        }
+        const rotated = await rotateCompanionTriggerSecretV2({
           orgId,
           companionId,
           triggerId,
           database,
           webhookBaseUrl: companionWebhookBaseUrl(env),
-        }));
+        });
+        return autoRegisterCompanionTrigger({ orgId, companionId, trigger: rotated, database });
+      });
       return c.json({ trigger });
     } catch (error) {
       return routeError(c, error);
@@ -1719,18 +1948,14 @@ export function registerCompanionRoutes(
     try {
       const companionId = companionIdSchema.parse(c.req.param("id"));
       const triggerId = companionIdSchema.parse(c.req.param("triggerId"));
-      // On-demand provider-side wiring, decided by the Companion or an Owner/Editor — approval of
-      // the trigger itself never registers anything, and this never wakes Box or Pi.
-      await tenant(c, ({ orgId, database }) =>
-        registerCompanionTriggerWebhookV2({
-          orgId,
-          companionId,
-          triggerId,
-          webhookBaseUrl: companionWebhookBaseUrl(env),
-          masterKey: loadSecretsMasterKey(env.COMPANION_SECRETS_MASTER_KEY),
-          database,
-        }));
-      return c.json({ registered: true });
+      const trigger = await tenant(c, async ({ orgId, database }) => {
+        const current = (await listCompanionTriggersV2({
+          orgId, companionId, database, webhookBaseUrl: companionWebhookBaseUrl(env),
+        })).find((candidate) => candidate.id === triggerId);
+        if (!current) throw new CompanionTriggerNotFoundError();
+        return autoRegisterCompanionTrigger({ orgId, companionId, trigger: current, database });
+      });
+      return c.json({ trigger });
     } catch (error) {
       return routeError(c, error);
     }
@@ -2138,13 +2363,25 @@ export function registerCompanionRoutes(
             throw new Error("Companion trigger proposals cannot be answered with free text");
           }
           proposalDecisionMutation = "trigger";
-          await answerCompanionTriggerDecisionV2({
+          const decisionResult = await answerCompanionTriggerDecisionV2({
             orgId,
             companionId,
             requestId,
             decision: body.action,
             database,
           });
+          const triggerId = triggerIdFromDecisionResult(decisionResult);
+          if (body.action === "allow" && triggerId) {
+            const created = (await listCompanionTriggersV2({
+              orgId,
+              companionId,
+              database,
+              webhookBaseUrl: companionWebhookBaseUrl(env),
+            })).find((candidate) => candidate.id === triggerId);
+            if (created) {
+              await autoRegisterCompanionTrigger({ orgId, companionId, trigger: created, database });
+            }
+          }
         } else {
           await answerCompanionDecisionV2({
             orgId,

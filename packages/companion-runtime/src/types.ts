@@ -391,6 +391,9 @@ export interface RuntimeWorkMaterial {
   /** Scheduled routine snapshot identity; distinct from the turn id that identifies this run. */
   routineId: string | null;
   routineName: string | null;
+  /** Trigger identity and the only allowed terminal surface mode for isolated validation runs. */
+  triggerName: string | null;
+  triggerMode: "notify" | "relay" | null;
   /** Once true, takeover must keep using the run-scoped session even if the deploy gate is off. */
   routineIsolated: boolean;
   /** Immutable runtime-only main-conversation background pinned before first Box contact. */

@@ -1238,11 +1238,11 @@ describe("Companion trigger contracts", () => {
       prompt: triggerRow.prompt,
       provider: "github",
     })).toMatchObject({ id: triggerRow.id, name: "CI failed on main", enabled: true });
-    expect(() => createCompanionTriggerInputSchema.parse({
+    expect(createCompanionTriggerInputSchema.parse({
       name: triggerRow.name,
       prompt: triggerRow.prompt,
       provider: "github",
-    })).toThrow();
+    })).toMatchObject({ name: triggerRow.name, mode: "relay", enabled: true });
     expect(() => createCompanionTriggerInputSchema.parse({
       id: triggerRow.id,
       name: triggerRow.name,

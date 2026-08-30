@@ -571,17 +571,18 @@ place, while a different name creates a new routine.
 
 A `companion:trigger:<name>` confirmation with a strict JSON `{summary, proposal}` body projects as
 `request_kind = trigger_proposal`. Pi emits these through the staged `propose_trigger` tool. The
-payload is name, prompt, and provider (`linear`, `github`, or `custom`), plus a github-only target
+payload is name, prompt, mode (`notify` or `relay`), and provider (`webhook`, `linear`, `github`, or
+`custom`), plus provider target metadata
 (`repo`, `events`) when Pi already knows what to watch; a redacted or malformed
-message is counted as unknown. Plugin-backed providers are gated: a `linear` or `github` trigger
-requires the matching plugin attached to the Companion, enforced both by the staged extension —
-which reads the attached plugins out of `config-catalog.json` and fails closed when it is unreadable
-— and fail-closed in `companion_api_create_trigger`/`companion_api_update_trigger`, so an approved
-proposal whose plugin was detached mid-turn still cannot create a trigger. Owner/Editor approval
+message is counted as unknown. Trigger definitions are autonomous and are not gated on an MCP
+plugin merely to exist. Remote registration reuses a matching attached provider account; one
+eligible account defaults silently and multiple accounts require `provider_account_id`.
+Owner/Editor approval
 runs `companion_api_answer_trigger_decision`,
-which creates the trigger — with a fresh server-side id and secret — under the approver's authority
-after the current turn; the person then copies the webhook URL from the Triggers panel. Pi never
-creates a trigger itself, and a proposed trigger never fires in the turn that proposed it.
+which creates the trigger with a fresh server-side id and secret under the approver's authority and
+immediately attempts provider registration. Success completes end-to-end; provider rejection
+persists `registration_status = failed` for retry. Users never paste callback URLs or secrets when
+Companion can register through held credentials.
 
 A running attempt has two bounds:
 

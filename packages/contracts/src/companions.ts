@@ -506,13 +506,13 @@ export const COMPANION_TRIGGER_MAX_PER_COMPANION = 10;
 export const COMPANION_TRIGGER_MIN_INTERVAL_MS = 60 * 1000;
 export const COMPANION_TRIGGER_MAX_CONSECUTIVE_FAILURES = 5;
 export const COMPANION_TRIGGER_PAYLOAD_EXCERPT_MAX_CHARACTERS = 4_096;
-export const COMPANION_TRIGGER_PROVIDERS = ["linear", "github", "custom"] as const;
+export const COMPANION_TRIGGER_PROVIDERS = ["webhook", "linear", "github", "custom"] as const;
 export const companionTriggerProviderSchema = z.enum(COMPANION_TRIGGER_PROVIDERS);
 export type CompanionTriggerProvider = z.infer<typeof companionTriggerProviderSchema>;
 
 /**
- * Trigger providers that are plugin-backed: proposing or creating a trigger with one of these
- * providers requires the matching MCP plugin attached to the Companion. `custom` needs no plugin.
+ * Legacy provider labels retained as delivery hints for clients that still render provider marks.
+ * They do not grant, require, or imply any external account or runtime capability.
  */
 export const COMPANION_PLUGIN_TRIGGER_PROVIDERS = ["linear", "github"] as const;
 
@@ -948,16 +948,27 @@ export const companionTriggerNameSchema = z.string().trim().min(1).max(
 export const companionTriggerPromptSchema = z.string().trim().min(1).max(
   COMPANION_TRIGGER_PROMPT_MAX_CHARACTERS,
 );
+export const companionTriggerModeSchema = z.enum(["notify", "relay"]);
+export type CompanionTriggerMode = z.infer<typeof companionTriggerModeSchema>;
 
-/** Bounded provider-side wiring a trigger may carry. Only GitHub is wired in v1. */
+export const companionTriggerRegistrationStatusSchema = z.enum(["manual", "registered", "failed"]);
+export type CompanionTriggerRegistrationStatus = z.infer<
+  typeof companionTriggerRegistrationStatusSchema
+>;
+
+/** A compact status used by clients that do not need registration details. */
+export const companionTriggerStatusSchema = z.enum(["active", "disabled", "error"]);
+export type CompanionTriggerStatus = z.infer<typeof companionTriggerStatusSchema>;
+
+/** Bounded legacy delivery metadata a trigger may carry. */
 export const COMPANION_TRIGGER_MAX_EVENTS = 30;
 
 export const companionTriggerTargetSchema = z.object({
-  /** GitHub repository as "owner/repo". Required for github triggers, forbidden elsewhere. */
+  /** Repository hint as "owner/repo" for providers that support repository delivery. */
   repo: z.string().trim().max(200).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9._-]+$/).optional(),
   /**
-   * Provider webhook event names; "*" subscribes to every GitHub event. The provider has the final
-   * word: an unknown name fails the registration, never the trigger.
+   * Provider webhook event names; "*" requests every event where supported. The provider has the
+   * final word: an unknown name fails registration, never the trigger definition.
    */
   events: z.array(z.string().trim().regex(/^\*$|^[a-z_]{1,64}$/))
     .min(1)
@@ -966,25 +977,12 @@ export const companionTriggerTargetSchema = z.object({
 }).strict();
 export type CompanionTriggerTarget = z.infer<typeof companionTriggerTargetSchema>;
 
-/**
- * Validate a target against its trigger's provider: github needs a repo and at least one event;
- * every other provider carries no target yet (the URL is pasted into the service by hand).
- */
+/** Normalize optional legacy target metadata without coupling it to a provider or account. */
 export function parseCompanionTriggerTarget(
-  provider: CompanionTriggerProvider,
+  _provider: CompanionTriggerProvider,
   target: CompanionTriggerTarget | null | undefined,
 ): CompanionTriggerTarget | null {
-  const normalized = target ?? null;
-  if (provider === "github") {
-    if (!normalized?.repo || !normalized.events?.length) {
-      throw new Error("a github trigger requires a target repo and at least one event");
-    }
-    return normalized;
-  }
-  if (normalized && (normalized.repo || normalized.events)) {
-    throw new Error(`a ${provider} trigger does not support a target yet`);
-  }
-  return null;
+  return target ?? null;
 }
 
 export const companionTriggerSchema = z.object({
@@ -992,16 +990,26 @@ export const companionTriggerSchema = z.object({
   companion_id: z.string().uuid(),
   name: companionTriggerNameSchema,
   prompt: companionTriggerPromptSchema,
-  provider: companionTriggerProviderSchema,
+  /** Older rows omit mode; readers treat those rows as relay. */
+  mode: companionTriggerModeSchema.default("relay"),
+  provider: companionTriggerProviderSchema.default("webhook"),
+  /** Selected external credential reference, when one was explicitly chosen. */
+  provider_account_id: z.string().uuid().nullable().optional(),
   /**
-   * Provider-side wiring the Companion may register on demand — for GitHub, the repository and the
-   * webhook events to subscribe. Null means "URL only": the person pastes it into the service.
+   * Legacy provider-side delivery metadata. A registration adapter may use it when supported.
    */
   target: z.lazy(() => companionTriggerTargetSchema).nullable().default(null),
-  /** Whether the provider-side webhook is wired: manual means the URL was pasted by hand. */
-  registration_status: z.enum(["manual", "registered", "failed"]).default("manual"),
-  enabled: z.boolean(),
-  /** Full URL an external service posts to. Null for Viewers, who never see the secret. */
+  registration_status: companionTriggerRegistrationStatusSchema.default("manual"),
+  /** Optional aggregate status for compact clients; registration_status remains authoritative. */
+  status: companionTriggerStatusSchema.optional(),
+  enabled: z.boolean().default(true),
+  /** Selected provider account after registration resolution, if any. */
+  remote_hook_account_id: z.string().uuid().nullable().optional(),
+  /** Provider-side hook identifier, if registration succeeded. */
+  remote_hook_id: z.string().max(200).nullable().optional(),
+  /** Bounded provider registration diagnostic; never a raw provider payload. */
+  last_registration_error: z.string().max(500).nullable().optional(),
+  /** Full URL an external service posts to. Null for Viewers. */
   webhook_url: z.string().url().nullable(),
   last_fired_at: z.string().datetime().nullable(),
   last_error_code: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/).nullable(),
@@ -1017,14 +1025,16 @@ export type CompanionTrigger = z.infer<typeof companionTriggerSchema>;
 export const companionTriggerDraftSchema = z.object({
   name: companionTriggerNameSchema,
   prompt: companionTriggerPromptSchema,
-  provider: companionTriggerProviderSchema,
+  mode: companionTriggerModeSchema.default("relay"),
+  provider: companionTriggerProviderSchema.default("webhook"),
+  provider_account_id: z.string().uuid().nullable().optional(),
   target: z.lazy(() => companionTriggerTargetSchema).nullable().optional(),
   enabled: z.boolean().default(true),
 }).strict();
 export type CompanionTriggerDraft = z.infer<typeof companionTriggerDraftSchema>;
 
 export const createCompanionTriggerInputSchema = companionTriggerDraftSchema.extend({
-  id: z.string().uuid(),
+  id: z.string().uuid().optional(),
 }).strict();
 export type CreateCompanionTriggerInput = z.infer<typeof createCompanionTriggerInputSchema>;
 
@@ -1039,24 +1049,11 @@ export const companionTriggerProposalSchema = z.object({
   kind: z.literal("trigger"),
   name: companionTriggerNameSchema,
   prompt: companionTriggerPromptSchema,
-  provider: companionTriggerProviderSchema,
+  mode: companionTriggerModeSchema.default("relay"),
+  provider: companionTriggerProviderSchema.default("webhook"),
+  provider_account_id: z.string().uuid().nullable().optional(),
   target: z.lazy(() => companionTriggerTargetSchema).optional(),
 }).strict().superRefine((proposal, context) => {
-  // Approval creates the trigger in one SQL call, so a partial github target would dead-end the
-  // pending decision: require the full target here, before the card is ever shown.
-  if (proposal.provider === "github") {
-    if (!proposal.target?.repo || !proposal.target.events?.length) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "a github trigger proposal requires a target repo and at least one event",
-      });
-    }
-  } else if (proposal.target) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: `a ${proposal.provider} trigger proposal does not support a target yet`,
-    });
-  }
   if (utf8ByteLength(JSON.stringify(proposal)) > COMPANION_CONFIG_PROPOSAL_MAX_BYTES) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
@@ -1072,6 +1069,172 @@ export const companionTriggerProposalMessageSchema = z.object({
   proposal: companionTriggerProposalSchema,
 }).strict();
 export type CompanionTriggerProposalMessage = z.infer<typeof companionTriggerProposalMessageSchema>;
+
+/**
+ * Trigger history follows the same durable turn lifecycle as routine history. The trigger snapshot
+ * keeps a deleted or renamed definition readable, while the outcome names the one user-visible
+ * terminal surface (or an explicit no-output completion).
+ */
+export const companionTriggerRunStatusSchema = companionTurnStatusSchema;
+export type CompanionTriggerRunStatus = z.infer<typeof companionTriggerRunStatusSchema>;
+
+export const companionTriggerRunOutcomeSchema = z.enum([
+  "pending",
+  "no_output",
+  "surfaced",
+  "error",
+]);
+export type CompanionTriggerRunOutcome = z.infer<typeof companionTriggerRunOutcomeSchema>;
+
+export const COMPANION_TRIGGER_RUN_ENTRY_PAGE_DEFAULT = 50;
+export const COMPANION_TRIGGER_RUN_ENTRY_PAGE_MAX = 100;
+
+/** Immutable trigger identity carried by each history row. */
+export const companionTriggerIdentitySnapshotSchema = z.object({
+  id: z.string().uuid().nullable(),
+  name: companionTriggerNameSchema,
+}).strict();
+export type CompanionTriggerIdentitySnapshot = z.infer<
+  typeof companionTriggerIdentitySnapshotSchema
+>;
+
+/** A bounded entry from the trigger-only transcript; surfaced payloads remain in the main thread. */
+export const companionTriggerRunEntrySchema = z.object({
+  event_id: z.string().min(1).max(200),
+  ordinal: z.number().int().nonnegative(),
+  role: z.enum(["user", "assistant", "system", "tool", "decision"]),
+  content: z.string().max(1_048_576),
+  reasoning: z.string().max(16_000).nullable().default(null),
+  tool: z.lazy(() => companionToolRunSchema).nullable().default(null),
+  decision: z.lazy(() => companionDecisionSchema).nullable().default(null),
+  created_at: z.string().datetime({ offset: true }),
+}).strict().superRefine((entry, context) => {
+  if ((entry.role === "tool") !== (entry.tool !== null)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["tool"],
+      message: "a trigger tool entry carries a tool run and no other role may",
+    });
+  }
+  if ((entry.role === "decision") !== (entry.decision !== null)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["decision"],
+      message: "a trigger decision entry carries a decision and no other role may",
+    });
+  }
+  if (entry.reasoning !== null && entry.role !== "assistant") {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["reasoning"],
+      message: "only a trigger assistant entry carries reasoning",
+    });
+  }
+});
+export type CompanionTriggerRunEntry = z.infer<typeof companionTriggerRunEntrySchema>;
+
+const companionTriggerRunFields = {
+  run_id: z.string().uuid(),
+  companion_id: z.string().uuid(),
+  trigger: companionTriggerIdentitySnapshotSchema,
+  status: companionTriggerRunStatusSchema,
+  mode: companionTriggerModeSchema,
+  outcome: companionTriggerRunOutcomeSchema,
+  surface_mode: companionTriggerModeSchema.nullable(),
+  /** Present when notify or relay produced a main-thread entry. */
+  main_entry_event_id: z.string().min(1).max(200).nullable(),
+  /** Present only for a relay outcome that creates a main-Pi turn. */
+  relay_turn_id: z.string().uuid().nullable(),
+  created_at: z.string().datetime({ offset: true }),
+  started_at: z.string().datetime({ offset: true }).nullable(),
+  settled_at: z.string().datetime({ offset: true }).nullable(),
+  error: companionRuntimeSafeErrorSchema.nullable(),
+} as const;
+
+function validateCompanionTriggerRunResult(
+  run: {
+    status: CompanionTriggerRunStatus;
+    outcome: CompanionTriggerRunOutcome;
+    surface_mode: CompanionTriggerMode | null;
+    main_entry_event_id: string | null;
+    relay_turn_id: string | null;
+  },
+  context: z.RefinementCtx,
+): void {
+  const surfaced = run.outcome === "surfaced";
+  if (surfaced !== (run.surface_mode !== null)
+      || surfaced !== (run.main_entry_event_id !== null)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["surface_mode"],
+      message: "a surfaced trigger run carries one terminal mode and main-thread entry",
+    });
+  }
+  if ((run.surface_mode === "relay") !== (run.relay_turn_id !== null)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["relay_turn_id"],
+      message: "only relay mode creates a main-Pi turn",
+    });
+  }
+  if (run.outcome === "no_output" && run.status !== "succeeded") {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["outcome"],
+      message: "no_output is a successful trigger completion without a terminal return",
+    });
+  }
+  if (run.outcome === "no_output"
+      && (run.main_entry_event_id !== null || run.relay_turn_id !== null)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["outcome"],
+      message: "no_output carries no main-thread entry or relay turn",
+    });
+  }
+  if (run.outcome === "error" && !["failed", "interrupted", "cancelled"].includes(run.status)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["outcome"],
+      message: "error outcome requires a failed, interrupted, or cancelled run",
+    });
+  }
+}
+
+export const companionTriggerRunSummarySchema = z.object(companionTriggerRunFields).strict()
+  .superRefine(validateCompanionTriggerRunResult);
+export type CompanionTriggerRunSummary = z.infer<typeof companionTriggerRunSummarySchema>;
+
+export const companionTriggerRunDetailSchema = z.object({
+  ...companionTriggerRunFields,
+  internal_entries: z.array(companionTriggerRunEntrySchema)
+    .max(COMPANION_TRIGGER_RUN_ENTRY_PAGE_MAX),
+  next_entry_cursor: z.number().int().nonnegative().nullable(),
+}).strict().superRefine(validateCompanionTriggerRunResult);
+export type CompanionTriggerRunDetail = z.infer<typeof companionTriggerRunDetailSchema>;
+
+export const companionTriggerRunListSchema = z.object({
+  runs: z.array(companionTriggerRunSummarySchema),
+  next_cursor: z.string().uuid().nullable(),
+}).strict();
+export type CompanionTriggerRunList = z.infer<typeof companionTriggerRunListSchema>;
+
+/** Bounded query input for the read-only trigger history list. */
+export const companionTriggerRunListQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  cursor: z.string().uuid().optional(),
+}).strict();
+export type CompanionTriggerRunListQuery = z.infer<typeof companionTriggerRunListQuerySchema>;
+
+/** Bounded keyset input for one trigger run's private transcript page. */
+export const companionTriggerRunDetailQuerySchema = z.object({
+  entry_limit: z.coerce.number().int().min(1).max(COMPANION_TRIGGER_RUN_ENTRY_PAGE_MAX)
+    .default(COMPANION_TRIGGER_RUN_ENTRY_PAGE_DEFAULT),
+  entry_cursor: z.coerce.number().int().nonnegative().optional(),
+}).strict();
+export type CompanionTriggerRunDetailQuery = z.infer<
+  typeof companionTriggerRunDetailQuerySchema
+>;
 
 export const companionDecisionProposalSchema = z.union([
   companionConfigProposalSchema,

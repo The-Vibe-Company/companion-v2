@@ -6,6 +6,10 @@ one persistent box.ascii.dev Box, one Pi daemon, and one durable chat thread. Re
 `docs/vision.md`, `docs/product.md`, `docs/design.md`, `docs/PRD.md`, `docs/testing.md`, root
 `DESIGN.md`, and `docs/companions-runtime.md` before non-trivial Companion or runtime changes.
 
+The project is built for **ZERO USER FRICTION**: Companion does everything end-to-end on the
+user's behalf. Users never paste URLs, never configure webhooks manually, and never touch provider
+consoles for work Companion can do with credentials it already holds.
+
 ## Domain vocabulary
 
 - Tenant hierarchy: **Organization → User**; organization roles: **Owner, Admin, Developer**.

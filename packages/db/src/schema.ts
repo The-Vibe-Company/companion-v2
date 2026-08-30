@@ -629,7 +629,9 @@ export const companionTriggers = pgTable(
     companionId: uuid("companion_id").notNull(),
     name: text("name").notNull(),
     prompt: text("prompt").notNull(),
+    mode: text("mode").notNull().default("relay"),
     provider: text("provider").notNull(),
+    providerAccountId: uuid("provider_account_id"),
     secret: text("secret").notNull(),
     target: jsonb("target").$type<Record<string, unknown>>().notNull().default({}),
     remoteHookId: text("remote_hook_id"),
@@ -656,7 +658,8 @@ export const companionTriggers = pgTable(
     nameUnique: uniqueIndex("companion_triggers_name_uq").on(t.companionId, sql`lower(${t.name})`),
     nameCheck: check("companion_triggers_name_check", sql`char_length(btrim(${t.name})) between 1 and 80 and ${t.name} !~ E'[\\n\\r]'`),
     promptCheck: check("companion_triggers_prompt_check", sql`char_length(btrim(${t.prompt})) between 1 and 16384`),
-    providerCheck: check("companion_triggers_provider_check", sql`${t.provider} in ('linear', 'github', 'custom')`),
+    modeCheck: check("companion_triggers_mode_check", sql`${t.mode} in ('notify', 'relay')`),
+    providerCheck: check("companion_triggers_provider_check", sql`${t.provider} in ('webhook', 'linear', 'github', 'custom')`),
     targetShapeCheck: check("companion_triggers_target_shape_check", sql`jsonb_typeof(${t.target}) = 'object'`),
     registrationStatusCheck: check(
       "companion_triggers_registration_status_check",
@@ -1043,6 +1046,8 @@ export const companionTurns = pgTable(
      */
     triggerId: uuid("trigger_id").references(() => companionTriggers.id, { onDelete: "set null" }),
     triggerName: text("trigger_name"),
+    /** Trigger v2 validates in the isolated lane and pins the configured terminal surface mode. */
+    triggerMode: text("trigger_mode"),
     /**
      * Set when an Owner/Editor asks to stop an active turn whose prompt may already be on Pi.
      * The executor that holds the lease aborts Pi and settles; the API never contacts Box.
@@ -1068,11 +1073,12 @@ export const companionTurns = pgTable(
     errorCheck: check("companion_turns_error_check", sql`((${t.lastErrorCode} is null) = (${t.lastErrorMessage} is null)) and ((${t.lastErrorCode} is null) = (${t.lastErrorAction} is null)) and (${t.lastErrorCode} is null or ${t.lastErrorCode} ~ '^[a-z][a-z0-9_]{0,63}$') and (${t.lastErrorMessage} is null or (char_length(${t.lastErrorMessage}) <= 500 and ${t.lastErrorMessage} !~ E'[\\n\\r]')) and (${t.status} not in ('failed','interrupted') or ${t.lastErrorCode} is not null) and (${t.status} not in ('succeeded','cancelled') or ${t.lastErrorCode} is null)`),
     messageEvent: index("companion_turns_message_event_idx").on(t.companionId, t.messageEventId),
     routineOriginCheck: check("companion_turns_routine_origin_check", sql`(${t.routineId} is null or ${t.routineName} is not null) and (${t.routineName} is null or (char_length(${t.routineName}) between 1 and 80 and ${t.routineName} !~ E'[\\n\\r]'))`),
-    routineSnapshotCheck: check("companion_turns_routine_snapshot_check", sql`${t.routineSnapshotId} is null or ${t.routineName} is not null`),
+    routineSnapshotCheck: check("companion_turns_routine_snapshot_check", sql`${t.routineSnapshotId} is null or ${t.routineName} is not null or ${t.triggerName} is not null`),
     routineIsolationCheck: check("companion_turns_routine_isolation_check", sql`not ${t.routineIsolated} or (${t.routineSnapshotId} is not null and ${t.routineContextSubstrateId} is not null)`),
     routineRelaySourceCheck: check("companion_turns_routine_relay_source_check", sql`${t.routineRelaySourceEventId} is null or (char_length(${t.routineRelaySourceEventId}) between 1 and 200 and ${t.routineRelaySourceEventId} !~ E'[\n\r]' and ${t.routineName} is null)`),
     routineSnapshot: index("companion_turns_routine_snapshot_idx").on(t.orgId, t.companionId, t.routineSnapshotId, t.queueSequence, t.id).where(sql`${t.routineSnapshotId} is not null`),
-    triggerOriginCheck: check("companion_turns_trigger_origin_check", sql`(${t.triggerId} is null or ${t.triggerName} is not null) and (${t.triggerName} is null or (char_length(${t.triggerName}) between 1 and 80 and ${t.triggerName} !~ E'[\\n\\r]')) and not (${t.routineName} is not null and ${t.triggerName} is not null)`),
+    triggerOriginCheck: check("companion_turns_trigger_origin_check", sql`(${t.triggerId} is null or ${t.triggerName} is not null) and (${t.triggerName} is null or (char_length(${t.triggerName}) between 1 and 80 and ${t.triggerName} !~ E'[\\n\\r]')) and (${t.triggerName} is null or ${t.routineId} is null)`),
+    triggerModeCheck: check("companion_turns_trigger_mode_check", sql`(${t.triggerName} is null and ${t.triggerMode} is null) or (${t.triggerName} is not null and ${t.triggerMode} in ('notify', 'relay'))`),
   }),
 );
 

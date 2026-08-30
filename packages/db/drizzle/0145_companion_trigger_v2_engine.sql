@@ -1,0 +1,494 @@
+-- Trigger v2: autonomous definitions, shared provider credentials, isolated payload validation,
+-- and read-only run history. Existing rows keep relay semantics and their current callback URL.
+
+ALTER TABLE public.companion_triggers
+  ADD COLUMN mode text NOT NULL DEFAULT 'relay',
+  ADD COLUMN provider_account_id uuid
+    REFERENCES public.companion_mcp_accounts(id) ON DELETE SET NULL;
+--> statement-breakpoint
+ALTER TABLE public.companion_triggers
+  ADD CONSTRAINT companion_triggers_mode_check CHECK (mode IN ('notify', 'relay'));
+--> statement-breakpoint
+ALTER TABLE public.companion_triggers
+  DROP CONSTRAINT companion_triggers_provider_check,
+  ADD CONSTRAINT companion_triggers_provider_check
+    CHECK (provider IN ('webhook', 'linear', 'github', 'custom'));
+--> statement-breakpoint
+
+ALTER TABLE public.companion_turns ADD COLUMN trigger_mode text;
+--> statement-breakpoint
+ALTER TABLE public.companion_turns
+  DROP CONSTRAINT companion_turns_trigger_origin_check,
+  DROP CONSTRAINT companion_turns_routine_snapshot_check,
+  ADD CONSTRAINT companion_turns_routine_snapshot_check CHECK (
+    routine_snapshot_id IS NULL OR routine_name IS NOT NULL OR trigger_name IS NOT NULL
+  ),
+  ADD CONSTRAINT companion_turns_trigger_mode_check CHECK (
+    (trigger_name IS NULL AND trigger_mode IS NULL)
+    OR (trigger_name IS NOT NULL AND trigger_mode IN ('notify', 'relay'))
+  ),
+  ADD CONSTRAINT companion_turns_trigger_origin_check CHECK (
+    (trigger_id IS NULL OR trigger_name IS NOT NULL)
+    AND (trigger_name IS NULL OR (char_length(trigger_name) BETWEEN 1 AND 80 AND trigger_name !~ E'[\n\r]'))
+    AND (trigger_name IS NULL OR routine_id IS NULL)
+  );
+--> statement-breakpoint
+
+CREATE OR REPLACE FUNCTION public.companion_api_trigger_json(
+  p_org_id uuid, p_companion_id uuid, p_trigger_id uuid, p_include_secret boolean
+)
+RETURNS jsonb
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = pg_catalog, public SET row_security = on
+AS $$
+  SELECT jsonb_build_object(
+    'id', t.id, 'companion_id', t.companion_id, 'name', t.name, 'prompt', t.prompt,
+    'mode', t.mode, 'provider', t.provider, 'provider_account_id', t.provider_account_id,
+    'target', NULLIF(t.target, '{}'::jsonb), 'registration_status', t.registration_status,
+    'remote_hook_account_id', t.remote_hook_account_id, 'remote_hook_id', t.remote_hook_id,
+    'last_registration_error', t.last_registration_error, 'enabled', t.enabled,
+    'secret', CASE WHEN p_include_secret THEN t.secret ELSE NULL END,
+    'last_fired_at', CASE WHEN t.last_fired_at IS NULL THEN NULL ELSE to_char(t.last_fired_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') END,
+    'last_error_code', t.last_error_code, 'last_error_message', t.last_error_message,
+    'last_error_at', CASE WHEN t.last_error_at IS NULL THEN NULL ELSE to_char(t.last_error_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') END,
+    'consecutive_failures', t.consecutive_failures,
+    'created_at', to_char(t.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+    'updated_at', to_char(t.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+  ) FROM public.companion_triggers t
+  WHERE t.org_id = p_org_id AND t.companion_id = p_companion_id AND t.id = p_trigger_id
+$$;
+--> statement-breakpoint
+
+CREATE FUNCTION public.companion_api_create_trigger(
+  p_org_id uuid, p_companion_id uuid, p_id uuid, p_name text, p_prompt text,
+  p_mode text, p_provider text, p_provider_account_id uuid, p_target jsonb,
+  p_secret text, p_enabled boolean
+)
+RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, public SET row_security = on
+AS $$
+DECLARE
+  v_actor_id text := public.companion_api_actor(p_org_id);
+  v_name text := btrim(p_name); v_prompt text := btrim(p_prompt);
+  v_now timestamptz := clock_timestamp(); v_existing public.companion_triggers%ROWTYPE;
+  v_account_id uuid := p_provider_account_id; v_count integer;
+BEGIN
+  PERFORM public.companion_api_require_access(p_org_id, p_companion_id, 'editor');
+  IF p_id IS NULL OR char_length(v_name) NOT BETWEEN 1 AND 80 OR v_name ~ E'[\n\r]'
+     OR char_length(v_prompt) NOT BETWEEN 1 AND 16384 OR p_mode NOT IN ('notify','relay')
+     OR p_provider NOT IN ('webhook','linear','github','custom')
+     OR p_target IS NULL OR jsonb_typeof(p_target) <> 'object'
+     OR p_secret !~ '^[0-9a-f]{32,128}$' OR p_enabled IS NULL THEN
+    RAISE EXCEPTION 'invalid Companion trigger' USING ERRCODE = '22023';
+  END IF;
+  PERFORM 1 FROM public.companions c
+   WHERE c.org_id=p_org_id AND c.id=p_companion_id FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Companion not found' USING ERRCODE='P0002'; END IF;
+
+  IF p_provider = 'github' AND v_account_id IS NULL THEN
+    SELECT CASE WHEN count(*) = 1 THEN min(a.id::text)::uuid ELSE NULL END INTO v_account_id
+    FROM public.companions c JOIN public.companion_mcp_accounts a
+      ON a.org_id=c.org_id AND COALESCE(c.selected_mcp_account_ids,'[]'::jsonb) ? a.id::text
+    WHERE c.org_id=p_org_id AND c.id=p_companion_id AND a.provider='github';
+  END IF;
+  IF v_account_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM public.companions c JOIN public.companion_mcp_accounts a
+      ON a.org_id=c.org_id AND COALESCE(c.selected_mcp_account_ids,'[]'::jsonb) ? a.id::text
+    WHERE c.org_id=p_org_id AND c.id=p_companion_id AND a.id=v_account_id
+      AND a.provider=p_provider
+  ) THEN
+    RAISE EXCEPTION 'provider account is not attached to this Companion' USING ERRCODE='42501';
+  END IF;
+
+  SELECT * INTO v_existing FROM public.companion_triggers WHERE id=p_id FOR UPDATE;
+  IF FOUND THEN
+    IF v_existing.org_id IS DISTINCT FROM p_org_id OR v_existing.companion_id IS DISTINCT FROM p_companion_id
+      OR v_existing.name IS DISTINCT FROM v_name OR v_existing.prompt IS DISTINCT FROM v_prompt
+      OR v_existing.mode IS DISTINCT FROM p_mode OR v_existing.provider IS DISTINCT FROM p_provider
+      OR v_existing.provider_account_id IS DISTINCT FROM v_account_id
+      OR v_existing.target IS DISTINCT FROM p_target OR v_existing.enabled IS DISTINCT FROM p_enabled THEN
+      RAISE EXCEPTION 'trigger id was reused with different trigger intent' USING ERRCODE='23505';
+    END IF;
+    RETURN public.companion_api_trigger_json(p_org_id,p_companion_id,p_id,true);
+  END IF;
+  SELECT count(*)::integer INTO v_count FROM public.companion_triggers
+   WHERE org_id=p_org_id AND companion_id=p_companion_id;
+  IF v_count >= 10 THEN RAISE EXCEPTION 'Companion trigger limit reached' USING ERRCODE='P0001'; END IF;
+  INSERT INTO public.companion_triggers(
+    id,org_id,companion_id,name,prompt,mode,provider,provider_account_id,target,secret,enabled,
+    created_by,created_at,updated_at
+  ) VALUES (
+    p_id,p_org_id,p_companion_id,v_name,v_prompt,p_mode,p_provider,v_account_id,p_target,p_secret,p_enabled,
+    v_actor_id,v_now,v_now
+  );
+  RETURN public.companion_api_trigger_json(p_org_id,p_companion_id,p_id,true);
+END $$;
+--> statement-breakpoint
+
+CREATE FUNCTION public.companion_api_trigger_run_json(
+  p_org_id uuid,p_companion_id uuid,p_run_id uuid,p_viewer boolean DEFAULT false,
+  p_entry_cursor integer DEFAULT NULL,p_entry_limit integer DEFAULT 50
+)
+RETURNS jsonb
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path=pg_catalog,public SET row_security=on
+AS $$
+  SELECT jsonb_build_object(
+    'run_id',t.id,'companion_id',t.companion_id,
+    'trigger',jsonb_build_object('id',COALESCE(t.routine_snapshot_id,t.trigger_id),'name',t.trigger_name),
+    'status',t.status,'mode',t.trigger_mode,
+    'outcome',CASE WHEN r.run_id IS NOT NULL THEN 'surfaced'
+      WHEN t.status IN ('failed','interrupted','cancelled') THEN 'error'
+      WHEN t.status='succeeded' THEN 'no_output' ELSE 'pending' END,
+    'surface_mode',r.mode,'main_entry_event_id',r.main_entry_event_id,'relay_turn_id',r.relay_turn_id,
+    'created_at',t.created_at,'started_at',a.started_at,'settled_at',t.settled_at,
+    'error',CASE WHEN p_viewer AND t.last_error_code IS NOT NULL
+      THEN public.companion_api_safe_error('runtime_unavailable','Companion runtime needs attention.','none'::public.companion_runtime_error_action)
+      ELSE public.companion_api_safe_error(t.last_error_code,t.last_error_message,t.last_error_action) END,
+    'internal_entries',COALESCE(h.entries,'[]'::jsonb),'next_entry_cursor',h.next_cursor
+  )
+  FROM public.companion_turns t
+  LEFT JOIN public.companion_routine_returns r
+    ON r.org_id=t.org_id AND r.companion_id=t.companion_id AND r.run_id=t.id
+  LEFT JOIN LATERAL (
+    SELECT x.started_at FROM public.companion_turn_attempts x
+    WHERE x.org_id=t.org_id AND x.companion_id=t.companion_id AND x.turn_id=t.id
+    ORDER BY x.attempt_number DESC,x.id DESC LIMIT 1
+  ) a ON true
+  LEFT JOIN LATERAL (
+    WITH ranked AS (
+      SELECT e.*,row_number() OVER(ORDER BY e.ordinal,e.event_id) n
+      FROM public.companion_routine_run_entries e
+      WHERE e.org_id=t.org_id AND e.companion_id=t.companion_id AND e.run_id=t.id
+        AND (p_entry_cursor IS NULL OR e.ordinal>p_entry_cursor)
+    ), page AS (
+      SELECT * FROM ranked WHERE n<=greatest(1,least(COALESCE(p_entry_limit,50),100))
+      ORDER BY ordinal,event_id
+    )
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+      'event_id',e.event_id,'ordinal',e.ordinal,'role',e.role,'content',e.content,
+      'reasoning',e.reasoning,'tool',e.tool,'decision',e.decision,'created_at',e.created_at
+    ) ORDER BY e.ordinal,e.event_id),'[]'::jsonb) entries,
+    CASE WHEN count(*)<(SELECT count(*) FROM ranked) THEN max(e.ordinal) ELSE NULL END next_cursor
+    FROM page e
+  ) h ON COALESCE(p_entry_limit,50)>0
+  WHERE t.org_id=p_org_id AND t.companion_id=p_companion_id AND t.id=p_run_id
+    AND t.trigger_name IS NOT NULL
+$$;
+--> statement-breakpoint
+
+CREATE FUNCTION public.companion_api_trigger_run_summary_json(
+  p_org_id uuid,p_companion_id uuid,p_run_id uuid,p_viewer boolean DEFAULT false
+)
+RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path=pg_catalog,public SET row_security=on
+AS $$ SELECT public.companion_api_trigger_run_json(
+  p_org_id,p_companion_id,p_run_id,p_viewer,NULL,0
+) - ARRAY['internal_entries','next_entry_cursor'] $$;
+--> statement-breakpoint
+
+CREATE FUNCTION public.companion_api_list_trigger_runs(
+  p_org_id uuid,p_companion_id uuid,p_trigger_id uuid,p_cursor uuid DEFAULT NULL,p_limit integer DEFAULT 50
+)
+RETURNS TABLE(run jsonb)
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path=pg_catalog,public SET row_security=on
+AS $$
+DECLARE v_access text;
+BEGIN
+  v_access:=public.companion_api_require_access(p_org_id,p_companion_id,'read');
+  RETURN QUERY SELECT public.companion_api_trigger_run_summary_json(
+    t.org_id,t.companion_id,t.id,v_access='viewer'
+  ) FROM public.companion_turns t
+  WHERE t.org_id=p_org_id AND t.companion_id=p_companion_id AND t.trigger_name IS NOT NULL
+    AND COALESCE(t.routine_snapshot_id,t.trigger_id)=p_trigger_id
+    AND (p_cursor IS NULL OR t.queue_sequence < (
+      SELECT c.queue_sequence FROM public.companion_turns c
+      WHERE c.org_id=p_org_id AND c.companion_id=p_companion_id AND c.id=p_cursor
+        AND c.trigger_name IS NOT NULL AND COALESCE(c.routine_snapshot_id,c.trigger_id)=p_trigger_id
+    ))
+  ORDER BY t.queue_sequence DESC,t.id DESC
+  LIMIT greatest(1,least(COALESCE(p_limit,50),101));
+END $$;
+--> statement-breakpoint
+
+CREATE FUNCTION public.companion_api_get_trigger_run(
+  p_org_id uuid,p_companion_id uuid,p_run_id uuid,p_entry_cursor integer DEFAULT NULL,p_entry_limit integer DEFAULT 50
+)
+RETURNS TABLE(run jsonb)
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path=pg_catalog,public SET row_security=on
+AS $$
+DECLARE v_access text; v_run jsonb;
+BEGIN
+  v_access:=public.companion_api_require_access(p_org_id,p_companion_id,'read');
+  v_run:=public.companion_api_trigger_run_json(
+    p_org_id,p_companion_id,p_run_id,v_access='viewer',p_entry_cursor,
+    greatest(1,least(COALESCE(p_entry_limit,50),100))
+  );
+  IF v_run IS NOT NULL THEN RETURN QUERY SELECT v_run; END IF;
+END $$;
+--> statement-breakpoint
+
+CREATE OR REPLACE FUNCTION public.companion_webhook_get_trigger(p_trigger_id uuid)
+RETURNS TABLE(org_id uuid,companion_id uuid,name text,prompt text,provider text,secret text,enabled boolean)
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path=pg_catalog,public SET row_security=on
+AS $$
+  SELECT t.org_id,t.companion_id,t.name,t.prompt,t.provider,t.secret,t.enabled
+  FROM public.companion_triggers t WHERE t.id=p_trigger_id
+$$;
+--> statement-breakpoint
+
+CREATE OR REPLACE FUNCTION public.companion_api_fire_trigger(
+  p_org_id uuid,p_trigger_id uuid,p_client_message_id uuid,p_content text
+)
+RETURNS TABLE(outcome text,turn jsonb,replayed boolean)
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path=pg_catalog,public SET row_security=on
+AS $$
+DECLARE
+  v_trigger public.companion_triggers%ROWTYPE; v_owner_id text;
+  v_turn jsonb; v_turn_id uuid; v_replayed boolean:=false; v_replay boolean:=false;
+BEGIN
+  IF p_org_id IS NULL OR p_trigger_id IS NULL OR p_client_message_id IS NULL
+    OR p_content IS NULL OR char_length(btrim(p_content)) NOT BETWEEN 1 AND 16384 THEN
+    RAISE EXCEPTION 'invalid Companion trigger fire' USING ERRCODE='22023';
+  END IF;
+  SELECT * INTO v_trigger FROM public.companion_triggers
+   WHERE org_id=p_org_id AND id=p_trigger_id FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Companion trigger not found' USING ERRCODE='P0002'; END IF;
+  SELECT EXISTS(SELECT 1 FROM public.companion_turns
+    WHERE org_id=p_org_id AND companion_id=v_trigger.companion_id
+      AND client_message_id=p_client_message_id) INTO v_replay;
+  IF NOT v_replay THEN
+    IF NOT v_trigger.enabled THEN RETURN QUERY SELECT 'skipped_disabled',NULL::jsonb,false; RETURN; END IF;
+    IF v_trigger.last_fired_at IS NOT NULL
+       AND v_trigger.last_fired_at > statement_timestamp()-interval '60 seconds' THEN
+      RETURN QUERY SELECT 'skipped_throttled',NULL::jsonb,false; RETURN;
+    END IF;
+    IF EXISTS(SELECT 1 FROM public.companion_turns q
+      WHERE q.org_id=p_org_id AND q.companion_id=v_trigger.companion_id
+        AND q.trigger_id=p_trigger_id AND q.status IN ('queued','starting','dispatching','running','needs_input')) THEN
+      RETURN QUERY SELECT 'skipped_pileup',NULL::jsonb,false; RETURN;
+    END IF;
+  END IF;
+  SELECT owner_id INTO STRICT v_owner_id FROM public.companions
+   WHERE org_id=p_org_id AND id=v_trigger.companion_id;
+  PERFORM set_config('app.org_id',p_org_id::text,true);
+  PERFORM set_config('app.user_id',v_owner_id,true);
+  SELECT q.turn,q.replayed INTO v_turn,v_replayed FROM public.companion_api_enqueue_turn(
+    p_org_id,v_trigger.companion_id,p_client_message_id,p_content,
+    'web'::public.companion_client_surface,'[]'::jsonb,NULL::uuid,NULL::text,
+    v_trigger.id,v_trigger.name
+  ) q;
+  v_turn_id := (v_turn->>'id')::uuid;
+  IF NOT v_replayed THEN
+    UPDATE public.companion_turns SET
+      routine_snapshot_id=v_trigger.id,
+      routine_snapshot_created_at=v_trigger.created_at,
+      routine_name=v_trigger.name,
+      trigger_mode=v_trigger.mode,
+      updated_at=clock_timestamp()
+    WHERE org_id=p_org_id AND companion_id=v_trigger.companion_id AND id=v_turn_id;
+  END IF;
+  UPDATE public.companion_triggers SET
+    last_fired_at=CASE WHEN v_replayed THEN last_fired_at ELSE statement_timestamp() END,
+    last_error_code=NULL,last_error_message=NULL,last_error_at=NULL,updated_at=clock_timestamp()
+  WHERE id=p_trigger_id;
+  RETURN QUERY SELECT CASE WHEN v_replayed THEN 'replayed' ELSE 'fired' END,v_turn,v_replayed;
+END $$;
+--> statement-breakpoint
+
+CREATE FUNCTION public.companion_runtime_get_trigger_material(
+  p_org_id uuid,p_companion_id uuid,p_claim_token uuid,p_claim_epoch bigint,p_gate_epoch bigint,
+  p_executor_id text,p_work_kind public.companion_runtime_work_kind,p_work_id uuid,p_lease_seconds integer
+)
+RETURNS TABLE(trigger_name text,trigger_mode text)
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path=pg_catalog,public SET row_security=on
+AS $$
+DECLARE v_authorization record; v_turn_id uuid;
+BEGIN
+  SELECT * INTO v_authorization FROM public.companion_runtime_renew_and_authorize(
+    p_org_id,p_companion_id,p_claim_token,p_claim_epoch,p_gate_epoch,p_executor_id,p_work_kind,p_work_id,p_lease_seconds
+  );
+  IF NOT FOUND OR NOT COALESCE(v_authorization.authorized,false) THEN RETURN; END IF;
+  v_turn_id:=v_authorization.turn_id;
+  RETURN QUERY SELECT t.trigger_name,t.trigger_mode
+  FROM (SELECT 1) a
+  LEFT JOIN public.companion_turns t
+    ON t.org_id=p_org_id AND t.companion_id=p_companion_id AND t.id=v_turn_id;
+END $$;
+--> statement-breakpoint
+
+CREATE FUNCTION public.companion_api_update_trigger(
+  p_org_id uuid, p_companion_id uuid, p_trigger_id uuid, p_name text, p_prompt text,
+  p_mode text, p_provider text, p_provider_account_id uuid, p_target jsonb, p_enabled boolean
+)
+RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, public SET row_security = on
+AS $$
+DECLARE
+  v_name text:=btrim(p_name); v_prompt text:=btrim(p_prompt);
+  v_trigger public.companion_triggers%ROWTYPE; v_account_id uuid:=p_provider_account_id;
+  v_changed boolean;
+BEGIN
+  PERFORM public.companion_api_require_access(p_org_id,p_companion_id,'editor');
+  IF p_trigger_id IS NULL OR char_length(v_name) NOT BETWEEN 1 AND 80 OR v_name ~ E'[\n\r]'
+     OR char_length(v_prompt) NOT BETWEEN 1 AND 16384 OR p_mode NOT IN ('notify','relay')
+     OR p_provider NOT IN ('webhook','linear','github','custom')
+     OR p_target IS NULL OR jsonb_typeof(p_target)<>'object' OR p_enabled IS NULL THEN
+    RAISE EXCEPTION 'invalid Companion trigger' USING ERRCODE='22023';
+  END IF;
+  SELECT * INTO v_trigger FROM public.companion_triggers
+   WHERE org_id=p_org_id AND companion_id=p_companion_id AND id=p_trigger_id FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Companion trigger not found' USING ERRCODE='P0002'; END IF;
+  IF p_provider='github' AND v_account_id IS NULL THEN
+    SELECT CASE WHEN count(*)=1 THEN min(a.id::text)::uuid ELSE NULL END INTO v_account_id
+    FROM public.companions c JOIN public.companion_mcp_accounts a
+      ON a.org_id=c.org_id AND COALESCE(c.selected_mcp_account_ids,'[]'::jsonb) ? a.id::text
+    WHERE c.org_id=p_org_id AND c.id=p_companion_id AND a.provider='github';
+  END IF;
+  IF v_account_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM public.companions c JOIN public.companion_mcp_accounts a
+      ON a.org_id=c.org_id AND COALESCE(c.selected_mcp_account_ids,'[]'::jsonb) ? a.id::text
+    WHERE c.org_id=p_org_id AND c.id=p_companion_id AND a.id=v_account_id AND a.provider=p_provider
+  ) THEN RAISE EXCEPTION 'provider account is not attached to this Companion' USING ERRCODE='42501'; END IF;
+  v_changed := v_trigger.provider IS DISTINCT FROM p_provider
+    OR v_trigger.provider_account_id IS DISTINCT FROM v_account_id
+    OR v_trigger.target IS DISTINCT FROM p_target;
+  UPDATE public.companion_triggers SET name=v_name,prompt=v_prompt,mode=p_mode,provider=p_provider,
+    provider_account_id=v_account_id,target=p_target,enabled=p_enabled,
+    remote_hook_id=CASE WHEN v_changed THEN NULL ELSE remote_hook_id END,
+    remote_hook_account_id=CASE WHEN v_changed THEN NULL ELSE remote_hook_account_id END,
+    registration_status=CASE WHEN v_changed THEN 'manual' ELSE registration_status END,
+    last_registration_error=CASE WHEN v_changed THEN NULL ELSE last_registration_error END,
+    last_error_code=NULL,last_error_message=NULL,last_error_at=NULL,consecutive_failures=0,
+    updated_at=clock_timestamp()
+  WHERE org_id=p_org_id AND companion_id=p_companion_id AND id=p_trigger_id;
+  RETURN public.companion_api_trigger_json(p_org_id,p_companion_id,p_trigger_id,true);
+END $$;
+--> statement-breakpoint
+
+CREATE OR REPLACE FUNCTION public.companion_api_answer_trigger_decision(
+  p_org_id uuid,p_companion_id uuid,p_request_key text,p_action text,p_trigger_id uuid,p_secret text
+)
+RETURNS TABLE(delivery_id uuid,turn_id uuid,decision_status public.companion_decision_status,
+  delivery_state public.companion_decision_delivery_state,responded_at timestamptz)
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path=pg_catalog,public SET row_security=on
+AS $$
+DECLARE
+  v_actor_id text:=public.companion_api_actor(p_org_id); v_actor_name text;
+  v_delivery public.companion_decision_deliveries%ROWTYPE;
+  v_status public.companion_decision_status; v_event_id text; v_now timestamptz:=clock_timestamp();
+  v_proposal jsonb; v_name text; v_prompt text; v_mode text; v_provider text; v_account_id uuid;
+BEGIN
+  PERFORM public.companion_api_require_access(p_org_id,p_companion_id,'editor');
+  IF p_request_key IS NULL OR char_length(p_request_key) NOT BETWEEN 1 AND 200
+    OR p_request_key~E'[\n\r]' OR p_action NOT IN ('allow','deny')
+    OR (p_action='allow' AND (p_trigger_id IS NULL OR p_secret !~ '^[0-9a-f]{32,128}$')) THEN
+    RAISE EXCEPTION 'invalid Companion trigger proposal' USING ERRCODE='22023';
+  END IF;
+  SELECT d.* INTO v_delivery FROM public.companion_decision_deliveries d
+  JOIN public.companion_turn_attempts a ON a.org_id=d.org_id AND a.companion_id=d.companion_id AND a.id=d.attempt_id
+  WHERE d.org_id=p_org_id AND d.companion_id=p_companion_id AND d.request_key=p_request_key
+    AND d.decision_status='pending' AND a.status='needs_input'
+  ORDER BY d.created_at DESC,d.id DESC LIMIT 1 FOR UPDATE OF d;
+  IF NOT FOUND THEN
+    SELECT * INTO v_delivery FROM public.companion_decision_deliveries d
+    WHERE d.org_id=p_org_id AND d.companion_id=p_companion_id AND d.request_key=p_request_key
+      AND d.actor_id=v_actor_id ORDER BY d.created_at DESC,d.id DESC LIMIT 1;
+    IF NOT FOUND OR v_delivery.request_kind<>'trigger_proposal' OR NOT (
+      (p_action='allow' AND v_delivery.decision_status='allowed') OR
+      (p_action='deny' AND v_delivery.decision_status='denied')) THEN
+      RAISE EXCEPTION 'Companion decision is not pending' USING ERRCODE='55000';
+    END IF;
+    RETURN QUERY SELECT v_delivery.id,v_delivery.turn_id,v_delivery.decision_status,
+      v_delivery.delivery_state,v_delivery.responded_at; RETURN;
+  END IF;
+  IF v_delivery.request_kind<>'trigger_proposal' OR v_delivery.expires_at<=v_now THEN
+    RAISE EXCEPTION 'Companion trigger proposal is not answerable' USING ERRCODE='55000';
+  END IF;
+  v_proposal:=v_delivery.proposal;
+  IF v_proposal IS NULL OR jsonb_typeof(v_proposal)<>'object' OR v_proposal->>'kind'<>'trigger'
+    OR EXISTS(SELECT 1 FROM jsonb_object_keys(v_proposal) k
+      WHERE k NOT IN ('kind','name','prompt','mode','provider','provider_account_id','target')) THEN
+    RAISE EXCEPTION 'invalid Companion trigger proposal' USING ERRCODE='22023';
+  END IF;
+  v_name:=btrim(v_proposal->>'name'); v_prompt:=btrim(v_proposal->>'prompt');
+  v_mode:=COALESCE(v_proposal->>'mode','relay'); v_provider:=COALESCE(v_proposal->>'provider','webhook');
+  BEGIN v_account_id:=NULLIF(v_proposal->>'provider_account_id','')::uuid;
+  EXCEPTION WHEN invalid_text_representation THEN
+    RAISE EXCEPTION 'invalid Companion trigger proposal' USING ERRCODE='22023'; END;
+  IF char_length(v_name) NOT BETWEEN 1 AND 80 OR v_name~E'[\n\r]'
+    OR char_length(v_prompt) NOT BETWEEN 1 AND 16384 OR v_mode NOT IN ('notify','relay')
+    OR v_provider NOT IN ('webhook','linear','github','custom') THEN
+    RAISE EXCEPTION 'invalid Companion trigger proposal' USING ERRCODE='22023';
+  END IF;
+  IF p_action='allow' THEN
+    PERFORM public.companion_api_create_trigger(p_org_id,p_companion_id,p_trigger_id,v_name,v_prompt,
+      v_mode,v_provider,v_account_id,COALESCE(v_proposal->'target','{}'::jsonb),p_secret,true);
+  END IF;
+  v_status:=CASE p_action WHEN 'allow' THEN 'allowed'::public.companion_decision_status
+    ELSE 'denied'::public.companion_decision_status END;
+  UPDATE public.companion_decision_deliveries d SET decision_status=v_status,actor_id=v_actor_id,
+    response_text=NULL,responded_at=v_now,updated_at=v_now
+  WHERE d.id=v_delivery.id AND d.org_id=p_org_id AND d.companion_id=p_companion_id
+    AND d.decision_status='pending' RETURNING d.* INTO v_delivery;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Companion decision changed concurrently' USING ERRCODE='40001'; END IF;
+  SELECT COALESCE(p.name,u.name,u.email) INTO v_actor_name FROM public."user" u
+    LEFT JOIN public.profiles p ON p.id=u.id WHERE u.id=v_actor_id;
+  SELECT e.event_id INTO v_event_id FROM public.companion_transcript_entries e
+  WHERE e.org_id=p_org_id AND e.companion_id=p_companion_id AND e.role='decision'
+    AND e.decision->>'request_id'=p_request_key AND e.decision->>'status'='pending'
+  ORDER BY e.ordinal DESC LIMIT 1 FOR UPDATE;
+  IF v_event_id IS NULL THEN RAISE EXCEPTION 'Companion decision transcript projection is missing' USING ERRCODE='55000'; END IF;
+  UPDATE public.companion_transcript_entries e SET decision=e.decision||jsonb_build_object(
+    'status',v_status,'answer',NULL,'decided_by_id',v_actor_id,'decided_by_name',v_actor_name,
+    'decided_at',to_char(v_now AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'))
+  WHERE e.org_id=p_org_id AND e.companion_id=p_companion_id AND e.event_id=v_event_id;
+  RETURN QUERY SELECT v_delivery.id,v_delivery.turn_id,v_delivery.decision_status,
+    v_delivery.delivery_state,v_delivery.responded_at;
+END $$;
+--> statement-breakpoint
+
+REVOKE ALL ON FUNCTION public.companion_api_create_trigger(uuid,uuid,uuid,text,text,text,text,uuid,jsonb,text,boolean) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.companion_api_update_trigger(uuid,uuid,uuid,text,text,text,text,uuid,jsonb,boolean) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.companion_api_trigger_run_json(uuid,uuid,uuid,boolean,integer,integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.companion_api_trigger_run_summary_json(uuid,uuid,uuid,boolean) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.companion_api_list_trigger_runs(uuid,uuid,uuid,uuid,integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.companion_api_get_trigger_run(uuid,uuid,uuid,integer,integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.companion_runtime_get_trigger_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer) FROM PUBLIC;
+--> statement-breakpoint
+
+DO $trigger_v2_api_acl$
+DECLARE v_source oid:=to_regprocedure('public.companion_api_read_thread(uuid,uuid)'); v_grantee oid; v_role name;
+BEGIN
+  FOR v_grantee IN SELECT DISTINCT acl.grantee FROM pg_proc p
+    CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl,acldefault('f',p.proowner))) acl
+    WHERE p.oid=v_source AND acl.privilege_type='EXECUTE' AND acl.grantee<>p.proowner
+  LOOP
+    SELECT rolname INTO v_role FROM pg_roles WHERE oid=v_grantee;
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.companion_api_create_trigger(uuid,uuid,uuid,text,text,text,text,uuid,jsonb,text,boolean) TO %I',v_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.companion_api_update_trigger(uuid,uuid,uuid,text,text,text,text,uuid,jsonb,boolean) TO %I',v_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.companion_api_list_trigger_runs(uuid,uuid,uuid,uuid,integer) TO %I',v_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.companion_api_get_trigger_run(uuid,uuid,uuid,integer,integer) TO %I',v_role);
+  END LOOP;
+END $trigger_v2_api_acl$;
+--> statement-breakpoint
+
+DO $trigger_v2_runtime_acl$
+DECLARE v_source oid:=to_regprocedure('public.companion_runtime_get_routine_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)'); v_grantee oid; v_role name;
+BEGIN
+  FOR v_grantee IN SELECT DISTINCT acl.grantee FROM pg_proc p
+    CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl,acldefault('f',p.proowner))) acl
+    WHERE p.oid=v_source AND acl.privilege_type='EXECUTE' AND acl.grantee<>p.proowner
+  LOOP
+    SELECT rolname INTO v_role FROM pg_roles WHERE oid=v_grantee;
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.companion_runtime_get_trigger_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer) TO %I',v_role);
+  END LOOP;
+END $trigger_v2_runtime_acl$;
