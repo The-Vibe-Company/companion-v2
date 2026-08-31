@@ -1407,3 +1407,120 @@ describe("CompanionThread visual viewport", () => {
     expect(pinned()).toEqual({ height: "", top: "" });
   });
 });
+
+/**
+ * Product promise:
+ * A wedged turn can be interrupted from a phone. Stop answers the finger that touched it.
+ *
+ * Regression caught:
+ * Stop shipped on `click` alone while Send was moved onto the press for THE-346. Both buttons sit in
+ * the same composer row, so both lose the click when iOS blurs the field, closes the keyboard, grows
+ * the visual viewport and lays the row out again. On 2026-08-31 a member could not stop a wedged
+ * Companion from their phone: messages queued behind a turn that would not end, and the one control
+ * that could release the lane did nothing when tapped.
+ *
+ * Why this test is component-level:
+ * The composer, the turn it stops, and the viewport pin all take part in one tap; the failure is in
+ * how they are sequenced.
+ *
+ * Failure proof:
+ * Moving Stop back to `click` alone fails the first case; dropping the prevented default fails the
+ * second; running both handlers fails the third.
+ */
+describe("CompanionThread mobile stop", () => {
+  class FakeVisualViewport extends EventTarget {
+    height = 350;
+    offsetTop = 24;
+  }
+
+  const viewport = new FakeVisualViewport();
+
+  const activeThread: Thread = {
+    ...thread,
+    active_turn: {
+      id: "66666666-6666-4666-8666-666666666666",
+      companion_id: companionId,
+      client_message_id: "77777777-7777-4777-8777-777777777777",
+      status: "running",
+      queue_sequence: 1,
+      latest_attempt: null,
+      replying: false,
+      error: null,
+      state_changed_at: "2026-08-12T12:00:00.000Z",
+      settled_at: null,
+      created_at: "2026-08-12T12:00:00.000Z",
+      updated_at: "2026-08-12T12:00:00.000Z",
+    },
+  };
+
+  function stopButton(container: HTMLElement) {
+    return container.querySelector("[data-slot=composer-stop]") as HTMLButtonElement;
+  }
+
+  beforeEach(() => {
+    viewport.height = 350;
+    viewport.offsetTop = 24;
+    Object.defineProperty(window, "visualViewport", { configurable: true, value: viewport });
+  });
+
+  afterEach(() => {
+    act(() => roots.splice(0).forEach((root) => root.unmount()));
+    document.body.innerHTML = "";
+    document.documentElement.removeAttribute("style");
+    Reflect.deleteProperty(window, "visualViewport");
+  });
+
+  it("stops the turn on the press that starts the tap", async () => {
+    const stopped: string[] = [];
+    const container = await mount(async () => true, {
+      thread: activeThread,
+      onCancelInterrupted: async (turnId) => {
+        stopped.push(turnId);
+      },
+    });
+
+    // The click never arrives, which is exactly what the phone does when the row moves under the
+    // finger. If the turn still stops, the tap was never the thing carrying it.
+    await act(async () => {
+      const composer = container.querySelector("textarea") as HTMLTextAreaElement;
+      pressed(stopButton(container));
+      composer.dispatchEvent(new Event("focusout", { bubbles: true }));
+      viewport.height = 640;
+      viewport.offsetTop = 0;
+      viewport.dispatchEvent(new Event("resize"));
+    });
+
+    expect(stopped).toEqual(["66666666-6666-4666-8666-666666666666"]);
+  });
+
+  it("refuses the press default so the composer keeps focus and the keyboard stays put", async () => {
+    const container = await mount(async () => true, { thread: activeThread });
+
+    let press!: PointerEvent;
+    await act(async () => {
+      press = pressed(stopButton(container));
+    });
+
+    // Letting the default through is what blurs the field, and the blur is what moves the button
+    // out from under the finger before its click can land.
+    expect(press.defaultPrevented).toBe(true);
+  });
+
+  it("stops once when the browser follows the press with a click", async () => {
+    const stopped: string[] = [];
+    const container = await mount(async () => true, {
+      thread: activeThread,
+      onCancelInterrupted: async (turnId) => {
+        stopped.push(turnId);
+      },
+    });
+
+    await act(async () => {
+      const stop = stopButton(container);
+      pressed(stop);
+      stop.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+
+    expect(stopped).toEqual(["66666666-6666-4666-8666-666666666666"]);
+  });
+});
