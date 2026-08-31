@@ -155,6 +155,44 @@ The decision expiry and the ten-minute running stall are different clocks.
 After migration 0129, `needs_input` pauses inactivity; before it, trust the row
 timestamps and error code over the expected state-machine semantics.
 
+### Sends are accepted but nothing ever replies, while routines still run
+
+This is a **wedged scheduling lane**, not a Box problem. Since migration 0139 a
+Companion has two independent lanes, `main` and `routine`, each with its own
+lease row and its own single active-attempt slot
+(`companion_turn_attempts_one_active_lane_uq`). A `main` attempt that never
+settles holds that slot forever, so every member message queues behind it while
+routines keep completing normally — which is exactly what the member reports.
+
+```bash
+python3 scripts/db_query.py leases --companion <uuid>
+python3 scripts/railway_logs.py --service runtime --companion <uuid> --since 2h
+```
+
+`leases` is the discriminating query. Read the two rows together:
+
+- **`main` claimed, `claim_epoch` climbing, attempt `active_for` far larger than
+  the lease TTL** — the executor is re-claiming the same work every lease period
+  and making no progress. Look for `runtime.work.fence_lost` in the logs.
+- **`main` free while an attempt is still active** — the work is orphaned; no
+  lease will expire, so nothing recovers it.
+
+Note that `db_query.py stuck` historically only matched an `interrupted`/
+`needs_input` head. It now also reports an *active* head that has not changed
+state for ten minutes; a head wedged in `starting` used to be invisible.
+
+**`fence_lost` in a loop is not a fencing problem.** `companion_runtime_get_material`
+returns **no row** when `companion_runtime_renew_and_authorize` denies
+authorization (`packages/db/drizzle/0106_companion_routines.sql:227`), and
+`LeaseSession.fencedMutation` maps *any* null to `#loseFence()`
+(`packages/companion-runtime/src/leaseSession.ts:306`). A real authorization
+denial — revoked provider or MCP access, a changed model selection, even an
+exceeded deadline — is therefore misreported as a lost fence and retried
+forever instead of failing closed. Treat repeated `fence_lost` on one attempt as
+a **swallowed denial**: the member must resolve the underlying access problem
+(reconnect the provider or MCP account in Plugins), and Cancel/Stop the wedged
+turn to release the lane. Retry alone will re-wedge it.
+
 ### Turn interrupted or Pi silent
 
 ```bash
@@ -218,6 +256,11 @@ adapters (persisted triplet: code, expurgated ≤500-char message, action):
 | `invalid_model_selection` | selected model no longer valid | switch model |
 | `runtime_shutting_down` | replica drained mid-work | should be reclaimed; investigate if it settled a turn |
 | `runtime_execution_failed` / `runtime_failure` | generic fallback — the log line's `thrown` block has the real name | search runtime logs for the same ts |
+
+`fence_lost` / `LeaseFenceLostError` is likewise a process-log outcome, never a
+persisted triplet. Once per attempt it is ordinary lease handoff; repeating at
+the lease TTL on the same `workId` it means a denial was swallowed — see the
+wedged-lane playbook above.
 
 `outbox_harvest_failed` is a process-log event, not a persisted attempt error:
 the turn succeeded and only reply images were partially recovered — search

@@ -103,6 +103,7 @@ query CompanionDebugLogs($deploymentId: String!, $limit: Int!) {
     timestamp
     severity
     message
+    attributes { key value }
   }
 }
 ```
@@ -134,9 +135,26 @@ Verified against the real backboard v2 API with a Railway CLI session token:
   `input: { environmentId }` was rejected: *"Unknown argument input"*). The
   project has a single `production` environment, so `deployments(first: N)` is
   used without an environment filter. STATUS_QUERY updated accordingly — VERIFIED.
-- **`deploymentLogs(deploymentId, limit) { timestamp severity message }`** —
-  VERIFIED (returns real log lines; a structured `attributes { key value }`
-  set is also available, e.g. `level`). An idle service returns empty `message`
-  strings, which is not an error.
+- **`deploymentLogs(deploymentId, limit) { timestamp severity message attributes { key value } }`**
+  — VERIFIED.
 - **`deploymentRestart`** (the mutation in railway_restart.py) remains
   UNVERIFIED by design — it is a production mutation and is not probed casually.
+
+## Structured runtime logs live in `attributes`, not `message` (2026-08-31)
+
+The runtime emits JSON logs, and Railway **splits them into `attributes` and
+leaves `message` empty**. Selecting only `message` therefore yields entries that
+are all blank — and the earlier tool reported `-- 2001 matching lines` of
+nothing, which reads exactly like "the runtime logged nothing". During the
+2026-08-31 wedged-lane incident this hid 163 `runtime.work.fence_lost` records
+that named the root cause outright.
+
+`railway_logs.py` now selects `attributes` and rebuilds the record via
+`record_from_attributes()` when `message` is not itself JSON. If every matched entry
+still renders empty it prints a loud stderr warning (in **both** default and `--json`
+mode) rather than a page of blank lines. It warns instead of exiting because a genuinely
+idle service also returns empty messages — that is not an error, but it must never be
+misread as "no matching logs". Each attribute `value` is JSON-encoded, so nested objects
+such as `thrown` must be `json.loads`-ed.
+
+Do not read an empty result as "no such logs" without checking `attributes`.

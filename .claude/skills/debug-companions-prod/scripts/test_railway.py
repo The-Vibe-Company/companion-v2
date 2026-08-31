@@ -146,6 +146,59 @@ class LogParsingTest(unittest.TestCase):
         ))
 
 
+    def test_record_from_attributes(self):
+        """Runtime logs arrive as Railway attributes with an empty message."""
+        self.assertIsNone(railway_logs.record_from_attributes(None))
+        self.assertIsNone(railway_logs.record_from_attributes({"level": "info"}))
+        record = railway_logs.record_from_attributes(
+            {"event": "runtime.work.fence_lost", "level": "error", "companionId": "c-1"},
+        )
+        self.assertEqual(record["event"], "runtime.work.fence_lost")
+        self.assertIn("companionId=c-1", railway_logs.format_record(record))
+
+    def test_fetch_promotes_attributes_so_records_are_never_blank(self):
+        """Regression: a structured line whose message is empty must still render."""
+        payload = {"data": {"deploymentLogs": [{
+            "timestamp": "2026-08-31T08:21:44.976Z",
+            "severity": "error",
+            "message": "",
+            "attributes": [
+                {"key": "event", "value": '"runtime.work.fence_lost"'},
+                {"key": "level", "value": '"error"'},
+                {"key": "thrown", "value": '{"name":"LeaseFenceLostError"}'},
+            ],
+        }]}}
+        def http(method, url, headers=None, body=None, **kwargs):
+            return 200, payload
+
+        rows = railway_logs.fetch_deployment_logs(ENV, "dep-1", 10, http=http)
+        self.assertEqual(rows[0]["message"], "")
+        self.assertEqual(rows[0]["attributes"]["event"], "runtime.work.fence_lost")
+        record = railway_logs.record_from_attributes(rows[0]["attributes"])
+        line = railway_logs.format_record(record)
+        self.assertTrue(line.strip(), "structured record must not render blank")
+        self.assertIn("thrown.name=LeaseFenceLostError", line)
+
+
+    def test_rendered_is_blank_covers_both_output_modes(self):
+        """The all-blank guard must see JSON dicts too, not just default-mode strings."""
+        self.assertTrue(railway_logs.rendered_is_blank(""))
+        self.assertTrue(railway_logs.rendered_is_blank("   "))
+        self.assertFalse(railway_logs.rendered_is_blank("event=x"))
+        # --json shape for an unparseable line: blank raw means nothing was rendered.
+        self.assertTrue(railway_logs.rendered_is_blank({"raw": "", "timestamp": "t"}))
+        self.assertFalse(railway_logs.rendered_is_blank({"raw": "text", "timestamp": "t"}))
+        # --json shape for a structured record: always carries content.
+        self.assertFalse(railway_logs.rendered_is_blank({"event": "x", "level": "error"}))
+
+    def test_blank_guard_does_not_fire_on_an_empty_window(self):
+        """No entries in the window is a normal result, not a schema drift signal."""
+        matched = []
+        self.assertFalse(
+            matched and all(railway_logs.rendered_is_blank(x) for x in matched),
+        )
+
+
 class RestartDoubleGateTest(unittest.TestCase):
     def test_refusal_matrix(self):
         cases = [
