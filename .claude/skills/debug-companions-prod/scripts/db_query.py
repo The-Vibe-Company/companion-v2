@@ -324,6 +324,53 @@ QUERIES: dict[str, dict] = {
             ),
         ],
     },
+    "material": {
+        "description": (
+            "Why work material would resolve to no row for every active attempt. "
+            "store.getMaterial CROSS JOINs companion_runtime_get_material, "
+            "_get_turn_context and _get_routine_material, so a single one of them "
+            "returning no row makes the whole lookup null, which the runtime reports "
+            "as a lost fence. Each precondition is selected as a boolean; actor ids "
+            "and prompt text are deliberately never selected."
+        ),
+        "params": ("companion_id_optional", "limit"),
+        "statements": [
+            (
+                "select a.companion_id, a.turn_id, a.id as attempt_id,\n"
+                "       a.execution_lane, a.status, a.checkpoint,\n"
+                "       a.claim_epoch as attempt_claim_epoch,\n"
+                "       l.claim_epoch as lane_claim_epoch,\n"
+                "       (a.actor_id = t.actor_id) as ctx_actor_matches,\n"
+                "       (a.claim_epoch is not distinct from l.claim_epoch)\n"
+                "         as claim_epoch_matches,\n"
+                "       (p.id is not null) as actor_profile_exists,\n"
+                "       a.member_timezone,\n"
+                "       (t.routine_snapshot_id is not null) as is_routine,\n"
+                "       (t.routine_name is not null) as has_routine_name,\n"
+                "       exists (\n"
+                "         select 1 from public.companion_transcript_entries e\n"
+                "         where e.org_id = t.org_id\n"
+                "           and e.companion_id = t.companion_id\n"
+                "           and e.event_id = t.message_event_id\n"
+                "           and e.role = 'user'\n"
+                "           and e.author_id = t.actor_id\n"
+                "       ) as prompt_entry_matches\n"
+                "from public.companion_turn_attempts a\n"
+                "join public.companion_turns t\n"
+                "  on t.org_id = a.org_id and t.companion_id = a.companion_id\n"
+                " and t.id = a.turn_id\n"
+                "left join public.companion_runtime_leases l\n"
+                "  on l.org_id = a.org_id and l.companion_id = a.companion_id\n"
+                " and l.lane = a.execution_lane\n"
+                "left join public.profiles p on p.id = t.actor_id\n"
+                "where a.status in ('starting','dispatching','running','needs_input')\n"
+                "  and (:'companion_id_optional'::text = ''\n"
+                "       or a.companion_id::text = :'companion_id_optional'::text)\n"
+                "order by a.started_at asc\n"
+                "limit :'limit'::int"
+            ),
+        ],
+    },
     "decisions": {
         "description": (
             "Recent decision deliveries (ask_user / proposals) for one companion, "
