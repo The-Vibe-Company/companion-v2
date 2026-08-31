@@ -368,7 +368,7 @@ async function stageCapturedResources(
   const targetSkillsRevision = clientSurface === "native_mobile"
     ? null
     : authorization.skillsRevision;
-  const material = await context.session.fencedMutation(async () =>
+  const material = await context.session.fencedLookup(async () =>
     await context.deps.materialProvider.getMaterial({
       store: context.deps.store,
       fence: context.session.fence,
@@ -809,7 +809,7 @@ async function handleIsolatedRoutineRetry(
       action: "none",
     });
   }
-  const material = await context.session.fencedMutation(async () =>
+  const material = await context.session.fencedLookup(async () =>
     await context.deps.materialProvider.getMaterial({
       store: context.deps.store,
       fence: context.session.fence,

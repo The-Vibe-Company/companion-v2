@@ -186,7 +186,7 @@ export function requireModelInputCapability(
 }
 
 async function material(context: AttemptContext): Promise<RuntimeWorkMaterial> {
-  const value = await context.session.fencedMutation(async () =>
+  const value = await context.session.fencedLookup(async () =>
     await context.deps.materialProvider.getMaterial({
       store: context.deps.store,
       fence: context.session.fence,

@@ -2081,6 +2081,50 @@ describe("RuntimeEngine attempts", () => {
     expect(store.settlements).toEqual([]);
   });
 
+  it("fails the turn instead of spinning when material is empty under a live fence", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
+    const ports = fakePorts(store);
+    const engine = new RuntimeEngine(engineDependencies({
+      store,
+      ports,
+      materialProvider: { getMaterial: async () => null },
+    }));
+
+    const result = await engine.execute(claim);
+
+    // `getMaterial` CROSS JOINs three definers that each re-authorize, so one of them declining
+    // empties the lookup without the lease having moved. Calling that a lost fence made the
+    // executor release, re-claim and decline again once per lease TTL — forever, with no Box
+    // contact and no checkpoint. The member must get a terminal, actionable turn instead.
+    expect(result.outcome).not.toBe("fence_lost");
+    expect(store.settlements).toHaveLength(1);
+    expect(store.settlements[0]).toMatchObject({ terminalStatus: "failed" });
+  });
+
+  it("still abandons without settling when material is empty because the fence really moved", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
+    const ports = fakePorts(store);
+    const engine = new RuntimeEngine(engineDependencies({
+      store,
+      ports,
+      materialProvider: {
+        getMaterial: async () => {
+          store.renewReturnsNull = true;
+          return null;
+        },
+      },
+    }));
+
+    const result = await engine.execute(claim);
+
+    // The other half of the distinction: when the lease really is gone, settling would write a
+    // terminal the new holder cannot see, so abandoning is still the only safe move.
+    expect(result.outcome).toBe("fence_lost");
+    expect(store.settlements).toEqual([]);
+  });
+
   it("abandons when the harvest commit itself is indeterminate", async () => {
     const claim = attemptClaim();
     const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });

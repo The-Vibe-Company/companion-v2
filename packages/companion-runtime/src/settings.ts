@@ -102,7 +102,7 @@ export async function handleSettings(
       clock: context.deps.clock,
       signal: context.session.signal,
       stage: async () => {
-        const material = await context.session.fencedMutation(async () =>
+        const material = await context.session.fencedLookup(async () =>
           await context.deps.materialProvider.getMaterial({
             store: context.deps.store,
             fence: context.session.fence,
