@@ -6855,6 +6855,45 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     }
   });
 
+  it("returns the non-isolated preparation row for an ordinary main attempt", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const fixture = await createCompanion();
+    try {
+      const claim = await claimWork();
+      expect(claim).toMatchObject({
+        workKind: "attempt",
+        companionId: fixture.companionId,
+      });
+
+      const prepared = await asRuntime((tx) => tx<Array<{
+        isolated: boolean;
+        contextId: string | null;
+        sha256: string | null;
+        content: string | null;
+      }>>`
+        select isolated, context_id::text as "contextId",
+          context_sha256 as sha256, context_content as content
+        from public.companion_runtime_prepare_routine_run(
+          ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
+          ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
+          'attempt', ${claim.workId}::uuid, true
+        )
+      `);
+
+      // Migration 0147 checked the composite result with `IS NOT NULL`. PostgreSQL evaluates that
+      // predicate as false for this valid `(false, NULL, NULL, NULL)` payload, so the wrapper
+      // returned no row and every ordinary message was reclaimed until its cold-start deadline.
+      expect(prepared).toEqual([{
+        isolated: false,
+        contextId: null,
+        sha256: null,
+        content: null,
+      }]);
+    } finally {
+      await removeCompanion(fixture.companionId);
+    }
+  });
+
   it("merges a delegated subagent run into one card and still refuses an unknown kind", async () => {
     if (!sql) throw new Error("runtime executor database is not initialized");
     const fixture = await createCompanion();

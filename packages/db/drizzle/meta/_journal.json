@@ -1037,6 +1037,13 @@
       "when": 1792516000000,
       "tag": "0147_companion_trigger_v2_engine",
       "breakpoints": true
+    },
+    {
+      "idx": 148,
+      "version": "7",
+      "when": 1792602400000,
+      "tag": "0148_companion_trigger_prepare_result",
+      "breakpoints": true
     }
   ]
 }
