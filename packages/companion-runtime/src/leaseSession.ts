@@ -1,7 +1,7 @@
 import { COMPANION_BUDGETS } from "@companion/contracts";
 
 import type { RuntimeClock } from "./clock";
-import { RuntimeHandoffError, RuntimeShutdownError } from "./errors";
+import { RuntimeHandoffError, RuntimeInvariantError, RuntimeShutdownError } from "./errors";
 import {
   RUNTIME_LEASE_SECONDS,
   type RuntimeStore,
@@ -305,6 +305,41 @@ export class LeaseSession {
       const result = await mutation();
       if (result === null) return this.#loseFence();
       return result;
+    });
+  }
+
+  /**
+   * Serialize a *read* through definers that re-authorize internally.
+   *
+   * `store.getMaterial` CROSS JOINs three such definers, so any single one declining collapses the
+   * whole lookup to null. Unlike a fenced CAS write, that null is not proof the fence moved, and
+   * treating it as one made the executor release, re-claim and decline again once per lease TTL —
+   * forever, with no Box contact and no checkpoint. That is the shape that wedged a Companion's
+   * main lane for hours on 2026-08-31 while its routine lane kept working, against the contract
+   * that a turn "never appears to reply forever".
+   *
+   * Ask the lease itself instead of guessing: only a fence that really moved is a fence loss, a
+   * denial is surfaced as a denial, and a live authorized fence that still cannot produce material
+   * is terminal and actionable rather than something to spin on until a deadline kills it.
+   */
+  async fencedLookup<T>(lookup: () => Promise<T | null>): Promise<T> {
+    return await this.#enqueue(async () => {
+      this.#assertMutable();
+      const result = await lookup();
+      if (result !== null) return result;
+      const authorization = await this.#store.renewAndAuthorize(this.fence, RUNTIME_LEASE_SECONDS);
+      if (!authorization) return this.#loseFence();
+      this.#authorization = authorization;
+      if (!authorization.authorized) {
+        throw new LeaseAuthorizationDeniedError(
+          authorization.denialCode ?? "runtime_authorization_denied",
+        );
+      }
+      throw new RuntimeInvariantError({
+        code: "work_material_unavailable",
+        message: "The runtime could not resolve the material for this work.",
+        action: "retry",
+      });
     });
   }
 

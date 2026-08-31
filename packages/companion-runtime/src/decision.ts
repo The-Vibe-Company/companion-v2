@@ -54,7 +54,7 @@ export async function handleDecision(
     const auth = await context.session.reauthorize();
     switch (auth.workCheckpoint) {
       case "pending": {
-        const workMaterial = await context.session.fencedMutation(async () =>
+        const workMaterial = await context.session.fencedLookup(async () =>
           await context.deps.materialProvider.getMaterial({
             store: context.deps.store,
             fence: context.session.fence,
