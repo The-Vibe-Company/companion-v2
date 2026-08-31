@@ -2,6 +2,7 @@ import { companionsAvailableToUser, companionsEnabled } from "@companion/core";
 import type {
   Companion,
   CompanionPluginsResponse,
+  CompanionTriggerProviderAccount,
   SkillListRow,
 } from "@companion/contracts";
 import { notFound, redirect } from "next/navigation";
@@ -55,6 +56,7 @@ export default async function CompanionsPage({
     orgRows,
     companionsResponse,
     plugins,
+    triggerProviderAccounts,
   ] =
     await Promise.all([
       // The context panel names and describes attached Skills. Keep the public library queries
@@ -63,8 +65,12 @@ export default async function CompanionsPage({
       serverApiFetch<SkillListRow[]>("/v1/skills?lib=org", { headers }).catch(() => []),
       serverApiFetch<{ companions: Companion[] }>("/v1/companions", { headers }).catch(() => null),
       serverApiFetch<CompanionPluginsResponse>("/v1/companion-plugins", { headers }).catch(() => null),
+      serverApiFetch<{ accounts: CompanionTriggerProviderAccount[] }>(
+        "/v1/companion-trigger-provider-accounts",
+        { headers },
+      ).catch(() => null),
     ]);
-  if (!companionsResponse || !plugins) {
+  if (!companionsResponse || !plugins || !triggerProviderAccounts) {
     return <WorkspaceLoadError />;
   }
   if (
@@ -105,6 +111,7 @@ export default async function CompanionsPage({
       initialCompanions={companionsResponse.companions}
       initialProviders={null}
       initialPlugins={plugins.accounts}
+      initialTriggerProviderAccounts={triggerProviderAccounts.accounts}
       initialCompanionId={initialCompanionId}
       initialSettingsCompanionId={initialSettingsCompanionId}
       initialPluginsOpen={initialPluginsOpen}

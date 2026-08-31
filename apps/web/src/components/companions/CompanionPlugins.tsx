@@ -307,7 +307,9 @@ function CatalogConnectDialog({
       icon={<PluginMark provider={server.provider} size="md" variant="glyph" />}
       title={`Connect ${server.title}`}
       desc={server.provider === "github"
-        ? "Give this account a short label such as work or personal. GitHub is used for MCP tools and for git clone, commit, and push."
+        ? "Give this account a short label such as work or personal. The same OAuth grant also makes GitHub trigger registration available member-wide."
+        : server.provider === "sentry"
+          ? "Give this account a short label. The same OAuth grant powers Sentry MCP tools and member-wide trigger registration."
         : server.provider === "gmail"
           ? "Give this account a short label such as work or personal. Gmail can read and search mail, then create drafts for you to review in Gmail. It never sends email."
         : "Give this account a short label such as work or personal."}
@@ -358,7 +360,9 @@ function CatalogConnectDialog({
         </label>
         <p className="companions-new-form__hint">
           {server.provider === "github"
-            ? "Authorize GitHub once. After you attach this account to a Companion, it can use GitHub tools plus git clone, commit, and push. Tokens remain write-only and encrypted."
+            ? "Authorize GitHub once. Trigger registration is immediately available to every Companion; GitHub MCP tools still require per-Companion attachment. Tokens remain write-only and encrypted."
+            : server.provider === "sentry"
+              ? "Authorize Sentry once. Trigger registration is immediately available to every Companion; Sentry MCP tools still require per-Companion attachment. Tokens remain write-only and encrypted."
             : server.provider === "gmail"
               ? "Authorize read and draft access on Google. Companion cannot send mail; every draft stays in Gmail for your review. Tokens remain write-only and encrypted."
             : "You will authorize this account on the provider's website. Tokens remain write-only and encrypted."}
@@ -406,11 +410,13 @@ export function CompanionPlugins({
   orgId,
   initialAccounts,
   onBack,
+  onAccountsChange,
   api = defaultCompanionPluginsApi,
 }: {
   orgId: string;
   initialAccounts: CompanionPluginAccount[];
   onBack: () => void;
+  onAccountsChange?: (accounts: CompanionPluginAccount[]) => void;
   api?: CompanionPluginsApi;
 }) {
   const [accounts, setAccounts] = useState(initialAccounts);
@@ -429,7 +435,9 @@ export function CompanionPlugins({
       setOauthNotice({
         tone: "success",
         message: url.searchParams.get("provider") === "github"
-          ? "GitHub connected for MCP and git."
+          ? "GitHub connected. Trigger registration is live for every Companion; MCP tools can now be attached separately."
+          : url.searchParams.get("provider") === "sentry"
+            ? "Sentry connected. Trigger registration is live for every Companion; MCP tools can now be attached separately."
           : url.searchParams.get("provider") === "gmail"
             ? "Gmail connected for reading and drafts."
             : "MCP account connected.",
@@ -470,11 +478,19 @@ export function CompanionPlugins({
   }, [accounts]);
 
   const remove = async (account: CompanionPluginAccount) => {
+    const confirmed = window.confirm(
+      `Disconnect ${providerName(account.provider)} “${account.label}”? `
+      + "This member-wide account will be unavailable to every Companion. Its MCP tool attachments "
+      + "will stop working, and triggers that use it cannot register or receive events until the provider is reconnected.",
+    );
+    if (!confirmed) return;
     setRemoving(account.id);
     setError(null);
     try {
       await api.deleteCompanionPlugin(orgId, account.id);
-      setAccounts((current) => current.filter((item) => item.id !== account.id));
+      const next = accounts.filter((item) => item.id !== account.id);
+      setAccounts(next);
+      onAccountsChange?.(next);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "This MCP account could not be disconnected.");
     } finally {
@@ -574,7 +590,9 @@ export function CompanionPlugins({
           orgId={orgId}
           api={api}
           onAdded={(account) => {
-            setAccounts((current) => [...current, account]);
+            const next = [...accounts, account];
+            setAccounts(next);
+            onAccountsChange?.(next);
             setAdding(false);
           }}
           onClose={() => setAdding(false)}

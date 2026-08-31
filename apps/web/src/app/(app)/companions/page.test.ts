@@ -154,6 +154,7 @@ describe("Companions page access gate", () => {
     apiMocks.serverApiFetch.mockImplementation(async (path: string) => {
       if (path === "/v1/companions") return { companions: [] };
       if (path === "/v1/companion-plugins") return { accounts: [] };
+      if (path === "/v1/companion-trigger-provider-accounts") return { accounts: [] };
       if (path === "/v1/skills?lib=mine") {
         return [{
           id: "personal-1",
@@ -244,6 +245,7 @@ describe("Companions page access gate", () => {
         return { companions: [{ id: "viewer-companion", access: "viewer" }] };
       }
       if (path === "/v1/companion-plugins") return { accounts: [] };
+      if (path === "/v1/companion-trigger-provider-accounts") return { accounts: [] };
       return [];
     });
 

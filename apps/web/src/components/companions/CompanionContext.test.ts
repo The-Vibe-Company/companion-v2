@@ -93,7 +93,7 @@ const trigger: CompanionTrigger = {
   companion_id: companionId,
   name: "Repository push",
   prompt: "Summarize the pushed changes.",
-  mode: "relay",
+  mode: "notify",
   provider: "github",
   provider_account_id: null,
   target: { repo: "acme/companion", events: ["push"] },
@@ -132,9 +132,20 @@ function renderDetails({
     skills,
     orgId: "org-1",
     routines,
-      onRoutinesChange: () => undefined,
-      onOpenRoutineHistory: () => undefined,
+    onRoutinesChange: () => undefined,
+    onOpenRoutineHistory: () => undefined,
     triggers,
+    triggerAccounts: [{
+      id: "account-1",
+      provider: "github",
+      label: "Acme GitHub",
+      credential_source: "mcp_oauth",
+      mcp_account_id: "44444444-4444-4444-8444-444444444444",
+      status: "connected",
+      dependent_trigger_count: 1,
+      created_at: "2026-08-30T00:00:00.000Z",
+      updated_at: "2026-08-30T00:00:00.000Z",
+    }],
     onTriggersChange: () => undefined,
     onJoin: () => undefined,
     onDesktop: () => undefined,
@@ -158,7 +169,8 @@ describe("CompanionContext connected resources", () => {
     expect(markup).toContain("Active");
     expect(markup).toContain("Repository push");
     expect(markup).toContain("GitHub");
-    expect(markup).toContain("Webhook registered");
+    expect(markup).toContain("Registered");
+    expect(markup).toContain("Notify me");
     expect(markup).toContain("Disabled");
   });
 

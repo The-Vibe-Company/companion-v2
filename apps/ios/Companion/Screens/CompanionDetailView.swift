@@ -585,6 +585,7 @@ struct CompanionDetailView: View {
         return CompanionResourceSectionsServices(
             load: services.connectedResources,
             listPlugins: services.listPlugins,
+            listTriggerProviderAccounts: services.listTriggerProviderAccounts,
             updatePluginSelection: services.updatePluginSelection,
             loadCompanion: services.loadCompanion,
             restart: services.restart,

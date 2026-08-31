@@ -199,11 +199,16 @@ struct CompanionTriggerEditorView: View {
     let create: (CreateCompanionTriggerInput) async throws -> CompanionTrigger
     let update: (String, UpdateCompanionTriggerInput) async throws -> CompanionTrigger
     let onSaved: () -> Void
+    let accountOptions: [CompanionTriggerProviderAccount]
 
     @State private var name: String
     @State private var prompt: String
     @State private var provider: CompanionTriggerProvider
+    @State private var mode: CompanionTriggerMode
+    @State private var providerAccountID: String
     @State private var repository: String
+    @State private var organization: String
+    @State private var project: String
     @State private var events: String
     @State private var enabled: Bool
     @State private var createID: String
@@ -212,6 +217,7 @@ struct CompanionTriggerEditorView: View {
 
     init(
         initial: CompanionTrigger? = nil,
+        accountOptions: [CompanionTriggerProviderAccount] = [],
         create: @escaping (CreateCompanionTriggerInput) async throws -> CompanionTrigger,
         update: @escaping (String, UpdateCompanionTriggerInput) async throws -> CompanionTrigger,
         onSaved: @escaping () -> Void
@@ -220,10 +226,23 @@ struct CompanionTriggerEditorView: View {
         self.create = create
         self.update = update
         self.onSaved = onSaved
+        self.accountOptions = accountOptions
         _name = State(initialValue: initial?.name ?? "")
         _prompt = State(initialValue: initial?.prompt ?? "")
-        _provider = State(initialValue: CompanionTriggerProvider(rawValue: initial?.provider ?? "custom") ?? .custom)
+        let defaultProvider = accountOptions.filter { $0.status == .connected }
+            .compactMap { CompanionTriggerProvider(rawValue: $0.provider.rawValue) }
+            .first(where: { $0 == .github || $0 == .linear || $0 == .sentry }) ?? .github
+        let selectedProvider = CompanionTriggerProvider(rawValue: initial?.provider ?? defaultProvider.rawValue) ?? .github
+        let matchingAccounts = accountOptions.filter {
+            $0.status == .connected && $0.provider.rawValue == selectedProvider.rawValue
+        }
+        let soleAccount = matchingAccounts.count == 1 ? matchingAccounts[0] : nil
+        _provider = State(initialValue: selectedProvider)
+        _mode = State(initialValue: initial?.mode ?? .relay)
+        _providerAccountID = State(initialValue: initial?.providerAccountID ?? soleAccount?.id ?? "")
         _repository = State(initialValue: initial?.target?.repo ?? "")
+        _organization = State(initialValue: initial?.target?.organization ?? "")
+        _project = State(initialValue: initial?.target?.project ?? "")
         _events = State(initialValue: initial?.target?.events?.joined(separator: ", ") ?? "")
         _enabled = State(initialValue: initial?.enabled ?? true)
         _createID = State(initialValue: UUID().uuidString.lowercased())
@@ -244,12 +263,48 @@ struct CompanionTriggerEditorView: View {
                     TextField("Name", text: $name)
                         .textInputAutocapitalization(.sentences)
                         .accessibilityIdentifier("companion.trigger-editor.name")
-                    Picker("Provider", selection: $provider) {
-                        Text("Custom").tag(CompanionTriggerProvider.custom)
-                        Text("GitHub").tag(CompanionTriggerProvider.github)
-                        Text("Linear").tag(CompanionTriggerProvider.linear)
+                    if availableProviders.isEmpty {
+                        Label {
+                            Text("Connect GitHub, Sentry, or Linear once. Every Companion can use it immediately.")
+                        } icon: {
+                            Image(systemName: "link.badge.plus")
+                        }
+                        .font(.footnote)
+                        .foregroundStyle(Color.companionMuted)
+                        .accessibilityIdentifier("companion.trigger-editor.provider-required")
+                    } else {
+                        Picker("Provider", selection: $provider) {
+                            ForEach(availableProviders, id: \.self) { option in
+                                Text(providerLabel(option)).tag(option)
+                            }
+                        }
+                        .accessibilityIdentifier("companion.trigger-editor.provider")
+                        .onChange(of: provider) { _, _ in chooseSoleAccount() }
                     }
-                    .accessibilityIdentifier("companion.trigger-editor.provider")
+
+                    if eligibleAccounts.count == 1, let account = eligibleAccounts.first {
+                        LabeledContent("Shared account", value: account.label)
+                            .accessibilityIdentifier("companion.trigger-editor.account-reused")
+                    } else if eligibleAccounts.count > 1 {
+                        Picker("Shared account", selection: $providerAccountID) {
+                            Text("Choose account").tag("")
+                            ForEach(eligibleAccounts) { account in
+                                Text(account.label).tag(account.id)
+                            }
+                        }
+                        .accessibilityIdentifier("companion.trigger-editor.account")
+                    } else if !availableProviders.isEmpty && providerUsesSharedAccount {
+                        Text("Connect this provider once in Trigger providers. It will become available to every Companion.")
+                            .font(.footnote)
+                            .foregroundStyle(Color.companionMuted)
+                    }
+
+                    Picker("Mode", selection: $mode) {
+                        Text("Notify me").tag(CompanionTriggerMode.notify)
+                        Text("Ask the Companion").tag(CompanionTriggerMode.relay)
+                    }
+                    .pickerStyle(.segmented)
+                    .accessibilityIdentifier("companion.trigger-editor.mode")
                     TextField("Prompt", text: $prompt, axis: .vertical)
                         .lineLimit(4...10)
                         .textInputAutocapitalization(.sentences)
@@ -259,7 +314,7 @@ struct CompanionTriggerEditorView: View {
                 } header: {
                     Text(initial == nil ? "New trigger" : "Edit trigger")
                 } footer: {
-                    Text("A webhook fires this prompt as an ordinary turn. Trigger creation has no timezone.")
+                    Text("Companion registers the provider event end to end. No webhook URL or separate key is required.")
                 }
 
                 if provider == .github {
@@ -276,6 +331,27 @@ struct CompanionTriggerEditorView: View {
                         Text("GitHub webhook")
                     } footer: {
                         Text("Use an owner/name repository and event names such as pull_request, push, or *.")
+                    }
+                }
+
+                if provider == .sentry {
+                    Section {
+                        TextField("Organization slug", text: $organization)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .accessibilityIdentifier("companion.trigger-editor.sentry-organization")
+                        TextField("Project slug", text: $project)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .accessibilityIdentifier("companion.trigger-editor.sentry-project")
+                        TextField("Events (comma separated)", text: $events)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .accessibilityIdentifier("companion.trigger-editor.events")
+                    } header: {
+                        Text("Sentry webhook")
+                    } footer: {
+                        Text("Companion registers the project service hook for these event names.")
                     }
                 }
 
@@ -323,19 +399,38 @@ struct CompanionTriggerEditorView: View {
     }
 
     private var target: CompanionTriggerTarget? {
-        guard provider == .github else { return nil }
-        return CompanionTriggerTarget(
-            repo: repository.trimmingCharacters(in: .whitespacesAndNewlines),
-            events: normalizedEvents
-        )
+        if provider == .github {
+            return CompanionTriggerTarget(
+                repo: repository.trimmingCharacters(in: .whitespacesAndNewlines),
+                events: normalizedEvents
+            )
+        }
+        if provider == .sentry {
+            return CompanionTriggerTarget(
+                organization: organization.trimmingCharacters(in: .whitespacesAndNewlines),
+                project: project.trimmingCharacters(in: .whitespacesAndNewlines),
+                events: normalizedEvents
+            )
+        }
+        return nil
     }
 
     private var formIsValid: Bool {
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
-        guard provider == .github else { return true }
-        return repository.trimmingCharacters(in: .whitespacesAndNewlines).contains("/")
-            && !normalizedEvents.isEmpty
+        if providerUsesSharedAccount {
+            guard !eligibleAccounts.isEmpty else { return false }
+        }
+        if provider == .github {
+            return repository.trimmingCharacters(in: .whitespacesAndNewlines).contains("/")
+                && !normalizedEvents.isEmpty
+        }
+        if provider == .sentry {
+            return !organization.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && !project.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && !normalizedEvents.isEmpty
+        }
+        return true
     }
 
     private var formError: String {
@@ -345,11 +440,58 @@ struct CompanionTriggerEditorView: View {
         if prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return "Enter a prompt."
         }
+        if providerUsesSharedAccount, eligibleAccounts.isEmpty {
+            return "Connect this member-wide provider so Companion can register the webhook."
+        }
+        if provider == .sentry { return "Sentry triggers need an organization, project, and at least one event." }
         return "GitHub triggers need a repository and at least one event."
     }
 
     private var saveDisabled: Bool {
-        saving || !formIsValid || provider == .unknown
+        saving || !formIsValid || provider == .unknown || (eligibleAccounts.count > 1 && providerAccountID.isEmpty)
+    }
+
+    private var eligibleAccounts: [CompanionTriggerProviderAccount] {
+        guard providerUsesSharedAccount else { return [] }
+        return accountOptions.filter { $0.status == .connected && $0.provider.rawValue == provider.rawValue }
+    }
+
+    private var availableProviders: [CompanionTriggerProvider] {
+        var providers = [CompanionTriggerProvider]()
+        for account in accountOptions where account.status == .connected {
+            guard let option = CompanionTriggerProvider(rawValue: account.provider.rawValue),
+                  option == .github || option == .linear || option == .sentry,
+                  !providers.contains(option) else { continue }
+            providers.append(option)
+        }
+        if let initialProvider = initial.flatMap({ CompanionTriggerProvider(rawValue: $0.provider) }),
+           !providers.contains(initialProvider) {
+            providers.append(initialProvider)
+        }
+        return providers
+    }
+
+    private func providerLabel(_ option: CompanionTriggerProvider) -> String {
+        switch option {
+        case .github: "GitHub"
+        case .linear: "Linear"
+        case .sentry: "Sentry"
+        case .webhook: "Webhook (legacy)"
+        case .custom: "Custom (legacy)"
+        case .unknown: "Unknown"
+        }
+    }
+
+    private var providerUsesSharedAccount: Bool {
+        provider == .github || provider == .linear || provider == .sentry
+    }
+
+    private func chooseSoleAccount() {
+        if eligibleAccounts.count == 1 {
+            providerAccountID = eligibleAccounts[0].id
+        } else if !eligibleAccounts.contains(where: { $0.id == providerAccountID }) {
+            providerAccountID = ""
+        }
     }
 
     private func saveTrigger() async {
@@ -365,7 +507,9 @@ struct CompanionTriggerEditorView: View {
                     UpdateCompanionTriggerInput(
                         name: trimmedName,
                         prompt: trimmedPrompt,
+                        mode: mode,
                         provider: provider,
+                        providerAccountID: providerAccountID.isEmpty ? nil : providerAccountID,
                         target: target,
                         enabled: enabled
                     )
@@ -376,7 +520,9 @@ struct CompanionTriggerEditorView: View {
                         id: createID,
                         name: trimmedName,
                         prompt: trimmedPrompt,
+                        mode: mode,
                         provider: provider,
+                        providerAccountID: providerAccountID.isEmpty ? nil : providerAccountID,
                         target: target,
                         enabled: enabled
                     )

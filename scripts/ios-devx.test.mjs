@@ -1130,6 +1130,33 @@ test("iOS navigation has one Companion details route and no legacy resource page
   assert.doesNotMatch(root, /-companion-resources-demo|CompanionConnectedResourcesDemoView/);
 });
 
+test("iOS trigger providers are member-wide while MCP tool attachments remain Companion-specific", () => {
+  const resources = read("apps/ios/Companion/Screens/CompanionDetailResourceSections.swift");
+  const editor = read("apps/ios/Companion/Screens/CompanionResourceEditorViews.swift");
+  const plugins = read("apps/ios/Companion/Screens/PluginCatalogSheet.swift");
+  const client = read("apps/ios/CompanionKit/Sources/CompanionKit/APIClient.swift");
+
+  const triggerAccounts = resources.slice(
+    resources.indexOf("private var triggerAccountOptions"),
+    resources.indexOf("private var effectiveMemberTimezone"),
+  );
+  assert.match(triggerAccounts, /\[CompanionTriggerProviderAccount\]/);
+  assert.match(triggerAccounts, /triggerProviderAccounts/);
+  assert.doesNotMatch(triggerAccounts, /plugins\.filter|selectedMCPAccountIDs|attached/);
+  assert.match(resources, /Text\("Shared providers"\)/);
+  assert.match(resources, /No Companion attachment is required\. MCP tool attachments are managed separately above\./);
+  assert.match(resources, /Registration blocked · provider disconnected/);
+  assert.match(editor, /LabeledContent\("Shared account"/);
+  assert.match(editor, /provider == \.github \|\| provider == \.linear \|\| provider == \.sentry/);
+  assert.doesNotMatch(editor, /Attach a GitHub or Linear account/);
+  assert.match(plugins, /struct TriggerProviderManagementView/);
+  assert.match(plugins, /there is no attachment step/);
+  assert.match(plugins, /unavailable to every Companion/);
+  assert.match(plugins, /dependent triggers cannot register or receive events/);
+  assert.match(client, /path: "\/v1\/companion-trigger-provider-accounts"/);
+  assert.doesNotMatch(client, /companion-trigger-provider-accounts\/.*companion/);
+});
+
 test("GitHub Actions never installs or invokes XcodeBuildMCP", () => {
   const workflows = readdirSync(resolve(ROOT, ".github/workflows"))
     .filter((file) => file.endsWith(".yml") || file.endsWith(".yaml"));

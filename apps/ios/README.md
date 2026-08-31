@@ -68,7 +68,15 @@ bounded internal transcript pages, and safe errors. A routine-origin chat entry 
 clickable marker instead of a prompt bubble; it opens that exact run, while surfaced `relay` and
 `notify` outputs remain ordinary main-thread history. These reads use the shared bounded API,
 remain available to Viewers, and never wake Box or Pi. The details page queues the existing Pi-only
-restart as **Restart Companion** and the existing full-Box restart as **Restart server**; both are
+restart. Trigger rows are a distinct result surface beside plugins: they show provider, notify/relay
+mode, remote registration state, retry failures, and newest-first fire history with bounded received
+payloads. Trigger provider accounts connect once at member level and are immediately usable by every
+Companion without an attachment step. GitHub and Sentry normally share their encrypted MCP OAuth
+credential; Linear and supported fallbacks use one encrypted member-level API key. Creation and chat
+approval let Companion register the remote webhook end to end, without a callback-URL prompt or
+manual provider-console setup. The platform URL and secret rotation remain collapsed technical controls for editors only. The
+details page queues the existing Pi-only restart as **Restart Companion** and the existing full-Box
+restart as **Restart server**; both are
 confirmed, idempotent lifecycle intents whose PostgreSQL-projected queued/stopping/starting/completed
 state is polled without contacting Box or Pi. Viewer sees the page read-only, including redacted
 unavailable plugin selections, and never receives mutation or restart controls. The

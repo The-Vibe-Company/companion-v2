@@ -7,6 +7,7 @@ import UIKit
 struct CompanionResourceSectionsServices {
     let load: () async throws -> CompanionConnectedResources
     let listPlugins: () async throws -> [CompanionPluginAccount]
+    let listTriggerProviderAccounts: (() async throws -> [CompanionTriggerProviderAccount])?
     let updatePluginSelection: ([String]) async throws -> CompanionSummary
     let loadCompanion: () async throws -> CompanionSummary
     let restart: (CompanionRuntimeRestartTarget, UUID) async throws -> CompanionOperationSummary
@@ -14,20 +15,24 @@ struct CompanionResourceSectionsServices {
     let updateTrigger: ((String, UpdateCompanionTriggerInput) async throws -> CompanionTrigger)?
     let deleteTrigger: ((String) async throws -> Void)?
     let rotateTriggerSecret: ((String) async throws -> CompanionTrigger)?
+    let retryTriggerRegistration: ((String) async throws -> CompanionTrigger)?
 
     init(
         load: @escaping () async throws -> CompanionConnectedResources,
         listPlugins: @escaping () async throws -> [CompanionPluginAccount],
+        listTriggerProviderAccounts: (() async throws -> [CompanionTriggerProviderAccount])? = nil,
         updatePluginSelection: @escaping ([String]) async throws -> CompanionSummary,
         loadCompanion: @escaping () async throws -> CompanionSummary,
         restart: @escaping (CompanionRuntimeRestartTarget, UUID) async throws -> CompanionOperationSummary,
         createTrigger: ((CreateCompanionTriggerInput) async throws -> CompanionTrigger)? = nil,
         updateTrigger: ((String, UpdateCompanionTriggerInput) async throws -> CompanionTrigger)? = nil,
         deleteTrigger: ((String) async throws -> Void)? = nil,
-        rotateTriggerSecret: ((String) async throws -> CompanionTrigger)? = nil
+        rotateTriggerSecret: ((String) async throws -> CompanionTrigger)? = nil,
+        retryTriggerRegistration: ((String) async throws -> CompanionTrigger)? = nil
     ) {
         self.load = load
         self.listPlugins = listPlugins
+        self.listTriggerProviderAccounts = listTriggerProviderAccounts
         self.updatePluginSelection = updatePluginSelection
         self.loadCompanion = loadCompanion
         self.restart = restart
@@ -35,6 +40,7 @@ struct CompanionResourceSectionsServices {
         self.updateTrigger = updateTrigger
         self.deleteTrigger = deleteTrigger
         self.rotateTriggerSecret = rotateTriggerSecret
+        self.retryTriggerRegistration = retryTriggerRegistration
     }
 }
 
@@ -47,6 +53,7 @@ struct CompanionResourceSections: View {
     @State private var currentCompanion: CompanionSummary
     @State private var resources: CompanionConnectedResources?
     @State private var plugins: [CompanionPluginAccount] = []
+    @State private var triggerProviderAccounts: [CompanionTriggerProviderAccount] = []
     @State private var loading = true
     @State private var error: String?
     @State private var success: String?
@@ -54,6 +61,7 @@ struct CompanionResourceSections: View {
     @State private var mutatingPluginID: String?
     @State private var showingPluginChoices = false
     @State private var showingPluginManagement = false
+    @State private var showingTriggerProviderManagement = false
     @State private var restartTarget: CompanionRuntimeRestartTarget?
     @State private var restartingTarget: CompanionRuntimeRestartTarget?
     @State private var restartRequestIDs: [CompanionRuntimeRestartTarget: UUID] = [:]
@@ -64,6 +72,7 @@ struct CompanionResourceSections: View {
     @State private var editingTrigger: CompanionTrigger?
     @State private var showingNewTrigger = false
     @State private var confirmingRotateTriggerID: String?
+    @State private var historyTrigger: CompanionTrigger?
 
     init(
         companion: CompanionSummary,
@@ -138,6 +147,13 @@ struct CompanionResourceSections: View {
             PluginManagementView()
                 .tint(visualTheme.accent)
         }
+        .sheet(
+            isPresented: $showingTriggerProviderManagement,
+            onDismiss: { Task { await load() } }
+        ) {
+            TriggerProviderManagementView()
+                .tint(visualTheme.accent)
+        }
         .confirmationDialog(
             "Delete this trigger?",
             isPresented: Binding(
@@ -156,6 +172,7 @@ struct CompanionResourceSections: View {
         }
         .sheet(isPresented: $showingNewTrigger) {
             CompanionTriggerEditorView(
+                accountOptions: triggerAccountOptions,
                 create: { try await createTrigger($0) },
                 update: { id, input in try await updateTrigger(id: id, input: input) }
             ) {
@@ -167,11 +184,22 @@ struct CompanionResourceSections: View {
         .sheet(item: $editingTrigger) { trigger in
             CompanionTriggerEditorView(
                 initial: trigger,
+                accountOptions: triggerAccountOptions,
                 create: { try await createTrigger($0) },
                 update: { id, input in try await updateTrigger(id: id, input: input) }
             ) {
                 editingTrigger = nil
                 Task { await load() }
+            }
+            .tint(visualTheme.accent)
+        }
+        .sheet(item: $historyTrigger) { trigger in
+            NavigationStack {
+                CompanionTriggerHistoryView(
+                    companionID: companion.id,
+                    triggerID: trigger.id,
+                    triggerName: trigger.name
+                )
             }
             .tint(visualTheme.accent)
         }
@@ -260,6 +288,8 @@ struct CompanionResourceSections: View {
                     symbol: "bolt",
                     count: resources.triggers.count
                 ) {
+                    triggerProviderAvailability
+                    resourceDivider
                     if resources.triggers.isEmpty {
                         emptyRow(
                             title: "No triggers connected",
@@ -414,7 +444,8 @@ struct CompanionResourceSections: View {
     }
 
     private func triggerRow(_ trigger: CompanionTrigger) -> some View {
-        HStack(alignment: .top, spacing: 12) {
+        let providerConnected = triggerProviderConnected(trigger)
+        return HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 6) {
                 Text(trigger.name)
                     .font(.subheadline.weight(.semibold))
@@ -422,10 +453,13 @@ struct CompanionResourceSections: View {
                 Text(trigger.providerName)
                     .font(.footnote.weight(.medium))
                     .foregroundStyle(Color.companionInk.opacity(0.82))
-                Text(trigger.registrationDescription)
+                Text(trigger.mode == .notify ? "Notify me" : "Ask the Companion")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(Color.companionMuted)
+                Text(providerConnected ? trigger.registrationDescription : "Registration blocked · provider disconnected")
                     .font(.caption)
                     .foregroundStyle(
-                        trigger.registrationStatus == .failed
+                        !providerConnected || trigger.registrationStatus == .failed
                             ? Color.companionDanger
                             : Color.companionMuted
                     )
@@ -437,26 +471,45 @@ struct CompanionResourceSections: View {
                         .font(.caption)
                         .foregroundStyle(Color.companionMuted)
                 }
-                if let message = trigger.lastErrorMessage {
+                if let message = trigger.lastRegistrationError ?? trigger.lastErrorMessage {
                     Text(message)
+                        .font(.caption)
+                        .foregroundStyle(Color.companionDanger)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if !providerConnected {
+                    Text("Reconnect this member provider to resume registration and incoming events for every dependent Companion.")
                         .font(.caption)
                         .foregroundStyle(Color.companionDanger)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
             Spacer(minLength: 8)
-            statusBadge(trigger.status)
-            if canEditResources, trigger.webhookURL != nil {
+            statusBadge(providerConnected ? trigger.status : .error)
+            Button {
+                historyTrigger = trigger
+            } label: {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.body.weight(.semibold))
+                    .frame(width: 32, height: 32)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Fire history for \(trigger.name)")
+            .accessibilityIdentifier("companion.details.trigger-history.\(trigger.id)")
+            if canEditResources,
+               providerConnected,
+               (trigger.registrationStatus == .failed || trigger.registrationStatus == .unregistered),
+               busyResourceID != trigger.id {
                 Button {
-                    copyWebhookURL(trigger)
+                    Task { await retryTriggerRegistration(trigger) }
                 } label: {
-                    Image(systemName: "doc.on.doc")
+                    Image(systemName: "arrow.clockwise")
                         .font(.body.weight(.semibold))
                         .frame(width: 32, height: 32)
                 }
                 .buttonStyle(.borderless)
-                .accessibilityLabel("Copy webhook URL for \(trigger.name)")
-                .accessibilityIdentifier("companion.details.trigger-copy.\(trigger.id)")
+                .accessibilityLabel("Retry registration for \(trigger.name)")
+                .accessibilityIdentifier("companion.details.trigger-retry.\(trigger.id)")
             }
             if canEditResources {
                 if busyResourceID == trigger.id {
@@ -471,8 +524,14 @@ struct CompanionResourceSections: View {
                         Button("Edit", systemImage: "pencil") {
                             editingTrigger = trigger
                         }
+                        if providerConnected,
+                           (trigger.registrationStatus == .failed || trigger.registrationStatus == .unregistered) {
+                            Button("Retry registration", systemImage: "arrow.clockwise") {
+                                Task { await retryTriggerRegistration(trigger) }
+                            }
+                        }
                         if trigger.webhookURL != nil {
-                            Button("Copy webhook URL", systemImage: "doc.on.doc") {
+                            Button("Copy technical URL", systemImage: "doc.on.doc") {
                                 copyWebhookURL(trigger)
                             }
                             Button(
@@ -501,7 +560,7 @@ struct CompanionResourceSections: View {
             }
         }
         .padding(16)
-        .accessibilityElement(children: canEditResources ? .contain : .combine)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel(
             triggerAccessibilityLabel(trigger)
         )
@@ -589,7 +648,12 @@ struct CompanionResourceSections: View {
     }
 
     private func triggerAccessibilityLabel(_ trigger: CompanionTrigger) -> String {
-        var parts = [trigger.name, trigger.providerName, trigger.registrationDescription]
+        var parts = [
+            trigger.name,
+            trigger.providerName,
+            trigger.mode == .notify ? "Notify me" : "Ask the Companion",
+            trigger.registrationDescription
+        ]
         if let last = MemberTimezone.formatInstant(trigger.lastFiredAt, in: effectiveMemberTimezone) {
             parts.append("Last fired \(last) in \(effectiveMemberTimezone)")
         }
@@ -799,6 +863,92 @@ struct CompanionResourceSections: View {
         currentCompanion.access.canEditCompanionSettings
     }
 
+    private var triggerAccountOptions: [CompanionTriggerProviderAccount] {
+        triggerProviderAccounts
+    }
+
+    private var sortedTriggerProviderAccounts: [CompanionTriggerProviderAccount] {
+        triggerProviderAccounts
+            .sorted {
+                let left = pluginProviderName($0.provider.rawValue)
+                let right = pluginProviderName($1.provider.rawValue)
+                if left != right { return left.localizedCaseInsensitiveCompare(right) == .orderedAscending }
+                return $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending
+            }
+    }
+
+    @ViewBuilder
+    private var triggerProviderAvailability: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Shared providers")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color.companionInk)
+                    Text("Connected once for every Companion")
+                        .font(.caption)
+                        .foregroundStyle(Color.companionMuted)
+                }
+                Spacer()
+                Button(triggerProviderAccounts.isEmpty ? "Connect" : "Manage") {
+                    showingTriggerProviderManagement = true
+                }
+                .font(.caption.weight(.semibold))
+                .accessibilityIdentifier("companion.details.triggers.manage-providers")
+            }
+
+            if triggerProviderAccounts.isEmpty {
+                Text("No trigger provider connected. Connect GitHub, Sentry, or Linear once to make it live for every Companion.")
+                    .font(.caption)
+                    .foregroundStyle(Color.companionMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                ForEach(sortedTriggerProviderAccounts) { account in
+                    HStack(spacing: 9) {
+                        PluginMark(provider: account.provider.rawValue, size: 28)
+                        Text("\(pluginProviderName(account.provider.rawValue)) · \(account.label)")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(Color.companionInk)
+                            .lineLimit(1)
+                        Spacer()
+                        Label(
+                            account.status == .connected ? "Connected" : "Disconnected",
+                            systemImage: account.status == .connected
+                                ? "checkmark.circle.fill"
+                                : "exclamationmark.circle.fill"
+                        )
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(
+                                account.status == .connected
+                                    ? Color.companionSuccess
+                                    : Color.companionDanger
+                            )
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(
+                        "\(pluginProviderName(account.provider.rawValue)) \(account.label), shared provider \(account.status.rawValue)"
+                    )
+                }
+            }
+
+            Text("No Companion attachment is required. MCP tool attachments are managed separately above.")
+                .font(.caption2)
+                .foregroundStyle(Color.companionMuted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16)
+        .accessibilityIdentifier("companion.details.triggers.providers")
+    }
+
+    private func triggerProviderConnected(_ trigger: CompanionTrigger) -> Bool {
+        let provider = trigger.provider.lowercased()
+        guard provider == "github" || provider == "linear" || provider == "sentry" else { return true }
+        if let accountID = trigger.providerAccountID {
+            return triggerProviderAccounts.contains { $0.id == accountID && $0.status == .connected }
+        }
+        return triggerProviderAccounts.contains { $0.provider.rawValue == provider && $0.status == .connected }
+    }
+
     private var effectiveMemberTimezone: String {
         sessionStore.memberTimezone ?? MemberTimezone.deviceIdentifier
     }
@@ -883,6 +1033,29 @@ struct CompanionResourceSections: View {
         busyResourceID = nil
     }
 
+    private func retryTriggerRegistration(_ trigger: CompanionTrigger) async {
+        guard canEditResources, busyResourceID == nil else { return }
+        busyResourceID = trigger.id
+        resourceActionError = nil
+        do {
+            if let retry = services?.retryTriggerRegistration {
+                _ = try await retry(trigger.id)
+            } else {
+                _ = try await sessionStore.retryCompanionTriggerRegistration(
+                    companionID: companion.id,
+                    triggerID: trigger.id
+                )
+            }
+            await load()
+        } catch {
+            resourceActionError = companionDisplayMessage(
+                error,
+                fallback: "The provider registration could not be retried."
+            )
+        }
+        busyResourceID = nil
+    }
+
     private func load() async {
         loadGeneration += 1
         let generation = loadGeneration
@@ -898,6 +1071,7 @@ struct CompanionResourceSections: View {
             resources = next
             error = nil
             await loadPlugins(expectedGeneration: generation)
+            await loadTriggerProviderAccounts(expectedGeneration: generation)
             await refreshRuntime()
         } catch {
             guard !Task.isCancelled, generation == loadGeneration else { return }
@@ -924,6 +1098,29 @@ struct CompanionResourceSections: View {
             guard !Task.isCancelled,
                   expectedGeneration == nil || expectedGeneration == loadGeneration else { return }
             self.error = companionDisplayMessage(error, fallback: "Plugin accounts could not be refreshed.")
+        }
+    }
+
+    private func loadTriggerProviderAccounts(expectedGeneration: Int? = nil) async {
+        do {
+            let next: [CompanionTriggerProviderAccount]
+            if let list = services?.listTriggerProviderAccounts {
+                next = try await list()
+            } else if services == nil {
+                next = try await sessionStore.listCompanionTriggerProviderAccounts()
+            } else {
+                next = []
+            }
+            guard !Task.isCancelled,
+                  expectedGeneration == nil || expectedGeneration == loadGeneration else { return }
+            triggerProviderAccounts = next
+        } catch {
+            guard !Task.isCancelled,
+                  expectedGeneration == nil || expectedGeneration == loadGeneration else { return }
+            self.error = companionDisplayMessage(
+                error,
+                fallback: "Trigger provider accounts could not be refreshed."
+            )
         }
     }
 
@@ -1077,8 +1274,12 @@ enum CompanionResourceDemoFixtures {
               "id":"44444444-4444-4444-8444-444444444444",
               "name":"Pull request opened",
               "prompt":"Summarize the pull request.",
+              "mode":"relay",
               "provider":"github",
+              "provider_account_id":"55555555-5555-4555-8555-555555555555",
               "registration_status":"registered",
+              "remote_hook_account_id":"55555555-5555-4555-8555-555555555555",
+              "remote_hook_id":"hook-42",
               "enabled":true,
               "last_error_message":null
             }
@@ -1087,7 +1288,7 @@ enum CompanionResourceDemoFixtures {
     }
 
     static var plugins: [CompanionPluginAccount] {
-        [decode(#"{"id":"55555555-5555-4555-8555-555555555555","provider":"linear","label":"work","transport":"http","endpoint":"https://mcp.linear.app","connected":true,"created_at":"2026-08-25T08:00:00.000Z","updated_at":"2026-08-25T08:00:00.000Z"}"#)]
+        [decode(#"{"id":"55555555-5555-4555-8555-555555555555","provider":"github","label":"work","transport":"http","endpoint":"https://api.githubcopilot.com/mcp","connected":true,"created_at":"2026-08-25T08:00:00.000Z","updated_at":"2026-08-25T08:00:00.000Z"}"#)]
     }
 
     static func restartOperation(_ target: CompanionRuntimeRestartTarget) -> CompanionOperationSummary {

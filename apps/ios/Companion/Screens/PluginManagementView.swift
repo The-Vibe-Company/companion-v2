@@ -158,7 +158,7 @@ private struct LegacyPluginManagementView: View {
                 }
                 Button("Cancel", role: .cancel) { pluginToDisconnect = nil }
             } message: {
-                Text("Its encrypted credential and all Companion attachments will be removed.")
+                Text("This member-wide account becomes unavailable to every Companion. MCP tool attachments stop working, and dependent triggers cannot register or receive events until the provider is reconnected.")
             }
             .task { await reload() }
         }
@@ -314,6 +314,16 @@ struct ConnectCuratedPluginView: View {
     @State private var oauthGeneration = UUID()
     @State private var error: String?
 
+    init(
+        plugin: CuratedCompanionPlugin,
+        initialLabel: String? = nil,
+        onConnected: @escaping () -> Void
+    ) {
+        self.plugin = plugin
+        self.onConnected = onConnected
+        _label = State(initialValue: initialLabel ?? "")
+    }
+
     var body: some View {
         NavigationStack {
             CompanionBackdrop {
@@ -466,6 +476,9 @@ struct ConnectCuratedPluginView: View {
     private var authorizationDetail: String {
         if plugin.provider.lowercased() == "gmail" {
             return "Authorize read and draft access on Google. Companion cannot send mail; drafts stay in Gmail for your review. Tokens remain encrypted and write-only."
+        }
+        if plugin.provider.lowercased() == "github" || plugin.provider.lowercased() == "sentry" {
+            return "Authorize once. Trigger registration becomes live for every Companion immediately; MCP tools still require their separate per-Companion attachment. Tokens remain encrypted and write-only."
         }
         return "Authorization happens on \(plugin.title). Tokens stay encrypted and write-only."
     }

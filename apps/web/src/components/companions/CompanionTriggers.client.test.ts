@@ -2,7 +2,7 @@
 
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import type { CompanionTrigger } from "@companion/contracts";
+import type { CompanionTrigger, CompanionTriggerProviderAccount } from "@companion/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CompanionTriggers, type CompanionTriggersApi } from "./CompanionTriggers";
 
@@ -11,6 +11,7 @@ const companionsApi = {
   deleteCompanionTrigger: vi.fn<CompanionTriggersApi["deleteCompanionTrigger"]>(),
   updateCompanionTrigger: vi.fn<CompanionTriggersApi["updateCompanionTrigger"]>(),
   rotateCompanionTriggerSecret: vi.fn<CompanionTriggersApi["rotateCompanionTriggerSecret"]>(),
+  retryCompanionTriggerRegistration: vi.fn<NonNullable<CompanionTriggersApi["retryCompanionTriggerRegistration"]>>(),
 } satisfies CompanionTriggersApi;
 
 Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
@@ -49,11 +50,30 @@ function trigger(overrides: Partial<CompanionTrigger> = {}): CompanionTrigger {
   };
 }
 
+function providerAccount(
+  overrides: Partial<CompanionTriggerProviderAccount> = {},
+): CompanionTriggerProviderAccount {
+  return {
+    id: "account-1",
+    provider: "github",
+    label: "Acme GitHub",
+    credential_source: "mcp_oauth",
+    mcp_account_id: "44444444-4444-4444-8444-444444444444",
+    status: "connected",
+    dependent_trigger_count: 0,
+    created_at: "2026-08-30T00:00:00.000Z",
+    updated_at: "2026-08-30T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
 async function mount(input: {
   triggers?: CompanionTrigger[];
   canEdit?: boolean;
   memberTimezone?: string | null;
+  accountOptions?: CompanionTriggerProviderAccount[];
   onChange?: (triggers: CompanionTrigger[]) => void;
+  onManageProviders?: () => void;
 } = {}) {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -66,7 +86,9 @@ async function mount(input: {
       triggers: input.triggers ?? [],
       memberTimezone: input.memberTimezone,
       canEdit: input.canEdit ?? true,
+      accountOptions: input.accountOptions,
       onChange: input.onChange ?? (() => undefined),
+      onManageProviders: input.onManageProviders,
       api: companionsApi,
     }));
   });
@@ -100,12 +122,6 @@ function requireTextArea(container: ParentNode): HTMLTextAreaElement {
   const textarea = container.querySelector("textarea");
   if (!(textarea instanceof HTMLTextAreaElement)) throw new Error("Missing textarea");
   return textarea;
-}
-
-function requireSelect(container: ParentNode): HTMLSelectElement {
-  const select = container.querySelector("select");
-  if (!(select instanceof HTMLSelectElement)) throw new Error("Missing select");
-  return select;
 }
 
 function setControlled(
@@ -154,7 +170,97 @@ describe("Companion triggers panel", () => {
     expect(container.textContent).toContain("GitHub");
     expect(container.textContent).toContain("Ticket opened");
     expect(container.textContent).toContain("Linear");
+    expect(container.textContent).toContain("Ask the Companion");
     expect(container.textContent).toContain("This trigger was disabled after repeated failures.");
+  });
+
+  it("retries failed remote registration and replaces the row with the refreshed result", async () => {
+    const failed = trigger({
+      registration_status: "failed",
+      last_registration_error: "GitHub token is missing hook write scope.",
+      webhook_url: null,
+    });
+    const registered = trigger({
+      registration_status: "registered",
+      remote_hook_id: "hook-42",
+      last_registration_error: null,
+      webhook_url: null,
+    });
+    companionsApi.retryCompanionTriggerRegistration.mockResolvedValue(registered);
+    const onChange = vi.fn();
+    const container = await mount({
+      triggers: [failed],
+      onChange,
+      accountOptions: [providerAccount()],
+    });
+
+    expect(container.textContent).toContain("GitHub token is missing hook write scope.");
+    await act(async () => {
+      requireNamedButton(container, "Retry registration")
+        .dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+
+    expect(companionsApi.retryCompanionTriggerRegistration).toHaveBeenCalledWith(
+      "org-1",
+      companionId,
+      triggerId,
+    );
+    expect(onChange).toHaveBeenCalledWith([registered]);
+  });
+
+  it("reuses the sole member-wide provider account without asking for attachment, a key, or a URL", async () => {
+    const created = trigger({ registration_status: "registered", provider_account_id: "account-1" });
+    companionsApi.createCompanionTrigger.mockResolvedValue(created);
+    const container = await mount({
+      accountOptions: [providerAccount()],
+    });
+
+    await act(async () => {
+      requireButton(container, "[aria-label='Add a trigger']")
+        .dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    const provider = [...container.querySelectorAll("select")]
+      .find((select) => [...select.options].some((option) => option.value === "github"));
+    if (!provider) throw new Error("Missing provider picker");
+    await act(async () => { setControlled(provider, "github"); });
+
+    expect(container.textContent).toContain("Using the shared GitHub account “Acme GitHub”.");
+    expect(container.textContent).toContain("No Companion attachment is required.");
+    expect(container.textContent?.toLowerCase()).not.toContain("paste");
+    expect(container.querySelector("input[placeholder*='URL']")).toBeNull();
+    expect(container.querySelector("input[placeholder*='key']")).toBeNull();
+  });
+
+  it("shows member-wide providers separately from per-Companion triggers", async () => {
+    const onManageProviders = vi.fn();
+    const container = await mount({
+      accountOptions: [providerAccount()],
+      onManageProviders,
+    });
+
+    expect(container.textContent).toContain("Shared providers");
+    expect(container.textContent).toContain("GitHub · Acme GitHub");
+    expect(container.textContent).toContain("Member-wide and immediately available here.");
+    expect(container.textContent).toContain("MCP tool attachments are managed separately.");
+
+    await act(async () => requireNamedButton(container, "Manage").click());
+    expect(onManageProviders).toHaveBeenCalledOnce();
+  });
+
+  it("blocks retry and explains cross-Companion degradation when a shared account disconnects", async () => {
+    const container = await mount({
+      triggers: [trigger({
+        provider_account_id: "account-1",
+        registration_status: "failed",
+        last_registration_error: "Provider credential was revoked.",
+      })],
+      accountOptions: [providerAccount({ status: "disconnected", mcp_account_id: null })],
+    });
+
+    expect(container.textContent).toContain("Provider disconnected");
+    expect(container.textContent).toContain("Registration blocked");
+    expect(container.textContent).toContain("every dependent Companion");
+    expect(buttonNamed(container, "Retry registration")).toBeUndefined();
   });
 
   it("shows trigger activity in the stored member timezone", async () => {
@@ -206,23 +312,48 @@ describe("Companion triggers panel", () => {
     expect(onChange).toHaveBeenCalledWith([]);
   });
 
-  it("creates a trigger with a client-generated id, mirroring routine creation", async () => {
-    const created = trigger({ name: "Deploy finished", provider: "custom" });
+  it("requires a connected provider instead of falling back to a manual webhook", async () => {
+    const container = await mount();
+
+    await act(async () => {
+      requireButton(container, "[aria-label='Add a trigger']")
+        .dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+
+    expect(container.textContent).toContain("Connect a provider first");
+    expect(container.textContent).not.toContain("Webhook (legacy)");
+    expect(container.textContent).not.toContain("Custom (legacy)");
+    expect(requireNamedButton(container, "Create trigger").disabled).toBe(true);
+  });
+
+  it("creates a provider-backed trigger with a client-generated id", async () => {
+    const created = trigger({
+      name: "Deploy finished",
+      provider: "github",
+      provider_account_id: "account-1",
+      registration_status: "registered",
+    });
     companionsApi.createCompanionTrigger.mockResolvedValue(created);
     const onChange = vi.fn();
-    const container = await mount({ onChange });
+    const container = await mount({
+      onChange,
+      accountOptions: [providerAccount()],
+    });
 
     const add = requireButton(container, "[aria-label='Add a trigger']");
     await act(async () => {
       add.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     });
 
-    setControlled(requireInput(container), "Deploy finished");
-    setControlled(requireTextArea(container), "Report the deploy.");
-    setControlled(requireSelect(container), "custom");
-    await act(async () => {});
+    await act(async () => {
+      setControlled(requireInput(container), "Deploy finished");
+      setControlled(requireTextArea(container), "Report the deploy.");
+      const repository = container.querySelector<HTMLInputElement>("input[placeholder='owner/repository']");
+      if (!repository) throw new Error("Missing repository input");
+      setControlled(repository, "acme/app");
+    });
 
-    const create = requireNamedButton(container, "Create");
+    const create = requireNamedButton(container, "Create trigger");
     expect(create.disabled).toBe(false);
     await act(async () => {
       create.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
@@ -235,11 +366,54 @@ describe("Companion triggers panel", () => {
         id: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/),
         name: "Deploy finished",
         prompt: "Report the deploy.",
-        provider: "custom",
+        provider: "github",
+        provider_account_id: "account-1",
+        target: { repo: "acme/app", events: ["push"] },
+        mode: "relay",
         enabled: true,
       }),
     );
     expect(onChange).toHaveBeenCalledWith([created]);
+  });
+
+  it("registers a Sentry project trigger with the shared member OAuth account", async () => {
+    const created = trigger({
+      name: "New Sentry issue",
+      provider: "sentry",
+      provider_account_id: "account-1",
+      target: { organization: "acme", project: "ios", events: ["error"] },
+      registration_status: "registered",
+    });
+    companionsApi.createCompanionTrigger.mockResolvedValue(created);
+    const container = await mount({
+      accountOptions: [providerAccount({ provider: "sentry", label: "Acme Sentry" })],
+    });
+
+    await act(async () => requireButton(container, "[aria-label='Add a trigger']").click());
+    const targetInputs = [...container.querySelectorAll<HTMLInputElement>(
+      ".companions-trigger-target input",
+    )];
+    if (!targetInputs[0] || !targetInputs[1] || !targetInputs[2]) {
+      throw new Error("Missing Sentry target fields");
+    }
+    await act(async () => {
+      setControlled(requireInput(container), "New Sentry issue");
+      setControlled(requireTextArea(container), "Fix the issue.");
+      setControlled(targetInputs[0]!, "acme");
+      setControlled(targetInputs[1]!, "ios");
+      setControlled(targetInputs[2]!, "error");
+    });
+    await act(async () => requireNamedButton(container, "Create trigger").click());
+
+    expect(companionsApi.createCompanionTrigger).toHaveBeenCalledWith(
+      "org-1",
+      companionId,
+      expect.objectContaining({
+        provider: "sentry",
+        provider_account_id: "account-1",
+        target: { organization: "acme", project: "ios", events: ["error"] },
+      }),
+    );
   });
 
   it("copies the webhook URL and confirms briefly", async () => {

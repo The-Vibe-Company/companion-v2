@@ -1021,8 +1021,10 @@ public struct CompanionTranscriptRoutineOrigin: Codable, Equatable, Sendable {
 }
 
 public enum CompanionTriggerProvider: String, Codable, CaseIterable, Equatable, Hashable, Sendable {
+    case webhook
     case linear
     case github
+    case sentry
     case custom
     case unknown
 
@@ -1032,12 +1034,26 @@ public enum CompanionTriggerProvider: String, Codable, CaseIterable, Equatable, 
     }
 }
 
+public enum CompanionTriggerMode: String, Codable, CaseIterable, Equatable, Hashable, Sendable {
+    case notify
+    case relay
+}
+
 public struct CompanionTriggerTarget: Codable, Equatable, Sendable {
     public let repo: String?
+    public let organization: String?
+    public let project: String?
     public let events: [String]?
 
-    public init(repo: String? = nil, events: [String]? = nil) {
+    public init(
+        repo: String? = nil,
+        organization: String? = nil,
+        project: String? = nil,
+        events: [String]? = nil
+    ) {
         self.repo = repo
+        self.organization = organization
+        self.project = project
         self.events = events
     }
 }
@@ -1045,6 +1061,7 @@ public struct CompanionTriggerTarget: Codable, Equatable, Sendable {
 public struct CompanionTrigger: Codable, Identifiable, Equatable, Sendable {
     public enum RegistrationStatus: String, Codable, Equatable, Sendable {
         case manual
+        case unregistered
         case registered
         case failed
         case unknown
@@ -1059,11 +1076,16 @@ public struct CompanionTrigger: Codable, Identifiable, Equatable, Sendable {
     public let companionID: String?
     public let name: String
     public let prompt: String
+    public let mode: CompanionTriggerMode
     public let provider: String
+    public let providerAccountID: String?
     public let target: CompanionTriggerTarget?
     public let registrationStatus: RegistrationStatus
     public let enabled: Bool
     public let webhookURL: String?
+    public let remoteHookAccountID: String?
+    public let remoteHookID: String?
+    public let lastRegistrationError: String?
     public let lastFiredAt: String?
     public let lastErrorCode: String?
     public let lastErrorMessage: String?
@@ -1073,11 +1095,16 @@ public struct CompanionTrigger: Codable, Identifiable, Equatable, Sendable {
         case companionID = "companion_id"
         case name
         case prompt
+        case mode
         case provider
+        case providerAccountID = "provider_account_id"
         case target
         case registrationStatus = "registration_status"
         case enabled
         case webhookURL = "webhook_url"
+        case remoteHookAccountID = "remote_hook_account_id"
+        case remoteHookID = "remote_hook_id"
+        case lastRegistrationError = "last_registration_error"
         case lastFiredAt = "last_fired_at"
         case lastErrorCode = "last_error_code"
         case lastErrorMessage = "last_error_message"
@@ -1087,13 +1114,18 @@ public struct CompanionTrigger: Codable, Identifiable, Equatable, Sendable {
         id: String,
         name: String,
         prompt: String = "",
+        mode: CompanionTriggerMode = .relay,
         provider: String,
         registrationStatus: RegistrationStatus,
         enabled: Bool,
         lastErrorMessage: String?,
         companionID: String? = nil,
         target: CompanionTriggerTarget? = nil,
+        providerAccountID: String? = nil,
         webhookURL: String? = nil,
+        remoteHookAccountID: String? = nil,
+        remoteHookID: String? = nil,
+        lastRegistrationError: String? = nil,
         lastFiredAt: String? = nil,
         lastErrorCode: String? = nil
     ) {
@@ -1101,25 +1133,56 @@ public struct CompanionTrigger: Codable, Identifiable, Equatable, Sendable {
         self.companionID = companionID
         self.name = name
         self.prompt = prompt
+        self.mode = mode
         self.provider = provider
+        self.providerAccountID = providerAccountID
         self.target = target
         self.registrationStatus = registrationStatus
         self.enabled = enabled
         self.webhookURL = webhookURL
+        self.remoteHookAccountID = remoteHookAccountID
+        self.remoteHookID = remoteHookID
+        self.lastRegistrationError = lastRegistrationError
         self.lastFiredAt = lastFiredAt
         self.lastErrorCode = lastErrorCode
         self.lastErrorMessage = lastErrorMessage
     }
 
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        companionID = try container.decodeIfPresent(String.self, forKey: .companionID)
+        name = try container.decode(String.self, forKey: .name)
+        prompt = try container.decode(String.self, forKey: .prompt)
+        mode = try container.decodeIfPresent(CompanionTriggerMode.self, forKey: .mode) ?? .relay
+        provider = try container.decode(String.self, forKey: .provider)
+        providerAccountID = try container.decodeIfPresent(String.self, forKey: .providerAccountID)
+        target = try container.decodeIfPresent(CompanionTriggerTarget.self, forKey: .target)
+        registrationStatus = try container.decodeIfPresent(RegistrationStatus.self, forKey: .registrationStatus) ?? .manual
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        webhookURL = try container.decodeIfPresent(String.self, forKey: .webhookURL)
+        remoteHookAccountID = try container.decodeIfPresent(String.self, forKey: .remoteHookAccountID)
+        remoteHookID = try container.decodeIfPresent(String.self, forKey: .remoteHookID)
+        lastRegistrationError = try container.decodeIfPresent(String.self, forKey: .lastRegistrationError)
+        lastFiredAt = try container.decodeIfPresent(String.self, forKey: .lastFiredAt)
+        lastErrorCode = try container.decodeIfPresent(String.self, forKey: .lastErrorCode)
+        lastErrorMessage = try container.decodeIfPresent(String.self, forKey: .lastErrorMessage)
+    }
+
     public var status: CompanionConnectedResourceStatus {
         if !enabled { return .disabled }
-        return lastErrorMessage == nil ? .active : .error
+        return registrationStatus == .failed || registrationStatus == .unregistered
+            || lastRegistrationError != nil || lastErrorMessage != nil
+            ? .error
+            : .active
     }
 
     public var providerName: String {
         switch provider {
+        case "webhook": "Webhook"
         case "github": "GitHub"
         case "linear": "Linear"
+        case "sentry": "Sentry"
         case "custom": "Custom"
         default: provider
         }
@@ -1127,11 +1190,198 @@ public struct CompanionTrigger: Codable, Identifiable, Equatable, Sendable {
 
     public var registrationDescription: String {
         switch registrationStatus {
-        case .manual: "Webhook managed manually"
+        case .manual: "Platform endpoint ready"
+        case .unregistered: "Webhook unregistered"
         case .registered: "Webhook registered"
         case .failed: "Registration failed"
         case .unknown: "Registration unknown"
         }
+    }
+}
+
+public enum CompanionTriggerProviderAccountProvider: String, Codable, CaseIterable, Hashable, Sendable {
+    case github
+    case linear
+    case sentry
+}
+
+public enum CompanionTriggerProviderAccountStatus: String, Codable, Hashable, Sendable {
+    case connected
+    case disconnected
+}
+
+public enum CompanionTriggerProviderCredentialSource: String, Codable, Hashable, Sendable {
+    case mcpOAuth = "mcp_oauth"
+    case apiKey = "api_key"
+}
+
+/// Write-only-safe member authority shared by every Companion without an attachment step.
+public struct CompanionTriggerProviderAccount: Codable, Identifiable, Hashable, Sendable {
+    public let id: String
+    public let provider: CompanionTriggerProviderAccountProvider
+    public let label: String
+    public let credentialSource: CompanionTriggerProviderCredentialSource
+    public let mcpAccountID: String?
+    public let status: CompanionTriggerProviderAccountStatus
+    public let dependentTriggerCount: Int
+    public let createdAt: String
+    public let updatedAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case provider
+        case label
+        case credentialSource = "credential_source"
+        case mcpAccountID = "mcp_account_id"
+        case status
+        case dependentTriggerCount = "dependent_trigger_count"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+}
+
+public struct CreateCompanionTriggerProviderAccountInput: Encodable, Equatable, Sendable {
+    public let provider: CompanionTriggerProviderAccountProvider
+    public let label: String
+    public let credential: String
+
+    public init(
+        provider: CompanionTriggerProviderAccountProvider,
+        label: String,
+        credential: String
+    ) {
+        self.provider = provider
+        self.label = label
+        self.credential = credential
+    }
+}
+
+public typealias CompanionTriggerRunStatus = CompanionRoutineRunStatus
+public typealias CompanionTriggerRunOutcome = CompanionRoutineRunOutcome
+public typealias CompanionTriggerSurfaceMode = CompanionRoutineSurfaceMode
+public typealias CompanionTriggerRunEntry = CompanionRoutineRunEntry
+
+public struct CompanionTriggerIdentitySnapshot: Codable, Equatable, Hashable, Sendable {
+    public let id: String?
+    public let name: String
+
+    public init(id: String?, name: String) {
+        self.id = id
+        self.name = name
+    }
+}
+
+public struct CompanionTriggerRunSummary: Codable, Identifiable, Equatable, Sendable {
+    public let runID: String
+    public let companionID: String
+    public let trigger: CompanionTriggerIdentitySnapshot
+    public let status: CompanionTriggerRunStatus
+    public let mode: CompanionTriggerMode
+    public let outcome: CompanionTriggerRunOutcome
+    public let surfaceMode: CompanionTriggerSurfaceMode?
+    public let mainEntryEventID: String?
+    public let relayTurnID: String?
+    public let createdAt: String
+    public let startedAt: String?
+    public let settledAt: String?
+    public let error: CompanionRuntimeSafeError?
+
+    public var id: String { runID }
+
+    enum CodingKeys: String, CodingKey {
+        case runID = "run_id"
+        case companionID = "companion_id"
+        case trigger
+        case status
+        case mode
+        case outcome
+        case surfaceMode = "surface_mode"
+        case mainEntryEventID = "main_entry_event_id"
+        case relayTurnID = "relay_turn_id"
+        case createdAt = "created_at"
+        case startedAt = "started_at"
+        case settledAt = "settled_at"
+        case error
+    }
+}
+
+public struct CompanionTriggerRunDetail: Codable, Equatable, Sendable {
+    public let runID: String
+    public let companionID: String
+    public let trigger: CompanionTriggerIdentitySnapshot
+    public let status: CompanionTriggerRunStatus
+    public let mode: CompanionTriggerMode
+    public let outcome: CompanionTriggerRunOutcome
+    public let surfaceMode: CompanionTriggerSurfaceMode?
+    public let mainEntryEventID: String?
+    public let relayTurnID: String?
+    public let createdAt: String
+    public let startedAt: String?
+    public let settledAt: String?
+    public let error: CompanionRuntimeSafeError?
+    public let internalEntries: [CompanionTriggerRunEntry]
+    public let nextEntryCursor: Int?
+
+    public init(
+        runID: String,
+        companionID: String,
+        trigger: CompanionTriggerIdentitySnapshot,
+        status: CompanionTriggerRunStatus,
+        mode: CompanionTriggerMode,
+        outcome: CompanionTriggerRunOutcome,
+        surfaceMode: CompanionTriggerSurfaceMode?,
+        mainEntryEventID: String?,
+        relayTurnID: String?,
+        createdAt: String,
+        startedAt: String?,
+        settledAt: String?,
+        error: CompanionRuntimeSafeError?,
+        internalEntries: [CompanionTriggerRunEntry],
+        nextEntryCursor: Int?
+    ) {
+        self.runID = runID
+        self.companionID = companionID
+        self.trigger = trigger
+        self.status = status
+        self.mode = mode
+        self.outcome = outcome
+        self.surfaceMode = surfaceMode
+        self.mainEntryEventID = mainEntryEventID
+        self.relayTurnID = relayTurnID
+        self.createdAt = createdAt
+        self.startedAt = startedAt
+        self.settledAt = settledAt
+        self.error = error
+        self.internalEntries = internalEntries
+        self.nextEntryCursor = nextEntryCursor
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case runID = "run_id"
+        case companionID = "companion_id"
+        case trigger
+        case status
+        case mode
+        case outcome
+        case surfaceMode = "surface_mode"
+        case mainEntryEventID = "main_entry_event_id"
+        case relayTurnID = "relay_turn_id"
+        case createdAt = "created_at"
+        case startedAt = "started_at"
+        case settledAt = "settled_at"
+        case error
+        case internalEntries = "internal_entries"
+        case nextEntryCursor = "next_entry_cursor"
+    }
+}
+
+public struct CompanionTriggerRunList: Codable, Equatable, Sendable {
+    public let runs: [CompanionTriggerRunSummary]
+    public let nextCursor: String?
+
+    enum CodingKeys: String, CodingKey {
+        case runs
+        case nextCursor = "next_cursor"
     }
 }
 
@@ -1235,7 +1485,9 @@ public struct CreateCompanionTriggerInput: Encodable, Equatable, Sendable {
     public let id: String
     public let name: String
     public let prompt: String
+    public let mode: CompanionTriggerMode
     public let provider: CompanionTriggerProvider
+    public let providerAccountID: String?
     public let target: CompanionTriggerTarget?
     public let enabled: Bool
 
@@ -1243,14 +1495,18 @@ public struct CreateCompanionTriggerInput: Encodable, Equatable, Sendable {
         id: String = UUID().uuidString.lowercased(),
         name: String,
         prompt: String,
+        mode: CompanionTriggerMode = .relay,
         provider: CompanionTriggerProvider,
+        providerAccountID: String? = nil,
         target: CompanionTriggerTarget? = nil,
         enabled: Bool = true
     ) {
         self.id = id
         self.name = name
         self.prompt = prompt
+        self.mode = mode
         self.provider = provider
+        self.providerAccountID = providerAccountID
         self.target = target
         self.enabled = enabled
     }
@@ -1259,7 +1515,9 @@ public struct CreateCompanionTriggerInput: Encodable, Equatable, Sendable {
         case id
         case name
         case prompt
+        case mode
         case provider
+        case providerAccountID = "provider_account_id"
         case target
         case enabled
     }
@@ -1269,7 +1527,9 @@ public struct CreateCompanionTriggerInput: Encodable, Equatable, Sendable {
         try container.encode(id, forKey: .id)
         try container.encode(name, forKey: .name)
         try container.encode(prompt, forKey: .prompt)
+        try container.encode(mode, forKey: .mode)
         try container.encode(provider.rawValue, forKey: .provider)
+        try container.encodeIfPresent(providerAccountID, forKey: .providerAccountID)
         try container.encodeIfPresent(target, forKey: .target)
         try container.encode(enabled, forKey: .enabled)
     }
@@ -1278,20 +1538,26 @@ public struct CreateCompanionTriggerInput: Encodable, Equatable, Sendable {
 public struct UpdateCompanionTriggerInput: Encodable, Equatable, Sendable {
     public let name: String?
     public let prompt: String?
+    public let mode: CompanionTriggerMode?
     public let provider: CompanionTriggerProvider?
+    public let providerAccountID: String?
     public let target: CompanionTriggerTarget?
     public let enabled: Bool?
 
     public init(
         name: String? = nil,
         prompt: String? = nil,
+        mode: CompanionTriggerMode? = nil,
         provider: CompanionTriggerProvider? = nil,
+        providerAccountID: String? = nil,
         target: CompanionTriggerTarget? = nil,
         enabled: Bool? = nil
     ) {
         self.name = name
         self.prompt = prompt
+        self.mode = mode
         self.provider = provider
+        self.providerAccountID = providerAccountID
         self.target = target
         self.enabled = enabled
     }
@@ -1299,7 +1565,9 @@ public struct UpdateCompanionTriggerInput: Encodable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case name
         case prompt
+        case mode
         case provider
+        case providerAccountID = "provider_account_id"
         case target
         case enabled
     }
@@ -1308,6 +1576,8 @@ public struct UpdateCompanionTriggerInput: Encodable, Equatable, Sendable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(name, forKey: .name)
         try container.encodeIfPresent(prompt, forKey: .prompt)
+        try container.encodeIfPresent(mode, forKey: .mode)
+        try container.encodeIfPresent(providerAccountID, forKey: .providerAccountID)
         if let provider {
             try container.encode(provider.rawValue, forKey: .provider)
             // A provider change from GitHub to a provider without targets must explicitly clear
@@ -1757,14 +2027,18 @@ public struct CompanionTriggerProposal: Codable, Equatable, Sendable {
 
     public let name: String
     public let prompt: String
+    public let mode: CompanionTriggerMode
     public let provider: String
+    public let providerAccountID: String?
     public let target: Target?
 
     enum CodingKeys: String, CodingKey {
         case kind
         case name
         case prompt
+        case mode
         case provider
+        case providerAccountID = "provider_account_id"
         case target
     }
 
@@ -1772,7 +2046,9 @@ public struct CompanionTriggerProposal: Codable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         name = try container.decode(String.self, forKey: .name)
         prompt = try container.decode(String.self, forKey: .prompt)
+        mode = try container.decodeIfPresent(CompanionTriggerMode.self, forKey: .mode) ?? .relay
         provider = try container.decode(String.self, forKey: .provider)
+        providerAccountID = try container.decodeIfPresent(String.self, forKey: .providerAccountID)
         target = try container.decodeIfPresent(Target.self, forKey: .target)
     }
 
@@ -1781,7 +2057,9 @@ public struct CompanionTriggerProposal: Codable, Equatable, Sendable {
         try container.encode("trigger", forKey: .kind)
         try container.encode(name, forKey: .name)
         try container.encode(prompt, forKey: .prompt)
+        try container.encode(mode, forKey: .mode)
         try container.encode(provider, forKey: .provider)
+        try container.encodeIfPresent(providerAccountID, forKey: .providerAccountID)
         try container.encodeIfPresent(target, forKey: .target)
     }
 }

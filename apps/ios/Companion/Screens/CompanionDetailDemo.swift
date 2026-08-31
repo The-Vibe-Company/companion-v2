@@ -8,6 +8,7 @@ struct CompanionDetailServices {
     let deleteCompanion: (String, UUID) async throws -> CompanionOperationSummary
     let connectedResources: () async throws -> CompanionConnectedResources
     let listPlugins: () async throws -> [CompanionPluginAccount]
+    let listTriggerProviderAccounts: (() async throws -> [CompanionTriggerProviderAccount])?
     let updatePluginSelection: ([String]) async throws -> CompanionSummary
     let loadCompanion: () async throws -> CompanionSummary
     let restart: (CompanionRuntimeRestartTarget, UUID) async throws -> CompanionOperationSummary
@@ -28,6 +29,7 @@ struct CompanionDetailServices {
         deleteCompanion: @escaping (String, UUID) async throws -> CompanionOperationSummary,
         connectedResources: @escaping () async throws -> CompanionConnectedResources,
         listPlugins: @escaping () async throws -> [CompanionPluginAccount],
+        listTriggerProviderAccounts: (() async throws -> [CompanionTriggerProviderAccount])? = nil,
         updatePluginSelection: @escaping ([String]) async throws -> CompanionSummary,
         loadCompanion: @escaping () async throws -> CompanionSummary,
         restart: @escaping (CompanionRuntimeRestartTarget, UUID) async throws -> CompanionOperationSummary,
@@ -47,6 +49,7 @@ struct CompanionDetailServices {
         self.deleteCompanion = deleteCompanion
         self.connectedResources = connectedResources
         self.listPlugins = listPlugins
+        self.listTriggerProviderAccounts = listTriggerProviderAccounts
         self.updatePluginSelection = updatePluginSelection
         self.loadCompanion = loadCompanion
         self.restart = restart
@@ -150,6 +153,7 @@ private enum CompanionDetailDemoFixtures {
             deleteCompanion: { _, _ in deleteOperation },
             connectedResources: { CompanionResourceDemoFixtures.resources },
             listPlugins: { plugins },
+            listTriggerProviderAccounts: { triggerProviderAccounts },
             updatePluginSelection: { selectedIDs in
                 companion(access: access, selectedMCPAccountIDs: selectedIDs)
             },
@@ -229,6 +233,10 @@ private enum CompanionDetailDemoFixtures {
     private static let plugins: [CompanionPluginAccount] = [
         decode(#"{"id":"55555555-5555-4555-8555-555555555555","provider":"linear","label":"work","transport":"http","endpoint":"https://mcp.linear.app","connected":true,"created_at":"2026-08-25T08:00:00.000Z","updated_at":"2026-08-25T08:00:00.000Z"}"#),
         decode(#"{"id":"66666666-6666-4666-8666-666666666666","provider":"github","label":"personal","transport":"http","endpoint":"https://api.githubcopilot.com/mcp","connected":true,"created_at":"2026-08-25T08:00:00.000Z","updated_at":"2026-08-25T08:00:00.000Z"}"#),
+    ]
+
+    private static let triggerProviderAccounts: [CompanionTriggerProviderAccount] = [
+        decode(#"{"id":"55555555-5555-4555-8555-555555555555","provider":"github","label":"personal","credential_source":"mcp_oauth","mcp_account_id":"66666666-6666-4666-8666-666666666666","status":"connected","dependent_trigger_count":1,"created_at":"2026-08-25T08:00:00.000Z","updated_at":"2026-08-25T08:00:00.000Z"}"#),
     ]
 
     static func chatServices(

@@ -20,6 +20,7 @@ import type {
   CompanionTurn,
   CompanionRoutine,
   CompanionTrigger,
+  CompanionTriggerProviderAccount,
 } from "@companion/contracts";
 import {
   COMPANION_PROVIDER_CATALOG,
@@ -42,9 +43,11 @@ import {
   listCompanions,
   listCompanionProviders,
   listCompanionRoutines,
+  listCompanionTriggerRuns,
   listCompanionTriggers,
   openCompanionDesktop,
   retryCompanionTurn,
+  readCompanionTriggerRun,
   sendCompanionMessage,
   setCompanionProvider,
   updateCompanionMemberState,
@@ -53,9 +56,11 @@ import { Icon } from "../Icon";
 import { Dialog } from "../org/primitives";
 import { CompanionProvidersDialog } from "./CompanionProvidersDialog";
 import { CompanionPlugins } from "./CompanionPlugins";
+import { CompanionTriggerProvidersDialog } from "./CompanionTriggerProvidersDialog";
 import { CompanionSettings } from "./CompanionSettings";
 import type { CompanionContextSkill } from "./CompanionContext";
 import { CompanionThread } from "./CompanionThread";
+import type { CompanionTriggerHistoryApi } from "./CompanionTriggerHistoryTypes";
 import { NewCompanionDialog } from "./NewCompanionDialog";
 import { ShareCompanionDialog } from "./ShareCompanionDialog";
 import { companionStatus } from "./status";
@@ -79,6 +84,11 @@ const PENDING_POLL_MS = 3_000;
  * wakes a Box for any Companion — including the ones nobody has opened.
  */
 const LIST_POLL_MS = 45_000;
+
+const companionTriggerHistoryApi: CompanionTriggerHistoryApi = {
+  listCompanionTriggerRuns,
+  readCompanionTriggerRun,
+};
 /**
  * The list cadence while any Companion in it is working — replying, transitioning, or carrying a
  * pending operation — so sidebar avatars and a requested delete track what is happening without a
@@ -246,6 +256,7 @@ export function CompanionsApp({
   initialCompanions,
   initialProviders,
   initialPlugins,
+  initialTriggerProviderAccounts = [],
   initialCompanionId,
   initialSettingsCompanionId,
   initialPluginsOpen = false,
@@ -261,6 +272,7 @@ export function CompanionsApp({
   initialCompanions: Companion[];
   initialProviders: CompanionProvidersResponse | null;
   initialPlugins: CompanionPluginAccount[];
+  initialTriggerProviderAccounts?: CompanionTriggerProviderAccount[];
   initialCompanionId?: string | null;
   initialSettingsCompanionId?: string | null;
   initialPluginsOpen?: boolean;
@@ -287,6 +299,11 @@ export function CompanionsApp({
   const [creating, setCreating] = useState(false);
   const [managingProviders, setManagingProviders] = useState(false);
   const [pluginsOpen, setPluginsOpen] = useState(initialPluginsOpen && !initialCompanionId);
+  const [pluginAccounts, setPluginAccounts] = useState(initialPlugins);
+  const [triggerProviderAccounts, setTriggerProviderAccounts] = useState(
+    initialTriggerProviderAccounts,
+  );
+  const [triggerProvidersOpen, setTriggerProvidersOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sharing, setSharing] = useState<Companion | null>(null);
@@ -1107,7 +1124,11 @@ export function CompanionsApp({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [mobileSidebarOpen]);
 
-  const dialogOpen = sharing !== null || creating || managingProviders || deletingCompanion !== null;
+  const dialogOpen = sharing !== null
+    || creating
+    || managingProviders
+    || deletingCompanion !== null
+    || triggerProvidersOpen;
 
   useEffect(() => {
     if (!dialogOpen) return;
@@ -1276,7 +1297,10 @@ export function CompanionsApp({
               onRoutinesChange={setRoutines}
               contextTriggers={triggers}
               onTriggersChange={setTriggers}
-              contextPlugins={initialPlugins.map((plugin) => ({
+              contextTriggerAccounts={triggerProviderAccounts}
+              onManageTriggerProviders={() => setTriggerProvidersOpen(true)}
+              contextTriggerHistoryApi={companionTriggerHistoryApi}
+              contextPlugins={pluginAccounts.map((plugin) => ({
                 id: plugin.id,
                 label: `${plugin.provider} · ${plugin.label}`,
               }))}
@@ -1343,7 +1367,18 @@ export function CompanionsApp({
         ) : pluginsOpen ? (
           <CompanionPlugins
             orgId={currentOrg.id}
-            initialAccounts={initialPlugins}
+            initialAccounts={pluginAccounts}
+            onAccountsChange={(accounts) => {
+              setPluginAccounts(accounts);
+              // Disconnecting an OAuth MCP account also disconnects its shared trigger authority.
+              // Mirror that immediately; a full refresh will load the server projection.
+              const remainingIds = new Set(accounts.map((account) => account.id));
+              setTriggerProviderAccounts((current) => current.map((account) => (
+                account.mcp_account_id && !remainingIds.has(account.mcp_account_id)
+                  ? { ...account, status: "disconnected", mcp_account_id: null }
+                  : account
+              )));
+            }}
             onBack={closePlugins}
           />
         ) : (
@@ -1399,7 +1434,20 @@ export function CompanionsApp({
             </div>
           </div>
         )}
+
       </main>
+
+      {triggerProvidersOpen && (
+        <CompanionTriggerProvidersDialog
+          orgId={currentOrg.id}
+          accounts={triggerProviderAccounts}
+          onAccountsChange={setTriggerProviderAccounts}
+          onMcpAccountRemoved={(accountId) => {
+            setPluginAccounts((current) => current.filter((account) => account.id !== accountId));
+          }}
+          onClose={() => setTriggerProvidersOpen(false)}
+        />
+      )}
 
       {creating && providers && (
         <NewCompanionDialog

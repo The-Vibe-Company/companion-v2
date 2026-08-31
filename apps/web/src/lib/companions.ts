@@ -15,9 +15,11 @@ import type {
   CompanionShares,
   CompanionThread,
   CompanionTrigger,
+  CompanionTriggerProviderAccount,
   CancelCompanionTurnAcceptedResponse,
   CreateCompanionRoutineInput,
   CreateCompanionTriggerInput,
+  CreateCompanionTriggerProviderAccountInput,
   SendCompanionMessageAcceptedResponse,
   SaveCompanionProviderInput,
   SaveCompanionPluginInput,
@@ -30,6 +32,12 @@ import {
   type RestartCompanionRuntimeInput,
 } from "@companion/contracts/companion-runtime";
 import { apiFetch } from "./apiClient";
+import type {
+  CompanionTriggerHistoryDetail,
+  CompanionTriggerHistoryDetailOptions,
+  CompanionTriggerHistoryListOptions,
+  CompanionTriggerHistoryListResponse,
+} from "@/components/companions/CompanionTriggerHistoryTypes";
 
 function orgHeaders(orgId: string): HeadersInit {
   return { "x-companion-org": orgId };
@@ -182,6 +190,44 @@ export async function deleteCompanionPlugin(orgId: string, accountId: string): P
     method: "DELETE",
     headers: orgHeaders(orgId),
   });
+}
+
+/** Member-wide provider authority used for trigger registration by every Companion. */
+export async function listCompanionTriggerProviderAccounts(
+  orgId: string,
+): Promise<CompanionTriggerProviderAccount[]> {
+  const result = await apiFetch<{ accounts: CompanionTriggerProviderAccount[] }>(
+    "/v1/companion-trigger-provider-accounts",
+    { headers: orgHeaders(orgId) },
+  );
+  return result.accounts;
+}
+
+/** API-key fallback; OAuth remains the primary GitHub and Sentry connection path. */
+export async function saveCompanionTriggerProviderAccount(
+  orgId: string,
+  input: CreateCompanionTriggerProviderAccountInput,
+): Promise<CompanionTriggerProviderAccount> {
+  const result = await apiFetch<{ account: CompanionTriggerProviderAccount }>(
+    "/v1/companion-trigger-provider-accounts",
+    {
+      method: "POST",
+      headers: orgHeaders(orgId),
+      body: JSON.stringify(input),
+    },
+  );
+  return result.account;
+}
+
+export async function disconnectCompanionTriggerProviderAccount(
+  orgId: string,
+  accountId: string,
+): Promise<CompanionTriggerProviderAccount> {
+  const result = await apiFetch<{ account: CompanionTriggerProviderAccount }>(
+    `/v1/companion-trigger-provider-accounts/${encodeURIComponent(accountId)}`,
+    { method: "DELETE", headers: orgHeaders(orgId) },
+  );
+  return result.account;
 }
 
 export async function saveCompanionProvider(
@@ -616,4 +662,50 @@ export async function rotateCompanionTriggerSecret(
     { method: "POST", headers: orgHeaders(orgId), body: "{}" },
   );
   return result.trigger;
+}
+
+/**
+ * Ask the API to reconcile a trigger with its provider webhook. The endpoint returns the refreshed
+ * trigger projection (rather than a bare `{ registered: true }` acknowledgement), so the row can
+ * immediately show registered/failed state and its safe registration error.
+ */
+export async function retryCompanionTriggerRegistration(
+  orgId: string,
+  companionId: string,
+  triggerId: string,
+): Promise<CompanionTrigger> {
+  const result = await apiFetch<{ trigger: CompanionTrigger }>(
+    `/v1/companions/${encodeURIComponent(companionId)}/triggers/${encodeURIComponent(triggerId)}/registration`,
+    { method: "POST", headers: orgHeaders(orgId), body: "{}" },
+  );
+  return result.trigger;
+}
+
+/** Trigger fire history is a control-plane read and never wakes the Companion Box. */
+export async function listCompanionTriggerRuns(
+  orgId: string,
+  companionId: string,
+  triggerId: string,
+  options: CompanionTriggerHistoryListOptions,
+): Promise<CompanionTriggerHistoryListResponse> {
+  const params = new URLSearchParams({ limit: String(options.limit) });
+  if (options.cursor) params.set("cursor", options.cursor);
+  return apiFetch<CompanionTriggerHistoryListResponse>(
+    `/v1/companions/${encodeURIComponent(companionId)}/triggers/${encodeURIComponent(triggerId)}/runs?${params.toString()}`,
+    { headers: orgHeaders(orgId) },
+  );
+}
+
+export async function readCompanionTriggerRun(
+  orgId: string,
+  companionId: string,
+  runId: string,
+  options: CompanionTriggerHistoryDetailOptions,
+): Promise<CompanionTriggerHistoryDetail> {
+  const params = new URLSearchParams({ entry_limit: String(options.entryLimit) });
+  if (options.entryCursor !== undefined) params.set("entry_cursor", String(options.entryCursor));
+  return apiFetch<CompanionTriggerHistoryDetail>(
+    `/v1/companions/${encodeURIComponent(companionId)}/trigger-runs/${encodeURIComponent(runId)}?${params.toString()}`,
+    { headers: orgHeaders(orgId) },
+  );
 }

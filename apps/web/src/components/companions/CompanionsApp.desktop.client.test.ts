@@ -5,7 +5,9 @@ import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type {
   Companion,
+  CompanionPluginAccount,
   CompanionProvidersResponse,
+  CompanionTriggerProviderAccount,
   CompanionThread as Thread,
 } from "@companion/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -130,7 +132,12 @@ function thread(overrides: Partial<Thread> = {}): Thread {
 
 const roots: Root[] = [];
 
-async function open(initial: Companion, others: Companion[] = []) {
+async function open(
+  initial: Companion,
+  others: Companion[] = [],
+  initialPlugins: CompanionPluginAccount[] = [],
+  initialTriggerProviderAccounts: CompanionTriggerProviderAccount[] = [],
+) {
   // The slow list poll re-reads every Companion; left unmocked against a different fixture it would
   // hand the open thread somebody else's access a minute in.
   companionsApi.listCompanions.mockResolvedValue([initial, ...others]);
@@ -147,7 +154,8 @@ async function open(initial: Companion, others: Companion[] = []) {
       skills: [],
       initialCompanions: [initial, ...others],
       initialProviders: providers,
-      initialPlugins: [],
+      initialPlugins,
+      initialTriggerProviderAccounts,
       initialCompanionId: companionId,
     }));
   });
@@ -496,6 +504,55 @@ describe("CompanionsApp context panel", () => {
     expect(companionsApi.startCompanionRuntime).not.toHaveBeenCalled();
     // The tab handoff is untouched by the panel being open.
     expect(window.open).not.toHaveBeenCalled();
+  });
+
+  it("offers an unattached member provider to this Companion and links to member management", async () => {
+    companionsApi.openCompanionDesktop.mockResolvedValue(desktopPayload(null));
+    const sharedGitHub: CompanionPluginAccount = {
+      id: "44444444-4444-4444-8444-444444444444",
+      provider: "github",
+      label: "Acme GitHub",
+      transport: "http",
+      endpoint: "https://api.github.test/mcp",
+      connected: true,
+      created_at: "2026-08-30T00:00:00.000Z",
+      updated_at: "2026-08-30T00:00:00.000Z",
+    };
+    const sharedTriggerProvider: CompanionTriggerProviderAccount = {
+      id: "55555555-5555-4555-8555-555555555555",
+      provider: "github",
+      label: "Acme GitHub",
+      credential_source: "mcp_oauth",
+      mcp_account_id: sharedGitHub.id,
+      status: "connected",
+      dependent_trigger_count: 0,
+      created_at: "2026-08-30T00:00:00.000Z",
+      updated_at: "2026-08-30T00:00:00.000Z",
+    };
+    const container = await open(
+      companion({ selected_mcp_account_ids: [] }),
+      [],
+      [sharedGitHub],
+      [sharedTriggerProvider],
+    );
+
+    await clickContextToggle(container);
+
+    expect(container.querySelector(".chat-context")?.textContent).toContain("GitHub · Acme GitHub");
+    expect(container.querySelector(".chat-context")?.textContent).toContain("No Companion attachment is required");
+    await act(async () => {
+      [...container.querySelectorAll(".chat-context__trigger-providers button")]
+        .find((button): button is HTMLButtonElement => (
+          button instanceof HTMLButtonElement && button.textContent === "Manage"
+        ))?.click();
+    });
+    expect(container.textContent).toContain("Trigger providers");
+    expect(container.textContent).toContain("there is no attachment step");
+    const main = container.querySelector(".companions-main");
+    const providerDialog = container.querySelector(".companions-trigger-providers-dialog");
+    expect(main?.getAttribute("aria-hidden")).toBe("true");
+    expect(main?.hasAttribute("inert")).toBe(true);
+    expect(main?.contains(providerDialog)).toBe(false);
   });
 
   it("shows the stream the first join minted without joining a second time", async () => {
