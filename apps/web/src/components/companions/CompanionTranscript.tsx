@@ -1035,6 +1035,36 @@ function Footer() {
   } = useChrome();
   const fileInput = useRef<HTMLInputElement | null>(null);
   const [dragging, setDragging] = useState(false);
+
+  /** When a press last stopped, so the click that press produces is not read as a second Stop. */
+  const stopPressedAt = useRef(0);
+
+  /**
+   * Stop shares the composer row with Send and so shares THE-346: a tap blurs the field, the
+   * keyboard starts closing, the visual viewport grows, the row is laid out again, and the `click`
+   * lands where the button used to be. Send was moved onto the press for exactly this; Stop was
+   * left on `click` alone, which made it the one control that could not interrupt a wedged turn
+   * from a phone — the case where interrupting matters most. Refusing the default keeps focus in
+   * the field, which is what stops the keyboard closing under the finger to begin with.
+   */
+  const stopOnPress = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    stopPressedAt.current = Date.now();
+    onStop();
+  }, [onStop]);
+
+  /**
+   * The browser still delivers a click after the press. Unlike Send there is no primitive handler
+   * composed behind this button, so the click must simply not run a second Stop. A click with no
+   * recent press — a keyboard activating the focused button — is a real Stop and goes through.
+   */
+  const stopOnClick = useCallback(() => {
+    if (Date.now() - stopPressedAt.current <= PRESS_CLICK_MS) {
+      stopPressedAt.current = 0;
+      return;
+    }
+    onStop();
+  }, [onStop]);
   const atCapacity = attachments.length >= COMPANION_MESSAGE_ATTACHMENT_MAX_COUNT;
 
   // A screenshot pasted straight into the field is the shortest path from "look at this" to a sent
@@ -1134,7 +1164,8 @@ function Footer() {
               aria-label={stopping ? "Stopping" : "Stop"}
               aria-busy={stopping || undefined}
               disabled={stopping}
-              onClick={onStop}
+              onPointerDown={stopOnPress}
+              onClick={stopOnClick}
             >
               <SquareIcon className="size-3 fill-current" />
             </button>
