@@ -147,8 +147,12 @@ QUERIES: dict[str, dict] = {
     },
     "stuck": {
         "description": (
-            "Companions whose queue head is interrupted/needs_input while queued "
-            "turns older than 10 minutes wait behind it."
+            "Companions whose queue head blocks the lane while queued turns older "
+            "than 10 minutes wait behind it: an interrupted/needs_input head "
+            "awaiting an explicit decision, or an active head with no correlated Pi "
+            "activity for 10 minutes (a wedged lane). Staleness is measured from the "
+            "attempt's last_activity_at so a long but healthy running turn, which may "
+            "legitimately run up to its two-hour absolute deadline, is not reported."
         ),
         "params": ("limit",),
         "statements": [
@@ -159,15 +163,30 @@ QUERIES: dict[str, dict] = {
                 "    t.queue_sequence, t.last_error_code, t.last_error_action,\n"
                 "    t.state_changed_at\n"
                 "  from public.companion_turns t\n"
-                "  where t.status in ('interrupted','needs_input')\n"
+                "  where t.status in\n"
+                "    ('interrupted','needs_input','starting','dispatching','running')\n"
                 "  order by t.companion_id, t.queue_sequence asc\n"
                 ")\n"
                 "select c.name as companion_name, h.companion_id, h.head_turn_id,\n"
                 "       h.head_status, h.last_error_code, h.last_error_action,\n"
-                "       h.state_changed_at, q.queued_turns,\n"
+                "       h.state_changed_at,\n"
+                "       date_trunc('second', now() - h.state_changed_at) as head_age,\n"
+                "       a.checkpoint_sequence, a.last_activity_at,\n"
+                "       date_trunc('second',\n"
+                "                  now() - coalesce(a.last_activity_at, h.state_changed_at))\n"
+                "         as idle_for,\n"
+                "       q.queued_turns,\n"
                 "       date_trunc('second', q.oldest_queued_age) as oldest_queued_age\n"
                 "from heads h\n"
                 "join public.companions c on c.id = h.companion_id\n"
+                "left join lateral (\n"
+                "  select attempt.last_activity_at, attempt.checkpoint_sequence\n"
+                "  from public.companion_turn_attempts attempt\n"
+                "  where attempt.companion_id = h.companion_id\n"
+                "    and attempt.turn_id = h.head_turn_id\n"
+                "  order by attempt.attempt_number desc\n"
+                "  limit 1\n"
+                ") a on true\n"
                 "cross join lateral (\n"
                 "  select count(*) as queued_turns,\n"
                 "         now() - min(t2.created_at) as oldest_queued_age\n"
@@ -176,6 +195,9 @@ QUERIES: dict[str, dict] = {
                 ") q\n"
                 "where q.queued_turns > 0\n"
                 "  and q.oldest_queued_age > interval '10 minutes'\n"
+                "  and (h.head_status in ('interrupted','needs_input')\n"
+                "       or coalesce(a.last_activity_at, h.state_changed_at)\n"
+                "            < now() - interval '10 minutes')\n"
                 "order by q.oldest_queued_age desc\n"
                 "limit :'limit'::int"
             ),
@@ -256,6 +278,49 @@ QUERIES: dict[str, dict] = {
                 "       last_error_action\n"
                 "from public.companion_runtime_instances\n"
                 "where companion_id = :'companion_id'::uuid"
+            ),
+        ],
+    },
+    "leases": {
+        "description": (
+            "Runtime lease rows per scheduling lane (main/routine) with every active "
+            "attempt joined to its lane lease. This is the query that distinguishes a "
+            "lane held by a live executor from a lane whose lease was released while an "
+            "attempt stayed active. Claim tokens are deliberately not selected."
+        ),
+        "params": ("companion_id_optional", "limit"),
+        "statements": [
+            (
+                "select l.companion_id, c.name as companion_name, l.lane,\n"
+                "       (l.claim_token is not null) as claimed,\n"
+                "       l.claim_epoch, l.gate_epoch, l.executor_id, l.work_kind, l.work_id,\n"
+                "       l.claimed_at, l.renewed_at, l.expires_at,\n"
+                "       case when l.expires_at is null then null\n"
+                "            else date_trunc('second', l.expires_at - now()) end as expires_in\n"
+                "from public.companion_runtime_leases l\n"
+                "join public.companions c on c.id = l.companion_id\n"
+                "where (:'companion_id_optional'::text = ''\n"
+                "       or l.companion_id::text = :'companion_id_optional'::text)\n"
+                "order by l.companion_id, l.lane\n"
+                "limit :'limit'::int"
+            ),
+            (
+                "select a.companion_id, a.execution_lane, a.turn_id, a.id as attempt_id,\n"
+                "       a.status, a.checkpoint, a.checkpoint_sequence, a.dispatch_state,\n"
+                "       a.dispatch_count,\n"
+                "       date_trunc('second', now() - a.started_at) as active_for,\n"
+                "       (l.claim_token is not null) as lane_claimed,\n"
+                "       l.claim_epoch as lane_claim_epoch, l.expires_at as lane_expires_at\n"
+                "from public.companion_turn_attempts a\n"
+                "left join public.companion_runtime_leases l\n"
+                "  on l.org_id = a.org_id\n"
+                " and l.companion_id = a.companion_id\n"
+                " and l.lane = a.execution_lane\n"
+                "where a.status in ('starting','dispatching','running','needs_input')\n"
+                "  and (:'companion_id_optional'::text = ''\n"
+                "       or a.companion_id::text = :'companion_id_optional'::text)\n"
+                "order by a.started_at asc\n"
+                "limit :'limit'::int"
             ),
         ],
     },

@@ -37,6 +37,7 @@ query CompanionDebugLogs($deploymentId: String!, $limit: Int!) {
     timestamp
     severity
     message
+    attributes { key value }
   }
 }
 """
@@ -82,6 +83,34 @@ def parse_log_line(message: str) -> dict | None:
     if not isinstance(record, dict) or "event" not in record:
         return None
     return record
+
+
+def record_from_attributes(attributes: object) -> dict | None:
+    """Rebuild a runtime record from Railway's structured attribute set.
+
+    The runtime ships JSON logs whose payload Railway splits into ``attributes``
+    and leaves ``message`` empty. Without this, every structured line renders as
+    a blank string and the tool silently reports "N matching lines" of nothing.
+    """
+    if not isinstance(attributes, dict) or "event" not in attributes:
+        return None
+    return dict(attributes)
+
+
+def rendered_is_blank(line: object) -> bool:
+    """True when a matched entry carries no readable content, in either output mode.
+
+    ``--json`` emits dicts, the default path emits strings, so the emptiness check has
+    to understand both or the guard below silently skips JSON callers.
+    """
+    if isinstance(line, str):
+        return not line.strip()
+    if isinstance(line, dict):
+        if set(line) - {"timestamp"} == {"raw"}:
+            raw = line.get("raw")
+            return isinstance(raw, str) and not raw.strip()
+        return False
+    return False
 
 
 def matches_filters(record: dict, args: argparse.Namespace) -> bool:
@@ -163,10 +192,24 @@ def fetch_deployment_logs(env: dict, deployment_id: str, limit: int, http=prodli
     for entry in entries:
         if not isinstance(entry, dict):
             raise railway_status.schema_error("deploymentLogs[]")
+        attributes: dict[str, object] = {}
+        raw_attributes = entry.get("attributes")
+        if isinstance(raw_attributes, list):
+            for attribute in raw_attributes:
+                if not isinstance(attribute, dict) or "key" not in attribute:
+                    continue
+                value = attribute.get("value")
+                if isinstance(value, str):
+                    try:
+                        value = json.loads(value)
+                    except ValueError:
+                        pass
+                attributes[str(attribute["key"])] = value
         rows.append({
             "timestamp": str(entry.get("timestamp", "")),
             "severity": str(entry.get("severity", "")),
             "message": str(entry.get("message", "")),
+            "attributes": attributes,
         })
     return rows
 
@@ -220,6 +263,10 @@ def main() -> None:
         if entry_at and entry_at < cutoff:
             continue
         record = parse_log_line(entry["message"])
+        from_attributes = False
+        if record is None:
+            record = record_from_attributes(entry.get("attributes"))
+            from_attributes = record is not None
         if record is None:
             if structured_only:
                 continue
@@ -230,12 +277,23 @@ def main() -> None:
             continue
         if not matches_filters(record, args):
             continue
-        rendered = entry["message"].rstrip() if args.raw else format_record(record)
+        if args.raw:
+            rendered = json.dumps(record) if from_attributes else entry["message"].rstrip()
+        else:
+            rendered = format_record(record)
         line = prodlib.redact(rendered)
         if grep and not grep.search(line):
             continue
         matched.append(line if not args.json else redact_json_value(record))
 
+    if entries and matched and all(rendered_is_blank(line) for line in matched):
+        print(
+            f"-- WARNING: all {len(matched)} matching entries rendered empty (no message and "
+            "no attributes). Do NOT read this as 'no matching logs': either the service was "
+            "idle, or the deploymentLogs schema drifted and needs re-probing "
+            "(references/railway-api.md).",
+            file=sys.stderr,
+        )
     if args.json:
         prodlib.print_json(matched)
         return
