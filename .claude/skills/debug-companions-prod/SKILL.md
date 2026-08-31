@@ -181,6 +181,25 @@ Note that `db_query.py stuck` historically only matched an `interrupted`/
 `needs_input` head. It now also reports an *active* head that has not changed
 state for ten minutes; a head wedged in `starting` used to be invisible.
 
+When the loop is on an attempt, `material` narrows which precondition actually fails:
+
+```bash
+python3 scripts/db_query.py material --companion <uuid>
+```
+
+`store.getMaterial` CROSS JOINs `companion_runtime_get_material`,
+`companion_runtime_get_turn_context` and `companion_runtime_get_routine_material`, so **any one of
+them returning no row makes the whole lookup null**, which `fencedMutation` reports as a lost
+fence. `material` selects each precondition as a boolean — actor match, claim epoch, prompt entry,
+routine shape — so a false column names the failing function instead of leaving one opaque
+`fence_lost`. A NULL `member_timezone` on an attempt that has been claimed means
+`get_turn_context`'s `UPDATE ... RETURNING` never matched.
+
+Note that `companion_runtime_renew_and_authorize` also returns **zero rows**, not a denial row,
+when its final lease CAS fails — including when the lease already expired
+(`l.expires_at > clock_timestamp()`) or a deadline has passed. The runtime maps zero rows to
+`LeaseFenceLostError`, so several unrelated conditions arrive as the same symptom.
+
 **`fence_lost` in a loop is not a fencing problem.** `companion_runtime_get_material`
 returns **no row** when `companion_runtime_renew_and_authorize` denies
 authorization (`packages/db/drizzle/0106_companion_routines.sql:227`), and
