@@ -26,6 +26,7 @@ import {
   composeDaemonFailureDetail,
   composedInstructions,
   composedRoutineInstructions,
+  composedTriggerValidationInstructions,
   mintBoxDesktopUrl,
   observedBoxStateFromProvider,
   parseOutboxManifest,
@@ -1639,7 +1640,7 @@ describe("staged Companion instructions", () => {
       `At most ${COMPANION_ROUTINE_MAX_PER_COMPANION} per Companion, at least ${COMPANION_ROUTINE_MIN_INTERVAL_MS / 60_000} minutes apart.`,
     );
     expect(text).toContain(
-      `At most ${COMPANION_TRIGGER_MAX_PER_COMPANION} per Companion. You cannot create one yourself.`,
+      `At most ${COMPANION_TRIGGER_MAX_PER_COMPANION} per Companion.`,
     );
     expect(text).toContain(COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS.join(", "));
   });
@@ -1981,6 +1982,7 @@ describe("isolated routine Pi sessions", () => {
       boxId: "bx_23456789",
       runId,
       persona: "Routine persona.",
+      validationOnly: true,
       expectedInvocationId: invocationId,
     })).resolves.toMatchObject({
       state: "idle",
@@ -1989,18 +1991,20 @@ describe("isolated routine Pi sessions", () => {
     expect(files).toEqual([
       {
         path: `${paths.root}/state/instructions.txt`,
-        content: composedRoutineInstructions("Routine persona."),
+        content: composedTriggerValidationInstructions("Routine persona."),
       },
       { path: paths.extension, content: COMPANION_PI_ROUTINE_SURFACE_EXTENSION_SOURCE },
     ]);
     expect(files[1]?.content).toContain('name: "surface_to_main"');
     expect(files[1]?.content).toContain("Use one short sentence with no process narration.");
-    expect(files[1]?.content).toContain('Type.Literal("relay")');
-    expect(files[1]?.content).toContain('Type.Literal("notify")');
+    expect(files[1]?.content).toContain('enum: ["relay", "notify"]');
+    expect(files[1]?.content).not.toContain('from "typebox"');
     expect(files.some((file) => file.path === `.companion/pi/extensions/${COMPANION_PI_ROUTINE_SURFACE_EXTENSION_FILE}`))
       .toBe(false);
     expect(commands[0]).toContain(`routine_root="$HOME/${paths.root}"`);
-    expect(commands[0]).toContain('cp -a "$HOME/.companion/pi/." "$routine_root/pi/"');
+    expect(commands[0]).not.toContain('cp -a "$HOME/.companion/pi/." "$routine_root/pi/"');
+    expect(commands[0]).toContain('cp -p "$HOME/.companion/pi/auth.json" "$routine_root/pi/auth.json"');
+    expect(commands[0]).not.toContain("mcp-accounts.json");
     expect(commands[0]).toContain("routine-pi-session run root is still owned by a process");
     expect(commands[0]).toContain("trap cleanup_failed_prepare ERR");
     expect(commands[0]).toContain("flock -w 20 9");
@@ -2012,6 +2016,8 @@ describe("isolated routine Pi sessions", () => {
     expect(launch).toContain("routine-pi-session could not be stopped after readiness timeout");
     expect(launch).toContain("# The cancellation marker may be published");
     expect(launch).toContain('"$broker_script" 9>&- </dev/null');
+    expect(launch).toContain("export COMPANION_PI_VALIDATION_ONLY=1");
+    expect(launch).not.toContain("companion/providers.env");
     expect(launch).toContain('rm -rf "$routine_root"');
     expect(launch).not.toContain("systemctl --user");
     // Terminate publishes its tombstone before waiting for the launch lock. A launch already

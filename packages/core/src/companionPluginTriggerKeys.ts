@@ -7,6 +7,7 @@ import { db, type Db } from "@companion/db";
 import { assertMember, type ActorContext } from "./services";
 import { encryptOpaqueValue, loadSecretsMasterKey, type OpaqueCiphertext } from "./secretsCrypto";
 import { schema } from "@companion/db";
+import { saveCompanionTriggerProviderAccount } from "./companionTriggerProviderAccounts";
 
 /**
  * Per-plugin trigger credentials: a second authentication a provider needs for webhook
@@ -68,6 +69,13 @@ export async function saveCompanionPluginTriggerKey(input: {
       ${envelope.keyId}
     )
   `);
+  await saveCompanionTriggerProviderAccount({
+    actor: input.actor,
+    orgId: input.orgId,
+    account: { provider: input.provider, label: "Linear", credential },
+    masterKey,
+    database,
+  });
 }
 
 export interface PluginTriggerKeyEnvelope {

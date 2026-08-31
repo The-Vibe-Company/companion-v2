@@ -354,7 +354,7 @@ function run() {
                 : "User denied or timed out. No routine was created.")
               : trigger
                 ? (approved
-                  ? "Approved. The trigger is created after this turn ends; the person pastes its webhook URL into the external service."
+                  ? "Approved. Companion creates the trigger and registers the provider webhook end-to-end after this turn."
                   : "User denied or timed out. No trigger was created.")
                 : (cancelled ? "Question cancelled." : "Answer received."),
         }],

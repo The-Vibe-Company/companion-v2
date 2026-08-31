@@ -11,7 +11,6 @@ import {
   COMPANION_CONFIG_PROPOSAL_MAX_IDS,
   COMPANION_CONFIG_PROPOSAL_SUMMARY_MAX_CHARACTERS,
   COMPANION_EXEC_TOOL_RUN_TIMEOUT_MS,
-  COMPANION_PLUGIN_TRIGGER_PROVIDERS,
   COMPANION_TOOL_KIND_NAME_TABLE,
   COMPANION_TOOL_RUN_TIMEOUT_MS,
   COMPANION_TRIGGER_PROVIDERS,
@@ -69,7 +68,6 @@ const CONFIG_MAX_IDS = ${COMPANION_CONFIG_PROPOSAL_MAX_IDS};
 const CONFIG_SUMMARY_MAX = ${COMPANION_CONFIG_PROPOSAL_SUMMARY_MAX_CHARACTERS};
 const CONNECT_PROVIDERS = ${JSON.stringify(COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS)} as string[];
 const TRIGGER_PROVIDERS = ${JSON.stringify(COMPANION_TRIGGER_PROVIDERS)} as string[];
-const PLUGIN_TRIGGER_PROVIDERS = ${JSON.stringify(COMPANION_PLUGIN_TRIGGER_PROVIDERS)} as string[];
 const INTERACTIVE_TOOLS = new Set(["ask_user", "propose_config", "propose_routine", "propose_trigger", "request_plugin_connection"]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const CATALOG_PATH = \`$\{process.env.HOME || ""}/.companion/runtime/state/config-catalog.json\`;
@@ -166,15 +164,6 @@ function readCatalog(): {
   } catch {
     return null;
   }
-}
-
-/**
- * Whether a plugin-backed trigger provider is usable: the config catalog must name at least one
- * attached plugin of that provider. An unreadable catalog fails closed.
- */
-function hasAttachedPlugin(provider: string): boolean {
-  if (!PLUGIN_TRIGGER_PROVIDERS.includes(provider)) return true;
-  return readCatalog()?.plugins?.some((plugin) => plugin.provider === provider && plugin.selected === true) ?? false;
 }
 
 function namedIds(
@@ -404,26 +393,42 @@ export default function companionPermissionBroker(pi: ExtensionAPI) {
     name: "propose_trigger",
     label: "Propose trigger",
     description:
-      "Propose a webhook trigger for Owner/Editor approval — a named prompt that runs when an external service posts an event. linear and github triggers require the matching plugin attached to you; custom needs none. This only proposes; never claim a trigger is active without approval. The human approves and pastes the webhook URL into the external service.",
+      "Propose an end-to-end webhook trigger for Owner/Editor approval. Companion registers supported provider webhooks itself with held credentials; never ask the person to paste a URL or use a provider console.",
     parameters: Type.Object({
       name: Type.String({ description: "Short unique name, max 80 characters" }),
       prompt: Type.String({ description: "The prompt the Companion will run on each webhook event" }),
-      provider: Type.String({ description: "linear, github, or custom" }),
+      mode: Type.Optional(Type.String({ description: "notify to inform only, or relay for the main Companion to act; defaults to relay" })),
+      provider: Type.Optional(Type.String({ description: "webhook, linear, github, sentry, or custom; defaults to webhook" })),
+      provider_account_id: Type.Optional(Type.String({ description: "Member-scoped trigger provider account UUID only when selecting among multiple eligible accounts" })),
       repo: Type.Optional(Type.String({ description: "github only: repository as owner/repo the webhook watches" })),
-      events: Type.Optional(Type.Array(Type.String(), { description: "github only: webhook event names (push, pull_request, ...) or a single \"*\"; max 30" })),
+      organization: Type.Optional(Type.String({ description: "sentry only: organization slug" })),
+      project: Type.Optional(Type.String({ description: "sentry only: project slug" })),
+      events: Type.Optional(Type.Array(Type.String(), { description: "github only: webhook event names (push, pull_request, ...) or a single "*"; max 30" })),
       summary: Type.Optional(Type.String({ description: "One-line confirm copy for the human" })),
     }),
     executionMode: "sequential",
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const name = typeof params.name === "string" ? params.name.trim() : "";
       const prompt = typeof params.prompt === "string" ? params.prompt.trim() : "";
-      const provider = typeof params.provider === "string" ? params.provider.trim().toLowerCase() : "";
+      const provider = typeof params.provider === "string" ? params.provider.trim().toLowerCase() : "webhook";
+      const mode = typeof params.mode === "string" ? params.mode.trim().toLowerCase() : "relay";
+      const providerAccountId = typeof params.provider_account_id === "string"
+        ? params.provider_account_id.trim().toLowerCase()
+        : "";
       const repo = typeof params.repo === "string" ? params.repo.trim() : "";
+      const organization = typeof params.organization === "string" ? params.organization.trim() : "";
+      const project = typeof params.project === "string" ? params.project.trim() : "";
       const events = asStringList(params.events).map((event) => event.trim().toLowerCase()).filter(Boolean);
       const summaryArg = typeof params.summary === "string" ? params.summary.trim() : "";
       if (!TRIGGER_PROVIDERS.includes(provider)) {
         return {
           content: [{ type: "text", text: \`Error: propose_trigger provider must be one of \${TRIGGER_PROVIDERS.join(", ")}\` }],
+          details: { proposal: null, confirmed: null },
+        };
+      }
+      if (!["notify", "relay"].includes(mode) || (providerAccountId && !UUID_PATTERN.test(providerAccountId))) {
+        return {
+          content: [{ type: "text", text: "Error: propose_trigger mode or provider_account_id is invalid" }],
           details: { proposal: null, confirmed: null },
         };
       }
@@ -435,25 +440,39 @@ export default function companionPermissionBroker(pi: ExtensionAPI) {
           details: { proposal: null, confirmed: null },
         };
       }
-      if (provider !== "github" && (repo || events.length)) {
+      if (provider === "sentry" && (!organization || !project || events.length === 0)) {
         return {
-          content: [{ type: "text", text: \`Error: \${provider} triggers do not take a repo or events yet\` }],
+          content: [{ type: "text", text: "Error: propose_trigger sentry triggers need organization, project, and at least one event" }],
+          details: { proposal: null, confirmed: null },
+        };
+      }
+      if (provider !== "github" && repo) {
+        return {
+          content: [{ type: "text", text: \`Error: \${provider} triggers do not take a repo\` }],
+          details: { proposal: null, confirmed: null },
+        };
+      }
+      if (provider !== "sentry" && (organization || project)) {
+        return {
+          content: [{ type: "text", text: \`Error: \${provider} triggers do not take a Sentry organization or project\` }],
+          details: { proposal: null, confirmed: null },
+        };
+      }
+      if (!["github", "sentry"].includes(provider) && events.length) {
+        return {
+          content: [{ type: "text", text: \`Error: \${provider} triggers do not take events yet\` }],
           details: { proposal: null, confirmed: null },
         };
       }
       if (events.some((event) => !/^\\*$|^[a-z_]{1,64}$/.test(event)) || events.length > 30) {
         return {
-          content: [{ type: "text", text: "Error: propose_trigger events must be lowercase webhook event names or \"*\", at most 30" }],
+          content: [{ type: "text", text: "Error: propose_trigger events must be lowercase webhook event names or "*", at most 30" }],
           details: { proposal: null, confirmed: null },
         };
       }
-      const target = provider === "github" ? { repo, events } : undefined;
-      if (!hasAttachedPlugin(provider)) {
-        return {
-          content: [{ type: "text", text: \`Error: \${provider} triggers require the \${provider} plugin attached to you. Propose attaching it with propose_config first; if it is not connected yet, ask with request_plugin_connection.\` }],
-          details: { proposal: null, confirmed: null },
-        };
-      }
+      const target = provider === "github"
+        ? { repo, events }
+        : provider === "sentry" ? { organization, project, events } : undefined;
       if (
         !name || name.length > 80 || /[\\n\\r]/.test(name)
         || !prompt || prompt.length > 16384
@@ -464,9 +483,11 @@ export default function companionPermissionBroker(pi: ExtensionAPI) {
           details: { proposal: null, confirmed: null },
         };
       }
-      const proposal = target
-        ? { kind: "trigger", name, prompt, provider, target }
-        : { kind: "trigger", name, prompt, provider };
+      const proposal = {
+        kind: "trigger", name, prompt, mode, provider,
+        ...(providerAccountId ? { provider_account_id: providerAccountId } : {}),
+        ...(target ? { target } : {}),
+      };
       if (!ctx.hasUI) {
         return {
           content: [{ type: "text", text: "Error: no permission UI available" }],
@@ -483,7 +504,7 @@ export default function companionPermissionBroker(pi: ExtensionAPI) {
         return {
           content: [{
             type: "text",
-            text: "Approved. The trigger is created after this turn ends; the person pastes its webhook URL into the external service.",
+            text: "Approved. Companion creates the trigger and registers the provider webhook end-to-end after this turn.",
           }],
           details: { proposal, confirmed: true },
         };

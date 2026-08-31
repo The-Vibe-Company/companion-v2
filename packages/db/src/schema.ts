@@ -629,7 +629,9 @@ export const companionTriggers = pgTable(
     companionId: uuid("companion_id").notNull(),
     name: text("name").notNull(),
     prompt: text("prompt").notNull(),
+    mode: text("mode").notNull().default("relay"),
     provider: text("provider").notNull(),
+    providerAccountId: uuid("provider_account_id"),
     secret: text("secret").notNull(),
     target: jsonb("target").$type<Record<string, unknown>>().notNull().default({}),
     remoteHookId: text("remote_hook_id"),
@@ -656,11 +658,12 @@ export const companionTriggers = pgTable(
     nameUnique: uniqueIndex("companion_triggers_name_uq").on(t.companionId, sql`lower(${t.name})`),
     nameCheck: check("companion_triggers_name_check", sql`char_length(btrim(${t.name})) between 1 and 80 and ${t.name} !~ E'[\\n\\r]'`),
     promptCheck: check("companion_triggers_prompt_check", sql`char_length(btrim(${t.prompt})) between 1 and 16384`),
-    providerCheck: check("companion_triggers_provider_check", sql`${t.provider} in ('linear', 'github', 'custom')`),
+    modeCheck: check("companion_triggers_mode_check", sql`${t.mode} in ('notify', 'relay')`),
+    providerCheck: check("companion_triggers_provider_check", sql`${t.provider} in ('webhook', 'linear', 'github', 'sentry', 'custom')`),
     targetShapeCheck: check("companion_triggers_target_shape_check", sql`jsonb_typeof(${t.target}) = 'object'`),
     registrationStatusCheck: check(
       "companion_triggers_registration_status_check",
-      sql`${t.registrationStatus} in ('manual', 'registered', 'failed')`,
+      sql`${t.registrationStatus} in ('manual', 'unregistered', 'registered', 'failed')`,
     ),
     secretCheck: check("companion_triggers_secret_check", sql`${t.secret} ~ '^[0-9a-f]{32,128}$'`),
     errorCheck: check("companion_triggers_error_check", sql`((${t.lastErrorCode} is null) = (${t.lastErrorMessage} is null)) and ((${t.lastErrorCode} is null) = (${t.lastErrorAt} is null)) and (${t.lastErrorCode} is null or ${t.lastErrorCode} ~ '^[a-z][a-z0-9_]{0,63}$') and (${t.lastErrorMessage} is null or (char_length(${t.lastErrorMessage}) <= 500 and ${t.lastErrorMessage} !~ E'[\\n\\r]')) and ${t.consecutiveFailures} >= 0`),
@@ -1043,6 +1046,8 @@ export const companionTurns = pgTable(
      */
     triggerId: uuid("trigger_id").references(() => companionTriggers.id, { onDelete: "set null" }),
     triggerName: text("trigger_name"),
+    /** Trigger v2 validates in the isolated lane and pins the configured terminal surface mode. */
+    triggerMode: text("trigger_mode"),
     /**
      * Set when an Owner/Editor asks to stop an active turn whose prompt may already be on Pi.
      * The executor that holds the lease aborts Pi and settles; the API never contacts Box.
@@ -1069,11 +1074,12 @@ export const companionTurns = pgTable(
     errorCheck: check("companion_turns_error_check", sql`((${t.lastErrorCode} is null) = (${t.lastErrorMessage} is null)) and (((${t.lastErrorCode} is null) = (${t.lastErrorAction} is null)) or (${t.status} = 'cancelled' and ${t.routineName} is not null and ${t.lastErrorCode} is not null and ${t.lastErrorAction} = 'none')) and (${t.lastErrorCode} is null or ${t.lastErrorCode} ~ '^[a-z][a-z0-9_]{0,63}$') and (${t.lastErrorMessage} is null or (char_length(${t.lastErrorMessage}) <= 500 and ${t.lastErrorMessage} !~ E'[\\n\\r]')) and (${t.status} not in ('failed','interrupted') or ${t.lastErrorCode} is not null) and (${t.status} not in ('succeeded','cancelled') or ${t.lastErrorCode} is null or (${t.status} = 'cancelled' and ${t.routineName} is not null and ${t.lastErrorAction} = 'none'))`),
     messageEvent: index("companion_turns_message_event_idx").on(t.companionId, t.messageEventId),
     routineOriginCheck: check("companion_turns_routine_origin_check", sql`(${t.routineId} is null or ${t.routineName} is not null) and (${t.routineName} is null or (char_length(${t.routineName}) between 1 and 80 and ${t.routineName} !~ E'[\\n\\r]'))`),
-    routineSnapshotCheck: check("companion_turns_routine_snapshot_check", sql`${t.routineSnapshotId} is null or ${t.routineName} is not null`),
+    routineSnapshotCheck: check("companion_turns_routine_snapshot_check", sql`${t.routineSnapshotId} is null or ${t.routineName} is not null or ${t.triggerName} is not null`),
     routineIsolationCheck: check("companion_turns_routine_isolation_check", sql`not ${t.routineIsolated} or (${t.routineSnapshotId} is not null and ${t.routineContextSubstrateId} is not null)`),
     routineRelaySourceCheck: check("companion_turns_routine_relay_source_check", sql`${t.routineRelaySourceEventId} is null or (char_length(${t.routineRelaySourceEventId}) between 1 and 200 and ${t.routineRelaySourceEventId} !~ E'[\n\r]' and ${t.routineName} is null)`),
     routineSnapshot: index("companion_turns_routine_snapshot_idx").on(t.orgId, t.companionId, t.routineSnapshotId, t.queueSequence, t.id).where(sql`${t.routineSnapshotId} is not null`),
-    triggerOriginCheck: check("companion_turns_trigger_origin_check", sql`(${t.triggerId} is null or ${t.triggerName} is not null) and (${t.triggerName} is null or (char_length(${t.triggerName}) between 1 and 80 and ${t.triggerName} !~ E'[\\n\\r]')) and not (${t.routineName} is not null and ${t.triggerName} is not null)`),
+    triggerOriginCheck: check("companion_turns_trigger_origin_check", sql`(${t.triggerId} is null or ${t.triggerName} is not null) and (${t.triggerName} is null or (char_length(${t.triggerName}) between 1 and 80 and ${t.triggerName} !~ E'[\\n\\r]')) and (${t.triggerName} is null or ${t.routineId} is null)`),
+    triggerModeCheck: check("companion_turns_trigger_mode_check", sql`(${t.triggerName} is null and ${t.triggerMode} is null) or (${t.triggerName} is not null and ${t.triggerMode} in ('notify', 'relay'))`),
   }),
 );
 
@@ -2145,6 +2151,95 @@ export const companionMcpAccounts = pgTable(
     credentialVersionCheck: check(
       "companion_mcp_accounts_credential_version_check",
       sql`${t.credentialVersion} >= 1`,
+    ),
+  }),
+);
+
+/**
+ * A member-owned provider authority for remote trigger registration. Unlike MCP accounts this is
+ * never attached to an individual Companion: every Companion the member can operate may use it.
+ * OAuth rows reference the existing MCP credential; API-key rows keep their own write-only
+ * envelope. Disconnect is soft so dependent per-Companion triggers retain an actionable state.
+ */
+export const companionTriggerProviderAccounts = pgTable(
+  "companion_trigger_provider_accounts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    ownerId: text("owner_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    provider: text("provider").notNull(),
+    label: text("label").notNull(),
+    credentialSource: text("credential_source").notNull(),
+    mcpAccountId: uuid("mcp_account_id").references(() => companionMcpAccounts.id, { onDelete: "set null" }),
+    credentialGeneration: uuid("credential_generation"),
+    ciphertext: text("ciphertext"),
+    iv: text("iv"),
+    authTag: text("auth_tag"),
+    wrappedDek: text("wrapped_dek"),
+    wrapIv: text("wrap_iv"),
+    wrapAuthTag: text("wrap_auth_tag"),
+    keyId: text("key_id"),
+    status: text("status").notNull().default("connected"),
+    disconnectedAt: timestamp("disconnected_at", { withTimezone: true }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    ownerMembershipFk: foreignKey({
+      columns: [t.orgId, t.ownerId],
+      foreignColumns: [memberships.orgId, memberships.userId],
+      name: "companion_trigger_provider_accounts_owner_membership_fk",
+    }).onDelete("cascade"),
+    uniqueProviderLabel: uniqueIndex("companion_trigger_provider_accounts_provider_label_uq").on(
+      t.orgId,
+      t.ownerId,
+      t.provider,
+      sql`lower(${t.label})`,
+    ),
+    byOwner: index("companion_trigger_provider_accounts_owner_idx").on(
+      t.orgId,
+      t.ownerId,
+      t.updatedAt,
+    ),
+    providerCheck: check(
+      "companion_trigger_provider_accounts_provider_check",
+      sql`${t.provider} in ('github', 'linear', 'sentry')`,
+    ),
+    labelCheck: check(
+      "companion_trigger_provider_accounts_label_check",
+      sql`char_length(${t.label}) between 1 and 40`,
+    ),
+    statusCheck: check(
+      "companion_trigger_provider_accounts_status_check",
+      sql`${t.status} in ('connected', 'disconnected')`,
+    ),
+    credentialCheck: check(
+      "companion_trigger_provider_accounts_credential_check",
+      sql`(
+        ${t.credentialSource} = 'mcp_oauth'
+        and ${t.credentialGeneration} is null
+        and ${t.ciphertext} is null and ${t.iv} is null and ${t.authTag} is null
+        and ${t.wrappedDek} is null and ${t.wrapIv} is null and ${t.wrapAuthTag} is null
+        and ${t.keyId} is null
+        and (${t.status} = 'disconnected' or ${t.mcpAccountId} is not null)
+      ) or (
+        ${t.credentialSource} = 'api_key'
+        and ${t.mcpAccountId} is null
+        and ((${t.status} = 'connected'
+          and ${t.credentialGeneration} is not null
+          and ${t.ciphertext} is not null and ${t.iv} is not null and ${t.authTag} is not null
+          and ${t.wrappedDek} is not null and ${t.wrapIv} is not null and ${t.wrapAuthTag} is not null
+          and ${t.keyId} is not null)
+        or (${t.status} = 'disconnected'
+          and ${t.credentialGeneration} is null
+          and ${t.ciphertext} is null and ${t.iv} is null and ${t.authTag} is null
+          and ${t.wrappedDek} is null and ${t.wrapIv} is null and ${t.wrapAuthTag} is null
+          and ${t.keyId} is null))
+      )`,
+    ),
+    disconnectedCheck: check(
+      "companion_trigger_provider_accounts_disconnected_check",
+      sql`(${t.status} = 'disconnected') = (${t.disconnectedAt} is not null)`,
     ),
   }),
 );

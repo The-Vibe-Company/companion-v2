@@ -195,6 +195,49 @@ describe("COMPANION_PI_BROKER_SOURCE", () => {
       .toMatchObject({ unboundEvents: 1 });
   }, 10_000);
 
+  it("allows only surface_to_main in an untrusted trigger validation process", async () => {
+    const home = temporaryDirectory("pi-broker-trigger-validation-");
+    const runtimeRoot = join(home, ".companion", "runtime", "routines", "11111111-1111-4111-8111-111111111111");
+    const brokerPath = join(home, "companion-pi-broker.mjs");
+    const piPath = join(home, "fake-pi.mjs");
+    const piArgvPath = join(home, "pi.argv.json");
+    const socketPath = join(home, "broker.sock");
+    mkdirSync(join(runtimeRoot, "state"), { recursive: true, mode: 0o700 });
+    mkdirSync(join(runtimeRoot, "logs"), { recursive: true, mode: 0o700 });
+    mkdirSync(join(runtimeRoot, "sessions"), { recursive: true, mode: 0o700 });
+    mkdirSync(join(runtimeRoot, "pi", "extensions"), { recursive: true, mode: 0o700 });
+    writeFileSync(brokerPath, COMPANION_PI_BROKER_SOURCE, { mode: 0o700 });
+    writeFileSync(piPath, fakePiSource(), { mode: 0o700 });
+
+    trackBrokerProcess(spawn(process.execPath, [brokerPath], {
+      detached: true,
+      env: {
+        ...process.env,
+        COMPANION_PI_ROOT: runtimeRoot,
+        COMPANION_PI_BIN: piPath,
+        COMPANION_PI_INVOCATION_ID: "routine-validation-invocation",
+        COMPANION_PI_ROUTINE_RUN_ID: "11111111-1111-4111-8111-111111111111",
+        COMPANION_PI_VALIDATION_ONLY: "1",
+        COMPANION_PI_SOCKET_PATH: socketPath,
+        FAKE_PI_CAPTURE_PATH: join(home, "pi-commands.ndjson"),
+        FAKE_PI_PID_PATH: join(home, "pi.pid"),
+        FAKE_PI_ARGV_PATH: piArgvPath,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    }));
+    await waitFor(() => existsSync(socketPath));
+
+    expect(await waitForStringArrayJsonFile(piArgvPath)).toEqual([
+      "--mode", "rpc",
+      "--session-dir", join(runtimeRoot, "sessions"),
+      "--no-skills",
+      "--no-extensions",
+      "--extension", join(runtimeRoot, "pi", "extensions", "companion-routine-surface.ts"),
+      "--tools", "surface_to_main",
+      "--no-context-files",
+    ]);
+  }, 10_000);
+
   it("terminates a spawned Pi when the command socket cannot start", async () => {
     const home = temporaryDirectory("pi-broker-start-failure-");
     const runtimeRoot = join(home, ".companion", "runtime");

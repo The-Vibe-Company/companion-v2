@@ -112,8 +112,9 @@ coordination, group Bot chat, handoffs, proactive jobs, Companion voice conversa
 artifact surface outside the thread, harness selection, Box-provider marketplace, container catalog,
 deployment management, or generic AI application builder. Scheduled Companion routines are in
 scope: Owner/Editor-gated cron prompts that enqueue ordinary turns. Webhook-fired Companion
-triggers are in scope: Owner/Editor-gated named prompts that an external webhook URL fires as
-ordinary turns. Chat files are in scope and bounded: images and documents sent with a message, and
+triggers are in scope: Owner/Editor-gated named rules that Companion registers end-to-end with held
+provider credentials, then validates in isolated runs before notifying or relaying. Chat files are
+in scope and bounded: images and documents sent with a message, and
 images Pi hands back from a turn. The iOS and macOS apps are complete Companion clients over the
 same API, not reduced product surfaces: Skills, Plugins, MCP connections, files, routines,
 triggers, sharing, settings, and the remaining browser workflows migrate milestone by milestone.

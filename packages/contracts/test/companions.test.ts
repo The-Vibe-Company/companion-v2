@@ -21,6 +21,8 @@ import {
   companionRoutineRunSummarySchema,
   companionTriggerProposalMessageSchema,
   companionTriggerProposalSchema,
+  companionTriggerRunDetailSchema,
+  companionTriggerRunSummarySchema,
   companionTriggerSchema,
   createCompanionTriggerInputSchema,
   updateCompanionTriggerInputSchema,
@@ -1238,11 +1240,11 @@ describe("Companion trigger contracts", () => {
       prompt: triggerRow.prompt,
       provider: "github",
     })).toMatchObject({ id: triggerRow.id, name: "CI failed on main", enabled: true });
-    expect(() => createCompanionTriggerInputSchema.parse({
+    expect(createCompanionTriggerInputSchema.parse({
       name: triggerRow.name,
       prompt: triggerRow.prompt,
       provider: "github",
-    })).toThrow();
+    })).toMatchObject({ name: triggerRow.name, mode: "relay", enabled: true });
     expect(() => createCompanionTriggerInputSchema.parse({
       id: triggerRow.id,
       name: triggerRow.name,
@@ -1336,6 +1338,43 @@ describe("Companion trigger contracts", () => {
       ...decision,
       kind: "question",
       name: "ask_user",
+    })).toThrow();
+  });
+
+  it("models notify, relay, and silent trigger validation outcomes", () => {
+    const base = {
+      run_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      companion_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      trigger: { id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", name: "CI failed" },
+      status: "succeeded" as const,
+      mode: "notify" as const,
+      created_at: "2026-08-30T12:00:00.000Z",
+      started_at: "2026-08-30T12:00:01.000Z",
+      settled_at: "2026-08-30T12:00:02.000Z",
+      error: null,
+    };
+    expect(companionTriggerRunSummarySchema.parse({
+      ...base,
+      outcome: "no_output",
+      surface_mode: null,
+      main_entry_event_id: null,
+      relay_turn_id: null,
+    }).outcome).toBe("no_output");
+    expect(companionTriggerRunDetailSchema.parse({
+      ...base,
+      outcome: "surfaced",
+      surface_mode: "notify",
+      main_entry_event_id: "routine-return:run",
+      relay_turn_id: null,
+      internal_entries: [],
+      next_entry_cursor: null,
+    }).surface_mode).toBe("notify");
+    expect(() => companionTriggerRunSummarySchema.parse({
+      ...base,
+      outcome: "surfaced",
+      surface_mode: "relay",
+      main_entry_event_id: "routine-return:run",
+      relay_turn_id: null,
     })).toThrow();
   });
 

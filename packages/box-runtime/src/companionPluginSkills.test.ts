@@ -34,7 +34,8 @@ describe("COMPANION_PLUGIN_SKILLS", () => {
     expect(github.content).toContain("owner/repo");
     expect(github.content).toContain("git push");
     expect(linear.content).not.toContain("git push");
-    expect(linear.content).toContain("Linear API key");
+    expect(linear.content).toContain("Linear webhook registration");
+    expect(linear.content).toContain("minimal encrypted webhook API-key credential");
     const slack = COMPANION_PLUGIN_SKILLS.find((skill) => skill.provider === "slack")!;
     expect(slack.content).toContain("slack_chat_post_message");
     expect(slack.content).toContain("does not receive Slack messages");

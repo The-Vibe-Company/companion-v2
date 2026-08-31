@@ -2,12 +2,23 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 
-import type { CompanionTrigger, CompanionTriggerProvider, CompanionTriggerTarget, CompanionTurn } from "@companion/contracts";
+import type {
+  CompanionTrigger,
+  CompanionTriggerMode,
+  CompanionTriggerProvider,
+  CompanionTriggerRunDetail,
+  CompanionTriggerRunList,
+  CompanionTriggerTarget,
+  CompanionTurn,
+} from "@companion/contracts";
 import {
   COMPANION_TRIGGER_PAYLOAD_EXCERPT_MAX_CHARACTERS,
   COMPANION_TRIGGER_PROMPT_MAX_CHARACTERS,
+  COMPANION_TRIGGER_RUN_ENTRY_PAGE_DEFAULT,
   companionTriggerDraftSchema,
   companionTriggerProposalSchema,
+  companionTriggerRunDetailSchema,
+  companionTriggerRunSummarySchema,
   companionTriggerSchema,
   companionTurnSchema,
   parseCompanionTriggerTarget,
@@ -103,6 +114,13 @@ export class CompanionTriggerNotFoundError extends Error {
   }
 }
 
+export class CompanionTriggerRunNotFoundError extends Error {
+  constructor() {
+    super("companion trigger run not found");
+    this.name = "CompanionTriggerRunNotFoundError";
+  }
+}
+
 /**
  * The whole authentication scheme: 64 hex characters of entropy embedded in the webhook URL,
  * share-token style. Always generated server-side; rotation mints a new one and the old URL stops
@@ -125,8 +143,9 @@ export function companionTriggerWebhookUrl(
 }
 
 /**
- * What the SQL layer hands back: the wire trigger with a raw `secret` in place of `webhook_url`.
- * The secret is null for Viewers; the API composes the URL and the bare secret never leaves core.
+ * What the SQL layer hands back: the trigger projection with a raw `secret` in place of
+ * `webhook_url`. The secret is null for Viewers; the API composes the URL and the bare credential
+ * never leaves core.
  */
 const triggerRowSchema = companionTriggerSchema.omit({ webhook_url: true }).extend({
   secret: z.string().regex(/^[0-9a-f]{32,128}$/).nullable(),
@@ -162,13 +181,65 @@ export async function listCompanionTriggersV2(input: {
   return list.map((trigger) => parseTrigger(trigger, input.webhookBaseUrl));
 }
 
+/** PostgreSQL-only trigger history read; this never contacts or wakes the Companion Box. */
+export async function listCompanionTriggerRunsV2(input: {
+  orgId: string;
+  companionId: string;
+  triggerId: string;
+  limit?: number;
+  cursor?: string;
+  database: Db;
+}): Promise<CompanionTriggerRunList> {
+  const limit = input.limit ?? 50;
+  const result = await input.database.execute(sql`
+    select run from public.companion_api_list_trigger_runs(
+      ${input.orgId}::uuid,
+      ${input.companionId}::uuid,
+      ${input.triggerId}::uuid,
+      ${input.cursor ?? null}::uuid,
+      ${limit + 1}::integer
+    )
+  `);
+  const parsed = rows<{ run: unknown }>(result).map((row) =>
+    companionTriggerRunSummarySchema.parse(row.run));
+  const hasMore = parsed.length > limit;
+  const runs = hasMore ? parsed.slice(0, limit) : parsed;
+  return { runs, next_cursor: hasMore ? runs.at(-1)?.run_id ?? null : null };
+}
+
+/** Read one trigger validation run, including only its private isolated transcript. */
+export async function getCompanionTriggerRunV2(input: {
+  orgId: string;
+  companionId: string;
+  runId: string;
+  entryLimit?: number;
+  entryCursor?: number;
+  database: Db;
+}): Promise<CompanionTriggerRunDetail> {
+  const entryLimit = input.entryLimit ?? COMPANION_TRIGGER_RUN_ENTRY_PAGE_DEFAULT;
+  const result = await input.database.execute(sql`
+    select run from public.companion_api_get_trigger_run(
+      ${input.orgId}::uuid,
+      ${input.companionId}::uuid,
+      ${input.runId}::uuid,
+      ${input.entryCursor ?? null}::integer,
+      ${entryLimit}::integer
+    )
+  `);
+  const [row] = rows<{ run: unknown }>(result);
+  if (!row) throw new CompanionTriggerRunNotFoundError();
+  return companionTriggerRunDetailSchema.parse(row.run);
+}
+
 export async function createCompanionTriggerV2(input: {
   orgId: string;
   companionId: string;
   id?: string;
   name: string;
   prompt: string;
-  provider: CompanionTriggerProvider;
+  mode?: CompanionTriggerMode;
+  provider?: CompanionTriggerProvider;
+  providerAccountId?: string | null;
   target?: CompanionTriggerTarget | null;
   enabled?: boolean;
   database: Db;
@@ -177,7 +248,9 @@ export async function createCompanionTriggerV2(input: {
   const draft = companionTriggerDraftSchema.parse({
     name: input.name,
     prompt: input.prompt,
-    provider: input.provider,
+    mode: input.mode ?? "relay",
+    provider: input.provider ?? "webhook",
+    provider_account_id: input.providerAccountId ?? null,
     target: input.target ?? null,
     enabled: input.enabled ?? true,
   });
@@ -189,7 +262,9 @@ export async function createCompanionTriggerV2(input: {
       ${input.id ?? randomUUID()}::uuid,
       ${draft.name},
       ${draft.prompt},
+      ${draft.mode},
       ${draft.provider},
+      ${draft.provider_account_id ?? null}::uuid,
       ${JSON.stringify(target ?? {})}::jsonb,
       ${generateCompanionTriggerSecret()},
       ${draft.enabled}
@@ -206,7 +281,9 @@ export async function updateCompanionTriggerV2(input: {
   triggerId: string;
   name?: string;
   prompt?: string;
+  mode?: CompanionTriggerMode;
   provider?: CompanionTriggerProvider;
+  providerAccountId?: string | null;
   target?: CompanionTriggerTarget | null;
   enabled?: boolean;
   database: Db;
@@ -218,7 +295,11 @@ export async function updateCompanionTriggerV2(input: {
   const draft = companionTriggerDraftSchema.parse({
     name: input.name ?? current.name,
     prompt: input.prompt ?? current.prompt,
+    mode: input.mode ?? current.mode,
     provider: input.provider ?? current.provider,
+    provider_account_id: input.providerAccountId === undefined
+      ? current.provider_account_id
+      : input.providerAccountId,
     target: input.target === undefined ? current.target : input.target,
     enabled: input.enabled ?? current.enabled,
   });
@@ -229,10 +310,12 @@ export async function updateCompanionTriggerV2(input: {
         ${input.orgId}::uuid,
         ${input.companionId}::uuid,
         ${input.triggerId}::uuid,
-        ${draft.name},
-        ${draft.prompt},
-        ${draft.provider},
-        ${JSON.stringify(target ?? {})}::jsonb,
+      ${draft.name},
+      ${draft.prompt},
+      ${draft.mode},
+      ${draft.provider},
+      ${draft.provider_account_id ?? null}::uuid,
+      ${JSON.stringify(target ?? {})}::jsonb,
         ${draft.enabled}
       ) as trigger
     `);
@@ -296,7 +379,7 @@ export async function answerCompanionTriggerDecisionV2(input: {
   requestId: string;
   decision: "allow" | "deny";
   database: Db;
-}): Promise<void> {
+}): Promise<{ trigger_id: string | null } | undefined> {
   let triggerId: string | null = null;
   let secret: string | null = null;
   if (input.decision === "allow") {
@@ -328,6 +411,10 @@ export async function answerCompanionTriggerDecisionV2(input: {
         ${secret}
       )
     `);
+    // The trigger id is generated before the atomic decision mutation. Returning it lets the HTTP
+    // layer reconcile provider registration immediately after approval without guessing from the
+    // trigger name. Denials intentionally return null.
+    return { trigger_id: triggerId };
   } catch (error) {
     throw triggerDecisionError(
       error instanceof Error ? error : new Error("Companion trigger decision failed"),

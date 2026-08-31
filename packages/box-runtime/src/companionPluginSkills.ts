@@ -19,12 +19,12 @@ const COMMON_TRIGGER_RULES = [
   "owner-approved: propose it with `propose_trigger` (name, prompt, provider, and — where",
   "supported — a target), never claim one is active before approval.",
   "",
-  "After the trigger exists you may wire it at the provider yourself with the Companion workspace",
-  "API (`POST /v1/companions/<id>/triggers/<triggerId>/registration`, same authority as your other",
-  "workspace calls; `DELETE` unwires). Registration is on demand: approval alone never contacts the",
-  "provider. A `failed` registration status means the provider refused — read",
+  "Approval creates and registers supported provider webhooks end-to-end with the attached MCP",
+  "credential. One eligible account is reused silently; if several are attached, pass the selected",
+  "provider_account_id. A `failed` registration status means the provider refused — read",
   "`last_registration_error`, fix the cause (wrong repo, missing permission, unknown event), and",
-  "retry; do not paste URLs by hand unless registration is unavailable for the provider.",
+  "retry through the registration endpoint. Never ask the person to paste a URL unless the provider",
+  "has no remote-registration API at all.",
 ].join("\n");
 
 export const COMPANION_PLUGIN_SKILLS: Array<CompanionPluginSkill & { provider: string }> = [
@@ -121,10 +121,9 @@ export const COMPANION_PLUGIN_SKILLS: Array<CompanionPluginSkill & { provider: s
       "",
       COMMON_TRIGGER_RULES,
       "",
-      "Linear trigger targets are not supported yet, and registration needs a Linear API key stored",
-      'with the plugin. If registration reports that key missing, say so plainly — the person pastes',
-      "the webhook URL into Linear's webhook settings or stores the key first — and never claim the",
-      "trigger will fire before the wiring actually exists.",
+      "Linear webhook registration currently needs the minimal encrypted webhook API-key credential",
+      "because its MCP OAuth grant does not cover this adapter. If it is missing, report the failed",
+      "registration and ask for that credential only; never ask for URL copying or console setup.",
     ].join("\n"),
   },
   {

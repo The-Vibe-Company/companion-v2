@@ -20,6 +20,17 @@ function formBody(init: RequestInit | undefined): URLSearchParams {
 }
 
 describe("Companion plugin OAuth broker", () => {
+  it("keeps the shared GitHub credential authorized for repository webhook registration", () => {
+    const scopes = COMPANION_PLUGIN_OAUTH_SERVERS["io.github.github/github-mcp-server"].scopes;
+    expect(scopes).toEqual([
+      "repo",
+      "read:org",
+      "read:user",
+      "user:email",
+      "admin:repo_hook",
+    ]);
+  });
+
   it("keeps Gmail OAuth limited to the exact read-and-draft scope pair", () => {
     const scopes = COMPANION_PLUGIN_OAUTH_SERVERS["com.google.workspace/gmail"].scopes;
 
@@ -138,7 +149,7 @@ describe("Companion plugin OAuth broker", () => {
     expect(authorization.origin + authorization.pathname).toBe("https://mcp.sentry.dev/oauth/authorize");
     expect(authorization.searchParams.get("resource")).toBe("https://mcp.sentry.dev/mcp");
     expect(authorization.searchParams.get("scope")).toBe(
-      "org:read project:write team:write event:write",
+      "org:read project:write project:admin team:write event:write",
     );
     expect(authorization.searchParams.get("code_challenge_method")).toBe("S256");
   });

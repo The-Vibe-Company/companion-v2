@@ -37,6 +37,14 @@ class RecordingSql implements RuntimeSqlClient {
           routine_context_id: row.routine_context_id ?? null,
           routine_context_sha256: row.routine_context_sha256 ?? null,
           routine_context_content: row.routine_context_content ?? null,
+          trigger_name: null,
+          trigger_mode: null,
+        });
+      }
+      if (query.includes("companion_runtime_get_trigger_material")) {
+        Object.assign(copy, {
+          trigger_name: row.trigger_name ?? null,
+          trigger_mode: row.trigger_mode ?? null,
         });
       }
       if (query.includes("companion_runtime_project_event_batch_v2")) {
@@ -180,6 +188,58 @@ describe("PostgresRuntimeStore", () => {
     expect(sql.calls[0]?.query).toContain("agent_token_ciphertext");
     expect(sql.calls[0]?.query).toContain("agent_observed_at");
     expect(sql.calls[0]?.query).toContain("public.companion_runtime_get_turn_context(");
+    expect(sql.calls[0]?.query).not.toContain("public.companion_runtime_get_trigger_material(");
+    expect(sql.calls).toHaveLength(1);
+  });
+
+  it("loads trigger identity only for a trigger-origin isolated run", async () => {
+    const sql = new RecordingSql();
+    const triggerId = "55555555-5555-4555-8555-555555555555";
+    sql.rows = [{
+      turn_id: TURN_ID,
+      attempt_id: ATTEMPT_ID,
+      message_event_id: MESSAGE_EVENT_ID,
+      prompt_text: "payload",
+      turn_started_at: new Date("2026-08-26T13:42:17.000Z"),
+      member_timezone: "UTC",
+      decision_request_kind: null,
+      decision_response_payload: null,
+      provider_material: [],
+      skill_material: [],
+      mcp_material: [],
+      model_input: null,
+      has_visible_output: false,
+      attachments: [],
+      credential_snapshot_matches: true,
+      box_id: "bx_2345678a",
+      agent_hosted_url: null,
+      agent_token_ciphertext: null,
+      agent_observed_at: null,
+      routine_snapshot_id: triggerId,
+      routine_name: null,
+      routine_isolated: false,
+      routine_context_id: null,
+      routine_context_sha256: null,
+      routine_context_content: null,
+      relay_source_content: null,
+      trigger_name: "CI failed on main",
+      trigger_mode: "notify",
+    }];
+    const store = new PostgresRuntimeStore(sql);
+
+    await expect(store.getMaterial({
+      ...fence,
+      workKind: "attempt",
+      workId: ATTEMPT_ID,
+    }, 30)).resolves.toMatchObject({
+      routineId: triggerId,
+      routineName: null,
+      triggerName: "CI failed on main",
+      triggerMode: "notify",
+    });
+
+    expect(sql.calls).toHaveLength(2);
+    expect(sql.calls[1]?.query).toContain("public.companion_runtime_get_trigger_material(");
   });
 
   it("accepts the multiline context produced while preparing an isolated routine run", async () => {

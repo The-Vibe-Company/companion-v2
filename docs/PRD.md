@@ -118,16 +118,25 @@ explicitly recoverable interruption even after the browser, API, or one runtime 
 ### Triggers
 
 - A Companion may have at most ten named triggers — the event-driven siblings of routines. Each has
-  a prompt of at most 16,384 characters and a provider label (`linear`, `github`, or `custom`) that
+  a prompt of at most 16,384 characters and a provider label (`webhook`, `linear`, `github`, `sentry`, or `custom`) that
   hints at the delivery id; it is not an auth scheme.
 - Creation is Owner/Editor only: the context-panel + control, or Pi `propose_trigger` approved as a
-  decision card; approval creates the trigger and the person pastes its webhook URL into the
-  external service. Viewer reads trigger rows but never the URL; Owner/Editor may copy and rotate it.
+  decision card. Creation and approval register the remote webhook end-to-end with the selected
+  member-scoped trigger-provider account. That authority is immediately available to every
+  Companion the member can operate and is never attached through `selected_mcp_account_ids`.
+  OAuth-backed accounts reuse the existing MCP credential in place. One eligible account is
+  selected silently; multiple accounts require
+  `provider_account_id`. `manual` plus the platform URL is only the exceptional fallback for a
+  source without a registration API. Users never paste URLs or secrets in the primary flow.
 - `POST /v1/hooks/triggers/:triggerId/:secret` is registered before session middleware, capped at
   1 MB, and compares the server-generated secret with `timingSafeEqual`. There is deliberately no
   per-provider HMAC: sources are services the user controls, and a wrong URL is a 404 or 401.
-- Fire is API-level turn enqueue as the immutable Companion Owner; the webhook route never contacts
-  Box or Pi. The message id is deterministic (`uuidv5(triggerId|deliveryId)`), so provider
+- Fire is API-level isolated validation-run enqueue as the immutable Companion Owner; the webhook
+  route never contacts Box or Pi. Runtime evaluates the untrusted payload in a disposable Pi session
+  whose only enabled tool is `surface_to_main`; it receives no MCP gateway, provider-tool credentials,
+  skills, or project context. The pinned memory copy remains isolated from main Pi. Runtime then performs
+  one configured `notify` (visible entry only), `relay` (visible entry plus main-Pi turn), or silent
+  no-op. The message id is deterministic (`uuidv5(triggerId|deliveryId)`), so provider
   redeliveries collapse to one turn. The prompt carries a payload excerpt of at most 4,096
   characters labeled external and untrusted.
 - A disabled trigger, a fire within 60 seconds of the last, or an active turn for the same trigger

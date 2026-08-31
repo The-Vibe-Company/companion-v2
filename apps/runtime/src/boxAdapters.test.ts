@@ -765,6 +765,7 @@ describe("runtime Box/Pi port adapters", () => {
       boxId: "bx_23456789",
       runId,
       persona: "Routine persona",
+      validationOnly: true,
       expectedInvocationId: routineInvocationId,
       signal,
     })).resolves.toEqual({
@@ -799,6 +800,7 @@ describe("runtime Box/Pi port adapters", () => {
       boxId: "bx_23456789",
       runId,
       persona: "Routine persona",
+      validationOnly: true,
       expectedInvocationId: routineInvocationId,
       signal,
     });

@@ -31,8 +31,10 @@ const defaultCompanionTriggersApi: CompanionTriggersApi = {
 
 /** UI names only: the provider picks the row's mark, never an authentication scheme. */
 const PROVIDER_LABELS = {
+  webhook: "Webhook",
   linear: "Linear",
   github: "GitHub",
+  sentry: "Sentry",
   custom: "Custom",
 } satisfies Record<CompanionTriggerProvider, string>;
 
@@ -68,6 +70,7 @@ function TriggerEditor({
           id: crypto.randomUUID(),
           name,
           prompt,
+          mode: "relay",
           provider,
           enabled: true,
         });
@@ -84,7 +87,7 @@ function TriggerEditor({
     <Dialog
       icon="zap"
       title={initial ? "Edit trigger" : "New trigger"}
-      desc="An external webhook fires this prompt as an ordinary turn. Paste the webhook URL into the service you control."
+      desc="Companion registers supported provider webhooks and validates each event before it reaches the thread."
       onClose={onClose}
       foot={(
         <>

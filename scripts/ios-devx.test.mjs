@@ -958,6 +958,14 @@ test("CI keeps Apple Quality valuable, native, and under five minutes", () => {
   assert.match(appleQuality, /Test bundled Companion skill guards/);
   assert.match(appleQuality, /run: bash scripts\/run-skill-guards\.sh/);
   assert.match(appleQuality, /swift test --package-path apps\/ios\/CompanionKit/);
+  assert.match(
+    appleQuality,
+    /- name: Test CompanionKit[\s\S]*?if: needs\.scope\.outputs\.ios != needs\.scope\.outputs\.macos/,
+  );
+  assert.match(
+    appleQuality,
+    /- name: Validate native apps[\s\S]*?swift test --package-path apps\/ios\/CompanionKit &[\s\S]*?if wait "\$companion_kit_pid";[\s\S]*?xcodebuild test/,
+  );
   assert.match(appleQuality, /xcodebuild build/);
   assert.match(appleQuality, /-destination "generic\/platform=iOS Simulator"/);
   assert.match(appleQuality, /CODE_SIGNING_ALLOWED=NO/);

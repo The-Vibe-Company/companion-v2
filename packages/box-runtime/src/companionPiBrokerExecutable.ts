@@ -22,6 +22,10 @@ const invocationId = requiredOpaqueId(
   "COMPANION_PI_INVOCATION_ID",
 );
 const routineRunId = optionalRoutineRunId();
+const validationOnly = optionalBooleanFlag("COMPANION_PI_VALIDATION_ONLY");
+if (validationOnly && routineRunId === null) {
+  throw new Error("COMPANION_PI_VALIDATION_ONLY requires an isolated routine run");
+}
 const socketPath = optionalAbsolutePath("COMPANION_PI_SOCKET_PATH")
   ?? join(root, "state", "pi-broker.sock");
 const journalPath = optionalAbsolutePath("COMPANION_PI_JOURNAL_PATH")
@@ -82,7 +86,7 @@ class SpawnedPiTransport implements CompanionPiRpcTransport {
       onRecord: (record) => this.#acceptRecord(record),
       onFault: (fault) => this.#onFault(fault),
     });
-    this.#child = spawn(piBin, piArguments(root, routineRunId !== null), {
+    this.#child = spawn(piBin, piArguments(root, routineRunId !== null, validationOnly), {
       env: environment,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -219,11 +223,13 @@ async function main(): Promise<void> {
     invocationId,
   });
   const gatewayToken = process.env.COMPANION_MCP_BROKER_TOKEN ?? "";
-  const gateway = await startCompanionMcpGateway({
-    configPath: join(root, "state", "mcp-gateway.json"),
-    apiUrl: process.env.COMPANION_API_URL ?? "",
-    brokerToken: gatewayToken,
-  });
+  const gateway = validationOnly
+    ? null
+    : await startCompanionMcpGateway({
+        configPath: join(root, "state", "mcp-gateway.json"),
+        apiUrl: process.env.COMPANION_API_URL ?? "",
+        brokerToken: gatewayToken,
+      });
   const piEnvironment = { ...process.env };
   delete piEnvironment.COMPANION_MCP_BROKER_TOKEN;
   if (gateway) piEnvironment.COMPANION_MCP_GATEWAY_ORIGIN = gateway.origin;
@@ -330,7 +336,11 @@ async function awaitPiState(
   }
 }
 
-function piArguments(runtimeRoot: string, isolatedRoutine: boolean): string[] {
+function piArguments(
+  runtimeRoot: string,
+  isolatedRoutine: boolean,
+  validationOnly = false,
+): string[] {
   // The main daemon resumes the Companion's one ongoing conversation. A routine root is a new,
   // disposable session by definition: passing --continue there could select an older session in
   // that run directory after takeover, and would make the routine depend on main-session history.
@@ -340,7 +350,17 @@ function piArguments(runtimeRoot: string, isolatedRoutine: boolean): string[] {
   if (model) args.push("--model", model);
   args.push("--no-skills");
   const skills = join(runtimeRoot, "skills");
-  if (containsSkillFile(skills)) args.push("--skill", skills);
+  if (!validationOnly && containsSkillFile(skills)) args.push("--skill", skills);
+  if (validationOnly) {
+    args.push(
+      "--no-extensions",
+      "--extension",
+      join(runtimeRoot, "pi", "extensions", "companion-routine-surface.ts"),
+      "--tools",
+      "surface_to_main",
+      "--no-context-files",
+    );
+  }
   const instructions = readOptionalText(join(runtimeRoot, "state", "instructions.txt"));
   if (instructions) args.push("--append-system-prompt", instructions);
   return args;
@@ -404,6 +424,13 @@ function optionalPositiveInteger(name: string): number | undefined {
   const value = Number(text);
   if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${name} is invalid`);
   return value;
+}
+
+function optionalBooleanFlag(name: string): boolean {
+  const value = process.env[name]?.trim();
+  if (!value) return false;
+  if (value !== "1") throw new Error(`${name} is invalid`);
+  return true;
 }
 
 void main().catch((error) => {

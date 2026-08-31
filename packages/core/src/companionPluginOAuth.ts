@@ -114,7 +114,7 @@ export const COMPANION_PLUGIN_OAUTH_SERVERS = {
     remoteUrl: "https://mcp.sentry.dev/mcp",
     resourceMetadataUrl: "https://mcp.sentry.dev/.well-known/oauth-protected-resource/mcp",
     authorizationServer: "https://mcp.sentry.dev",
-    scopes: ["org:read", "project:write", "team:write", "event:write"],
+    scopes: ["org:read", "project:write", "project:admin", "team:write", "event:write"],
     allowedOrigins: ["https://mcp.sentry.dev"],
     dynamicRegistration: true,
   },

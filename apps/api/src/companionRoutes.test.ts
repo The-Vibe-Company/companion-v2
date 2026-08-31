@@ -59,11 +59,19 @@ const coreMocks = {
   deleteCompanionRoutineV2: vi.fn<typeof coreModule.deleteCompanionRoutineV2>(),
   answerCompanionRoutineDecisionV2: vi.fn<typeof coreModule.answerCompanionRoutineDecisionV2>(),
   listCompanionTriggersV2: vi.fn<typeof coreModule.listCompanionTriggersV2>(),
+  listCompanionTriggerProviderAccounts: vi.fn<typeof coreModule.listCompanionTriggerProviderAccounts>(),
+  saveCompanionTriggerProviderAccount: vi.fn<typeof coreModule.saveCompanionTriggerProviderAccount>(),
+  disconnectCompanionTriggerProviderAccount: vi.fn<typeof coreModule.disconnectCompanionTriggerProviderAccount>(),
+  ensureOAuthCompanionTriggerProviderAccount: vi.fn<typeof coreModule.ensureOAuthCompanionTriggerProviderAccount>(),
+  listCompanionTriggerRunsV2: vi.fn<typeof coreModule.listCompanionTriggerRunsV2>(),
+  getCompanionTriggerRunV2: vi.fn<typeof coreModule.getCompanionTriggerRunV2>(),
   createCompanionTriggerV2: vi.fn<typeof coreModule.createCompanionTriggerV2>(),
   updateCompanionTriggerV2: vi.fn<typeof coreModule.updateCompanionTriggerV2>(),
   deleteCompanionTriggerV2: vi.fn<typeof coreModule.deleteCompanionTriggerV2>(),
   rotateCompanionTriggerSecretV2: vi.fn<typeof coreModule.rotateCompanionTriggerSecretV2>(),
   answerCompanionTriggerDecisionV2: vi.fn<typeof coreModule.answerCompanionTriggerDecisionV2>(),
+  registerCompanionTriggerWebhookV2: vi.fn<typeof coreModule.registerCompanionTriggerWebhookV2>(),
+  unregisterCompanionTriggerWebhookV2: vi.fn<typeof coreModule.unregisterCompanionTriggerWebhookV2>(),
   getCompanionTriggerForWebhook: vi.fn<typeof coreModule.getCompanionTriggerForWebhook>(),
   fireCompanionTrigger: vi.fn<typeof coreModule.fireCompanionTrigger>(),
   failCompanionTriggerFire: vi.fn<typeof coreModule.failCompanionTriggerFire>(),
@@ -159,6 +167,18 @@ const section = {
   owner_id: owner.id,
   name: "Work",
   position: 0,
+  created_at: NOW,
+  updated_at: NOW,
+};
+
+const triggerProviderAccount = {
+  id: "88888888-8888-4888-8888-888888888888",
+  provider: "github" as const,
+  label: "GitHub",
+  credential_source: "mcp_oauth" as const,
+  mcp_account_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  status: "connected" as const,
+  dependent_trigger_count: 2,
   created_at: NOW,
   updated_at: NOW,
 };
@@ -387,6 +407,13 @@ describe("Companions Runtime v2 API", () => {
     coreMocks.listCompanionRoutineRunsV2.mockResolvedValue({ runs: [], next_cursor: null });
     coreMocks.answerCompanionTriggerDecisionV2.mockResolvedValue(undefined);
     coreMocks.listCompanionTriggersV2.mockResolvedValue([]);
+    coreMocks.listCompanionTriggerProviderAccounts.mockResolvedValue([triggerProviderAccount]);
+    coreMocks.saveCompanionTriggerProviderAccount.mockResolvedValue(triggerProviderAccount);
+    coreMocks.disconnectCompanionTriggerProviderAccount.mockResolvedValue({
+      ...triggerProviderAccount,
+      status: "disconnected",
+      mcp_account_id: null,
+    });
     coreMocks.getCompanionDecisionV2.mockResolvedValue({
       requestKey: "question-1",
       requestKind: "question",
@@ -406,6 +433,29 @@ describe("Companions Runtime v2 API", () => {
       token_type: "Bearer",
       expires_at: "2026-08-17T00:15:00.000Z",
       credential_version: 4,
+    });
+  });
+
+  it("lists, connects, and disconnects member-wide trigger provider accounts", async () => {
+    const app = appWithRoutes();
+    const listed = await app.request("/v1/companion-trigger-provider-accounts");
+    const created = await app.request(jsonPost("/v1/companion-trigger-provider-accounts", {
+      provider: "linear",
+      label: "Linear",
+      credential: "lin_api_test",
+    }));
+    const disconnected = await app.request(
+      `/v1/companion-trigger-provider-accounts/${triggerProviderAccount.id}`,
+      { method: "DELETE" },
+    );
+
+    expect([listed.status, created.status, disconnected.status]).toEqual([200, 201, 200]);
+    await expect(listed.json()).resolves.toEqual({ accounts: [triggerProviderAccount] });
+    expect(coreMocks.saveCompanionTriggerProviderAccount).toHaveBeenCalledWith(expect.objectContaining({
+      account: { provider: "linear", label: "Linear", credential: "lin_api_test" },
+    }));
+    await expect(disconnected.json()).resolves.toEqual({
+      account: { ...triggerProviderAccount, status: "disconnected", mcp_account_id: null },
     });
   });
 
@@ -1785,6 +1835,7 @@ describe("Companions Runtime v2 API", () => {
         kind: "trigger",
         name: "CI failed on main",
         prompt: "Investigate the failing workflow.",
+        mode: "relay",
         provider: "github",
       },
       expiresAt: NOW,
@@ -1816,6 +1867,7 @@ describe("Companions Runtime v2 API", () => {
         kind: "trigger",
         name: "CI failed on main",
         prompt: "Investigate the failing workflow.",
+        mode: "relay",
         provider: "github",
       },
       expiresAt: NOW,
@@ -1847,6 +1899,7 @@ describe("Companions Runtime v2 API", () => {
         kind: "trigger",
         name: "CI failed on main",
         prompt: "Investigate the failing workflow.",
+        mode: "relay",
         provider: "github",
       },
       expiresAt: NOW,
@@ -1868,9 +1921,14 @@ describe("Companions Runtime v2 API", () => {
       companion_id: COMPANION_ID,
       name: "CI failed on main",
       prompt: "Investigate the failing workflow.",
+      mode: "relay" as const,
       provider: "github" as const,
+      provider_account_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
       target: { repo: "acme/widgets", events: ["workflow_run"] },
       registration_status: "registered" as const,
+      remote_hook_id: "42",
+      remote_hook_account_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      last_registration_error: null,
       enabled: true,
       webhook_url: `http://127.0.0.1:3000/v1/hooks/triggers/${TRIGGER_ID}/${TRIGGER_SECRET}`,
       last_fired_at: null,
@@ -1891,7 +1949,7 @@ describe("Companions Runtime v2 API", () => {
     const listed = await app.request(`/v1/companions/${COMPANION_ID}/triggers`);
     expect(listed.status).toBe(200);
     await expect(listed.json()).resolves.toEqual({ triggers: [trigger] });
-    // Each Owner/Editor row embeds the webhook secret in its URL.
+    // The callback URL is secondary setup detail; a bare secret is never returned.
     expect(listed.headers.get("cache-control")).toBe("private, no-store");
 
     const created = await app.request(
@@ -1946,6 +2004,73 @@ describe("Companions Runtime v2 API", () => {
       companionId: COMPANION_ID,
       triggerId: TRIGGER_ID,
     }));
+  });
+
+  it("retries remote trigger registration and serves bounded trigger history", async () => {
+    const failedTrigger = {
+      id: TRIGGER_ID,
+      companion_id: COMPANION_ID,
+      name: "CI failed on main",
+      prompt: "Investigate the failing workflow.",
+      mode: "relay" as const,
+      provider: "github" as const,
+      provider_account_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      target: { repo: "acme/widgets", events: ["workflow_run"] },
+      registration_status: "failed" as const,
+      remote_hook_id: null,
+      remote_hook_account_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      last_registration_error: "github rejected the webhook (403)",
+      enabled: true,
+      webhook_url: `http://127.0.0.1:3000/v1/hooks/triggers/${TRIGGER_ID}/${TRIGGER_SECRET}`,
+      last_fired_at: null,
+      last_error_code: null,
+      last_error_message: null,
+      last_error_at: null,
+      consecutive_failures: 0,
+      created_at: NOW,
+      updated_at: NOW,
+    };
+    const registered = {
+      ...failedTrigger,
+      registration_status: "registered" as const,
+      remote_hook_id: "43",
+      last_registration_error: null,
+    };
+    coreMocks.listCompanionTriggersV2
+      .mockResolvedValueOnce([failedTrigger])
+      .mockResolvedValueOnce([registered]);
+    coreMocks.registerCompanionTriggerWebhookV2.mockResolvedValueOnce({
+      status: "registered",
+      remote_hook_id: "43",
+    });
+    const app = appWithRoutes();
+    const retried = await app.request(
+      `/v1/companions/${COMPANION_ID}/triggers/${TRIGGER_ID}/registration`,
+      { method: "POST" },
+    );
+    expect(retried.status).toBe(200);
+    await expect(retried.json()).resolves.toEqual({ trigger: registered });
+
+    const history = { runs: [], next_cursor: null };
+    coreMocks.listCompanionTriggerRunsV2.mockResolvedValueOnce(history);
+    const listed = await app.request(
+      `/v1/companions/${COMPANION_ID}/triggers/${TRIGGER_ID}/runs?limit=25`,
+    );
+    expect(listed.status).toBe(200);
+    await expect(listed.json()).resolves.toEqual(history);
+    expect(coreMocks.listCompanionTriggerRunsV2).toHaveBeenCalledWith(expect.objectContaining({
+      triggerId: TRIGGER_ID,
+      limit: 25,
+    }));
+
+    // SAFETY: this route test only verifies transport passthrough; the core mock owns validation.
+    const run = { run_id: TURN_ID, internal_entries: [], next_entry_cursor: null } as never;
+    coreMocks.getCompanionTriggerRunV2.mockResolvedValueOnce(run);
+    const detail = await app.request(
+      `/v1/companions/${COMPANION_ID}/trigger-runs/${TURN_ID}?entry_limit=10`,
+    );
+    expect(detail.status).toBe(200);
+    await expect(detail.json()).resolves.toEqual({ run });
   });
 
   it("maps trigger authorization, absence, and conflict failures onto their statuses", async () => {
@@ -2141,6 +2266,22 @@ describe("Companion trigger webhook", () => {
     }
     expect(coreMocks.fireCompanionTrigger).not.toHaveBeenCalled();
     expect(coreMocks.failCompanionTriggerFire).not.toHaveBeenCalled();
+  });
+
+  it("rejects an oversized payload before trigger lookup or isolated validation", async () => {
+    const body = "x".repeat(1024 * 1024 + 1);
+    const response = await webhookApp().request(fire({
+      body,
+      headers: { "content-length": String(Buffer.byteLength(body)) },
+    }));
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toEqual({
+      ok: false,
+      error: "trigger payload exceeds the 1 MB limit",
+    });
+    expect(coreMocks.getCompanionTriggerForWebhook).not.toHaveBeenCalled();
+    expect(coreMocks.fireCompanionTrigger).not.toHaveBeenCalled();
   });
 
   it("fires with the provider delivery id collapsed into a deterministic message id", async () => {

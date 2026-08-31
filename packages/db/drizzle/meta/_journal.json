@@ -1030,6 +1030,13 @@
       "when": 1792429600000,
       "tag": "0146_companion_restart_box_checkpoint",
       "breakpoints": true
+    },
+    {
+      "idx": 147,
+      "version": "7",
+      "when": 1792516000000,
+      "tag": "0147_companion_trigger_v2_engine",
+      "breakpoints": true
     }
   ]
 }

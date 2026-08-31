@@ -253,7 +253,9 @@ describe("Skills Hub runtime-role grants", () => {
     );
     // Triggers fire synchronously in the API request: the worker receives nothing here.
     expect(triggerBlock).not.toContain("worker_functions");
-    expect(triggerBlock).not.toContain("companion_runtime_functions :=");
+    expect(triggerBlock).toContain(
+      "'public.companion_runtime_get_trigger_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)'::regprocedure",
+    );
   });
 
   it("keeps APNs state private and splits registration from fenced delivery", async () => {

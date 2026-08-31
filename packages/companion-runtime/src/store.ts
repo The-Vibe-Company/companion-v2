@@ -442,8 +442,15 @@ function decodeMaterial(row: RuntimeSqlRow): RuntimeWorkMaterial {
   }
   const routineId = nullableUuidText(row, "routine_snapshot_id");
   const routineName = nullableText(row, "routine_name");
+  const triggerName = nullableText(row, "trigger_name");
+  const rawTriggerMode = nullableText(row, "trigger_mode");
+  const triggerMode = rawTriggerMode === "notify" || rawTriggerMode === "relay"
+    ? rawTriggerMode
+    : null;
+  if ((triggerName === null) !== (triggerMode === null)) throw new RuntimeStoreContractError();
   const routineIsolated = booleanValue(row.routine_isolated);
-  if (routineIsolated === null || (routineId === null) !== (routineName === null)) {
+  if (routineIsolated === null
+      || (routineId === null) !== (routineName === null && triggerName === null)) {
     throw new RuntimeStoreContractError();
   }
   const contextId = nullableUuidText(row, "routine_context_id");
@@ -466,6 +473,8 @@ function decodeMaterial(row: RuntimeSqlRow): RuntimeWorkMaterial {
     memberTimezone,
     routineId,
     routineName,
+    triggerName,
+    triggerMode,
     routineIsolated,
     routineContext: contextId === null ? null : {
       id: contextId,
@@ -873,7 +882,8 @@ export class PostgresRuntimeStore implements RuntimeStore {
                routine_material.routine_snapshot_id, routine_material.routine_name,
                routine_material.routine_isolated, routine_material.routine_context_id,
                routine_material.routine_context_sha256, routine_material.routine_context_content,
-               routine_material.relay_source_content
+               routine_material.relay_source_content,
+               NULL::text AS trigger_name, NULL::text AS trigger_mode
         FROM public.companion_runtime_get_material(
           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
           $6::text, $7::public.companion_runtime_work_kind, $8::uuid, $9::integer
@@ -888,7 +898,21 @@ export class PostgresRuntimeStore implements RuntimeStore {
         ) routine_material
       `, [...fenceParameters(fence), leaseSeconds]);
       if (rows.length === 0) return null;
-      return decodeMaterial(one(rows, "work material"));
+      const row = one(rows, "work material");
+      if (row.routine_snapshot_id !== null && row.routine_name === null) {
+        const triggerRows = await this.sql.unsafe<RuntimeSqlRow[]>(`
+          SELECT trigger_name, trigger_mode
+          FROM public.companion_runtime_get_trigger_material(
+            $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
+            $6::text, $7::public.companion_runtime_work_kind, $8::uuid, $9::integer
+          )
+        `, [...fenceParameters(fence), leaseSeconds]);
+        if (triggerRows.length === 0) return null;
+        const triggerRow = one(triggerRows, "trigger material");
+        row.trigger_name = triggerRow.trigger_name;
+        row.trigger_mode = triggerRow.trigger_mode;
+      }
+      return decodeMaterial(row);
     }, true);
   }
 

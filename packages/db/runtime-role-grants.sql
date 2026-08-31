@@ -170,6 +170,11 @@ BEGIN
       'public.companion_sections'::regclass
     ];
   END IF;
+  IF pg_catalog.to_regclass('public.companion_trigger_provider_accounts') IS NOT NULL THEN
+    worker_forbidden_companion_tables := worker_forbidden_companion_tables || ARRAY[
+      'public.companion_trigger_provider_accounts'::regclass
+    ];
+  END IF;
   IF api_role IS NULL OR worker_role IS NULL OR companion_runtime_role IS NULL THEN
     RAISE EXCEPTION 'companion API, worker, and runtime roles are required';
   END IF;
@@ -830,6 +835,26 @@ BEGIN
     ) IS NOT NULL THEN
       companion_api_functions := companion_api_functions || ARRAY[
         'public.companion_api_answer_trigger_decision(uuid,uuid,text,text,uuid,text)'::regprocedure
+      ];
+    END IF;
+    -- 0147 adds autonomous Trigger v2 definitions, read-only history, and one runtime-only
+    -- identity/mode reader for the isolated validation lane.
+    IF pg_catalog.to_regprocedure(
+      'public.companion_api_create_trigger(uuid,uuid,uuid,text,text,text,text,uuid,jsonb,text,boolean)'
+    ) IS NOT NULL THEN
+      companion_api_functions := companion_api_functions || ARRAY[
+        'public.companion_api_create_trigger(uuid,uuid,uuid,text,text,text,text,uuid,jsonb,text,boolean)'::regprocedure,
+        'public.companion_api_update_trigger(uuid,uuid,uuid,text,text,text,text,uuid,jsonb,boolean)'::regprocedure,
+        'public.companion_api_list_trigger_provider_accounts(uuid)'::regprocedure,
+        'public.companion_api_list_trigger_runs(uuid,uuid,uuid,uuid,integer)'::regprocedure,
+        'public.companion_api_get_trigger_run(uuid,uuid,uuid,integer,integer)'::regprocedure
+      ];
+      companion_runtime_functions := companion_runtime_functions || ARRAY[
+        'public.companion_runtime_get_trigger_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)'::regprocedure
+      ];
+      internal_runtime_functions := internal_runtime_functions || ARRAY[
+        'public.companion_api_trigger_run_json(uuid,uuid,uuid,boolean,integer,integer)'::regprocedure,
+        'public.companion_api_trigger_run_summary_json(uuid,uuid,uuid,boolean)'::regprocedure
       ];
     END IF;
 
