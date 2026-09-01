@@ -428,7 +428,7 @@ describe("CompanionThread", () => {
       }),
     });
 
-    expect(markup).toContain("An Owner or Editor must retry or cancel this turn");
+    expect(markup).toContain("This turn is finished. Later messages continue automatically.");
     expect(markup).not.toContain("Retry turn");
     expect(markup).not.toContain("Cancel turn");
   });

@@ -315,7 +315,7 @@ describe("Companion routine history", () => {
     historyApi.readCompanionRoutineRun.mockReset().mockResolvedValue(interrupted);
 
     const { container } = await mount(runId, { onRetry });
-    expect(container.textContent).toContain("Cancel releases blocked runtime work.");
+    expect(container.textContent).toContain("Later work continues automatically");
 
     await act(async () => buttonNamed(container, "Retry run").click());
 
@@ -373,7 +373,7 @@ describe("Companion routine history", () => {
 
     const { container } = await mount(runId, { canAct: false });
 
-    expect(container.textContent).toContain("An Owner or Editor must retry or cancel this run.");
+    expect(container.textContent).toContain("This run is finished. Later work continues automatically.");
     expect(container.textContent).not.toContain("Retry run");
     expect(container.textContent).not.toContain("Cancel run");
   });

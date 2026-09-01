@@ -776,7 +776,7 @@ async function handleIsolatedRoutineAttempt(
   // durable handoff that makes a cancellation during start observable to the executor and takeover.
   if (!commandId || !routineInvocationId) {
     // A persisted write intent without its command identity is already ambiguous. Do not contact
-    // Box from this executor; an explicit retry/cancel remains the only safe resolution.
+    // Box to guess or replay it; terminal interruption cleanup releases the lane instead.
     throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
   }
   const staged = recoveringWrite
@@ -1027,8 +1027,9 @@ async function harvestOutputs(
   const auth = authorization(context);
   // Clamp the harvest to the authority that still exists. Pi has settled and its reply is durable,
   // but the executor must still reauthorize to record and settle, and a deadline that expires mid
-  // harvest is denied as `interrupted` -- which would block the ordered queue on a turn that
-  // actually finished. Harvesting inside the remaining budget keeps the settle reachable.
+  // harvest is denied as `interrupted` -- which would misreport a turn that actually finished,
+  // even though the interruption remains terminal and releases the queue. Harvesting inside the
+  // remaining budget keeps the successful settle reachable.
   const budgetEnd = context.deps.clock.now().getTime() + OUTBOX_HARVEST_BUDGET_MS;
   const authorityEnd = Math.min(
     auth.inactivityDeadlineAt?.getTime() ?? Number.POSITIVE_INFINITY,
@@ -1229,10 +1230,9 @@ async function consumeAcceptedAttempt(
     return await consumeEvents(context, redact);
   } catch (error) {
     if (mustAbandonRuntimeExecution(error)) throw error;
-    // Once Pi accepted a prompt, an observation/validation/ACK failure cannot
-    // safely be represented as a terminal failure that releases the ordered
-    // queue. Preserve the specific safe code when one exists, and require an
-    // explicit retry/cancel path instead.
+    // Once Pi accepted a prompt, an observation/validation/ACK failure must remain visibly
+    // ambiguous. Preserve the specific safe code, settle interrupted, clean up the exact
+    // invocation best-effort, and release the lane without replaying this prompt.
     return {
       kind: "settle",
       settlement: {

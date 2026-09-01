@@ -813,7 +813,7 @@ describe("RuntimeEngine attempts", () => {
     expect(engine.activeCount).toBe(0);
   });
 
-  it("marks an ambiguous prompt interrupted and never replays it", async () => {
+  it("marks an ambiguous prompt interrupted, aborts it, and never replays it", async () => {
     const claim = attemptClaim();
     const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
     const ports = fakePorts(store);
@@ -827,6 +827,7 @@ describe("RuntimeEngine attempts", () => {
 
     expect(result.outcome).toBe("interrupted");
     expect(ports.promptCalls).toHaveLength(1);
+    expect(ports.abortCalls).toEqual([{ attemptId: claim.workId, boxId: BOX_ID }]);
     expect(store.checkpoints).toContainEqual(expect.objectContaining({
       nextCheckpoint: "dispatch_write_intent",
       piInvocationId: PI_INVOCATION_ID,
@@ -1371,7 +1372,7 @@ describe("RuntimeEngine attempts", () => {
     expect(store.settlements).toEqual([expect.objectContaining({ terminalStatus: "interrupted" })]);
   });
 
-  it("fails closed when the isolated routine broker reports a replacement invocation", async () => {
+  it("fails closed and retires the interrupted run when its routine invocation changed", async () => {
     const claim = attemptClaim({
       checkpoint: "dispatch_accepted",
       checkpointSequence: 1n,
@@ -1418,7 +1419,7 @@ describe("RuntimeEngine attempts", () => {
       error: expect.objectContaining({ code: "pi_invocation_changed" }),
     })]);
     expect(projectEventBatch).not.toHaveBeenCalled();
-    expect(ports.routineTerminates).toHaveLength(0);
+    expect(ports.routineTerminates).toEqual([TURN_ID]);
   });
 
   it("terminates a started routine when pre-acceptance capability validation fails", async () => {
@@ -2308,6 +2309,44 @@ describe("RuntimeEngine attempts", () => {
 
     expect(result.outcome).toBe("interrupted");
     expect(store.settlements[0]?.error?.code).toBe("turn_stalled");
+  });
+
+  it("stops an accepted isolated routine when its deadline denial redacts provider identity", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(claim),
+      material: attemptMaterial({
+        routineId: ROUTINE_SNAPSHOT_ID,
+        routineName: "deadline-during-run",
+        routineIsolated: true,
+      }),
+    });
+    const ports = fakePorts(store);
+    const prompt = ports.pi.routineSession!.prompt;
+    ports.pi.routineSession!.prompt = async (input) => {
+      const accepted = await prompt(input);
+      store.authorization.authorized = false;
+      store.authorization.denialCode = "inactivity_deadline_exceeded";
+      store.authorization.runtimeGeneration = null;
+      store.authorization.boxId = null;
+      store.authorization.modelId = null;
+      store.authorization.commandPiInvocationId = null;
+      return accepted;
+    };
+    const routineAbort = vi.fn(ports.pi.routineSession!.abort);
+    ports.pi.routineSession!.abort = routineAbort;
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("interrupted");
+    expect(store.settlements[0]?.error?.code).toBe("turn_stalled");
+    expect(routineAbort).toHaveBeenCalledWith(expect.objectContaining({
+      boxId: BOX_ID,
+      runId: TURN_ID,
+      attemptId: ATTEMPT_ID,
+    }));
+    expect(ports.routineTerminates).toEqual([TURN_ID]);
+    expect(ports.abortCalls).toHaveLength(0);
   });
 
   it("aborts Pi and settles cancelled when the runner stops an accepted turn", async () => {

@@ -160,8 +160,9 @@ queued → starting → dispatching → running ↔ needs_input
 ```
 
 Only one attempt is active per execution lane. One ordinary main attempt and one isolated routine
-attempt may run concurrently; later turns remain ordered within their lane. An interrupted turn
-blocks only its lane until Owner/Editor Retry or Cancel. Settings revisions accepted during a turn
+attempt may run concurrently; later turns remain ordered within their lane. An interrupted turn is
+terminal, cleans up its exact Pi invocation best-effort, and releases its lane automatically.
+Settings revisions accepted during a turn
 apply after the routine lane is quiescent and before the next main turn. On a warm Box, configuration is published as
 applied only after runtime stages the exact snapshot, restarts Pi, and observes a different idle Pi
 invocation; takeover repeats those idempotent steps if their final observation was lost.
@@ -236,8 +237,8 @@ refuses a changed instance before network I/O while the broker refuses a stale i
 any Pi call. This is resolution of a proven broker fact, not replay of an
 ambiguous external effect. If no matching
 ledger fact can be recovered, the attempt becomes `interrupted`, no exec fallback or new prompt is
-sent, and later turns remain blocked. Retry warns that an earlier external effect may have succeeded;
-Cancel explicitly accepts that uncertainty and releases the queue.
+sent, and later work continues automatically without replaying it. An optional Retry warns that an
+earlier external effect may have succeeded and affects only that terminal turn.
 
 Immediately before dispatch, runtime adds one fixed-format metadata block to the newest user
 message: the attempt's durable `started_at` rendered with an offset plus the initiating member's
@@ -293,8 +294,8 @@ and reconciles any already-claimed cold-start derivative only after its main lea
 expired, so an orphan cannot retain lifecycle priority or the one-running-operation slot.
 
 Shared Box mutation remains single-owner: settings and lifecycle work other than permanent delete
-wait for the routine lane to be quiescent, and an interrupted routine must be retried or cancelled
-before those operations proceed. Permanent delete atomically fences and settles the routine lane,
+wait only for an active routine attempt. An interrupted routine is terminal and does not retain
+routine-lane ownership. Permanent delete atomically fences and settles an active routine lane,
 then terminates its exact run-scoped Pi invocation before provider deletion. Routine context is
 pinned and read-only; run-local memory cannot write parent memory. A
 `relay` return enters the ordinary main queue and does not inherit routine-lane ordering.
@@ -600,9 +601,9 @@ The web and native Apple routine rows expose run history, and a routine-origin t
 routine-history APIs, list newest runs first, distinguish notify, relay, silent, pending, and error
 outcomes, and page the private transcript forward by ordinal. A deleted routine remains directly
 readable from its marker because the run id and identity snapshot are durable. An interrupted run
-keeps the explicit Retry/Cancel safety boundary in that history surface so an Owner/Editor can
-recycle only the isolated routine session or cancel it to release blocked shared lifecycle work;
-Viewer sees no mutation controls. Web presents a
+stays visible in history while later routines and shared lifecycle work continue automatically.
+Owner/Editor Retry or Cancel, where offered, affects only that finished run; Viewer sees no mutation
+controls. Web presents a
 responsive right-side drawer that traps focus, uses a scrim and Esc dismissal, and takes the full
 chat stage on a phone; iOS uses native navigation from Connected Resources and a modal navigation
 stack from the marker. Neither client contacts or wakes Box.

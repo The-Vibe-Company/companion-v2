@@ -80,8 +80,9 @@ excluded product surface.
   receives the Box key and only narrow `SECURITY DEFINER` claim/renew/checkpoint/settle access.
 - One `(companion_id, client_message_id)` creates exactly one turn. Only one attempt may be active
   per Companion; later turns remain ordered in PostgreSQL.
-- An ambiguous dispatch is never replayed automatically. It becomes `interrupted` and blocks the
-  queue until an Owner/Editor explicitly retries with a new `retry_id` or cancels it.
+- An ambiguous dispatch is never replayed automatically. It becomes the visible terminal state
+  `interrupted`; runtime cleans up the exact Pi invocation best-effort and later work continues
+  automatically without an Owner/Editor Retry or Cancel decision.
 - Full Box restart is an explicit user action only. Automatic repair may recycle Pi but never
   restart, replace, archive, or delete a healthy Box as healing.
 - Runtime errors persist only a stable code, an expurgated message of at most 500 characters, and an
@@ -140,7 +141,7 @@ its full real-Linux acceptance is slow; run it locally as the final validation a
 - A turn stalls after ten minutes without correlated activity and has a two-hour absolute deadline.
   A timed-out or ambiguous turn becomes visible and actionable; it never appears to reply forever.
 - Retry creates a new attempt and warns that earlier external effects may have succeeded. Cancel
-  terminates the interrupted turn and releases the ordered queue.
+  closes only that terminal interrupted turn; later work already continues automatically.
 - Box stays warm for six hours after successful Pi acceptance. Reads, lists, ordinary status, and
   Viewer access are PostgreSQL-only and never wake or observe Box directly.
 - Disabling the Companions flag stops new runtime claims. Active work reaches a safe checkpoint and

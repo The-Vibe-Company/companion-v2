@@ -1011,7 +1011,7 @@ private struct CompanionMacInterruptedTurnView: View {
             Label("Turn interrupted", systemImage: "pause.circle.fill")
                 .font(.callout.weight(.semibold))
                 .foregroundStyle(Color.companionMacWarning)
-            Text("The runtime stopped waiting for this turn. Earlier external effects may have succeeded. Retry only if that is safe.")
+            Text("The runtime stopped waiting for this turn. Earlier external effects may have succeeded. Later work continues automatically. Retry only if that is safe.")
                 .font(.callout)
                 .foregroundStyle(Color.companionMacMuted)
             HStack {
@@ -1021,7 +1021,7 @@ private struct CompanionMacInterruptedTurnView: View {
                 Button("Cancel", role: .destructive, action: cancel)
                     .disabled(!canAct)
                 if queuedCount > 0 {
-                    Text("\(queuedCount) later message\(queuedCount == 1 ? "" : "s") queued")
+                    Text("\(queuedCount) later message\(queuedCount == 1 ? "" : "s") will continue automatically")
                         .font(.caption)
                         .foregroundStyle(Color.companionMacMuted)
                 }

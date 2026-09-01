@@ -121,8 +121,8 @@ queued → starting → dispatching → running ↔ needs_input
 
 There are two serial execution lanes per Companion: `main` for ordinary turns and `routine` for
 isolated routine-origin turns. At most one attempt is active in each lane, so one main attempt and
-one routine attempt may run together. FIFO ordering and the `interrupted` Retry/Cancel block apply
-within the affected lane; neither lane blocks the other.
+one routine attempt may run together. FIFO ordering applies only to queued and non-terminal work;
+`interrupted` is terminal and releases its lane automatically. Neither lane blocks the other.
 
 ### Attempt
 
@@ -420,7 +420,8 @@ or writing to Pi. An absent ledger after a daemon restart can therefore never au
 the replacement process. A takeover obtains `command_id` plus that pinned invocation through the
 fenced authorization row and performs the same resolution without
 re-staging files. A conflict, missing ledger proof, changed Pi invocation, or
-expired resolution window remains `prompt_dispatch_ambiguous` and blocks the queue. Abort and
+expired resolution window remains `prompt_dispatch_ambiguous`; runtime aborts or terminates the
+exact invocation best-effort and releases the lane without replaying it. Abort and
 decision delivery retain their existing ambiguous outcome after a possibly-started one-way write;
 they never fall through to a second transport. Every lifecycle command remains exec-only. In
 `shadow`, no productive call is routed: runtime performs one throttled direct health-plus-broker-state
@@ -523,7 +524,8 @@ Dispatch has three relevant outcomes:
 - **prompt may have been written, no ACK:** attempt and turn become `interrupted` immediately.
 
 The ambiguous case is never automatically replayed, including after lease takeover, Pi restart,
-runtime restart, or a new user message. Later turns stay queued.
+runtime restart, or a new user message. It settles `interrupted`, runtime cleans up its exact Pi
+invocation best-effort, and later turns continue automatically.
 
 `POST /v1/companions/:id/turns/:turnId/retry` requires a unique `retry_id` and creates a new attempt
 on the same turn. When a usable Box is projected, retry recycles Pi first. When no usable Box is
@@ -533,8 +535,9 @@ external effects may already have succeeded. Repeating the same retry request re
 lifecycle operation and attempt.
 
 `POST /v1/companions/:id/turns/:turnId/cancel` is the Owner/Editor stop and dequeue path. A
-queued follow-up, an interrupted turn, or an active turn that has not yet written a prompt to Pi
-settles `cancelled` immediately. An active turn that may already be on Pi records
+queued follow-up or an active turn that has not yet written a prompt to Pi
+settles `cancelled` immediately. An interrupted turn is already terminal; cancelling or retrying it
+is optional and never releases or delays other work. An active turn that may already be on Pi records
 `cancel_requested_at` and stays active until the executor that holds the lease aborts Pi and
 settles; remaining queued turns then run. Cancel does not claim that prior effects were rolled
 back. For an isolated routine, the cancellation denial preserves only the attempt-bound Pi
@@ -714,8 +717,8 @@ state and attempt-bound invocation are the only Pi identity used by routine obse
 ordinary main turns never inspect or terminate the run-scoped routine broker.
 
 Shared Box lifecycle and staging stays on the main lane and waits for the routine lane to be
-quiescent. An active or interrupted routine therefore prevents Pi recycle, Box restart, settings
-apply, health repair, or other shared lifecycle work from racing its run root. Permanent delete is
+quiescent. Only an active routine prevents Pi recycle, Box restart, settings apply, health repair,
+or other shared lifecycle work from racing its run root; `interrupted` is terminal. Permanent delete is
 the exception: its claim fences and settles the routine lane, then termination addresses only the
 captured run-scoped invocation before provider deletion. Routine takeover, Retry, Cancel, and
 settlement address only the exact routine invocation and never stop the main Pi. The routine context
@@ -725,8 +728,8 @@ to the run, so concurrency introduces no second writer to parent memory.
 The isolated invocation is pinned separately from the main Pi identity at dispatch write intent.
 Runtime validates that pinned value for broker reads, durable projection, terminal acknowledgement,
 and explicit cancellation. If preparation fails before a prompt can have reached Pi, runtime
-terminates the run-scoped process; once dispatch may be ambiguous, it preserves the fail-closed
-Retry/Cancel boundary instead of guessing or replaying.
+terminates the run-scoped process; once dispatch may be ambiguous, it records `interrupted`, cleans
+up that exact invocation best-effort, and advances the lane without guessing or replaying.
 
 Before Box contact, each run also pins the content-addressed main-conversation background specified
 in [Routine Pi context substrate](routine-pi-context-substrate.md). The latest valid main-Pi

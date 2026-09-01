@@ -264,7 +264,7 @@ export class RuntimeEngine {
       return this.#result(claim, released ? "released" : "fence_lost");
     }
     if (code === "turn_cancel_requested") {
-      await this.#abortPiForStop(claim, session);
+      await this.#abortAttempt(claim, session);
       return await this.#finishSettlement(claim, session, {
         terminalStatus: "cancelled",
       }, thrown);
@@ -277,12 +277,12 @@ export class RuntimeEngine {
    * Best-effort Pi abort on Owner/Editor stop. The lease signal is already aborted by the denial,
    * so this uses a short independent deadline rather than the turn's lease.
    */
-  async #abortPiForStop(
+  async #abortAttempt(
     claim: RuntimeClaim,
     session: LeaseSession,
   ): Promise<void> {
     if (claim.workKind !== "attempt") return;
-    const auth = session.authorization;
+    const auth = session.cleanupAuthorization;
     if (!auth?.boxId) return;
     if (auth.dispatchState !== "accepted"
       && auth.dispatchState !== "write_intent"
@@ -367,6 +367,24 @@ export class RuntimeEngine {
     settlement: RuntimeSettlementInput,
     thrown?: unknown,
   ): Promise<RuntimeExecutionResult> {
+    if (settlement.terminalStatus === "interrupted" && claim.workKind === "attempt") {
+      try {
+        // Interruption is terminal and must not leave an accepted or ambiguous Pi invocation in
+        // the way of later work. Cleanup is exact to this attempt/run and never replays it. A
+        // provider-side cleanup failure is still not allowed to turn interruption into a queue
+        // lock: the next main preflight recycles Pi, while routine runs use isolated roots.
+        await this.#abortAttempt(claim, session);
+      } catch (error) {
+        this.#deps.log?.warn({
+          ts: this.#deps.clock.now().toISOString(),
+          event: "runtime.work.interruption_cleanup_failed",
+          companionId: claim.companionId,
+          attemptId: claim.workId,
+          reason: "attempt_cleanup_unconfirmed",
+          error: describeThrownError(error),
+        });
+      }
+    }
     const settled = await session.settle(settlement);
     const outcome = settled ? settlement.terminalStatus : "fence_lost";
     if (!settled || settlement.terminalStatus !== "succeeded") {

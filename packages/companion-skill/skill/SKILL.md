@@ -39,6 +39,8 @@ Pi turn. Their hosted operating brief uses terse delivery semantics: one short
 sentence for an update, one word for an acknowledgement, and no process narration or filler; the
 owner's persona still owns voice. Consecutive attachment-free notify returns from one routine may be
 collapsed by the thread projection while their durable entries and routine history remain complete.
+An interrupted hosted turn or isolated routine run is terminal and visible but never owns a queue:
+later messages, routines, triggers, and lifecycle work continue automatically without Retry or Cancel.
 Agent Auth clients must not call those tools.
 
 Treat runtime provider/model settings, provider credentials, MCP accounts, and Companion
@@ -1384,7 +1386,7 @@ skills view shows the correct status and version. Report the version from this s
 `companion.json.version`:
 
 ```sh
-printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.100.0","agent":"<your assistant name>"}}' \
+printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.101.0","agent":"<your assistant name>"}}' \
   | node scripts/companion-agent-client.mjs
 ```
 

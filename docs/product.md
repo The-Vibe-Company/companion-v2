@@ -62,7 +62,8 @@ slash-separated, multi-assigned, and may exist without skills.
 8. When Companions are enabled, create a named Companion with one connected provider/model, selected
    Skills, and selected member MCP accounts; send work and leave while it continues.
 9. Return to a durable thread that truthfully shows queued, active, input-needed, completed, failed,
-   interrupted, or cancelled work, and explicitly Retry or Cancel an ambiguous attempt. Native iOS
+   interrupted, or cancelled work. An interruption is terminal and later work continues
+   automatically; an explicit Retry may revisit only that individual attempt. Native iOS
    restores the latest roster and bounded transcript tail locally so returning to the product stays
    immediate and readable offline while fresh authority and projection deltas arrive.
 10. See and create routine schedules, open each run's private transcript from its compact chat
@@ -83,7 +84,8 @@ Sending is the only normal wake path. There is no Wake button and no keystroke p
 idle before main dispatch, only one attempt may be active per lane, and queued turns preserve lane
 order. One isolated routine attempt may run alongside one ordinary main attempt. An attempt
 without a provable Pi acknowledgement becomes `interrupted` and is never replayed automatically.
-Retry creates a new attempt; Cancel releases the queue. Full Box restart is always an explicit,
+Runtime cleans up the exact invocation best-effort and later work continues automatically. Retry,
+when explicitly requested, creates a new attempt only for that turn. Full Box restart is always an explicit,
 confirmed Editor/Owner action. Automatic repair may recycle Pi only.
 
 Provider connections and member MCP accounts are envelope-encrypted and survive the one-time legacy

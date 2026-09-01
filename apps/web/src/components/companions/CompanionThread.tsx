@@ -145,7 +145,7 @@ function InterruptedTurnNotice({
         </div>
         {!canAct ? (
           <p className="chat-interruption__status">
-            An Owner or Editor must retry or cancel this turn before the queue can continue.
+            This turn is finished. Later messages continue automatically.
           </p>
         ) : (
           <>
@@ -364,7 +364,8 @@ export function CompanionThread({
     return () => window.cancelAnimationFrame(frame);
   }, [routineHistory, triggerHistory]);
 
-  // Once Retry or Cancel releases the blocked turn, return keyboard users to the place work resumes.
+  // Once the optional Retry or Cancel closes this terminal notice, return keyboard users to the
+  // composer. Later work was never blocked by the notice.
   useEffect(() => {
     const previous = previousInterruptedIdRef.current;
     previousInterruptedIdRef.current = interruptedTurn?.id ?? null;

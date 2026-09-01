@@ -63,9 +63,10 @@ explicitly recoverable interruption even after the browser, API, or one runtime 
   `(companion_id, client_message_id)`, then returns `202` without contacting Box.
 - Turn states are
   `queued → starting → dispatching → running ↔ needs_input → succeeded|failed|interrupted|cancelled`.
-  One attempt is active per Companion; later turns remain ordered in PostgreSQL.
+  One attempt is active per lane; later turns remain ordered in PostgreSQL. `interrupted` is terminal
+  and releases the affected lane automatically.
 - Retry requires a new `retry_id`, creates a new attempt on the same turn, and warns that earlier
-  external effects may have succeeded. Cancel settles an interrupted turn and releases the queue.
+  external effects may have succeeded. It is optional and never required for later work to proceed.
 - A dedicated `apps/runtime` service is the only Box/Pi lifecycle owner. Durable operations,
   checkpoints, leases, and attempt epochs let another replica continue after a crash without
   accepting stale settlements.

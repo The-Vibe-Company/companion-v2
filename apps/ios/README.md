@@ -82,9 +82,9 @@ state is polled without contacting Box or Pi. Viewer sees the page read-only, in
 unavailable plugin selections, and never receives mutation or restart controls. The
 native thread renders every durable decision request. Owner and Editor can answer `ask_user`,
 approve or deny configuration, routine, and trigger proposals, and handle historical shell/file
-requests without leaving iOS. An interrupted turn is equally explicit: Owner and Editor can retry
-it with a durable idempotency key or cancel it to release later queued messages, while Viewer remains
-read-only. The roster also manages model providers and MCP plugins. Provider
+requests without leaving iOS. An interrupted turn stays explicit but terminal: later messages
+continue automatically, while Owner and Editor may still retry that individual turn and Viewer
+remains read-only. The roster also manages model providers and MCP plugins. Provider
 connections support encrypted API keys plus the shared Claude authorization-code and Codex device
 flows. The live server catalog includes Claude, Codex, Kimi, Moonshot, z.ai, OpenAI API, and Google
 Gemini; the app renders that catalog rather than maintaining a divergent mobile allowlist. Members

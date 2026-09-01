@@ -1790,7 +1790,7 @@ export const companionThreadSchema = z.object({
   active_turn: companionActiveTurnSchema.nullable(),
   /** Exact number of later turns still ordered in PostgreSQL. */
   queued_count: z.number().int().nonnegative(),
-  /** The queue-blocking ambiguous turn that requires explicit Retry or Cancel, if any. */
+  /** The latest visible ambiguous turn. It is terminal and never blocks later work. */
   interrupted_turn: companionInterruptedTurnSchema.nullable(),
   last_message_at: z.string().datetime().nullable(),
   /**
