@@ -7506,11 +7506,22 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
     expect(await settle(claim!, "observe-health-orphan", "succeeded")).toBe(true);
   });
 
-  it("keeps decision delivery durable, blocks an interrupted queue, and globally fences on disable", async () => {
+  it("keeps decision delivery durable, advances an interrupted queue, and globally fences on disable", async () => {
     if (!runtimeSql) throw new Error("runtime database is not initialized");
     let gate = await gateStatus();
     const parent = await insertActiveTurnAttempt({ companionId: ids.companionA });
-    const queuedBehind = await insertQueuedTurn({ companionId: ids.companionA });
+    const queuedBehind = await asRole(apiRole, async (tx) => {
+      await tx`select set_config('app.org_id', ${ids.orgA}, true)`;
+      await tx`select set_config('app.user_id', ${ids.ownerA}, true)`;
+      const [queued] = await tx<Array<{ turn: { id: string } }>>`
+        select turn from public.companion_api_enqueue_turn(
+          ${ids.orgA}::uuid, ${ids.companionA}::uuid, ${randomUUID()}::uuid,
+          'Continue after the interrupted turn', 'web'
+        )
+      `;
+      if (!queued) throw new Error("expected a queued continuation turn");
+      return queued.turn.id;
+    });
     const decision = await insertDecision({
       companionId: ids.companionA,
       turnId: parent.turnId,
@@ -7613,7 +7624,13 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
       queuedStatus: "queued",
     });
     expect(JSON.stringify(interrupted)).not.toContain("raw-secret");
-    expect(await claimWork("blocked-queue-replica", gate.gateEpoch)).toEqual([]);
+    const [continued] = await claimWork("continued-queue-replica", gate.gateEpoch);
+    expect(continued).toMatchObject({
+      workKind: "operation",
+      operationKind: "start",
+      turnId: queuedBehind,
+      turnStatus: "queued",
+    });
 
     await resetWork();
     gate = await gateStatus();

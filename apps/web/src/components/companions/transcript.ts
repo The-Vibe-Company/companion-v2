@@ -71,9 +71,9 @@ export function composerHint(input: {
   const queued = input.thread?.queued_count ?? 0;
   if (interrupted) {
     const waiting = queued > 0
-      ? ` ${queued} later message${queued === 1 ? " is" : "s are"} queued behind it.`
+      ? ` ${queued} later message${queued === 1 ? " is" : "s are"} queued and will continue automatically.`
       : "";
-    return `Retry or cancel the interrupted turn to continue.${waiting}`;
+    return `This turn was interrupted; later work continues automatically.${waiting}`;
   }
 
   const active = input.thread?.active_turn;

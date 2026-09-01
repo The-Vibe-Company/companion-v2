@@ -21,8 +21,8 @@ re-enable procedure live in the
   `node dist/index.js`; it is never a migration hook.
 - Keep the runtime desktop endpoint private even though requests are HMAC authenticated. Never
   persist or log its returned signed URL.
-- Never replay a dispatch automatically once the prompt may have been written. Mark it interrupted
-  and require an Owner/Editor Retry or Cancel decision.
+- Never replay a dispatch automatically once the prompt may have been written. Mark it interrupted,
+  clean up the exact Pi invocation best-effort, and let later work continue automatically.
 - Never use Full Box restart as automatic repair. Never delete a Box unless an explicit user delete
   or the audited legacy-purge procedure owns it.
 - Do not put provider payloads, tokens, signed URLs, raw Pi lines, auth files, or decrypted material
@@ -266,11 +266,10 @@ fence when waiting for a rolling deployment is unsafe.
 
 ### Re-enable
 
-Re-enable only after the cause is corrected, an empty-claim dry observation is healthy, and an
-Owner/Editor communication plan exists for interrupted turns. Deploy all three flag consumers with
-the flag on, verify `/healthz`, then have the migration owner call `companion_runtime_enable` with
-the newly observed epoch. Interrupted turns remain explicit Retry/Cancel decisions; enabling the
-gate never replays them.
+Re-enable only after the cause is corrected and an empty-claim dry observation is healthy. Deploy
+all three flag consumers with the flag on, verify `/healthz`, then have the migration owner call
+`companion_runtime_enable` with the newly observed epoch. Interrupted turns remain visible terminal
+outcomes; enabling the gate never replays them and later work claims automatically.
 
 ## Incident response
 
@@ -290,9 +289,10 @@ Do not make the health endpoint public and do not weaken it to satisfy Railway r
 ### Turn is interrupted or Pi is silent
 
 The ten-minute inactivity deadline and two-hour absolute deadline must settle visibly. If prompt
-write/ACK outcome is ambiguous, warn that earlier external effects may have succeeded and expose
-Retry/Cancel only. Retry creates a new attempt and recycles Pi; it does not restart the Box. Never
-manually mark an ambiguous attempt queued.
+write/ACK outcome is ambiguous, warn that earlier external effects may have succeeded, verify the
+turn settled `interrupted`, and verify the next same-lane item claims automatically. Retry, when
+explicitly requested for that individual turn, creates a new attempt and recycles Pi; it does not
+restart the Box. Never manually mark an ambiguous attempt queued.
 
 While a turn is waiting in `needs_input`, its inactivity deadline is intentionally cleared. An
 `ask_user` or `propose_*` decision returns control to Pi after ten minutes; a newer member message

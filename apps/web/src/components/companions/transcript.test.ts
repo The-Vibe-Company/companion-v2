@@ -200,12 +200,15 @@ describe("composerHint", () => {
     })).toBe("Answer the request above to continue this turn. 1 later message is queued.");
   });
 
-  it("explains that interruption blocks the ordered queue", () => {
+  it("explains that later work continues after an interruption", () => {
     expect(composerHint({
       thread: thread({ interrupted_turn: interruptedTurn(), queued_count: 2 }),
       companionName: "Luna",
       state: "running",
-    })).toBe("Retry or cancel the interrupted turn to continue. 2 later messages are queued behind it.");
+    })).toBe(
+      "This turn was interrupted; later work continues automatically. "
+      + "2 later messages are queued and will continue automatically.",
+    );
   });
 
   it("reports saved queued work and lifecycle-only changes without suggesting a retry send", () => {

@@ -47,7 +47,7 @@ struct CompanionInterruptedTurnNotice: View {
             }
 
             if !canAct {
-                Text("An Owner or Editor must retry or cancel this turn before the conversation can continue.")
+                Text("This turn is finished. Later messages continue automatically.")
                     .font(.footnote.weight(.medium))
                     .foregroundStyle(Color.companionMuted)
             } else {
@@ -169,7 +169,7 @@ struct CompanionInterruptedTurnNotice: View {
 
     private var queueMessage: String {
         let noun = queuedCount == 1 ? "message is" : "messages are"
-        return "\(queuedCount) later \(noun) waiting behind this turn."
+        return "\(queuedCount) later \(noun) queued and will continue automatically."
     }
 
     private func retry() {

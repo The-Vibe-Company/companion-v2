@@ -20,9 +20,10 @@ mode; it only persists the routine-origin turn.
 
 Migration `0139_companion_routine_parallel_scheduling.sql` adds independently fenced `main` and
 `routine` leases and claim protocol 4. One ordinary main attempt and one isolated routine attempt
-may then run concurrently. Protocol-3 runtimes may finish an existing fenced claim after the
-migration, but cannot claim new work; deploy protocol-4 runtime immediately after the release
-migration. There is no separate parallelism flag.
+may then run concurrently. Migration `0149_companion_interruptions_release_queues.sql` advances the
+required claim protocol to 5 when it makes interruptions non-blocking. Protocol-4 runtimes may
+finish an existing fenced claim after migration 0149, but cannot claim new work; deploy the
+protocol-5 runtime immediately after the release migration. There is no separate parallelism flag.
 
 The actual product gate remains:
 
@@ -40,12 +41,14 @@ variables are a product kill switch, not an isolation/legacy selector.
 
 | Runtime binary | Database | Isolation variable | Result |
 | --- | --- | --- | --- |
-| Current parallel runtime | Includes migrations 0137 and 0139 | Any value or absent | Variable is ignored. New routine runs are isolated and use the routine lease while the main lease remains available. |
-| Protocol-3 runtime | Includes migration 0139 | Any value or absent | Existing claims remain fenced, but new claims are rejected until protocol-4 runtime is deployed. |
+| Current protocol-5 runtime | Includes migrations 0137, 0139, and 0149 | Any value or absent | Variable is ignored. Interruptions are terminal queue evidence, and later work continues automatically on its lane. |
+| Protocol-4 runtime | Includes migration 0149 | Any value or absent | Existing claims remain fenced, but new claims are rejected until the protocol-5 runtime is deployed. |
+| Protocol-3 runtime | Includes migration 0139 but not 0149 | Any value or absent | Existing claims remain fenced, but new claims are rejected until a protocol-4 runtime is deployed. |
 | Intermediate, unmerged #466 build | Includes migration 0137 | Absent or `false` | New, unpinned runs use the legacy ordinary-turn path. An already-isolated run remains isolated because the SQL checks its durable pin before the flag argument. |
 | Intermediate, unmerged #466 build | Includes migration 0137 | `true` | New runs are pinned to isolation. The variable was read by runtime only, not worker. |
 | Pre-#466 runtime | Includes migration 0137 | Any value | The old runtime ignores the variable and never calls the preparation function, so it executes the legacy path. The migration is additive for that binary. |
 | Current runtime | Missing migration 0137 | Any value | Runtime readiness fails on the missing required function/grants and must not claim work. Run the release service; there is no supported legacy fallback. |
+| Current protocol-5 runtime | Missing migration 0149 | Any value or absent | Claims are rejected by the protocol-4 database gate. Run the release service before deploying the runtime; there is no mixed-protocol fallback. |
 
 On the intermediate build only, the exact variable was
 `COMPANION_ROUTINE_ISOLATION_ENABLED=true` on the runtime service. Its parser treated absent or
@@ -118,8 +121,9 @@ boundary for this incident. Deploy its release migration and the matching runtim
 4. Use the named read-only routine diagnostic to confirm `enabled`, `consecutive_failures`, the next
    fire, and recent run outcomes. Do not infer an abnormal cancellation from a Box-side
    `.cancelled` tombstone alone: exact routine termination writes that marker for normal cleanup too.
-5. If a historical run is still `interrupted`, an Owner/Editor must explicitly Retry or Cancel that
-   run. The migration never resolves ambiguous external effects and never restarts or deletes a Box.
+5. If a historical run is still `interrupted`, confirm it remains visible but does not retain the
+   routine lane: the next routine or shared lifecycle item must claim automatically. The migration
+   never replays ambiguous external effects and never restarts or deletes a Box.
 
 After this migration, successful enqueue no longer clears the streak. A succeeded run clears it;
 only a terminal `failed` run increments it. `interrupted`, `cancelled`, and
@@ -128,16 +132,16 @@ only a terminal `failed` run increments it. `interrupted`, `cancelled`, and
 
 ## Ordered Railway cutover
 
-1. Record the exact target Git SHA and confirm that it includes migrations 0137 and 0139, the final #466
-   isolation implementation, #472, and the already-running prepare recovery. Do not deploy a
-   moving branch independently to each service.
+1. Record the exact target Git SHA and confirm that it includes migrations 0137, 0139, and 0149,
+   the final #466 isolation implementation, #472, and the already-running prepare recovery. Do not
+   deploy a moving branch independently to each service.
 2. Disable the target routine in the product so its cron cannot enqueue more validation turns.
    For a full runtime cutover, set `COMPANION_COMPANIONS_ENABLED=false` on web, API, worker, and
    runtime, deploy all four, and wait for active work to reach its safe interrupted checkpoint.
 3. Take the normal production backup. Deploy the Railway `release` service at the exact target
    SHA. Require a `Completed` result before deploying application services; this applies migrations
-   0137 and 0139 and their role grants. Protocol-3 runtimes may finish current claims after this
-   point but do not claim more work.
+   0137, 0139, and 0149 and their role grants. Protocol-4 runtimes may finish current claims after
+   this point but do not claim more work.
 4. Confirm the default branch has not advanced past the recorded SHA. Configure
    `COMPANION_COMPANIONS_ENABLED=true` and the same non-empty
    `COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS` on web, API, worker, and runtime. Do not add
@@ -194,8 +198,8 @@ Then validate scheduling concurrency with a routine that remains active long eno
   active under different lease lanes;
 - take over one lane in a controlled test environment and confirm the other lane's token, renewal,
   and process are unchanged; and
-- Retry or Cancel the routine and confirm the active main turn remains authorized, then validate the
-  inverse for a main turn while a routine is active.
+- interrupt the routine and confirm the next routine-lane item claims automatically while the
+  active main turn remains authorized, then validate the inverse for a main interruption.
 
 A `relay` return enters the ordinary main queue. It may wait behind another main turn, but it does
 not wait merely for routine settlement. Routine context and any parent-memory snapshot remain
@@ -210,16 +214,15 @@ while the main thread gains nothing. `no_output` is a settlement outcome, not a
 Do not accept `failed`, `interrupted`, a duplicate main entry, or a main-Pi dispatch for the notify
 case. Keep the routine disabled while investigating any of those results.
 
-## Clean interrupted and queued validation turns
+## Clean queued validation turns
 
 1. Disable the `Hello World` routine first to stop new cron fires.
-2. In the Companion chat, use **Cancel turn** on the interrupted queue-head notice. Do not choose
-   Retry until the prepare recovery is deployed.
+2. Confirm any interrupted validation turn is terminal and that it did not hold the queue.
 3. Expand the queued-messages card and use **Remove from queue** for each queued `Hello World`
    message. Preserve unrelated owner messages.
 4. If the client action is unavailable, an authorized Owner/Editor may call
-   `POST /v1/companions/<companion-id>/turns/<turn-id>/cancel` with `{}` once per exact queued or
-   interrupted turn. Cancellation is durable and idempotent. Do not edit leases, attempts, or
+   `POST /v1/companions/<companion-id>/turns/<turn-id>/cancel` with `{}` once per exact queued turn.
+   Cancellation is durable and idempotent. Do not edit leases, attempts, or
    routine rows directly.
 5. Confirm the ordered queue is clear before re-enabling the routine.
 
@@ -231,9 +234,11 @@ If isolated routine execution fails after cutover:
    `COMPANION_COMPANIONS_ENABLED=false` consistently on worker and runtime—preferably all four
    product services—and deploy so new work stops and active work reaches the safe interrupted
    checkpoint.
-2. Cancel only the affected interrupted and queued turns through the product/API procedure above.
-3. Preserve migrations 0137 and 0139 and every durable `routine_isolated` pin. Do not down-migrate, force a
-   run onto the legacy main Pi, delete the Box, or use a full Box restart as automatic repair.
+2. Cancel only affected queued validation turns through the product/API procedure above;
+   interrupted turns are already terminal and need no operator action to release work.
+3. Preserve migrations 0137, 0139, and 0149 and every durable `routine_isolated` pin. Do not
+   down-migrate, force a run onto the legacy main Pi, delete the Box, or use a full Box restart as
+   automatic repair.
 4. Roll forward to a compatible fixed Runtime v2 SHA. Re-run release first if that SHA contains a
    migration, deploy runtime before the producers, verify health and grants, then restore the
    master feature gate and database gate using their documented procedures.

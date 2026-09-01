@@ -468,8 +468,8 @@ export function CompanionRoutineHistory({
                   {selectedSummary.status === "interrupted" ? (
                     <div className="routine-history__recovery">
                       <p>
-                        Earlier routine effects may already have succeeded. Retry recycles only
-                        this run&apos;s isolated Pi session; Cancel releases blocked runtime work.
+                        Earlier routine effects may already have succeeded. Later work continues
+                        automatically; Retry or Cancel affects only this finished run.
                       </p>
                       {canAct ? (
                         <div className="routine-history__recovery-actions">
@@ -495,7 +495,7 @@ export function CompanionRoutineHistory({
                           ) : null}
                         </div>
                       ) : (
-                        <p>An Owner or Editor must retry or cancel this run.</p>
+                        <p>This run is finished. Later work continues automatically.</p>
                       )}
                       {retryPending ? (
                         <p role="status">

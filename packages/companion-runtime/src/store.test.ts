@@ -76,7 +76,7 @@ describe("PostgresRuntimeStore", () => {
     await store.claimWork({ executorId: "executor-1", limit: 2, leaseSeconds: 30, gateEpoch: 4n });
 
     expect(sql.calls[0]?.query).toContain(
-      "$4::bigint, 4::integer, 1::integer",
+      "$4::bigint, 5::integer, 1::integer",
     );
   });
 
@@ -572,14 +572,14 @@ describe("PostgresRuntimeStore", () => {
     });
   });
 
-  it("claims only lane-aware material protocol 4 and reads the dedicated MCP broker capability", async () => {
+  it("claims only interruption-safe material protocol 5 and reads the dedicated MCP broker capability", async () => {
     const sql = new RecordingSql();
     const expiresAt = new Date("2026-08-16T18:00:00.000Z");
     sql.rows = [];
     const store = new PostgresRuntimeStore(sql);
 
     await store.claimWork({ executorId: "executor-1", limit: 2, leaseSeconds: 30, gateEpoch: 4n });
-    expect(sql.calls[0]?.query).toContain("$4::bigint, 4::integer");
+    expect(sql.calls[0]?.query).toContain("$4::bigint, 5::integer");
 
     sql.rows = [{ token: `cmp_mcp_${"a".repeat(48)}`, expires_at: expiresAt }];
     await expect(store.mintMcpBrokerToken(fence, 30)).resolves.toEqual({

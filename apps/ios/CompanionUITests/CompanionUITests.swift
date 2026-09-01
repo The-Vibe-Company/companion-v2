@@ -218,7 +218,9 @@ final class CompanionUITests: XCTestCase {
         app.launch()
 
         XCTAssertTrue(app.staticTexts["Turn interrupted"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["2 later messages are waiting behind this turn."].exists)
+        XCTAssertTrue(app.staticTexts[
+            "2 later messages are queued and will continue automatically."
+        ].exists)
         let retry = app.buttons["chat.interrupted.retry"]
         let cancel = app.buttons["chat.interrupted.cancel"]
         XCTAssertTrue(retry.exists)
@@ -405,7 +407,9 @@ final class CompanionUITests: XCTestCase {
             app.descendants(matching: .any)["interruption.demo.released"]
                 .waitForExistence(timeout: 2)
         )
-        XCTAssertTrue(app.staticTexts["The two waiting messages can continue in order."].exists)
+        XCTAssertTrue(app.staticTexts[
+            "Later messages were already free to continue in order."
+        ].exists)
     }
 
     @MainActor
@@ -417,7 +421,7 @@ final class CompanionUITests: XCTestCase {
 
         XCTAssertTrue(app.staticTexts["Turn interrupted"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts[
-            "An Owner or Editor must retry or cancel this turn before the conversation can continue."
+            "This turn is finished. Later messages continue automatically."
         ].exists)
         XCTAssertFalse(app.buttons["chat.interrupted.retry"].exists)
         XCTAssertFalse(app.buttons["chat.interrupted.cancel"].exists)

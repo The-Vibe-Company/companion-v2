@@ -323,7 +323,7 @@ async function claimWorkRows(
       runtime_generation::text as "runtimeGeneration"
     from public.companion_runtime_claim_work(${claimant}, ${limit}, 30, (
       select gate_epoch from public.companion_runtime_gate_status()
-    ), 4, 1)
+    ), 5, 1)
   `);
   return rows;
 }
@@ -2379,6 +2379,130 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     }
   });
 
+  it("projects the latest interruption and preserves the automatic-continuation notice", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const fixture = await createCompanion({ boxReady: true });
+    const installationId = randomUUID();
+    const secondTurnId = randomUUID();
+    const secondAttemptId = randomUUID();
+    const secondClientMessageId = randomUUID();
+    const secondError = "A".repeat(500);
+    try {
+      await sql`
+        insert into companion_notification_devices(
+          org_id, installation_id, user_id, device_token, environment, bundle_id
+        ) values (
+          ${ids.orgA}::uuid, ${installationId}::uuid, ${ids.ownerA},
+          ${createHash("sha256").update(installationId).digest("hex")},
+          'sandbox', 'dev.companion.mobile.dev'
+        )
+      `;
+      await sql`
+        update companion_turn_attempts
+        set status = 'interrupted', settled_at = now(),
+          last_error_code = 'dispatch_ambiguous', last_error_message = 'Earlier interruption.',
+          last_error_action = 'retry'
+        where id = ${fixture.attemptId}::uuid
+      `;
+      await sql`
+        update companion_turns
+        set status = 'interrupted', settled_at = now(), inactivity_deadline_at = null,
+          last_error_code = 'dispatch_ambiguous', last_error_message = 'Earlier interruption.',
+          last_error_action = 'retry'
+        where id = ${fixture.turnId}::uuid
+      `;
+
+      await sql`
+        insert into companion_turns (
+          id, org_id, companion_id, client_message_id, message_event_id,
+          queue_sequence, actor_id, client_surface, status,
+          inactivity_deadline_at, absolute_deadline_at
+        ) values (
+          ${secondTurnId}::uuid, ${ids.orgA}::uuid, ${fixture.companionId}::uuid,
+          ${secondClientMessageId}::uuid, ${`msg:${secondClientMessageId}`}, 2,
+          ${ids.ownerA}, 'web', 'running', now() + interval '10 minutes',
+          now() + interval '2 hours'
+        )
+      `;
+      await sql`
+        insert into companion_turn_attempts (
+          id, org_id, companion_id, turn_id, attempt_number, actor_id,
+          runtime_generation, settings_revision, skills_revision, model_id,
+          provider_ids, provider_credential_refs, selected_skill_ids,
+          selected_mcp_account_ids, mcp_credential_refs,
+          status, checkpoint, dispatch_state, command_id,
+          dispatch_accepted_at, pi_invocation_id, last_activity_at
+        ) values (
+          ${secondAttemptId}::uuid, ${ids.orgA}::uuid, ${fixture.companionId}::uuid,
+          ${secondTurnId}::uuid, 1, ${ids.ownerA}, 1, 1, 1, 'fixture-model',
+          ${sql.json([providerId])}, ${sql.json([{
+            provider_id: providerId,
+            credential_generation: providerGeneration,
+            credential_version: 1,
+          }])}, ${sql.json([ids.skill])}, ${sql.json([ids.mcpAccount])},
+          ${sql.json([{
+            account_id: ids.mcpAccount,
+            credential_generation: ids.mcpGeneration,
+          }])}, 'running', 'running', 'accepted', ${randomUUID()}::uuid,
+          now(), ${`pi-${secondAttemptId}`}, now()
+        )
+      `;
+      await sql`
+        update companion_turn_attempts
+        set status = 'interrupted', settled_at = now(),
+          last_error_code = 'dispatch_ambiguous', last_error_message = ${secondError},
+          last_error_action = 'retry'
+        where id = ${secondAttemptId}::uuid
+      `;
+      await sql`
+        update companion_turns
+        set status = 'interrupted', settled_at = now(), inactivity_deadline_at = null,
+          last_error_code = 'dispatch_ambiguous', last_error_message = ${secondError},
+          last_error_action = 'retry'
+        where id = ${secondTurnId}::uuid
+      `;
+
+      const [runtime] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ interruptedTurn: IntegrationJsonObject | null }>>`
+          select interrupted_turn as "interruptedTurn"
+          from public.companion_api_read_runtime(${ids.orgA}::uuid, ${fixture.companionId}::uuid)
+        `,
+      });
+      const [listed] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ interruptedTurn: IntegrationJsonObject | null }>>`
+          select interrupted_turn as "interruptedTurn"
+          from public.companion_api_list_runtime(${ids.orgA}::uuid)
+          where companion_id = ${fixture.companionId}::uuid
+        `,
+      });
+      const [thread] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ interruptedTurn: IntegrationJsonObject | null }>>`
+          select interrupted_turn as "interruptedTurn"
+          from public.companion_api_read_thread(${ids.orgA}::uuid, ${fixture.companionId}::uuid)
+        `,
+      });
+      expect(runtime?.interruptedTurn).toMatchObject({ id: secondTurnId });
+      expect(listed?.interruptedTurn).toMatchObject({ id: secondTurnId });
+      expect(thread?.interruptedTurn).toMatchObject({ id: secondTurnId });
+
+      const [delivery] = await sql<Array<{ body: string }>>`
+        select body from companion_notification_deliveries
+        where companion_id = ${fixture.companionId}::uuid
+          and event_key = ${`turn:${secondTurnId}:interrupted:${secondAttemptId}`}
+      `;
+      expect(delivery?.body).toHaveLength(180);
+      expect(delivery?.body).toMatch(/ Later messages continue automatically\.$/);
+    } finally {
+      await removeCompanion(fixture.companionId);
+    }
+  });
+
   it("enqueues an already-warm send without a start operation and dispatches it directly", async () => {
     if (!sql) throw new Error("runtime executor database is not initialized");
     let companionId = "";
@@ -2714,6 +2838,13 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         ), 2, 1)
       `);
       expect(protocolTwoClaims).toEqual([]);
+      const protocolFourClaims = await asRuntime((tx) => tx<Array<{ workId: string }>>`
+        select work_id::text as "workId"
+        from public.companion_runtime_claim_work(${executorId}, 1, 30, (
+          select gate_epoch from public.companion_runtime_gate_status()
+        ), 4, 1)
+      `);
+      expect(protocolFourClaims).toEqual([]);
       const [unclaimed] = await sql<Array<{ workKind: string | null; workId: string | null }>>`
         select work_kind::text as "workKind", work_id::text as "workId"
         from companion_runtime_leases
@@ -5753,7 +5884,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     }
   });
 
-  it("runs main turns and isolated routines concurrently with independent takeover, retry, and cancel", async () => {
+  it("runs both lanes concurrently and advances an interrupted routine before optional recovery", async () => {
     if (!sql) throw new Error("runtime executor database is not initialized");
     const fixture = await createCompanion({
       boxReady: true,
@@ -5764,9 +5895,11 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     const routineExecutor = `${executorId}-routine-takeover`;
     const mainExecutor = `${executorId}-main-takeover`;
     const retryExecutor = `${executorId}-routine-retry`;
+    const continuationExecutor = `${executorId}-routine-continuation`;
     let routineClaim: Claim | undefined;
     let mainClaim: Claim | undefined;
     let retryClaim: Claim | undefined;
+    let continuationClaim: Claim | undefined;
     try {
       await sql`
         update companion_runtime_instances
@@ -5967,6 +6100,42 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       `;
       await release(routineClaim!, routineExecutor);
       routineClaim = undefined;
+
+      // `interrupted` is terminal queue evidence, not routine-lane ownership. A later routine run
+      // claims automatically without Retry or Cancel, while the independent main claim stays live.
+      const [continuedRoutine] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ turn: { id: string } }>>`
+          select turn from public.companion_api_enqueue_turn(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid, ${randomUUID()}::uuid,
+            'Continue after interruption', 'web', '[]'::jsonb,
+            ${routineId}::uuid, 'Parallel routine'
+          )
+        `,
+      });
+      [continuationClaim] = await claimWorkRows(1, continuationExecutor);
+      expect(continuationClaim).toMatchObject({ workKind: "attempt" });
+      const [continuedAttempt] = await sql<Array<{ turnId: string }>>`
+        select turn_id::text as "turnId" from companion_turn_attempts
+        where id = ${continuationClaim!.workId}::uuid
+      `;
+      expect(continuedAttempt?.turnId).toBe(continuedRoutine!.turn.id);
+      expect(await authorizeClaim(mainClaim!, `${mainExecutor}-second`)).toEqual({
+        authorized: true,
+        denialCode: null,
+      });
+      await sql`
+        update companion_turn_attempts set status = 'cancelled', settled_at = now()
+        where id = ${continuationClaim!.workId}::uuid
+      `;
+      await sql`
+        update companion_turns set status = 'cancelled', settled_at = now()
+        where id = ${continuedRoutine!.turn.id}::uuid
+      `;
+      await release(continuationClaim!, continuationExecutor);
+      continuationClaim = undefined;
+
       const retryId = randomUUID();
       const [retried] = await asApi({
         orgId: ids.orgA,
@@ -6026,6 +6195,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       `;
       expect(settledRetry?.status).toBe("succeeded");
     } finally {
+      if (continuationClaim) await release(continuationClaim, continuationExecutor);
       if (retryClaim) await release(retryClaim, retryExecutor);
       if (mainClaim) await release(mainClaim, `${mainExecutor}-second`);
       if (routineClaim) await release(routineClaim, routineExecutor);

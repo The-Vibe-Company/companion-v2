@@ -278,10 +278,10 @@ The sidebar presents the Skills libraries directly: My Skills, Organization, Ins
 Routine history extends the compatibility marker without adding chat chrome. The routine row exposes
 a History action, while a marker carrying `run_id` is a compact clickable control. Both open the same
 right-side drawer: newest runs first, explicit terminal outcome, then the private transcript paged by
-durable ordinal. An interrupted run exposes the same explicit Retry and Cancel boundary as an
-interrupted main turn: Retry recycles only that run's isolated Pi session, while Cancel releases the
-routine lane and any shared lifecycle work waiting behind it. Viewer sees the reason but no mutation
-controls. The drawer takes the full chat stage on a phone, traps focus, closes with Esc or its scrim,
+durable ordinal. An interrupted run is a visible terminal outcome and releases the routine lane
+automatically. Retry or Cancel, where offered, affects only that individual finished run and never
+controls whether later routines or shared lifecycle work proceed. Viewer sees the reason but no
+mutation controls. The drawer takes the full chat stage on a phone, traps focus, closes with Esc or its scrim,
 and never contacts Box on reads. During the compatibility phase the ordinary assistant reply stays
 in the thread and is referenced as the run's virtual notify result rather than duplicated in history.
 
@@ -447,10 +447,10 @@ visible terminal outcome; the two-hour absolute ceiling remains authoritative ev
 
 An `interrupted` card explains that delivery became ambiguous and that previous external effects may
 have succeeded. Owner/Editor gets **Retry** and **Cancel**: Retry creates a new attempt on the same
-turn; Cancel settles it and releases the ordered queue. Neither action is disguised as regenerate,
-and the client never retries automatically. Stable, expurgated errors may offer only their allowed
-action, such as Retry, Restart Pi, or Switch model. Full Box never appears as an automatic repair in
-the thread.
+turn; Cancel closes only that terminal item. Later work already continues automatically, so neither
+action owns or releases the queue. Neither action is disguised as regenerate, and the client never
+retries automatically. Stable, expurgated errors may offer only their allowed action, such as Retry,
+Restart Pi, or Switch model. Full Box never appears as an automatic repair in the thread.
 
 The transcript keeps day boundaries and one member-private `New` divider, neither inside a turn.
 Loading uses static skeleton lines. A reply keeps Copy as its one ordinary action, always reachable
@@ -503,8 +503,8 @@ Do:
 - Use slide-over drawers for resource detail.
 - Keep focus states obvious and accessible.
 - Keep motion short, functional, and reduceable.
-- Derive Companion waiting state from durable turns and show Retry/Cancel only for an explicit
-  interruption.
+- Derive Companion waiting state from non-terminal durable turns. Show an interruption as a
+  terminal outcome, never as a queue wait; Retry/Cancel may affect only that individual turn.
 
 Don't:
 

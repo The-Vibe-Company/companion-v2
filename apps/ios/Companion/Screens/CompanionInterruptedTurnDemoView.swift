@@ -24,9 +24,9 @@ struct CompanionInterruptedTurnDemoView: View {
                 ScrollView {
                     if released {
                         ContentUnavailableView(
-                            "Queue released",
+                            "Interruption closed",
                             systemImage: "checkmark.circle",
-                            description: Text("The two waiting messages can continue in order.")
+                            description: Text("Later messages were already free to continue in order.")
                         )
                         .accessibilityIdentifier("interruption.demo.released")
                         .padding(.top, 80)
