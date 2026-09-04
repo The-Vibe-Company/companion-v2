@@ -458,65 +458,16 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - name: Build API image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+      - name: Build Railway images
+        uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: false
         with:
-          context: .
-          file: deploy/railway/Dockerfile.backend
-          build-args: RAILWAY_SERVICE_NAME=api
-          tags: companion-api:ci
+          source: .
+          files: .github/railway-containers-bake.hcl
+          targets: ci
           load: true
-          cache-from: type=gha,scope=railway-api
-          cache-to: type=gha,mode=max,scope=railway-api
-
-      - name: Build one-shot release image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          file: deploy/railway/Dockerfile.backend
-          build-args: RAILWAY_SERVICE_NAME=release
-          tags: companion-release:ci
-          load: true
-          cache-from: |
-            type=gha,scope=railway-release
-            type=gha,scope=railway-api
-          cache-to: type=gha,mode=max,scope=railway-release
-
-      - name: Build worker image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          file: deploy/railway/Dockerfile.backend
-          build-args: RAILWAY_SERVICE_NAME=worker
-          tags: companion-worker:ci
-          load: true
-          cache-from: type=gha,scope=railway-worker
-          cache-to: type=gha,mode=max,scope=railway-worker
-
-      - name: Build runtime image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          file: deploy/railway/Dockerfile.backend
-          build-args: RAILWAY_SERVICE_NAME=runtime
-          tags: companion-runtime:ci
-          load: true
-          cache-from: type=gha,scope=railway-runtime
-          cache-to: type=gha,mode=max,scope=railway-runtime
-
-      - name: Build web image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          file: deploy/railway/Dockerfile.web
-          build-args: |
-            COMPANION_API_URL=http://127.0.0.1:18082
-            COMPANION_WEB_URL=http://127.0.0.1:18080
-            NEXT_PUBLIC_COMPANION_API_BASE=http://127.0.0.1:18080/v1
-          tags: companion-web:ci
-          load: true
-          cache-from: type=gha,scope=railway-web
-          cache-to: type=gha,mode=max,scope=railway-web
+          vars: CACHE_WRITE=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Smoke Railway images
         run: bash scripts/ci-container-smoke.sh

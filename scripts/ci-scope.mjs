@@ -172,6 +172,7 @@ export function classifyFiles(files, { forceFull = false } = {}) {
         !isDocumentation(file) &&
         (matchesRuntimePackage(file) ||
           matchesAny(file, [
+            ".github/railway-containers-bake.hcl",
             "deploy/railway/",
             "scripts/ci-container-smoke.sh",
             "docker-compose.yml",
