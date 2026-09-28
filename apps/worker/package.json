@@ -19,7 +19,7 @@
     "@companion/skills": "workspace:*",
     "@companion/storage": "workspace:*",
     "@sentry/node": "^10.70.0",
-    "drizzle-orm": "^0.45.2",
+    "drizzle-orm": "^0.45.3",
     "postgres": "^3.4.5",
     "stripe": "^18.5.0"
   },
