@@ -20,6 +20,8 @@ import { auth, companionAgentAuthPlugin, getAgentConfiguration } from "./index";
 
 const execFileAsync = promisify(execFile);
 const tempPaths: string[] = [];
+const CLI_DISCOVERY_TIMEOUT_MS = 10_000;
+const CLI_COMPATIBILITY_TEST_TIMEOUT_MS = 15_000;
 
 afterAll(async () => {
   await Promise.all(tempPaths.map((path) => rm(path, { recursive: true, force: true })));
@@ -53,6 +55,31 @@ function sessionWithGrant(
       ],
     },
   };
+}
+
+async function withAgentConfigurationServer(
+  run: (origin: string) => Promise<void>,
+): Promise<void> {
+  const configuration = await getAgentConfiguration();
+  const server = createServer((request, response) => {
+    if (request.url === "/.well-known/agent-configuration") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(configuration));
+      return;
+    }
+    response.writeHead(404);
+    response.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server did not bind a TCP port");
+    await run(`http://127.0.0.1:${address.port}`);
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
 }
 
 describe("Agent Auth operation registry", () => {
@@ -219,27 +246,17 @@ describe("Agent Auth event redaction", () => {
 });
 
 describe("pinned SDK and CLI compatibility", () => {
-  it("lets @auth/agent 0.6.2 and @auth/agent-cli 0.5.1 consume the server discovery document", async () => {
-    const configuration = await getAgentConfiguration();
-    const server = createServer((request, response) => {
-      if (request.url === "/.well-known/agent-configuration") {
-        response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify(configuration));
-        return;
-      }
-      response.writeHead(404);
-      response.end();
-    });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    try {
-      const address = server.address();
-      if (!address || typeof address === "string") throw new Error("test server did not bind a TCP port");
-      const origin = `http://127.0.0.1:${address.port}`;
+  it("lets @auth/agent 0.6.2 consume the server discovery document", async () => {
+    await withAgentConfigurationServer(async (origin) => {
       const discovered = await discoverProvider(origin);
       expect(discovered.provider_name).toBe("Companion");
       expect(discovered.modes).toEqual(["delegated"]);
       expect(discovered.approval_methods).toEqual(["device_authorization"]);
+    });
+  });
 
+  it("lets @auth/agent-cli 0.5.1 consume the server discovery document", async () => {
+    await withAgentConfigurationServer(async (origin) => {
       const storageDir = await mkdtemp(join(tmpdir(), "companion-agent-auth-cli-"));
       tempPaths.push(storageDir);
       const cliPath = fileURLToPath(
@@ -250,15 +267,15 @@ describe("pinned SDK and CLI compatibility", () => {
         // official opt-in for a self-hosted instance and enables direct
         // discovery without weakening its global directory policy.
         env: { ...process.env, AGENT_AUTH_STORAGE_DIR: storageDir },
+        // This suite runs beside every workspace lint, typecheck, test, and build task in the
+        // Node 20 compatibility job. Keep the real CLI process, but bound it independently so a
+        // stalled child is terminated and the test still has time to close its loopback server.
+        timeout: CLI_DISCOVERY_TIMEOUT_MS,
       });
       expect(stdout).toContain("Companion");
       expect(stdout).toContain("device_authorization");
-    } finally {
-      await new Promise<void>((resolve, reject) =>
-        server.close((error) => (error ? reject(error) : resolve())),
-      );
-    }
-  });
+    });
+  }, CLI_COMPATIBILITY_TEST_TIMEOUT_MS);
 
   it("generates one-minute, unique agent JWTs with the pinned SDK", async () => {
     const keypair = await generateKeypair();
